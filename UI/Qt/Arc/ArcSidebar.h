@@ -66,12 +66,16 @@ public:
     void switch_to_space(QString const& id);
     void switch_to_space_at(int index);
     bool handle_key_press(QKeyEvent const&);
+    static bool is_space_shortcut(QKeyEvent const&);
 
     // Opens tabs in the background in the given spaces' Today lists, skipping URLs a space already has open.
     // Returns how many were opened.
     int open_background_tabs(QList<SessionEntry> const&);
     // Closes the current space's Today tabs (the divider's Clear button).
     void clear_today();
+    // A tab for the command bar to load into: the spare if ready, else a new one, in the current space and its profile,
+    // and shown.
+    Tab& new_tab_for_input();
     void back_to_pinned_url(QString const& node_id);
     void separate_from_pinned_tab(QString const& node_id);
 
@@ -187,6 +191,7 @@ private:
     };
     DropTarget resolve_drop(QModelIndex const& target, SidebarTree::DropPlace) const;
 
+    int m_serial { 0 }; // Unique per sidebar, for marking tabs it watches.
     QPointer<BrowserWindow> m_window;
     QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
     QPushButton* m_update_button { nullptr };

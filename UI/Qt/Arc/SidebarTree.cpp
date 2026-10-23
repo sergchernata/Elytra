@@ -494,8 +494,6 @@ SidebarTree::SidebarTree(QWidget* parent)
                   "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }");
     viewport()->setAutoFillBackground(false);
 
-    // Holding Shift over an away pinned tab's favicon changes what it says; the page has focus, so watch app-wide.
-    qApp->installEventFilter(this);
 
     m_pinned_hover_animation = new QVariantAnimation(this);
     m_pinned_hover_animation->setDuration(180);
@@ -626,8 +624,17 @@ void SidebarTree::mouseMoveEvent(QMouseEvent* event)
     update_pinned_hover();
 }
 
+void SidebarTree::enterEvent(QEnterEvent* event)
+{
+    QTreeView::enterEvent(event);
+    // Holding Shift over an away pinned tab's favicon changes what it says. The page has focus, so watch key events
+    // app-wide, but only while the pointer is over the list.
+    qApp->installEventFilter(this);
+}
+
 void SidebarTree::leaveEvent(QEvent* event)
 {
+    qApp->removeEventFilter(this);
     QTreeView::leaveEvent(event);
     if (m_hovered_index.isValid())
         viewport()->update(visualRect(m_hovered_index));

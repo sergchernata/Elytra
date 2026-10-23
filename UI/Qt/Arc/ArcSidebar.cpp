@@ -168,15 +168,20 @@ void ArcSidebar::attach(BrowserWindow& window)
         return;
     auto* sidebar = new ArcSidebar(window, *tabs);
     tabs->set_vertical_sidebar_widget(sidebar);
+    window.setProperty("arc_sidebar", QVariant::fromValue(static_cast<QObject*>(sidebar)));
 }
 
 ArcSidebar* ArcSidebar::for_window(BrowserWindow& window)
 {
-    return window.findChild<ArcSidebar*>();
+    // Remembered on the window: searching its whole widget tree was too slow for per-keystroke use.
+    return qobject_cast<ArcSidebar*>(window.property("arc_sidebar").value<QObject*>());
 }
+
+static int s_next_sidebar_serial = 0;
 
 ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     : QWidget(&tabs)
+    , m_serial(++s_next_sidebar_serial)
     , m_window(&window)
     , m_tabs(tabs)
 {
@@ -436,13 +441,19 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     rebuild();
 }
 
-bool ArcSidebar::handle_key_press(QKeyEvent const& event)
+bool ArcSidebar::is_space_shortcut(QKeyEvent const& event)
 {
-    // Control+1..9 (Alt elsewhere) switches spaces, as in Arc. Called from an app-wide event filter so
-    // it works even while the page has focus (the web view gets first claim on most shortcuts).
+    // Control+1..9 (Alt elsewhere) switches spaces, as in Arc.
     auto modifiers = event.modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
     auto expected = SPACE_SHORTCUT_MODIFIER == Qt::META ? Qt::MetaModifier : Qt::AltModifier;
-    if (modifiers != expected || event.key() < Qt::Key_1 || event.key() > Qt::Key_9)
+    return modifiers == expected && event.key() >= Qt::Key_1 && event.key() <= Qt::Key_9;
+}
+
+bool ArcSidebar::handle_key_press(QKeyEvent const& event)
+{
+    // Called from an app-wide event filter so it works even while the page has focus (the web view gets first claim
+    // on most shortcuts).
+    if (!is_space_shortcut(event))
         return false;
     switch_to_space_at(event.key() - Qt::Key_1);
     return true;
@@ -510,7 +521,8 @@ void ArcSidebar::track_tabs()
 void ArcSidebar::watch_tab(Tab& tab)
 {
     // One set of connections per sidebar; a tab dragged to another window gets new ones there.
-    auto key = QString("arc_watched_%1").arg(reinterpret_cast<quintptr>(this));
+    // Keyed by this sidebar's serial, not its address, which a later sidebar can reuse.
+    auto key = QString("arc_watched_%1").arg(m_serial);
     if (tab.property(key.toUtf8().constData()).toBool())
         return;
     tab.setProperty(key.toUtf8().constData(), true);
@@ -631,6 +643,20 @@ Tab* ArcSidebar::open_tab(QString const& text)
     auto& tab = m_window->new_tab_from_url(*url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     set_tab_space(tab, m_space_id);
     return &tab;
+}
+
+Tab& ArcSidebar::new_tab_for_input()
+{
+    if (auto* spare = take_spare_tab(current_profile())) {
+        spare->setProperty(BLANK_PROPERTY, false);
+        set_tab_space(*spare, m_space_id);
+        activate(*spare);
+        return *spare;
+    }
+    ScopedProfileForNewViews profile(current_profile());
+    auto& tab = m_window->create_new_tab(Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    set_tab_space(tab, m_space_id);
+    return tab;
 }
 
 // A blank tab built ahead of time, while the app is idle, in the current space's profile. Not listed anywhere; used
@@ -969,7 +995,9 @@ void ArcSidebar::rename_node(QString const& node_id)
     bool ok = false;
     auto label = node->is_folder() ? "Folder name:" : "Tab name (leave empty to use the page title):";
     auto title = QInputDialog::getText(m_window, "Rename", label, QLineEdit::Normal, current, &ok);
-    if (!ok)
+    // The dialog runs its own event loop, in which the store can change: look the node up again.
+    node = SpaceStore::the().node(node_id);
+    if (!ok || !node)
         return;
     if (node->is_folder() && title.trimmed().isEmpty())
         return;
@@ -1122,7 +1150,9 @@ void ArcSidebar::edit_space(QString const& space_id)
     IconPicker* icon_picker = nullptr;
     QComboBox* color_box = nullptr;
     auto* dialog = make_space_dialog(m_window, space->title, space->icon, space->color, name_edit, icon_picker, color_box);
-    if (dialog->exec() == QDialog::Accepted) {
+    auto accepted = dialog->exec() == QDialog::Accepted;
+    space = store.space(space_id); // The dialog's event loop can change the store.
+    if (accepted && space) {
         auto name = name_edit->text().trimmed();
         store.update_space(space_id, name.isEmpty() ? space->title : name, icon_picker->icon(), QColor(color_box->currentData().toString()));
     }
@@ -1138,7 +1168,8 @@ void ArcSidebar::delete_space(QString const& space_id)
 
     auto answer = QMessageBox::question(m_window, "Delete Space",
         QString("Delete the space \"%1\" and its pinned tabs and folders?\n\nIts open tabs move to another space.").arg(space->title));
-    if (answer != QMessageBox::Yes)
+    // The dialog runs its own event loop, in which the store can change.
+    if (answer != QMessageBox::Yes || !store.space(space_id) || store.spaces().size() <= 1)
         return;
 
     QString fallback;
@@ -1305,7 +1336,7 @@ void ArcSidebar::place_tabs_in_their_profiles()
         auto profile = profile_of_tab(*tab);
         auto expected = session_for_profile(profile);
         auto* expected_session = expected ? expected.ptr() : &WebView::Application::default_session();
-        if (&tab->view().session() == expected_session || tab->view().is_private() == WebView::IsPrivate::Yes || is_blank(*tab))
+        if (&tab->view().session() == expected_session || tab->view().is_private() == WebView::IsPrivate::Yes || is_blank(*tab) || tab->property("arc_replaced").toBool())
             continue;
 
         auto url = tab->view().url();
@@ -1314,6 +1345,9 @@ void ArcSidebar::place_tabs_in_their_profiles()
         auto space = space_of(*tab);
         auto node = node_of(*tab);
         set_tab_node(*tab, {}); // So the reopened tab is the one bound to the node.
+        // Reopen it once: its close can wait on the page (a "leave page?" prompt), and until then every rebuild would
+        // reopen it again.
+        tab->setProperty("arc_replaced", true);
 
         Tab* reopened = nullptr;
         {
@@ -2490,7 +2524,8 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
             auto index = m_tree->currentIndex();
             auto kind = row_kind(index);
             if (kind == RowKind::TodayTab) {
-                if (auto* tab = tab_in_row(index))
+                // The row can outlive its tab while a drag runs (rebuilds wait for the drop).
+                if (auto* tab = tab_in_row(index); tab && m_tabs.index_of(tab) >= 0)
                     add_favorite(*tab);
             } else if (kind == RowKind::PinnedTab) {
                 // Arc moves a pinned tab into favorites.

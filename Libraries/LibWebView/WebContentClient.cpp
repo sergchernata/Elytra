@@ -107,7 +107,7 @@ static constexpr auto close_server_exit_timeout_ms = 5000;
 static constexpr auto detached_page_forced_exit_timeout_ms = detached_page_close_timeout_ms + close_server_exit_timeout_ms;
 
 WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id)
-    : WebContentClient(move(transport), *Application::existing_session(is_private), initial_page_id, root_navigable_id)
+    : WebContentClient(move(transport), Application::session_for_new_view(is_private), initial_page_id, root_navigable_id)
 {
 }
 

@@ -15,6 +15,8 @@
 
 class QJsonObject;
 
+class QTimer;
+
 namespace Ladybird::Arc {
 
 struct PinnedNode {
@@ -76,6 +78,7 @@ public:
 
     // A store backed by the given file; tests use this directly.
     explicit SpaceStore(QString file_path);
+    virtual ~SpaceStore() override;
 
     // True when this Ladybird profile had no Arc data before this launch.
     bool is_new_profile() const { return m_is_new_profile; }
@@ -131,10 +134,18 @@ public:
 
     static QString new_id();
 
+    // Writes pending changes now (they're written shortly after changing, batched). Closing the store flushes too.
+    void flush();
+    int write_count_for_testing() const { return m_write_count; }
+
 signals:
     void changed();
 
 private:
+    void write_now();
+    QTimer* m_save_timer { nullptr };
+    int m_write_count { 0 };
+
 
     void load();
     void save();

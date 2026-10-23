@@ -14,7 +14,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/TabBar.h/.cpp` (hidden sidebar) | `collapsed_vertical_tabs_width()` (a thin hover edge instead of an icon column), `vertical_sidebar_expanded_width()`, upstream's hover-expand switched off in `can_expand_vertical_tabs_on_hover()`, `on_vertical_sidebar_expanded_will_change` (called at the top of `set_vertical_tabs_expanded()`), and `set_vertical_sidebar_reserved_width()` with its check at the top of `vertical_tabs_layout_width()` (lets the dock/hide animation move the page edge) |
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
-| `UI/Qt/BrowserWindow.h/.cpp` | `on_tab_will_close`, called in `definitely_close_tab()` before the tab is removed (the sidebar picks the next tab from the same space, or leaves an empty page so closing a space's last tab doesn't close the window) |
+| `UI/Qt/BrowserWindow.h/.cpp` | `on_tab_will_close`, called in `definitely_close_tab()` before the tab is removed (the sidebar picks the next tab from the same space, or leaves an empty page so closing a space's last tab doesn't close the window), with the early returns around it for a tab already gone; `is_popup_window()` (popups get no sidebar) |
 
 ### Profiles (LibWebView)
 
@@ -32,9 +32,13 @@ private-or-not; these hooks carry the session itself instead. All are marked `Fo
 | `FileDownloader.h/.cpp` | downloads remember the session they started in (`m_download_sessions`) for their requests |
 | `CanonicalNavigable.cpp`, `CanonicalTraversable.cpp` | child-frame processes get the page's session |
 | `WebContentPage.cpp`, `ProcessSnapshot.cpp`, `WebUI/HistoryUI.cpp` | history and favicons through `records()`; downloads and BroadcastChannel by session |
+| `CookieJar.h/.cpp` | `TransientStorage::owner`: cookie-change notifications go only to views using that jar |
+| `RequestServerManager.cpp` | profile sessions (`is_profile_session()`) keep no HTTP disk cache, like private ones |
+| `Autocomplete.cpp` | remote suggestions use `session_for_new_web_view()`'s cookies (the current space's profile) |
 
 `Tests/UI/Qt/Arc/TestArcProfileSessions.cpp` checks all of this with real processes, headlessly; run it, and
-upstream's `Tests/LibWebView` tests, after a rebase that touches these files.
+upstream's `Tests/LibWebView` tests, after a rebase that touches these files. `BrowsingSession::create_persistent()`
+takes `Persist::No` for SQL-disabled runs (and as the fallback when a profile's database can't be opened).
 
 
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
@@ -93,6 +97,13 @@ downloads wording). They run headless:
 ninja -C Build/release TestArcSpaceStore TestArcWidgets TestArcImportParser TestArcProfileSessions
 Build/release/bin/TestArcSpaceStore && Build/release/bin/TestArcWidgets && Build/release/bin/TestArcImportParser
 LADYBIRD_SOURCE_DIR=$PWD Build/release/bin/TestArcProfileSessions
+```
+
+`TestArcEdgeCases` and `TestArcReleaseInfo` run the same way. The sidebar's integration tests run in a real window
+(they need a desktop session):
+
+```sh
+LADYBIRD_SOURCE_DIR=$PWD Tests/UI/Qt/Arc/run-arc-self-test.sh Build/release/bin/Ladybird.app/Contents/MacOS/Ladybird
 ```
 
 To watch the dock/hide animations without touching the mouse, run with `ARC_DEV_AUTOTOGGLE=1600`

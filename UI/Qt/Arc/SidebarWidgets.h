@@ -12,6 +12,8 @@
 #include <QPoint>
 #include <QWidget>
 
+class QFileSystemWatcher;
+
 namespace Ladybird::Arc {
 
 // Formatting for the downloads shelf ("1 day ago"), and which files in Downloads are unfinished downloads.
@@ -51,6 +53,11 @@ private:
     void show_menu(int index, QPoint global_position);
 
     QList<Item> m_items;
+    // The Downloads folder's newest entries, listed again only when the folder changes (refresh() runs every second
+    // while the shelf shows, for download progress).
+    QList<Item> m_folder_items;
+    bool m_folder_changed { true };
+    QFileSystemWatcher* m_folder_watcher { nullptr };
     int m_hovered_row { -1 };
     int m_pressed_row { -1 };
     QPoint m_press_position;

@@ -13,6 +13,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
@@ -26,8 +27,22 @@ SpaceStore::SpaceStore(QString file_path)
 {
     QDir().mkpath(QFileInfo(m_path).absolutePath());
     m_is_new_profile = !QFile::exists(m_path);
+
+    // Changes are written shortly after they're made, batched: bookkeeping (titles, the active space, folders) can
+    // change many times a second.
+    m_save_timer = new QTimer(this);
+    m_save_timer->setSingleShot(true);
+    m_save_timer->setInterval(400);
+    connect(m_save_timer, &QTimer::timeout, this, &SpaceStore::write_now);
+
     load();
     ensure_default_space();
+    flush(); // A new profile's file exists from the start.
+}
+
+SpaceStore::~SpaceStore()
+{
+    flush();
 }
 
 QString SpaceStore::new_id()
@@ -111,8 +126,22 @@ void SpaceStore::load()
     m_last_active_space_id = root["activeSpace"].toString();
 }
 
+void SpaceStore::flush()
+{
+    if (m_save_timer && m_save_timer->isActive()) {
+        m_save_timer->stop();
+        write_now();
+    }
+}
+
 void SpaceStore::save()
 {
+    m_save_timer->start();
+}
+
+void SpaceStore::write_now()
+{
+    ++m_write_count;
     QJsonObject root;
     root["version"] = FILE_VERSION;
     root["activeSpace"] = m_last_active_space_id;

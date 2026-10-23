@@ -14,7 +14,6 @@
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
-#include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/BrowserWindow.h>
 
 #include <QAction>
@@ -89,6 +88,9 @@ public:
     virtual bool eventFilter(QObject* watched, QEvent* event) override
     {
         if (event->type() == QEvent::KeyPress) {
+            // Cheap check first: this sees every key press, often several times as it propagates.
+            if (!ArcSidebar::is_space_shortcut(*static_cast<QKeyEvent*>(event)))
+                return false;
             if (auto* widget = qobject_cast<QWidget*>(watched)) {
                 if (auto* window = qobject_cast<BrowserWindow*>(widget->window())) {
                     if (auto* sidebar = ArcSidebar::for_window(*window); sidebar && sidebar->handle_key_press(*static_cast<QKeyEvent*>(event)))

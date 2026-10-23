@@ -69,19 +69,30 @@ QPixmap symbol_pixmap(QString const& name, int point_size, QColor const& color, 
 
 QPixmap fitted_symbol_pixmap(QString const& name, int box, QColor const& color, qreal device_pixel_ratio)
 {
-    if (name.startsWith("arc."))
-        return custom_glyph_pixmap(name, box, color, device_pixel_ratio);
-    // Render large, then scale down to the box, so every symbol ends up the same visual size.
-    auto rendered = symbol_pixmap(name + ".fill", box * 2, color, device_pixel_ratio);
-    if (rendered.isNull())
-        rendered = symbol_pixmap(name, box * 2, color, device_pixel_ratio);
-    if (rendered.isNull())
-        return {};
+    // Called while painting (rows, buttons, the command bar): keep the finished pixmaps, not just the renders.
+    static QHash<QString, QPixmap> cache;
+    auto key = QString("%1|%2|%3|%4").arg(name).arg(box).arg(color.rgba()).arg(device_pixel_ratio);
+    if (auto it = cache.find(key); it != cache.end())
+        return it.value();
 
-    auto target = static_cast<int>(std::round(box * device_pixel_ratio));
-    auto scaled = rendered.scaled(target, target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    scaled.setDevicePixelRatio(device_pixel_ratio);
-    return scaled;
+    QPixmap result;
+    if (name.startsWith("arc.")) {
+        result = custom_glyph_pixmap(name, box, color, device_pixel_ratio);
+    } else {
+        // Render large, then scale down to the box, so every symbol ends up the same visual size.
+        auto rendered = symbol_pixmap(name + ".fill", box * 2, color, device_pixel_ratio);
+        if (rendered.isNull())
+            rendered = symbol_pixmap(name, box * 2, color, device_pixel_ratio);
+        if (!rendered.isNull()) {
+            auto target = static_cast<int>(std::round(box * device_pixel_ratio));
+            result = rendered.scaled(target, target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            result.setDevicePixelRatio(device_pixel_ratio);
+        }
+    }
+    if (cache.size() > 512)
+        cache.clear(); // Bounded: colors change with spaces and themes.
+    cache.insert(key, result);
+    return result;
 }
 
 QStringList const& space_symbol_names()

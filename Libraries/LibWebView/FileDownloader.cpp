@@ -35,8 +35,6 @@
 
 namespace WebView {
 
-
-
 struct FileDownloader::Segment {
     u64 start_offset { 0 };
     u64 end_offset { NumericLimits<u64>::max() };
@@ -899,8 +897,10 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> FileDownloader::request_server_c
 u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination, BrowsingSession* session)
 {
     auto download_id = m_next_download_id++;
-    if (session) // Fork hook (Arc profiles)
+    if (session) { // Fork hook (Arc profiles)
+        m_download_sessions.remove_all_matching([](auto, auto const& weak) { return !weak.strong_ref(); });
         m_download_sessions.set(download_id, session->make_weak_ptr());
+    }
 
     m_downloads.append(Download {
         .id = download_id,

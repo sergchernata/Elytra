@@ -16,8 +16,6 @@
 #include <AK/OwnPtr.h>
 #include <AK/Span.h>
 #include <AK/String.h>
-#include <AK/WeakPtr.h>
-#include <LibWebView/BrowsingSession.h>
 #include <AK/Time.h>
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>

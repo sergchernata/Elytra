@@ -173,8 +173,10 @@ void CommandBar::open_in_new_tab(String input, Optional<URL::URL> url, WebView::
     if (!m_window || input.is_empty())
         return;
 
-    // Mirrors Tab::location_edit_return_pressed(), which is private upstream.
-    auto& tab = m_window->create_new_tab(Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    // Mirrors Tab::location_edit_return_pressed(), which is private upstream. The sidebar provides the tab: its ready
+    // spare when there is one, in the current space's profile.
+    auto* sidebar = ArcSidebar::for_window(*m_window);
+    auto& tab = sidebar ? sidebar->new_tab_for_input() : m_window->create_new_tab(Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     auto& view = tab.view();
     view.set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
     if (destination_kind == WebView::OmniboxDestinationKind::Search) {

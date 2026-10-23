@@ -8,6 +8,8 @@
 #include <LibTest/TestCase.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -257,4 +259,35 @@ TEST_CASE(favorites_belong_to_a_profile)
     auto defaults = store.favorites_for_profile({});
     EXPECT(defaults[0].title == "C");
     EXPECT(defaults[1].title == "A");
+}
+
+TEST_CASE(bookkeeping_writes_are_batched_and_never_lost)
+{
+    // A page that retitles itself every second must not rewrite the whole file every second.
+    QTemporaryDir directory;
+    QString tab;
+    {
+        SpaceStore store(store_path(directory));
+        auto space = store.first_space_id();
+        tab = store.add_pinned_tab(space, {}, -1, "https://example.com/", "Example");
+        store.flush();
+        auto writes = store.write_count_for_testing();
+
+        for (int i = 0; i < 100; ++i)
+            store.set_saved_title(tab, QString("Title %1").arg(i));
+        store.set_last_active_space_id(space);
+        EXPECT_EQ(store.write_count_for_testing(), writes);
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 1500 && store.write_count_for_testing() == writes)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        EXPECT_EQ(store.write_count_for_testing(), writes + 1);
+
+        store.set_saved_title(tab, "Last"); // Closing the store writes what's pending.
+    }
+    SpaceStore reopened(store_path(directory));
+    auto const* node = reopened.node(tab);
+    VERIFY(node);
+    EXPECT(node->saved_title == "Last");
 }

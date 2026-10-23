@@ -133,6 +133,7 @@ protected:
     virtual void mouseReleaseEvent(QMouseEvent*) override;
     virtual void mouseDoubleClickEvent(QMouseEvent*) override;
     virtual void mouseMoveEvent(QMouseEvent*) override;
+    virtual void enterEvent(QEnterEvent*) override;
     virtual void leaveEvent(QEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
     virtual void dragMoveEvent(QDragMoveEvent*) override;

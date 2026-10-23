@@ -18,6 +18,7 @@
 #include <QDrag>
 #include <QEnterEvent>
 #include <QFileIconProvider>
+#include <QFileSystemWatcher>
 #include <QFileInfo>
 #include <QLinearGradient>
 #include <QMenu>
@@ -43,6 +44,10 @@ DownloadsShelf::DownloadsShelf(QWidget* parent)
 {
     setMouseTracking(true);
     setAttribute(Qt::WA_Hover);
+
+    m_folder_watcher = new QFileSystemWatcher(this);
+    m_folder_watcher->addPath(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+    connect(m_folder_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_folder_changed = true; });
 }
 
 void DownloadsShelf::refresh()
@@ -78,14 +83,20 @@ void DownloadsShelf::refresh()
     }
 
     // Plus the newest files in the Downloads folder, so earlier sessions (and other apps) show up too.
-    QDir downloads(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
-    auto entries = downloads.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
-    for (auto const& info : entries) {
-        if (items.size() >= SHELF_MAX_ITEMS * 2)
-            break;
-        if (is_partial_download_name(info.fileName()) || seen.contains(info.absoluteFilePath()))
-            continue;
-        items.append({ info.absoluteFilePath(), info.fileName(), info.lastModified(), -1, false });
+    if (m_folder_changed) {
+        m_folder_changed = false;
+        m_folder_items.clear();
+        QDir downloads(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+        for (auto const& info : downloads.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time)) {
+            if (m_folder_items.size() >= SHELF_MAX_ITEMS * 2)
+                break;
+            if (!is_partial_download_name(info.fileName()))
+                m_folder_items.append({ info.absoluteFilePath(), info.fileName(), info.lastModified(), -1, false });
+        }
+    }
+    for (auto const& item : m_folder_items) {
+        if (!seen.contains(item.path))
+            items.append(item);
     }
 
     std::stable_sort(items.begin(), items.end(), [](Item const& a, Item const& b) {
@@ -96,6 +107,8 @@ void DownloadsShelf::refresh()
     if (items.size() > SHELF_MAX_ITEMS)
         items.resize(SHELF_MAX_ITEMS);
 
+    if (m_items.size() != items.size() || !std::equal(m_items.begin(), m_items.end(), items.begin(), [](Item const& a, Item const& b) { return a.path == b.path; }))
+        m_pressed_row = -1; // The row pressed may be another file now (or gone).
     m_items = items;
     m_hovered_row = -1;
     update();
@@ -192,7 +205,7 @@ void DownloadsShelf::mouseMoveEvent(QMouseEvent* event)
     auto position = event->position().toPoint();
 
     // Drag a file out of the shelf, e.g. into a Finder window or an upload field.
-    if (m_pressed_row >= 0 && (event->buttons() & Qt::LeftButton)
+    if (m_pressed_row >= 0 && m_pressed_row < m_items.size() && (event->buttons() & Qt::LeftButton)
         && (position - m_press_position).manhattanLength() >= QApplication::startDragDistance()) {
         auto const& item = m_items[m_pressed_row];
         if (!item.in_progress) {

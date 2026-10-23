@@ -10,6 +10,8 @@
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
+#include <QCoreApplication>
+
 namespace Ladybird::Arc {
 
 SpaceStore& SpaceStore::the()
@@ -19,7 +21,10 @@ SpaceStore& SpaceStore::the()
         auto const& data_directory = WebView::Application::profile().paths().data;
         auto directory = QString::fromUtf8(data_directory.characters(), static_cast<qsizetype>(data_directory.length()));
         ArcIcons::set_directory(directory + "/ArcIcons");
-        return new SpaceStore(directory + "/ArcSpaces.json");
+        auto* store = new SpaceStore(directory + "/ArcSpaces.json");
+        // Never quit with changes unwritten.
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, store, &SpaceStore::flush);
+        return store;
     }();
     return *store;
 }

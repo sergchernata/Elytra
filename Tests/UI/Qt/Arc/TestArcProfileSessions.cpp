@@ -67,6 +67,17 @@ URL::URL const& example_url()
     return url;
 }
 
+// Waits for a condition, but fails (rather than hanging until the test runner gives up) after a while.
+void spin_until(Function<bool()> condition, StringView what)
+{
+    auto deadline = MonotonicTime::now() + AK::Duration::from_seconds(30);
+    Core::EventLoop::current().spin_until([&] { return condition() || MonotonicTime::now() > deadline; });
+    if (!condition()) {
+        warnln("FAIL: timed out waiting for {}", what);
+        exit(1);
+    }
+}
+
 Optional<String> cookie_value(WebView::BrowsingSession& session, StringView name)
 {
     for (auto const& cookie : session.cookie_jar->get_all_cookies_webdriver(example_url())) {
@@ -181,7 +192,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         return handle;
     };
     work_view->run_javascript("window.open('about:blank'); window.open('about:blank', '_blank', 'noopener');"_string);
-    Core::EventLoop::current().spin_until([&] { return popup_sessions.size() >= 2; });
+    spin_until([&] { return popup_sessions.size() >= 2; }, "popups to open"sv);
     expect(popup_sessions.size() == 2 && popup_sessions[0] == work.ptr() && popup_sessions[1] == work.ptr(), "popups of a profile's page stay in the profile"sv);
 
     // A worker started by a profile's page makes its requests with the profile's cookies: its RequestServer client
@@ -192,7 +203,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     size_t worker_view_loads = 0;
     worker_view->on_load_finish = [&](auto const&) { ++worker_view_loads; };
     worker_view->load(URL::Parser::basic_parse("data:text/html,<title>worker owner</title>"sv).release_value());
-    Core::EventLoop::current().spin_until([&] { return worker_view_loads > 0 && worker_view->url().scheme() == "data"sv; });
+    spin_until([&] { return worker_view_loads > 0 && worker_view->url().scheme() == "data"sv; }, "the worker's page to load"sv);
 
     auto work_clients = app->request_server_client_ids_for_testing(*work).size();
     auto default_clients = app->request_server_client_ids_for_testing(default_session).size();
