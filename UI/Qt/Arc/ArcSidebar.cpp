@@ -185,8 +185,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     // Sidebar toggle, right of the window controls as in Arc.
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
-    m_sidebar_toggle->set_dimmed(true);
-    m_sidebar_toggle->setFixedSize(28, 22);
+    m_sidebar_toggle->set_symbol_point_size(18); // Same size as the toolbar's sidebar button.
+    m_sidebar_toggle->setFixedSize(30, 22);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] {
         auto& settings = WebView::Application::settings();
@@ -1404,6 +1404,7 @@ void ArcSidebar::dock_panel()
     m_panel->setGeometry(rect());
     m_panel->show();
     m_traffic_lights->set_drawn(false);
+    m_sidebar_toggle->hide(); // Docked, the toolbar's own sidebar button does this.
     // Docked, the real window controls sit a little higher than our drawn ones; center the toggle on them.
     m_top_strip->layout()->setContentsMargins(6, 0, 0, 0);
     update();
@@ -1451,6 +1452,7 @@ void ArcSidebar::float_panel()
     size_host();
     m_panel->show();
     m_traffic_lights->set_drawn(true);
+    m_sidebar_toggle->show();
     m_top_strip->layout()->setContentsMargins(6, 4, 0, 0);
     m_host->move(hidden_host_position());
     m_host->hide();

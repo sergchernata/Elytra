@@ -5,6 +5,7 @@
  */
 
 #include <UI/Qt/Arc/SidebarTree.h>
+#include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/ChromeStyle.h>
 
 #include <QDragMoveEvent>
@@ -188,8 +189,16 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
 
     if (kind == RowKind::Folder) {
         auto expanded = option.state & QStyle::State_Open;
-        auto folder_rect = QRectF(icon_rect.center().x() - FOLDER_ICON_SIZE / 2.0, icon_rect.center().y() - FOLDER_ICON_SIZE / 2.0, FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
-        draw_folder_glyph(*painter, folder_rect, text_color, expanded);
+        // Filled folder symbol, the same size as tab icons. Falls back to a drawn outline off macOS.
+        auto device_pixel_ratio = option.widget ? option.widget->devicePixelRatioF() : 2.0;
+        auto symbol = fitted_symbol_pixmap("folder", ICON_SIZE, text_color, device_pixel_ratio);
+        if (!symbol.isNull()) {
+            auto logical = symbol.deviceIndependentSize();
+            painter->drawPixmap(QPointF(icon_rect.center().x() - logical.width() / 2.0, icon_rect.center().y() - logical.height() / 2.0), symbol);
+        } else {
+            auto folder_rect = QRectF(icon_rect.center().x() - FOLDER_ICON_SIZE / 2.0, icon_rect.center().y() - FOLDER_ICON_SIZE / 2.0, FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
+            draw_folder_glyph(*painter, folder_rect, text_color, expanded);
+        }
         if (!compact) {
             auto chevron_rect = QRectF(row.right() - 22, row.center().y() - 6, 12, 12);
             if (hovered)
