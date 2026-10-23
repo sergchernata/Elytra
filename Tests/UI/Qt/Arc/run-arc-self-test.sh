@@ -5,4 +5,5 @@ set -u
 LADYBIRD="$1"
 PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/ladybird-arc-self-test.XXXXXX")"
 trap 'rm -rf "$PROFILE"' EXIT
-ARC_SELF_TEST=1 "$LADYBIRD" --profile-path "$PROFILE" --window-width 1200 --window-height 800 about:blank
+# --allow-popups: scenarios open popups from script, with no user click behind them.
+ARC_SELF_TEST=1 "$LADYBIRD" --profile-path "$PROFILE" --allow-popups --window-width 1200 --window-height 800 about:blank

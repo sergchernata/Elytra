@@ -102,7 +102,8 @@ private:
     void watch_tab(Tab&);
 
     // Actions
-    Tab& open_tab(QString const& url);
+    Tab* open_tab(QString const& url); // Null for a malformed URL.
+    bool is_private() const;
     void prepare_spare_tab();
     void schedule_spare_tab();
     Tab* take_spare_tab(QString const& profile);

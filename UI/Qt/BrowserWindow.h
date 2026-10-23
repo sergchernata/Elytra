@@ -103,6 +103,7 @@ public:
 
     // Fork hook (Arc): runs before a tab closes, e.g. to pick the next tab or keep the window open.
     Function<void(Tab&)> on_tab_will_close;
+    bool is_popup_window() const { return m_is_popup_window == IsPopupWindow::Yes; } // Fork hook (Arc)
 
     enum class IsPopupWindow {
         No,

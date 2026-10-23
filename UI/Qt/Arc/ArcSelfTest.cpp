@@ -91,6 +91,16 @@ private:
         wait_until([&] { return timer.elapsed() >= ms; }, ms + 1000);
     }
 
+    static QList<BrowserWindow*> browser_windows()
+    {
+        QList<BrowserWindow*> windows;
+        for (auto* widget : QApplication::topLevelWidgets()) {
+            if (auto* window = qobject_cast<BrowserWindow*>(widget); window && window->isVisible())
+                windows.append(window);
+        }
+        return windows;
+    }
+
     static QString page(QString const& title, QString const& body = {})
     {
         return QString("data:text/html,<title>%1</title>%2").arg(title, body.isEmpty() ? title : body);
@@ -143,6 +153,12 @@ private:
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
+    void background_tabs_show_while_loading_and_stay_open();
+    void the_empty_page_becomes_a_tab_once_navigated();
+    void tabs_of_removed_pinned_tabs_and_favorites_move_to_today();
+    void a_malformed_pinned_url_doesnt_crash();
+    void popups_close_themselves();
+    void private_windows_write_nothing();
 
     ArcSidebar& m_sidebar;
     int m_failures { 0 };
@@ -194,9 +210,9 @@ void SelfTest::toolbar_stays_aligned()
     m_watch_toolbars = true;
     qApp->installEventFilter(this);
 
-    auto& first = s().open_tab(page("Toolbar 1"));
+    auto& first = *s().open_tab(page("Toolbar 1"));
     wait_until([&] { return loaded(first); });
-    auto& second = s().open_tab(page("Toolbar 2"));
+    auto& second = *s().open_tab(page("Toolbar 2"));
     wait_until([&] { return loaded(second); });
     s().activate(first);
     settle(150);
@@ -269,7 +285,7 @@ void SelfTest::closing_a_spaces_last_tab_keeps_the_window()
             s().close_tab(*tab);
     }
     settle(200);
-    auto& only = s().open_tab(page("Only"));
+    auto& only = *s().open_tab(page("Only"));
     wait_until([&] { return loaded(only); });
     QPointer<Tab> guarded = &only;
     s().close_tab(only);
@@ -397,7 +413,7 @@ void SelfTest::profiles_get_their_own_session()
     auto& default_session = WebView::Application::default_session();
     s().switch_to_space(m_beta);
     settle(200);
-    auto& beta_tab = s().open_tab(page("In Beta"));
+    auto& beta_tab = *s().open_tab(page("In Beta"));
     wait_until([&] { return loaded(beta_tab); });
     auto beta_session = session_for_profile("SelfTest");
     check(beta_session && &beta_tab.view().session() == beta_session.ptr(), "a tab opened in a profile's space uses that profile's session");
@@ -405,7 +421,7 @@ void SelfTest::profiles_get_their_own_session()
 
     s().switch_to_space(m_alpha);
     settle(200);
-    auto& alpha_tab = s().open_tab(page("In Alpha"));
+    auto& alpha_tab = *s().open_tab(page("In Alpha"));
     wait_until([&] { return loaded(alpha_tab); });
     check(&alpha_tab.view().session() == &default_session, "a tab in a default-profile space uses the default session");
 
@@ -454,6 +470,145 @@ void SelfTest::update_pill_hidden_without_a_release()
     check(s().m_update_button && !s().m_update_button->isVisible(), "so the update pill is hidden");
 }
 
+void SelfTest::background_tabs_show_while_loading_and_stay_open()
+{
+    // Regression: tabs still loading counted as blank, so they were hidden from Today and closed as stale.
+    s().switch_to_space(m_alpha);
+    auto& current = *s().open_tab(page("Foreground"));
+    wait_until([&] { return loaded(current); });
+    // A slow page: its URL stays blank until it commits.
+    auto slow = page("Slow", "<script>let t = Date.now(); while (Date.now() - t < 1500) {}</script>slow");
+    s().open_background_tabs({ { slow, m_alpha, {} } });
+    Tab* background = nullptr;
+    for (auto* tab : s().tabs()) {
+        if (tab != &current && ArcSidebar::space_of(*tab) == m_alpha && ArcSidebar::node_of(*tab).isEmpty() && !ArcSidebar::is_blank(*tab) && tab != s().m_spare_tab)
+            background = tab;
+    }
+    QPointer<Tab> guarded = background;
+    check(background && s().today_tabs(m_alpha).contains(background), "a background tab shows in Today while it loads");
+    // Switching tabs used to close it as a stale blank page.
+    s().activate(current);
+    settle(400);
+    check(guarded && s().today_tabs(m_alpha).contains(guarded.data()), "and switching tabs doesn't close it");
+    if (guarded)
+        s().close_tab(*guarded);
+    s().close_tab(current);
+    settle(300);
+}
+
+void SelfTest::the_empty_page_becomes_a_tab_once_navigated()
+{
+    // Close the space's last tab: an empty page shows. Navigating it makes it a tab like any other.
+    s().switch_to_space(m_beta);
+    settle(200);
+    auto& only = *s().open_tab(page("Last"));
+    wait_until([&] { return loaded(only); });
+    QPointer<Tab> guarded = &only;
+    s().close_tab(only);
+    wait_until([&] { return !guarded; });
+    auto* empty = window().current_tab();
+    check(empty && ArcSidebar::is_blank(*empty), "closing the last tab shows the empty page");
+    if (!empty)
+        return;
+    empty->navigate(ak_url_from_qurl(QUrl(page("Typed"))));
+    check(wait_until([&] { return s().today_tabs(m_beta).contains(empty); }), "navigating it lists it in Today");
+    check(wait_until([&] { return loaded(*empty) && &empty->view().session() == session_for_profile("SelfTest").ptr(); }), "in its space's profile");
+    if (auto* tab = s().today_tabs(m_beta).value(0))
+        s().close_tab(*tab);
+    s().switch_to_space(m_alpha);
+    settle(300);
+}
+
+void SelfTest::tabs_of_removed_pinned_tabs_and_favorites_move_to_today()
+{
+    // Regression: a tab whose pinned entry or favorite was removed elsewhere (another window, a re-import)
+    // vanished from the sidebar while it kept running.
+    s().switch_to_space(m_alpha);
+    auto& store = SpaceStore::the();
+    auto node = store.add_pinned_tab(m_alpha, {}, -1, page("Doomed"), "Doomed");
+    settle(100);
+    s().open_or_activate_node(node);
+    auto* tab = s().tab_for_node(node);
+    wait_until([&] { return tab && loaded(*tab); });
+    store.remove_node(node); // As another window or an import would.
+    check(wait_until([&] { return tab && s().today_tabs(m_alpha).contains(tab); }), "a removed pinned tab's tab moves to Today");
+
+    auto favorite = store.add_favorite(page("Doomed favorite"), "Doomed favorite");
+    settle(100);
+    s().open_or_activate_favorite(favorite);
+    auto* favorite_tab = s().tab_for_node(QString("fav:%1").arg(favorite));
+    wait_until([&] { return favorite_tab && loaded(*favorite_tab); });
+    store.remove_favorite(favorite);
+    check(wait_until([&] { return favorite_tab && s().today_tabs(s().current_space_id()).contains(favorite_tab); }), "so does a removed favorite's");
+    for (auto* today : s().today_tabs(m_alpha))
+        s().close_tab(*today);
+    settle(300);
+}
+
+void SelfTest::a_malformed_pinned_url_doesnt_crash()
+{
+    auto node = SpaceStore::the().add_pinned_tab(m_alpha, {}, -1, "http://[::1", "Broken");
+    settle(100);
+    auto tabs_before = tab_count();
+    s().open_or_activate_node(node); // Used to abort the browser.
+    settle(300);
+    check(true, "opening a pinned tab with a malformed URL doesn't crash");
+    check(!s().tab_for_node(node) && tab_count() <= tabs_before, "and opens nothing");
+    SpaceStore::the().remove_node(node);
+    s().on_row_clicked({}); // Nor does clicking nothing.
+    check(true, "clicking no row doesn't crash");
+}
+
+void SelfTest::popups_close_themselves()
+{
+    // Regression: popups got a sidebar, and a popup's window.close() left an empty page instead of closing it.
+    auto& opener = *s().open_tab(page("Opener"));
+    wait_until([&] { return loaded(opener); });
+    auto windows_before = browser_windows().size();
+    opener.view().run_javascript("window.open('data:text/html,<title>Popup</title>popup', '_blank', 'popup,width=320,height=240');"_string);
+    BrowserWindow* popup = nullptr;
+    wait_until([&] {
+        for (auto* candidate : browser_windows()) {
+            if (candidate->is_popup_window())
+                popup = candidate;
+        }
+        return popup != nullptr;
+    });
+    check(popup, "a page can open a popup window");
+    if (!popup)
+        return;
+    check(!ArcSidebar::for_window(*popup), "popups get no sidebar");
+    QPointer<BrowserWindow> guarded = popup;
+    if (auto* tab = popup->current_tab()) {
+        wait_until([&] { return loaded(*tab); });
+        tab->view().run_javascript("window.close();"_string);
+    }
+    check(wait_until([&] { return !guarded || !guarded->isVisible(); }), "and closing itself closes the popup window");
+    check(browser_windows().size() <= windows_before + 0 || !guarded, "leaving the windows as they were");
+    s().close_tab(opener);
+    settle(300);
+}
+
+void SelfTest::private_windows_write_nothing()
+{
+    // Regression: private windows' tabs, titles and icons were saved to the profile.
+    auto secret = page("Private secret");
+    auto& private_window = Application::the().new_window({ ak_url_from_qurl(QUrl(secret)) }, Application::the().configuration_for_new_window(),
+        BrowserWindow::IsPopupWindow::No, WebView::IsPrivate::Yes);
+    auto* private_tab = private_window.current_tab();
+    wait_until([&] { return private_tab && loaded(*private_tab); });
+    settle(2500); // Past the session save's debounce.
+    auto saved = std::any_of(SpaceStore::the().session().begin(), SpaceStore::the().session().end(), [&](auto const& entry) {
+        return pinned_urls_match(secret, entry.url);
+    });
+    check(!saved, "a private window's tabs aren't saved to the profile");
+    check(!ArcSidebar::for_window(private_window) || !ArcSidebar::for_window(private_window)->m_spare_tab, "and it keeps no spare tab");
+    private_window.close();
+    settle(300);
+    window().activateWindow();
+    settle(300);
+}
+
 int SelfTest::run()
 {
     seed();
@@ -469,6 +624,12 @@ int SelfTest::run()
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
+    background_tabs_show_while_loading_and_stay_open();
+    the_empty_page_becomes_a_tab_once_navigated();
+    tabs_of_removed_pinned_tabs_and_favorites_move_to_today();
+    a_malformed_pinned_url_doesnt_crash();
+    popups_close_themselves();
+    private_windows_write_nothing();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

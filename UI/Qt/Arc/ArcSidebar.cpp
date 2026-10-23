@@ -7,6 +7,7 @@
 
 #include <LibWebView/Application.h>
 #include <UI/Qt/Arc/ArcIcons.h>
+#include <LibURL/Parser.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
@@ -158,6 +159,9 @@ KeepSidebarOpen::~KeepSidebarOpen()
 void ArcSidebar::attach(BrowserWindow& window)
 {
     if (for_window(window))
+        return;
+    // A popup (e.g. a sign-in window) is the page's, not a browsing window: no spaces, and window.close() closes it.
+    if (window.is_popup_window())
         return;
     auto* tabs = window.findChild<TabWidget*>();
     if (!tabs)
@@ -518,7 +522,14 @@ void ArcSidebar::watch_tab(Tab& tab)
     };
     connect(&tab, &Tab::title_changed, this, refresh);
     connect(&tab, &Tab::favicon_changed, this, refresh);
-    connect(&tab, &Tab::loading_changed, this, refresh); // Navigations: a pinned tab may have left its URL.
+    connect(&tab, &Tab::loading_changed, this, [this, guarded, refresh] {
+        // The empty page (shown when a space empties) navigated somewhere is a tab like any other now.
+        if (guarded && guarded != m_spare_tab && guarded->property(BLANK_PROPERTY).toBool() && tab_shows_a_page(url_of(*guarded))) {
+            guarded->setProperty(BLANK_PROPERTY, false);
+            schedule_rebuild();
+        }
+        refresh(); // Navigations: a pinned tab may have left its URL.
+    });
     connect(&tab, &Tab::loading_finished, this, [this, refresh] {
         refresh();
         save_session();
@@ -569,41 +580,66 @@ void ArcSidebar::save_session()
         timer->setSingleShot(true);
         timer->setInterval(1500);
     }
-    timer->disconnect();
-    QPointer<ArcSidebar> guarded = this;
-    QObject::connect(timer, &QTimer::timeout, [guarded] {
-        if (!guarded)
-            return;
-        QList<SessionEntry> entries;
-        for (auto* tab : guarded->tabs())
-            entries.append({ url_of(*tab), space_of(*tab), node_of(*tab) });
-        SpaceStore::the().set_session(std::move(entries));
-    });
+    // One save for every window (each used to overwrite the others' tabs); private windows' tabs are never saved.
+    if (!timer->property("arc_connected").toBool()) {
+        timer->setProperty("arc_connected", true);
+        QObject::connect(timer, &QTimer::timeout, [] {
+            QList<SessionEntry> entries;
+            for (auto* widget : QApplication::topLevelWidgets()) {
+                auto* window = qobject_cast<BrowserWindow*>(widget);
+                auto* sidebar = window ? ArcSidebar::for_window(*window) : nullptr;
+                if (!sidebar || sidebar->is_private())
+                    continue;
+                for (auto* tab : sidebar->tabs()) {
+                    if (tab != sidebar->m_spare_tab && !tab->property(BLANK_PROPERTY).toBool())
+                        entries.append({ url_of(*tab), space_of(*tab), node_of(*tab) });
+                }
+            }
+            SpaceStore::the().set_session(std::move(entries));
+        });
+    }
     timer->start();
 }
 
 // --- Actions ------------------------------------------------------------------------------------
 
-Tab& ArcSidebar::open_tab(QString const& url)
+// A stored URL (pinned, favorite, imported) as a URL to load; nothing if it isn't one, rather than aborting.
+static Optional<URL::URL> parse_stored_url(QString const& text)
 {
+    auto encoded = QUrl(text).toEncoded();
+    if (encoded.isEmpty())
+        return {};
+    return URL::Parser::basic_parse(StringView(encoded.constData(), static_cast<size_t>(encoded.size())));
+}
+
+Tab* ArcSidebar::open_tab(QString const& text)
+{
+    auto url = parse_stored_url(text);
+    if (!url.has_value()) {
+        warnln("Arc sidebar: not opening malformed URL {}", text.toUtf8().constData());
+        return nullptr;
+    }
     // A spare tab is ready for this: navigating it is much quicker than building a new tab's widgets.
     if (auto* spare = take_spare_tab(current_profile())) {
         spare->setProperty(BLANK_PROPERTY, false);
         set_tab_space(*spare, m_space_id);
-        spare->navigate(ak_url_from_qurl(QUrl(url)));
+        spare->navigate(*url);
         activate(*spare);
-        return *spare;
+        return spare;
     }
     ScopedProfileForNewViews profile(current_profile());
-    auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(url)), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    auto& tab = m_window->new_tab_from_url(*url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     set_tab_space(tab, m_space_id);
-    return tab;
+    return &tab;
 }
 
 // A blank tab built ahead of time, while the app is idle, in the current space's profile. Not listed anywhere; used
 // by the next tab the sidebar opens, or as the empty page when a space's last tab closes.
 void ArcSidebar::prepare_spare_tab()
 {
+    // Private windows open few tabs, and their spare could never match a profile's session: none there.
+    if (is_private())
+        return;
     auto profile = current_profile();
     if (m_spare_tab) {
         if (tab_is_in_profile(*m_spare_tab, profile))
@@ -653,7 +689,8 @@ void ArcSidebar::back_to_pinned_url(QString const& node_id)
     auto* tab = tab_for_node(node_id);
     if (!node || !tab)
         return;
-    tab->navigate(ak_url_from_qurl(QUrl(node->url)));
+    if (auto url = parse_stored_url(node->url); url.has_value())
+        tab->navigate(*url);
     activate(*tab);
 }
 
@@ -672,7 +709,8 @@ void ArcSidebar::separate_from_pinned_tab(QString const& node_id)
         separated = &m_window->new_tab_from_url(tab->view().url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*tab));
     }
     set_tab_space(*separated, space);
-    tab->navigate(ak_url_from_qurl(QUrl(node->url)));
+    if (auto url = parse_stored_url(node->url); url.has_value())
+        tab->navigate(*url);
     schedule_rebuild();
 }
 
@@ -688,8 +726,11 @@ int ArcSidebar::open_background_tabs(QList<SessionEntry> const& entries)
         });
         if (already_open)
             continue;
+        auto url = parse_stored_url(entry.url);
+        if (!url.has_value())
+            continue;
         ScopedProfileForNewViews profile(profile_of_space(entry.space_id));
-        auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(entry.url)), Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::end());
+        auto& tab = m_window->new_tab_from_url(*url, Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::end());
         set_tab_space(tab, entry.space_id);
         ++opened;
     }
@@ -725,12 +766,19 @@ void ArcSidebar::close_tab(Tab& tab)
 }
 
 // A blank page (the new tab page, or the empty space shown after the last tab closes). Not listed in Today.
+bool ArcSidebar::is_private() const
+{
+    return m_window && m_window->is_private() == WebView::IsPrivate::Yes;
+}
+
 bool ArcSidebar::is_blank(Tab const& tab)
 {
+    // The sidebar's own empty pages (the spare tab, the page shown when a space empties) are flagged. A new tab
+    // still loading its first page shows about:blank too, but it's a tab: it's listed, and never closed as stale.
     if (tab.property(BLANK_PROPERTY).toBool())
         return true;
     auto url = url_of(tab);
-    return url == "about:newtab" || url == "about:blank" || url == qstring_from_ak_string(WebView::Application::settings().new_tab_page_url().serialize());
+    return url == "about:newtab" || url == qstring_from_ak_string(WebView::Application::settings().new_tab_page_url().serialize());
 }
 
 // Every close (sidebar, Cmd+W, Clear) comes through here. Like Arc: the next tab comes from the same space,
@@ -749,8 +797,15 @@ void ArcSidebar::before_tab_closes(Tab& tab)
             next = same_space[i - 1];
     }
     if (!next) {
+        // A favorite's tab is in no space: fall back within the space shown, or to this profile's favorites, never
+        // to a page shown nowhere in the sidebar (another profile's favorite).
+        auto shown_space = space.isEmpty() ? m_space_id : space;
         for (auto* other : tabs()) {
-            if (other != &tab && space_of(*other) == space && !is_blank(*other)) {
+            if (other == &tab || is_blank(*other))
+                continue;
+            auto other_space = space_of(*other);
+            auto shown = other_space.isEmpty() ? profile_of_tab(*other) == current_profile() : other_space == shown_space;
+            if (shown) {
                 next = other;
                 break;
             }
@@ -783,7 +838,7 @@ void ArcSidebar::close_stale_blank_tabs()
     if (!current || is_blank(*current))
         return;
     for (auto* tab : tabs()) {
-        if (tab != current && tab != m_spare_tab && is_blank(*tab)) {
+        if (tab != current && tab != m_spare_tab && tab->property(BLANK_PROPERTY).toBool()) {
             if (auto index = m_tabs.index_of(tab); index >= 0)
                 m_window->request_to_close_tab(index);
         }
@@ -799,8 +854,10 @@ void ArcSidebar::open_or_activate_node(QString const& node_id)
     auto const* node = SpaceStore::the().node(node_id);
     if (!node || node->is_folder())
         return;
-    auto& tab = open_tab(node->url);
-    set_tab_node(tab, node_id);
+    auto* tab = open_tab(node->url);
+    if (!tab)
+        return;
+    set_tab_node(*tab, node_id);
     schedule_rebuild();
 }
 
@@ -814,9 +871,11 @@ void ArcSidebar::open_or_activate_favorite(QString const& favorite_id)
     auto const* favorite = SpaceStore::the().favorite(favorite_id);
     if (!favorite)
         return;
-    auto& tab = open_tab(favorite->url);
-    set_tab_node(tab, node);
-    set_tab_space(tab, {});
+    auto* tab = open_tab(favorite->url);
+    if (!tab)
+        return;
+    set_tab_node(*tab, node);
+    set_tab_space(*tab, {});
     schedule_rebuild();
 }
 
@@ -1311,7 +1370,8 @@ QIcon ArcSidebar::icon_for(QString const& url, Tab const* tab) const
     // A loaded tab's live favicon (remembered for its site, so the site keeps it once unloaded); otherwise the
     // site's cached icon (from browsing, or imported from Arc); otherwise a letter tile.
     if (tab && !tab->favicon().isNull()) {
-        ArcIcons::store(url, tab->favicon());
+        if (!is_private()) // Private browsing leaves nothing behind.
+            ArcIcons::store(url, tab->favicon());
         return tab->favicon();
     }
     if (auto cached = ArcIcons::icon_for_url(url); !cached.isNull())
@@ -1357,13 +1417,23 @@ void ArcSidebar::rebuild()
         space = SpaceStore::the().space(m_space_id);
     }
 
-    // Tabs whose space went away (deleted, or the starter space an import replaced) join the current one.
+    // Tabs whose space went away (deleted, or the starter space an import replaced) join the current one. Tabs whose
+    // pinned tab or favorite went away (removed in another window, replaced by a re-import) become Today tabs, rather
+    // than running on unreachable.
     for (auto* tab : tabs()) {
         auto tab_space = space_of(*tab);
         if (!tab_space.isEmpty() && !SpaceStore::the().space(tab_space)) {
             set_tab_space(*tab, m_space_id);
             if (!is_favorite_node(node_of(*tab)))
                 set_tab_node(*tab, {});
+        }
+        auto node = node_of(*tab);
+        if (node.isEmpty())
+            continue;
+        if (is_favorite_node(node) ? !SpaceStore::the().favorite(node.mid(4)) : !SpaceStore::the().node(node)) {
+            set_tab_node(*tab, {});
+            if (space_of(*tab).isEmpty())
+                set_tab_space(*tab, m_space_id);
         }
     }
 
@@ -1677,7 +1747,7 @@ void ArcSidebar::update_tab_rows(Tab& tab)
         item.setIcon(icon);
     });
 
-    if (!node.isEmpty() && !tab.title().isEmpty() && tab_shows_a_page(url_of(tab)))
+    if (!node.isEmpty() && !tab.title().isEmpty() && tab_shows_a_page(url_of(tab)) && !is_private())
         SpaceStore::the().set_saved_title(node, tab.title());
 }
 
@@ -2294,7 +2364,9 @@ void ArcSidebar::on_row_dropped(QModelIndex const& source, QModelIndex const& ta
             auto const* node = store.node(id);
             if (!node)
                 return;
-            tab = &open_tab(node->url);
+            tab = open_tab(node->url);
+            if (!tab)
+                return;
         }
         unpin_node(id);
         move_today_tab(*m_window, m_tabs, *tab, today_tabs(m_space_id), destination.index);
@@ -2353,8 +2425,10 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
             size_host();
         else if (event->type() == QEvent::WindowActivate && m_mode_set)
             set_window_controls_hidden(*window(), m_mode == Mode::Hidden || m_host_docking); // AppKit can restore them on activation.
-        if (event->type() == QEvent::WindowActivate)
+        if (event->type() == QEvent::WindowActivate) {
             apply_profile_for_new_views();
+            apply_space_tint(); // The window frame shows this window's space's color, not the last-rebuilt one's.
+        }
         return false;
     }
 
