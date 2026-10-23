@@ -1290,7 +1290,7 @@ void ArcSidebar::rebuild_favorites()
 
         auto* button = new QToolButton(m_favorites);
         button->setIcon(icon_for(favorite.url, tab));
-        button->setIconSize(QSize(18, 18));
+        button->setIconSize(QSize(16, 16));
         button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
         button->setCheckable(true);
         button->setChecked(tab && tab == current);

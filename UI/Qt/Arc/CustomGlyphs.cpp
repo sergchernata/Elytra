@@ -51,7 +51,10 @@ QPixmap custom_glyph_pixmap(QString const& name, int box, QColor const& color, q
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
     auto bounds = path.boundingRect();
-    auto scale = size / qMax(bounds.width(), bounds.height());
+    // A solid shape filling its whole box looks heavier than SF Symbols, whose outlines and openings leave air:
+    // draw it a little smaller so it reads at the same size as the symbols beside it.
+    static constexpr double OPTICAL_SCALE = 0.8;
+    auto scale = size * OPTICAL_SCALE / qMax(bounds.width(), bounds.height());
     painter.translate((size - bounds.width() * scale) / 2.0, (size - bounds.height() * scale) / 2.0);
     painter.scale(scale, scale);
     painter.translate(-bounds.topLeft());
