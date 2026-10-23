@@ -1,0 +1,127 @@
+# Arc fork: builds Ladybird for Apple Silicon Macs and publishes it as a GitHub release.
+#
+# Runs when a tag named arc-v* is pushed (the release takes the tag's name), or by hand from the Actions tab
+# (the release is tagged arc-<date>-<commit>). Uses upstream's setup, cache and packaging steps (see
+# lagom-template.yml), so it keeps working as those change.
+
+name: Arc release (macOS, Apple Silicon)
+
+on:
+  push:
+    tags: ['arc-v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # Same as upstream CI: ccache and vcpkg caches live in the workspace so they can be restored and saved.
+  LADYBIRD_SOURCE_DIR: ${{ github.workspace }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_COMPILERCHECK: "%compiler% -v"
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set Up Environment
+        uses: ./.github/actions/setup
+        id: setup
+        with:
+          os: macOS
+          arch: arm64
+          toolchain: Clang
+          build_preset: Release
+
+      - name: Restore Caches
+        uses: ./.github/actions/cache-restore
+        id: cache-restore
+        with:
+          os: macOS
+          arch: arm64
+          toolchain: Clang
+          cache_key_extra: Release-arc
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
+
+      - name: Configure
+        run: |
+          CC="$(xcrun --find clang)"
+          CXX="$(xcrun --find clang++)"
+          # vcpkg builds its ports with the same compiler.
+          echo "CC=$CC" >> "$GITHUB_ENV"
+          echo "CXX=$CXX" >> "$GITHUB_ENV"
+          # ENABLE_CI_BASELINE_CPU: code for any Apple Silicon Mac, not just the build machine's CPU.
+          CC="$CC" CXX="$CXX" cmake --preset Release -B Build \
+            -DENABLE_CI_BASELINE_CPU=ON \
+            -DBUILD_TESTING=OFF \
+            -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX"
+
+      - name: Build
+        working-directory: ${{ github.workspace }}/Build
+        run: |
+          cmake --build .
+          cmake --install . --strip --prefix "${GITHUB_WORKSPACE}/Install"
+
+      - name: Save Caches
+        if: always()
+        uses: ./.github/actions/cache-save
+        with:
+          arch: arm64
+          ccache_path: ${{ steps.setup.outputs.ccache_path }}
+          ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}
+          vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
+          vcpkg_cache_primary_key: ${{ steps.cache-restore.outputs.vcpkg_cache_primary_key }}
+
+      - name: Package Ladybird.app
+        id: package
+        run: |
+          # Upstream's packager makes the bundle self-contained (Qt and libraries inside) and signs it ad hoc.
+          "${{ env.pythonLocation }}/bin/python" Meta/package-macos-app-bundle.py \
+            --build-dir Build --install-dir Install --output ladybird-app-bundle.tar.gz
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="arc-$(date -u +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          fi
+          ZIP="Ladybird-${TAG}-macOS-arm64.zip"
+
+          mkdir -p staging
+          tar -xzf ladybird-app-bundle.tar.gz -C staging
+          APP="$(find staging -maxdepth 3 -name Ladybird.app -type d | head -1)"
+          test -n "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          Ladybird with the Arc-style interface, built for Apple Silicon Macs (arm64, macOS 14.4 or later).
+
+          The app is signed ad hoc, not notarized, so macOS blocks it the first time. After unzipping, either
+          right-click Ladybird.app and choose Open, or run:
+
+              xattr -dr com.apple.quarantine /path/to/Ladybird.app
+          EOF
+          gh release create "${{ steps.package.outputs.tag }}" \
+            --title "Ladybird (Arc) ${{ steps.package.outputs.tag }}" \
+            --notes-file notes.md \
+            --target "${GITHUB_SHA}" \
+            "${{ steps.package.outputs.zip }}" "${{ steps.package.outputs.zip }}.sha256"
