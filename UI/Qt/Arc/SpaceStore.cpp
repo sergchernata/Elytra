@@ -96,6 +96,8 @@ void SpaceStore::load()
         space.id = object["id"].toString(new_id());
         space.title = object["title"].toString("Space");
         space.icon = object["icon"].toString();
+        if (space.icon == QString::fromUtf8("\xF0\x9F\x8F\xA0"))
+            space.icon = "sf:house"; // Earlier builds used a house emoji for the default space.
         space.color = QColor(object["color"].toString());
         for (auto const& node : object["pinned"].toArray())
             space.pinned.append(node_from_json(node.toObject()));
@@ -163,7 +165,7 @@ void SpaceStore::ensure_default_space()
 {
     if (!m_spaces.isEmpty())
         return;
-    m_spaces.append({ new_id(), "Personal", QString::fromUtf8("\xF0\x9F\x8F\xA0"), QColor("#7a9cc6"), {} });
+    m_spaces.append({ new_id(), "Personal", "sf:house", QColor("#7a9cc6"), {} });
     save();
 }
 

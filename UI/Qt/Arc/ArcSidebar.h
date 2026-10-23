@@ -21,6 +21,7 @@ class QGridLayout;
 class QHBoxLayout;
 class QKeyEvent;
 class QLabel;
+class QTimer;
 class QToolButton;
 
 namespace Ladybird {
@@ -88,6 +89,8 @@ private:
     void rebuild_favorites();
     void rebuild_tree();
     void rebuild_switcher();
+    void show_shelf();
+    void position_shelf();
     void append_nodes(QStandardItem& parent, QList<PinnedNode> const&);
     void update_tab_rows(Tab&);
     void update_current_highlight();
@@ -120,7 +123,13 @@ private:
     QWidget* m_top_strip { nullptr };
     QWidget* m_favorites { nullptr };
     QGridLayout* m_favorites_layout { nullptr };
+    QLabel* m_space_icon { nullptr };
     QLabel* m_space_title { nullptr };
+    class SymbolButton* m_downloads_button { nullptr };
+    class DownloadsShelf* m_shelf { nullptr };
+    QTimer* m_shelf_show_timer { nullptr };
+    QTimer* m_shelf_hide_timer { nullptr };
+    QTimer* m_shelf_refresh_timer { nullptr };
     SidebarTree* m_tree { nullptr };
     SidebarModel* m_model { nullptr };
     QWidget* m_switcher { nullptr };

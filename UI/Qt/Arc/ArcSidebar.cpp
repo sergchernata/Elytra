@@ -8,6 +8,8 @@
 #include <LibWebView/Application.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/SidebarWidgets.h>
+#include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
@@ -16,7 +18,10 @@
 #include <UI/Qt/TabBar.h>
 #include <UI/Qt/WebContentView.h>
 
+#include <QButtonGroup>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QStandardPaths>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDragEnterEvent>
@@ -74,11 +79,6 @@ static constexpr ColorPreset COLOR_PRESETS[] = {
     { "Teal", "#5fb3b3" },
     { "Gray", "#8a8f98" },
 };
-
-static QString rgba(QColor const& color)
-{
-    return QString("rgba(%1, %2, %3, %4)").arg(color.red()).arg(color.green()).arg(color.blue()).arg(color.alpha());
-}
 
 static QString favorite_node(QString const& favorite_id) { return FAVORITE_PREFIX + favorite_id; }
 static bool is_favorite_node(QString const& node) { return node.startsWith(FAVORITE_PREFIX); }
@@ -141,13 +141,21 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_favorites->installEventFilter(this);
     layout->addWidget(m_favorites);
 
-    m_space_title = new QLabel(this);
-    m_space_title->setContentsMargins(8, 2, 8, 2);
-    m_space_title->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_space_title, &QLabel::customContextMenuRequested, this, [this](QPoint const& position) {
-        show_space_menu(m_space_id, m_space_title->mapToGlobal(position));
+    auto* header = new QWidget(this);
+    auto* header_layout = new QHBoxLayout(header);
+    header_layout->setContentsMargins(10, 2, 8, 2);
+    header_layout->setSpacing(8);
+    m_space_icon = new QLabel(header);
+    m_space_icon->setFixedSize(18, 18);
+    m_space_icon->setAlignment(Qt::AlignCenter);
+    m_space_title = new QLabel(header);
+    header_layout->addWidget(m_space_icon);
+    header_layout->addWidget(m_space_title, 1);
+    header->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(header, &QWidget::customContextMenuRequested, this, [this, header](QPoint const& position) {
+        show_space_menu(m_space_id, header->mapToGlobal(position));
     });
-    layout->addWidget(m_space_title);
+    layout->addWidget(header);
 
     m_model = new SidebarModel(this);
     m_tree = new SidebarTree(this);
@@ -156,9 +164,44 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 
     m_switcher = new QWidget(this);
     m_switcher_layout = new QHBoxLayout(m_switcher);
-    m_switcher_layout->setContentsMargins(2, 4, 2, 2);
-    m_switcher_layout->setSpacing(2);
+    m_switcher_layout->setContentsMargins(0, 4, 0, 4);
+    m_switcher_layout->setSpacing(0);
     layout->addWidget(m_switcher);
+
+    // Downloads: hovering the left-most button raises a shelf of recent files, as in Arc.
+    m_downloads_button = new SymbolButton(m_switcher);
+    m_downloads_button->set_symbol("tray.and.arrow.down");
+    m_downloads_button->setToolTip("Downloads");
+    m_downloads_button->installEventFilter(this);
+    connect(m_downloads_button, &QAbstractButton::clicked, this, [this] {
+        if (m_shelf->isVisible())
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)));
+        else
+            show_shelf();
+    });
+
+    m_shelf = new DownloadsShelf(this);
+    m_shelf->hide();
+    m_shelf->installEventFilter(this);
+
+    m_shelf_show_timer = new QTimer(this);
+    m_shelf_show_timer->setSingleShot(true);
+    m_shelf_show_timer->setInterval(140);
+    connect(m_shelf_show_timer, &QTimer::timeout, this, &ArcSidebar::show_shelf);
+    m_shelf_hide_timer = new QTimer(this);
+    m_shelf_hide_timer->setSingleShot(true);
+    m_shelf_hide_timer->setInterval(320);
+    connect(m_shelf_hide_timer, &QTimer::timeout, m_shelf, &QWidget::hide);
+    m_shelf_refresh_timer = new QTimer(this);
+    m_shelf_refresh_timer->setInterval(1000);
+    connect(m_shelf_refresh_timer, &QTimer::timeout, this, [this] {
+        if (!m_shelf->isVisible()) {
+            m_shelf_refresh_timer->stop();
+            return;
+        }
+        m_shelf->refresh(); // Keeps in-progress percentages moving.
+        position_shelf();
+    });
 
     connect(m_tree, &SidebarTree::row_clicked, this, &ArcSidebar::on_row_clicked);
     connect(m_tree, &SidebarTree::close_clicked, this, &ArcSidebar::on_close_clicked);
@@ -551,16 +594,62 @@ void ArcSidebar::delete_folder(QString const& node_id)
     save_session();
 }
 
-static QDialog* make_space_dialog(QWidget* parent, QString const& title, QString const& icon, QColor const& color, QLineEdit*& name_edit, QLineEdit*& icon_edit, QComboBox*& color_box)
+// A grid of monochrome symbols to pick a space icon from (plus "first letter").
+class IconPicker final : public QWidget {
+public:
+    IconPicker(QString const& current, QWidget* parent)
+        : QWidget(parent)
+    {
+        auto* grid = new QGridLayout(this);
+        grid->setContentsMargins(0, 0, 0, 0);
+        grid->setSpacing(2);
+        m_group = new QButtonGroup(this);
+        m_group->setExclusive(true);
+
+        int index = 0;
+        auto add = [&](QString const& icon, QString const& label, QString const& tooltip) {
+            auto* button = new SymbolButton(this);
+            button->setCheckable(true);
+            button->set_icon_text(label);
+            button->setToolTip(tooltip);
+            button->setProperty("arc_icon", icon);
+            if (icon == current)
+                button->setChecked(true);
+            m_group->addButton(button);
+            grid->addWidget(button, index / 10, index % 10);
+            ++index;
+        };
+
+        add({}, "Aa", "First letter of the name");
+        if (!current.isEmpty() && !is_symbol_icon(current))
+            add(current, current, "Current icon");
+        for (auto const& name : space_symbol_names()) {
+            if (symbol_pixmap(name, 15, Qt::black, 1).isNull())
+                continue; // Not available on this macOS version.
+            add("sf:" + name, "sf:" + name, name);
+        }
+        if (!m_group->checkedButton() && !m_group->buttons().isEmpty())
+            m_group->buttons().first()->setChecked(true);
+    }
+
+    QString icon() const
+    {
+        auto* button = m_group->checkedButton();
+        return button ? button->property("arc_icon").toString() : QString();
+    }
+
+private:
+    QButtonGroup* m_group { nullptr };
+};
+
+static QDialog* make_space_dialog(QWidget* parent, QString const& title, QString const& icon, QColor const& color, QLineEdit*& name_edit, IconPicker*& icon_picker, QComboBox*& color_box)
 {
     auto* dialog = new QDialog(parent);
     dialog->setWindowTitle("Space");
     auto* form = new QFormLayout(dialog);
 
     name_edit = new QLineEdit(title, dialog);
-    icon_edit = new QLineEdit(icon, dialog);
-    icon_edit->setPlaceholderText("An emoji, or leave empty");
-    icon_edit->setMaxLength(8);
+    icon_picker = new IconPicker(icon, dialog);
     color_box = new QComboBox(dialog);
     for (auto const& preset : COLOR_PRESETS) {
         QPixmap swatch(14, 14);
@@ -571,7 +660,7 @@ static QDialog* make_space_dialog(QWidget* parent, QString const& title, QString
     }
 
     form->addRow("Name", name_edit);
-    form->addRow("Icon", icon_edit);
+    form->addRow("Icon", icon_picker);
     form->addRow("Color", color_box);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
@@ -587,14 +676,14 @@ void ArcSidebar::new_space()
     auto preset = COLOR_PRESETS[store.spaces().size() % std::size(COLOR_PRESETS)];
 
     QLineEdit* name_edit = nullptr;
-    QLineEdit* icon_edit = nullptr;
+    IconPicker* icon_picker = nullptr;
     QComboBox* color_box = nullptr;
-    auto* dialog = make_space_dialog(m_window, "New Space", {}, QColor(preset.hex), name_edit, icon_edit, color_box);
+    auto* dialog = make_space_dialog(m_window, "New Space", "sf:star", QColor(preset.hex), name_edit, icon_picker, color_box);
     dialog->setWindowTitle("New Space");
     name_edit->selectAll();
     if (dialog->exec() == QDialog::Accepted) {
         auto name = name_edit->text().trimmed();
-        auto id = store.add_space(name.isEmpty() ? "New Space" : name, icon_edit->text().trimmed(), QColor(color_box->currentData().toString()));
+        auto id = store.add_space(name.isEmpty() ? "New Space" : name, icon_picker->icon(), QColor(color_box->currentData().toString()));
         switch_to_space(id);
     }
     dialog->deleteLater();
@@ -608,12 +697,12 @@ void ArcSidebar::edit_space(QString const& space_id)
         return;
 
     QLineEdit* name_edit = nullptr;
-    QLineEdit* icon_edit = nullptr;
+    IconPicker* icon_picker = nullptr;
     QComboBox* color_box = nullptr;
-    auto* dialog = make_space_dialog(m_window, space->title, space->icon, space->color, name_edit, icon_edit, color_box);
+    auto* dialog = make_space_dialog(m_window, space->title, space->icon, space->color, name_edit, icon_picker, color_box);
     if (dialog->exec() == QDialog::Accepted) {
         auto name = name_edit->text().trimmed();
-        store.update_space(space_id, name.isEmpty() ? space->title : name, icon_edit->text().trimmed(), QColor(color_box->currentData().toString()));
+        store.update_space(space_id, name.isEmpty() ? space->title : name, icon_picker->icon(), QColor(color_box->currentData().toString()));
     }
     dialog->deleteLater();
 }
@@ -818,7 +907,17 @@ void ArcSidebar::rebuild()
     }
 
     auto muted = ChromeStyle::chrome_muted_text(palette());
-    m_space_title->setText(space ? (space->icon.isEmpty() ? space->title : space->icon + "  " + space->title) : QString());
+    m_space_title->setText(space ? space->title : QString());
+    m_space_icon->clear();
+    if (space) {
+        auto icon = space->icon.isEmpty() ? space->title.left(1).toUpper() : space->icon;
+        auto pixmap = is_symbol_icon(icon) ? symbol_pixmap(symbol_name(icon), 13, muted, devicePixelRatioF()) : QPixmap();
+        if (!pixmap.isNull())
+            m_space_icon->setPixmap(pixmap);
+        else
+            m_space_icon->setText(is_symbol_icon(icon) ? space->title.left(1).toUpper() : icon);
+        m_space_icon->setStyleSheet(QString("QLabel { color: %1; font-weight: 700; font-size: 13px; }").arg(muted.name()));
+    }
     m_space_title->setStyleSheet(QString("QLabel { color: %1; font-weight: 600; font-size: 13px; }").arg(muted.name()));
     m_tree->delegate().accent = space_color();
 
@@ -947,58 +1046,63 @@ void ArcSidebar::rebuild_tree()
     m_tree->verticalScrollBar()->setValue(scroll);
 }
 
+void ArcSidebar::show_shelf()
+{
+    m_shelf->refresh();
+    if (m_shelf->is_empty())
+        return;
+    position_shelf();
+    m_shelf->raise();
+    m_shelf->show();
+    m_shelf_refresh_timer->start();
+}
+
+void ArcSidebar::position_shelf()
+{
+    auto bottom = m_switcher->geometry().top();
+    auto height = qMin(m_shelf->preferred_height(), bottom - TOP_STRIP_HEIGHT);
+    m_shelf->setGeometry(0, bottom - height, width(), height);
+}
+
 void ArcSidebar::rebuild_switcher()
 {
+    // Everything but the downloads button is rebuilt.
     while (auto* item = m_switcher_layout->takeAt(0)) {
-        if (auto* widget = item->widget())
+        if (auto* widget = item->widget(); widget && widget != m_downloads_button)
             widget->deleteLater();
         delete item;
     }
 
     auto const& spaces = SpaceStore::the().spaces();
-    auto muted = ChromeStyle::chrome_muted_text(palette());
+
+    // [downloads]  [space] [space] ...  [+], spread across the bar like Arc's.
+    m_switcher_layout->addWidget(m_downloads_button);
+    m_switcher_layout->addStretch(1);
 
     for (int i = 0; i < spaces.size(); ++i) {
         auto const& space = spaces[i];
         auto active = space.id == m_space_id;
 
-        auto* button = new QToolButton(m_switcher);
-        button->setText(space.icon.isEmpty() ? space.title.left(1).toUpper() : space.icon);
-        button->setToolTip(i < 9 ? QString("%1  (%2%3)").arg(space.title, SPACE_SHORTCUT_MODIFIER == Qt::META ? "⌃" : "Alt+").arg(i + 1) : space.title);
-        button->setFixedSize(28, 28);
-        button->setFocusPolicy(Qt::NoFocus);
+        auto* button = new SymbolButton(m_switcher);
+        button->set_icon_text(space.icon.isEmpty() ? space.title.left(1).toUpper() : space.icon);
+        button->set_dimmed(!active);
+        button->setToolTip(i < 9 ? QString("%1  (%2%3)").arg(space.title, SPACE_SHORTCUT_MODIFIER == Qt::META ? "\u2303" : "Alt+").arg(i + 1) : space.title);
         button->setContextMenuPolicy(Qt::CustomContextMenu);
 
-        auto hover = ChromeStyle::chrome_surface_hover(palette());
-        hover.setAlpha(120);
-        button->setStyleSheet(QString("QToolButton { background: transparent; border: none; border-radius: 8px; color: %1; font-weight: 700; font-size: 14px; }"
-                                      "QToolButton:hover { background: %2; }")
-                                  .arg(ChromeStyle::chrome_text(palette()).name(), rgba(hover)));
-        if (!active) {
-            // Emoji can't be recolored, so dim inactive spaces with opacity, as Arc does.
-            auto* dim = new QGraphicsOpacityEffect(button);
-            dim->setOpacity(0.4);
-            button->setGraphicsEffect(dim);
-        }
-
         auto id = space.id;
-        connect(button, &QToolButton::clicked, this, [this, id] { switch_to_space(id); });
-        connect(button, &QToolButton::customContextMenuRequested, this, [this, id, button](QPoint const& position) {
+        connect(button, &QAbstractButton::clicked, this, [this, id] { switch_to_space(id); });
+        connect(button, &QWidget::customContextMenuRequested, this, [this, id, button](QPoint const& position) {
             show_space_menu(id, button->mapToGlobal(position));
         });
         m_switcher_layout->addWidget(button);
         m_switcher_layout->addStretch(1);
     }
 
-    auto* add = new QToolButton(m_switcher);
-    add->setText("+");
+    auto* add = new SymbolButton(m_switcher);
+    add->set_symbol("plus");
+    add->set_dimmed(true);
     add->setToolTip("New Space");
-    add->setFixedSize(28, 28);
-    add->setFocusPolicy(Qt::NoFocus);
-    add->setStyleSheet(QString("QToolButton { background: transparent; border: none; border-radius: 8px; color: %1; font-size: 16px; }"
-                               "QToolButton:hover { background: %2; }")
-                           .arg(muted.name(), rgba(ChromeStyle::chrome_surface_hover(palette()))));
-    connect(add, &QToolButton::clicked, this, &ArcSidebar::new_space);
+    connect(add, &QAbstractButton::clicked, this, &ArcSidebar::new_space);
     m_switcher_layout->addWidget(add);
 }
 
@@ -1229,6 +1333,19 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_downloads_button || watched == m_shelf) {
+        if (event->type() == QEvent::Enter) {
+            m_shelf_hide_timer->stop();
+            if (watched == m_downloads_button && !m_shelf->isVisible())
+                m_shelf_show_timer->start();
+        } else if (event->type() == QEvent::Leave) {
+            m_shelf_show_timer->stop();
+            if (m_shelf->isVisible())
+                m_shelf_hide_timer->start();
+        }
+        return false;
+    }
+
     if (watched == m_top_strip) {
         if (event->type() == QEvent::MouseButtonPress && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
             if (auto* handle = window()->windowHandle())
