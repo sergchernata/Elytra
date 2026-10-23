@@ -17,7 +17,9 @@
 #include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
+#include <QElapsedTimer>
 #include <QScrollBar>
+#include <QTimer>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
 
@@ -340,6 +342,9 @@ TEST_CASE(rebuilding_the_list_keeps_its_scroll_position)
     tree.verticalScrollBar()->setValue(900);
     VERIFY(tree.verticalScrollBar()->value() == 900);
 
+    // The list mustn't move at all on the way, not even for a frame: no intermediate positions.
+    Vector<int> positions;
+    auto connection = QObject::connect(tree.verticalScrollBar(), &QScrollBar::valueChanged, [&](int value) { positions.append(value); });
     tree.rebuild_keeping_scroll_position([&] {
         model.clear();
         fill();
@@ -347,6 +352,159 @@ TEST_CASE(rebuilding_the_list_keeps_its_scroll_position)
     EXPECT_EQ(tree.verticalScrollBar()->value(), 900);
     QApplication::processEvents(); // And it stays there once the view settles.
     EXPECT_EQ(tree.verticalScrollBar()->value(), 900);
+    QObject::disconnect(connection);
+    EXPECT(positions.is_empty());
+}
+
+TEST_CASE(clicking_a_row_that_rebuilds_the_list_keeps_its_scroll_position)
+{
+    // As in the sidebar: folders with tabs, and a click whose handling rebuilds the whole list.
+    QStandardItemModel model;
+    auto fill = [&] {
+        for (int f = 0; f < 10; ++f) {
+            auto* folder = new QStandardItem(QString("Folder %1").arg(f));
+            folder->setData(static_cast<int>(RowKind::Folder), KindRole);
+            folder->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
+            for (int t = 0; t < 5; ++t) {
+                auto* tab = new QStandardItem(QString("Tab %1.%2").arg(f).arg(t));
+                tab->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
+                tab->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+                folder->appendRow(tab);
+            }
+            model.appendRow(folder);
+        }
+    };
+    fill();
+
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.expandAll();
+    tree.show();
+    QApplication::processEvents();
+    tree.verticalScrollBar()->setValue(1000);
+    QApplication::processEvents();
+    auto scrolled = tree.verticalScrollBar()->value();
+    VERIFY(scrolled > 500);
+
+    // As in the sidebar, the rebuild runs after the click, from the event loop (twice: tab added, then loaded).
+    auto rebuild = [&] {
+        tree.rebuild_keeping_scroll_position([&] {
+            model.clear();
+            fill();
+            tree.expandAll();
+        });
+    };
+    QObject::connect(&tree, &SidebarTree::row_clicked, [&](QModelIndex const&) {
+        QTimer::singleShot(0, &tree, rebuild);
+        QTimer::singleShot(30, &tree, rebuild);
+    });
+    auto point = QPoint(120, 150);
+    VERIFY(tree.indexAt(point).isValid());
+    auto global = tree.viewport()->mapToGlobal(point);
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(global), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point), QPointF(global), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(tree.viewport(), &press);
+    QApplication::sendEvent(tree.viewport(), &release);
+    QElapsedTimer settle;
+    settle.start();
+    while (settle.elapsed() < 200)
+        QApplication::processEvents();
+    EXPECT_EQ(tree.verticalScrollBar()->value(), scrolled);
+}
+
+TEST_CASE(a_list_rebuilt_while_hidden_keeps_its_scroll_position)
+{
+    // The floating sidebar is hidden or squeezed while it retracts; a rebuild then must not lose the position.
+    QStandardItemModel model;
+    auto fill = [&] {
+        for (int i = 0; i < 100; ++i) {
+            auto* item = new QStandardItem(QString("Tab %1").arg(i));
+            item->setData(static_cast<int>(RowKind::TodayTab), KindRole);
+            model.appendRow(item);
+        }
+    };
+    fill();
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    QApplication::processEvents();
+    tree.verticalScrollBar()->setValue(900);
+
+    for (auto squeeze : { false, true }) {
+        if (squeeze)
+            tree.resize(260, 0);
+        else
+            tree.hide();
+        QApplication::processEvents();
+        tree.rebuild_keeping_scroll_position([&] {
+            model.clear();
+            fill();
+        });
+        QApplication::processEvents();
+        tree.resize(260, 300);
+        tree.show();
+        for (int i = 0; i < 5; ++i)
+            QApplication::processEvents();
+        EXPECT_EQ(tree.verticalScrollBar()->value(), 900);
+    }
+}
+
+TEST_CASE(clicking_the_last_row_at_the_bottom_keeps_the_list_at_the_bottom)
+{
+    QStandardItemModel model;
+    auto fill = [&] {
+        for (int i = 0; i < 60; ++i) {
+            auto* item = new QStandardItem(QString("Tab %1").arg(i));
+            item->setData(static_cast<int>(RowKind::TodayTab), KindRole);
+            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+            model.appendRow(item);
+        }
+        auto* space = new QStandardItem;
+        space->setData(static_cast<int>(RowKind::BottomSpace), KindRole);
+        model.appendRow(space);
+    };
+    fill();
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    QApplication::processEvents();
+    auto* bar = tree.verticalScrollBar();
+    bar->setValue(bar->maximum());
+    auto bottom = bar->value();
+    VERIFY(bottom > 0);
+
+    Vector<int> positions;
+    QObject::connect(bar, &QScrollBar::valueChanged, [&](int value) { positions.append(value); });
+    auto rebuild = [&] {
+        tree.rebuild_keeping_scroll_position([&] {
+            model.clear();
+            fill();
+        });
+    };
+    QObject::connect(&tree, &SidebarTree::row_clicked, [&](QModelIndex const&) {
+        QTimer::singleShot(0, &tree, rebuild);
+        QTimer::singleShot(30, &tree, rebuild);
+    });
+
+    // The last tab, just above the empty room at the end.
+    auto last = model.index(59, 0);
+    auto point = tree.visualRect(last).center();
+    VERIFY(tree.viewport()->rect().contains(point));
+    auto global = tree.viewport()->mapToGlobal(point);
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(global), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point), QPointF(global), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(tree.viewport(), &press);
+    QApplication::sendEvent(tree.viewport(), &release);
+    QElapsedTimer settle;
+    settle.start();
+    while (settle.elapsed() < 200)
+        QApplication::processEvents();
+
+    EXPECT_EQ(bar->value(), bottom);
+    EXPECT(positions.is_empty());
 }
 
 TEST_CASE(divider_row_has_a_rule_strip_with_clear_at_its_end)

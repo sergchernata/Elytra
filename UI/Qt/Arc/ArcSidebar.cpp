@@ -44,6 +44,7 @@
 #include <QScrollBar>
 #include <QKeyEvent>
 #include <QScopeGuard>
+#include <QScrollBar>
 #include <QMouseEvent>
 #include <QWindow>
 #include <QGraphicsOpacityEffect>
@@ -1362,16 +1363,8 @@ void ArcSidebar::update_space_header_icon()
 
 void ArcSidebar::rebuild_favorites()
 {
-    while (auto* item = m_favorites_layout->takeAt(0)) {
-        if (auto* widget = item->widget())
-            widget->deleteLater();
-        delete item;
-    }
-
     auto favorites = SpaceStore::the().favorites_for_profile(current_profile());
     m_favorites->setVisible(!favorites.isEmpty());
-    if (favorites.isEmpty())
-        return;
 
     auto dark = ChromeStyle::is_dark(palette());
     auto tile = dark ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.45)";
@@ -1382,35 +1375,58 @@ void ArcSidebar::rebuild_favorites()
                          "QToolButton:checked { background: %3; }")
                      .arg(tile, tile_hover, tile_checked);
 
-    // Always four equal columns, like Arc, so one favorite is a tile rather than a full-width bar.
-    constexpr int columns = 4;
-    for (int column = 0; column < columns; ++column)
-        m_favorites_layout->setColumnStretch(column, 1);
-    auto* current = m_window ? m_window->current_tab() : nullptr;
+    QStringList ids;
+    for (auto const& favorite : favorites)
+        ids.append(favorite.id);
 
+    // Rebuilding the tiles empties the grid for a moment, which resizes the list below it and can move its scroll
+    // position. Only rebuild when the tiles themselves change; otherwise update them in place.
+    if (ids != m_favorite_ids || style != m_favorite_style || m_favorite_buttons.size() != ids.size()) {
+        while (auto* item = m_favorites_layout->takeAt(0)) {
+            if (auto* widget = item->widget())
+                widget->deleteLater();
+            delete item;
+        }
+        m_favorite_buttons.clear();
+        m_favorite_ids = ids;
+        m_favorite_style = style;
+
+        // Always four equal columns, like Arc, so one favorite is a tile rather than a full-width bar.
+        constexpr int columns = 4;
+        for (int column = 0; column < columns; ++column)
+            m_favorites_layout->setColumnStretch(column, 1);
+
+        for (int i = 0; i < favorites.size(); ++i) {
+            auto* button = new QToolButton(m_favorites);
+            button->setIconSize(QSize(16, 16));
+            button->setCheckable(true);
+            button->setFixedHeight(FAVORITE_TILE_HEIGHT);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            button->setFocusPolicy(Qt::NoFocus);
+            button->setStyleSheet(style);
+            button->setContextMenuPolicy(Qt::CustomContextMenu);
+
+            auto id = favorites[i].id;
+            connect(button, &QToolButton::clicked, this, [this, id] { open_or_activate_favorite(id); });
+            connect(button, &QToolButton::customContextMenuRequested, this, [this, id, button](QPoint const& position) {
+                show_favorite_menu(id, button->mapToGlobal(position));
+            });
+
+            m_favorites_layout->addWidget(button, i / columns, i % columns);
+            m_favorite_buttons.append(button);
+        }
+    }
+
+    auto* current = m_window ? m_window->current_tab() : nullptr;
     for (int i = 0; i < favorites.size(); ++i) {
         auto const& favorite = favorites[i];
+        auto* button = m_favorite_buttons[i].data();
+        if (!button)
+            continue;
         auto* tab = tab_for_node(favorite_node(favorite.id));
-
-        auto* button = new QToolButton(m_favorites);
         button->setIcon(icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr));
-        button->setIconSize(QSize(16, 16));
         button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
-        button->setCheckable(true);
         button->setChecked(tab && tab == current);
-        button->setFixedHeight(FAVORITE_TILE_HEIGHT);
-        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        button->setFocusPolicy(Qt::NoFocus);
-        button->setStyleSheet(style);
-        button->setContextMenuPolicy(Qt::CustomContextMenu);
-
-        auto id = favorite.id;
-        connect(button, &QToolButton::clicked, this, [this, id] { open_or_activate_favorite(id); });
-        connect(button, &QToolButton::customContextMenuRequested, this, [this, id, button](QPoint const& position) {
-            show_favorite_menu(id, button->mapToGlobal(position));
-        });
-
-        m_favorites_layout->addWidget(button, i / columns, i % columns);
     }
 }
 

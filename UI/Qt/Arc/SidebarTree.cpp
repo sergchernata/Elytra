@@ -20,6 +20,7 @@
 #include <QEasingCurve>
 #include <QPainterPath>
 #include <QScrollBar>
+#include <QSignalBlocker>
 
 #include <cmath>
 
@@ -504,17 +505,26 @@ SidebarTree::SidebarTree(QWidget* parent)
 
 void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuild)
 {
-    auto scroll = verticalScrollBar()->value();
+    auto* bar = verticalScrollBar();
+    auto scroll = bar->value();
     setUpdatesEnabled(false);
     setAnimated(false);
+    {
+        // While the rows are replaced the list is briefly empty, so the scroll bar would clamp to the top and the
+        // view scroll there and back. Keep it from telling the view, so the list never moves.
+        QSignalBlocker block(bar);
+        rebuild();
 
-    rebuild();
-
-    // The view lays out new rows later; until then the scroll range is that of an empty list, and restoring the
-    // position would clamp it to the top. Lay them out now, then restore.
-    executeDelayedItemsLayout();
-    updateGeometries();
-    verticalScrollBar()->setValue(scroll);
+        // The view lays out new rows later; until then the scroll range is that of an empty list, and restoring the
+        // position would clamp it to the top. Lay them out now, then restore.
+        executeDelayedItemsLayout();
+        updateGeometries();
+        bar->setValue(scroll);
+    }
+    // If the list got shorter than the old position, it now ends at its new bottom: tell the view, which still
+    // holds the old offset.
+    if (bar->value() != scroll)
+        emit bar->valueChanged(bar->value());
 
     setAnimated(true);
     setUpdatesEnabled(true);

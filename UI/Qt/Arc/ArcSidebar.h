@@ -187,6 +187,9 @@ private:
     QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
     QString m_tree_space_id;                // The space the list shows.
     QHash<QString, int> m_scroll_positions; // Each space's list scroll position.
+    QStringList m_favorite_ids;                       // What the favorite tiles show, in order.
+    QString m_favorite_style;
+    QList<QPointer<QToolButton>> m_favorite_buttons;
     TabWidget& m_tabs;
     QString m_space_id;
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;
