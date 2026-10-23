@@ -360,7 +360,9 @@ void Autocomplete::start_remote_query(AutocompleteQueryID query_id, SearchEngine
         return;
     }
 
-    auto client = Application::request_server_client(m_is_private);
+    // Fork hook (Arc profiles): with the cookies of the profile new views open in (the current space's), not the
+    // default session's.
+    auto client = Application::request_server_client(*Application::session_for_new_web_view(m_is_private));
     if (client.is_error()) {
         warnln("Unable to fetch autocomplete suggestions: {}", client.error());
         m_remote_query_complete = true;

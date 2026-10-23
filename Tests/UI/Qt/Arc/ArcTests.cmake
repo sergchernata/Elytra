@@ -49,9 +49,11 @@ deploy_qt_offscreen_platform_plugin(TestArcImportParser)
 
 # Profiles: real WebContent and RequestServer processes, run headlessly (modeled on upstream's
 # Tests/LibWebView/TestRequestServerClientSessions).
-add_executable(TestArcProfileSessions "${CMAKE_CURRENT_LIST_DIR}/TestArcProfileSessions.cpp")
+add_executable(TestArcProfileSessions "${CMAKE_CURRENT_LIST_DIR}/TestArcProfileSessions.cpp"
+    "${ARC_SOURCE_DIR}/ArcIcons.cpp" "${ARC_SOURCE_DIR}/ProfileSessions.cpp" "${ARC_SOURCE_DIR}/SpaceStore.cpp" "${ARC_SOURCE_DIR}/SpaceStoreProfile.cpp")
+set_target_properties(TestArcProfileSessions PROPERTIES AUTOMOC ON)
 add_dependencies(TestArcProfileSessions ladybird_build_resource_files ${ladybird_helper_processes})
-target_link_libraries(TestArcProfileSessions PRIVATE AK LibCore LibFileSystem LibGfx LibHTTP LibIPC LibMain LibURL LibWeb LibWebView)
+target_link_libraries(TestArcProfileSessions PRIVATE AK LibCore LibFileSystem LibGfx LibHTTP LibIPC LibMain LibURL LibWeb LibWebView Qt::Core Qt::Gui)
 if (APPLE)
     target_compile_definitions(TestArcProfileSessions PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
 endif()

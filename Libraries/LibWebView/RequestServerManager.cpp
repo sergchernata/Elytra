@@ -110,7 +110,9 @@ ErrorOr<NonnullRefPtr<RequestServerInstance>> RequestServerManager::launch(Nonnu
 ErrorOr<void> RequestServerManager::launch_process(RequestServerInstance& instance)
 {
     // Private sessions keep nothing on disk. Every RequestServer of a session would open the same cache otherwise.
-    auto disk_cache_mode = instance.session().is_private() == IsPrivate::Yes ? HTTPDiskCacheMode::Disabled : Application::request_server_options().http_disk_cache_mode;
+    // Fork hook (Arc profiles): nor do profile sessions, which would otherwise share the default session's cache.
+    auto keeps_no_disk_cache = instance.session().is_private() == IsPrivate::Yes || instance.session().is_profile_session();
+    auto disk_cache_mode = keeps_no_disk_cache ? HTTPDiskCacheMode::Disabled : Application::request_server_options().http_disk_cache_mode;
     auto control_client = TRY(launch_request_server_process(instance.cache_path(), instance.site(), disk_cache_mode));
 
     auto weak_instance = instance.make_weak_ptr();

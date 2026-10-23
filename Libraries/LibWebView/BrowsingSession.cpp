@@ -43,27 +43,38 @@ NonnullRefPtr<BrowsingSession> BrowsingSession::create(IsPrivate is_private)
 }
 
 // Fork hook (Arc profiles)
-ErrorOr<NonnullRefPtr<BrowsingSession>> BrowsingSession::create_persistent(ByteString const& directory, BrowsingSession& records)
+ErrorOr<NonnullRefPtr<BrowsingSession>> BrowsingSession::create_persistent(ByteString const& directory, BrowsingSession& records, Persist persist)
 {
     auto session = adopt_ref(*new BrowsingSession(IsPrivate::No));
     session->m_records = records;
 
-    TRY(Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes));
-    auto database = TRY(Database::Database::create(directory, "Ladybird"sv));
-
-    // As for the default session: migrate every store first, and persist none of them if the file is too new.
-    auto persist = TRY(CookieJar::migrate_schema(database)) == Database::MigrationOutcome::Success
-        && TRY(HSTSStore::migrate_schema(database)) == Database::MigrationOutcome::Success
-        && TRY(StorageJar::migrate_schema(database)) == Database::MigrationOutcome::Success;
-    if (persist) {
-        session->cookie_jar = TRY(CookieJar::create(database));
-        session->hsts_store = TRY(HSTSStore::create(database));
-        session->storage_jar = TRY(StorageJar::create(database));
-    } else {
-        warnln("Profile database in {} was created by a newer Ladybird version; its site data will not be persisted", directory);
+    auto in_memory = [&] {
         session->cookie_jar = CookieJar::create();
         session->hsts_store = HSTSStore::create();
         session->storage_jar = StorageJar::create();
+    };
+
+    if (persist == Persist::No) {
+        in_memory();
+    } else {
+        TRY(Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes));
+        auto database = TRY(Database::Database::create(directory, "Ladybird"sv));
+
+        // As for the default session (Application::launch_services()): check that every store can use the file before
+        // any migrates it, then migrate in order, and persist none of them if one finds the file too new.
+        auto all_succeed = [&](Database::MigrationMode mode) -> ErrorOr<bool> {
+            return TRY(CookieJar::migrate_schema(database, mode)) == Database::MigrationOutcome::Success
+                && TRY(HSTSStore::migrate_schema(database, mode)) == Database::MigrationOutcome::Success
+                && TRY(StorageJar::migrate_schema(database, mode)) == Database::MigrationOutcome::Success;
+        };
+        if (TRY(all_succeed(Database::MigrationMode::CheckOnly)) && TRY(all_succeed(Database::MigrationMode::Apply))) {
+            session->cookie_jar = TRY(CookieJar::create(database));
+            session->hsts_store = TRY(HSTSStore::create(database));
+            session->storage_jar = TRY(StorageJar::create(database));
+        } else {
+            warnln("Profile database in {} was created by a newer Ladybird version; its site data will not be persisted", directory);
+            in_memory();
+        }
     }
     session->blob_url_store = make<BlobURLStore>();
 

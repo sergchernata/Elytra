@@ -109,6 +109,11 @@ private:
         IsPrivate m_is_private { IsPrivate::No };
         Cookies m_cookies;
         Cookies m_dirty_cookies;
+
+    public:
+        // Fork hook (Arc profiles): the jar this storage belongs to. Changes are sent only to views using it, not to
+        // every view of the same private-or-not kind (each profile has its own jar).
+        CookieJar const* owner { nullptr };
     };
 
     struct WEBVIEW_API PersistedStorage {

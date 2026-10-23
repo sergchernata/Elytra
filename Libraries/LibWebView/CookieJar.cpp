@@ -133,6 +133,7 @@ CookieJar::CookieJar(Optional<PersistedStorage> persisted_storage, IsPrivate is_
     : m_persisted_storage(move(persisted_storage))
     , m_transient_storage(is_private)
 {
+    m_transient_storage.owner = this; // Fork hook (Arc profiles)
     if (!m_persisted_storage.has_value())
         return;
 
@@ -766,6 +767,9 @@ void CookieJar::TransientStorage::send_cookie_changed_notifications(ReadonlySpan
 {
     ViewImplementation::for_each_view([&](ViewImplementation& view) {
         if (view.is_private() != m_is_private)
+            return IterationDecision::Continue;
+        // Fork hook (Arc profiles): only views whose session uses this jar.
+        if (owner && view.session().cookie_jar.ptr() != owner)
             return IterationDecision::Continue;
 
         auto retrieval_host_canonical = HTTP::Cookie::canonicalize_domain(view.url());

@@ -131,6 +131,7 @@ static void add_import_menu_items()
 void install()
 {
     UpdateChecker::the().start();
+    open_all_profile_sessions();
     schedule_self_test_if_requested();
 
     // The first window's tab opens before its sidebar exists: give it the profile of the space it will show.

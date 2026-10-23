@@ -26,6 +26,7 @@
 #include <LibWebView/HelperProcess.h>
 #include <LibWebView/Utilities.h>
 #include <LibWebView/WebContentClient.h>
+#include <UI/Qt/Arc/ProfileSessions.h>
 
 namespace {
 
@@ -98,13 +99,28 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 #endif
 
     auto& default_session = WebView::Application::default_session();
+
+    // Profile folder names: never outside ArcProfiles/, and never shared by two profiles (macOS folders ignore case).
+    {
+        using Ladybird::Arc::profile_directory_name;
+        expect(profile_directory_name("Work") != profile_directory_name("work"), "profiles differing only in case get different folders"sv);
+        expect(profile_directory_name("a/b") != profile_directory_name("a_b"), "names that sanitize alike get different folders"sv);
+        expect(profile_directory_name("Work").toLower() != profile_directory_name("work").toLower(), "even on a case-insensitive disk"sv);
+        bool contained = true;
+        for (auto const* name : { "../../evil", "a/b", "..", ".", "", " ", "Profile 1", "x\\y", "\xF0\x9F\x9A\x80" }) {
+            auto folder = profile_directory_name(QString::fromUtf8(name));
+            contained &= !folder.isEmpty() && !folder.contains('/') && !folder.contains('\\') && folder != "." && folder != ".." && !folder.startsWith('.');
+        }
+        expect(contained, "and folder names stay inside ArcProfiles/"sv);
+        expect(profile_directory_name("Profile 1") == profile_directory_name("Profile 1"), "the same profile always gets the same folder"sv);
+    }
     auto work_directory = LexicalPath::join(test_directory, "work"sv).string();
     auto side_directory = LexicalPath::join(test_directory, "side"sv).string();
 
     // A profile's session keeps site data apart and persistent; the browser's own records stay shared.
     {
-        auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session));
-        auto side = TRY(WebView::BrowsingSession::create_persistent(side_directory, default_session));
+        auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session, WebView::BrowsingSession::Persist::Yes));
+        auto side = TRY(WebView::BrowsingSession::create_persistent(side_directory, default_session, WebView::BrowsingSession::Persist::Yes));
         expect(work->is_private() == WebView::IsPrivate::No, "a profile session is not private"sv);
         expect(work.ptr() != &default_session && work.ptr() != side.ptr(), "each profile has its own session"sv);
         expect(work->cookie_jar.ptr() != default_session.cookie_jar.ptr(), "a profile has its own cookie jar"sv);
@@ -120,11 +136,21 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         expect(!cookie_value(*side, "who"sv).has_value(), "another profile sees neither"sv);
     }
     {
-        auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session));
+        auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session, WebView::BrowsingSession::Persist::Yes));
         expect(cookie_value(*work, "who"sv) == "work"sv, "a profile's cookies survive a restart"sv);
     }
 
-    auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session));
+    // A profile that mustn't persist (SQL disabled, or its database couldn't be opened) still has its own jar, in
+    // memory, and writes nothing.
+    {
+        auto memory_directory = LexicalPath::join(test_directory, "memory"sv).string();
+        auto memory = TRY(WebView::BrowsingSession::create_persistent(memory_directory, default_session, WebView::BrowsingSession::Persist::No));
+        set_cookie(*memory, "who"sv, "memory"sv);
+        expect(cookie_value(*memory, "who"sv) == "memory"sv && cookie_value(default_session, "who"sv) == "default"sv, "a profile kept in memory has its own cookies"sv);
+        expect(!FileSystem::exists(memory_directory), "and writes nothing to disk"sv);
+    }
+
+    auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session, WebView::BrowsingSession::Persist::Yes));
     auto theme = TRY(Gfx::load_system_theme(LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv).string()));
 
     // A view created while a profile is chosen for new views belongs to it, down to its processes.

@@ -2383,6 +2383,17 @@ NonnullRefPtr<Core::Promise<Application::BrowsingDataSizes>> Application::estima
         ->when_resolved([this, promise, since](Requests::CacheSizes cache_sizes) {
             auto cookie_sizes = m_default_session->cookie_jar->estimate_storage_size_accessed_since(since);
             auto storage_sizes = m_default_session->storage_jar->estimate_storage_size_accessed_since(since);
+            // Fork hook (Arc profiles): profiles' site data counts too.
+            for (auto const& weak_session : m_profile_sessions) {
+                if (auto session = weak_session.strong_ref()) {
+                    auto cookies = session->cookie_jar->estimate_storage_size_accessed_since(since);
+                    auto storage = session->storage_jar->estimate_storage_size_accessed_since(since);
+                    cookie_sizes.total += cookies.total;
+                    cookie_sizes.since_requested_time += cookies.since_requested_time;
+                    storage_sizes.total += storage.total;
+                    storage_sizes.since_requested_time += storage.since_requested_time;
+                }
+            }
 
             BrowsingDataSizes sizes;
 

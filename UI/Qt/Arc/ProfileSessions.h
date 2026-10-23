@@ -32,6 +32,10 @@ private:
     RefPtr<WebView::BrowsingSession> m_previous;
 };
 
+// Opens the session of every profile a space uses, so browser-wide actions (clearing site data) reach all of them,
+// not only those visited this run.
+void open_all_profile_sessions();
+
 // The profile new views use outside a ScopedProfileForNewViews: the current space's, in the active window.
 void set_profile_for_new_views(QString const& profile);
 
