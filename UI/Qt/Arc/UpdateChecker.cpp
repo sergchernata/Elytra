@@ -21,6 +21,8 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QSettings>
+#include <QThread>
 #include <QTimer>
 
 namespace Ladybird::Arc {
@@ -101,14 +103,19 @@ void UpdateChecker::fetch(QString const& address, Function<void(Optional<QByteAr
 
 void UpdateChecker::check()
 {
-    if (m_request || m_state != State::UpToDate)
-        return; // In flight, or already found one.
+    // Keep looking after a release was staged (a newer one supersedes it) or couldn't be prepared (a fixed one may
+    // follow); only not while one is being prepared.
+    if (m_request || m_state == State::Preparing)
+        return;
     fetch(QString("https://api.github.com/repos/%1/releases/latest").arg(m_repository), [this](Optional<QByteArray> body) {
         if (!body.has_value())
             return;
         auto release = parse_latest_release(*body);
-        if (release.has_value() && is_newer_release(m_current_tag, release->tag))
-            found(release.release_value());
+        if (!release.has_value() || !is_newer_release(m_current_tag, release->tag))
+            return;
+        if (m_release.has_value() && !is_newer_release(m_release->tag, release->tag) && m_state != State::PageOnly)
+            return; // Already have it.
+        found(release.release_value());
     });
 }
 
@@ -158,49 +165,62 @@ void UpdateChecker::prepare()
         fetch(m_release->archive_url, [this, expected](Optional<QByteArray> archive) {
             if (!archive.has_value())
                 return fail_preparing("couldn't download the release");
-            if (QCryptographicHash::hash(*archive, QCryptographicHash::Sha256).toHex() != expected.toLatin1())
-                return fail_preparing("the download doesn't match its checksum");
-
             auto directory = QDir(staging_directory() + "/" + m_release->tag);
-            directory.removeRecursively();
-            if (!QDir().mkpath(directory.path()))
-                return fail_preparing("couldn't create the staging folder");
-            QFile zip(directory.filePath(m_release->archive_name));
-            if (!zip.open(QIODevice::WriteOnly) || zip.write(*archive) != archive->size())
-                return fail_preparing("couldn't save the download");
-            zip.close();
+            auto zip_path = directory.filePath(m_release->archive_name);
 
-            // Unpack and check the app, off the main thread's critical path: the processes run on their own.
-            auto* unpack = new QProcess(this);
-            connect(unpack, &QProcess::finished, this, [this, unpack, directory](int exit_code) {
-                unpack->deleteLater();
-                auto staged = directory.filePath("Ladybird.app");
-                if (exit_code != 0 || !QFileInfo::exists(staged))
-                    return fail_preparing("couldn't unpack the release");
-
-                auto* verify = new QProcess(this);
-                connect(verify, &QProcess::finished, this, [this, verify, staged](int verify_exit_code) {
-                    verify->deleteLater();
-                    if (verify_exit_code != 0)
-                        return fail_preparing("the release's app isn't validly signed");
-                    // The same app: its bundle identifier is ours.
-                    auto read_identifier = [](QString const& app) {
-                        QProcess plist;
-                        plist.start("/usr/libexec/PlistBuddy", { "-c", "Print :CFBundleIdentifier", app + "/Contents/Info.plist" });
-                        plist.waitForFinished(5000);
-                        return QString::fromUtf8(plist.readAllStandardOutput()).trimmed();
-                    };
-                    auto identifier = read_identifier(staged);
-                    if (identifier.isEmpty() || identifier != read_identifier(installed_app_path()))
-                        return fail_preparing("the release's app isn't this app");
-                    m_staged_app = staged;
-                    set_state(State::Ready);
+            // Hashing and saving ~100 MB would stall the UI: do it on a thread, then carry on here.
+            auto* worker = QThread::create([archive = archive.release_value(), expected, directory, zip_path, this] {
+                QString error;
+                if (QCryptographicHash::hash(archive, QCryptographicHash::Sha256).toHex() != expected.toLatin1()) {
+                    error = "the download doesn't match its checksum";
+                } else {
+                    QDir(directory).removeRecursively();
+                    QFile zip(zip_path);
+                    if (!QDir().mkpath(directory.path()) || !zip.open(QIODevice::WriteOnly) || zip.write(archive) != archive.size())
+                        error = "couldn't save the download";
+                }
+                QMetaObject::invokeMethod(this, [this, error, directory, zip_path] {
+                    if (!error.isEmpty())
+                        return fail_preparing(error);
+                    unpack(directory.path(), zip_path);
                 });
-                verify->start("/usr/bin/codesign", { "--verify", "--deep", staged });
             });
-            unpack->start("/usr/bin/ditto", { "-x", "-k", zip.fileName(), directory.path() });
+            connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+            worker->start();
         });
     });
+}
+
+void UpdateChecker::unpack(QString const& directory_path, QString const& zip_path)
+{
+    QDir directory(directory_path);
+    // Unpack and check the app, off the main thread's critical path: the processes run on their own.
+    auto* unpack = new QProcess(this);
+    connect(unpack, &QProcess::finished, this, [this, unpack, directory](int exit_code) {
+        unpack->deleteLater();
+        auto staged = directory.filePath("Ladybird.app");
+        if (exit_code != 0 || !QFileInfo::exists(staged))
+            return fail_preparing("couldn't unpack the release");
+
+        auto* verify = new QProcess(this);
+        connect(verify, &QProcess::finished, this, [this, verify, staged](int verify_exit_code) {
+            verify->deleteLater();
+            if (verify_exit_code != 0)
+                return fail_preparing("the release's app isn't validly signed");
+            // The same app: its bundle identifier is ours (read from the Info.plist files, no processes).
+            auto read_identifier = [](QString const& app) {
+                QSettings plist(app + "/Contents/Info.plist", QSettings::NativeFormat);
+                return plist.value("CFBundleIdentifier").toString();
+            };
+            auto identifier = read_identifier(staged);
+            if (identifier.isEmpty() || identifier != read_identifier(installed_app_path()))
+                return fail_preparing("the release's app isn't this app");
+            m_staged_app = staged;
+            set_state(State::Ready);
+        });
+        verify->start("/usr/bin/codesign", { "--verify", "--deep", staged });
+    });
+    unpack->start("/usr/bin/ditto", { "-x", "-k", zip_path, directory.path() });
 }
 
 void UpdateChecker::restart_into_update()
@@ -213,11 +233,14 @@ void UpdateChecker::restart_into_update()
 
     // The swap starts only once the quit goes ahead (a page or an active download can cancel it), and waits for this
     // process to exit before touching the app.
-    auto script = install_script(installed, m_staged_app, QCoreApplication::applicationPid(),
-        QString("/usr/bin/open '%1'").arg(QString(installed).replace("'", "'\\''")));
-    connect(qApp, &QCoreApplication::aboutToQuit, this, [script] {
-        QProcess::startDetached("/bin/sh", { "-c", script });
-    });
+    // Once, however often this is asked: two scripts would race on the same app.
+    if (!m_install_armed) {
+        m_install_armed = true;
+        auto script = install_script(installed, m_staged_app, QCoreApplication::applicationPid(),
+            QString("/usr/bin/open '%1'").arg(QString(installed).replace("'", "'\\''")));
+        // If a page or a download cancels this quit, the update installs at the next one instead (as in Arc).
+        connect(qApp, &QCoreApplication::aboutToQuit, this, [script] { QProcess::startDetached("/bin/sh", { "-c", script }); }, Qt::SingleShotConnection);
+    }
     Application::the().quit_action()->trigger();
 }
 

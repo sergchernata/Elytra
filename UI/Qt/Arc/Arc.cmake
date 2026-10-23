@@ -41,5 +41,7 @@ endif()
 set(ARC_RELEASE_TAG "" CACHE STRING "Arc fork: this build's release tag (release builds only)")
 set(ARC_RELEASE_REPOSITORY "" CACHE STRING "Arc fork: the GitHub repository releases come from (owner/name)")
 if (ARC_RELEASE_TAG AND ARC_RELEASE_REPOSITORY)
-    target_compile_definitions(ladybird PRIVATE ARC_RELEASE_TAG="${ARC_RELEASE_TAG}" ARC_RELEASE_REPOSITORY="${ARC_RELEASE_REPOSITORY}")
+    # Only the file that uses them, so a new tag doesn't change (and recompile) every other file.
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/UpdateChecker.cpp PROPERTIES
+        COMPILE_DEFINITIONS "ARC_RELEASE_TAG=\"${ARC_RELEASE_TAG}\";ARC_RELEASE_REPOSITORY=\"${ARC_RELEASE_REPOSITORY}\"")
 endif()

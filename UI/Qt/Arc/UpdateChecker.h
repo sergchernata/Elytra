@@ -51,6 +51,7 @@ private:
     void check();
     void found(ReleaseInfo);
     void prepare();
+    void unpack(QString const& directory, QString const& zip_path);
     void fail_preparing(QString const& why);
     void set_state(State);
     void fetch(QString const& url, Function<void(Optional<QByteArray>)> done);
@@ -65,6 +66,7 @@ private:
     Optional<ReleaseInfo> m_release;
     State m_state { State::UpToDate };
     QString m_staged_app;
+    bool m_install_armed { false };
 };
 
 }

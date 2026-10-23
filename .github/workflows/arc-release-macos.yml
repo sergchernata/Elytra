@@ -15,8 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Build steps (vcpkg ports, scripts) get read access only; publishing is a separate job (see below).
 permissions:
-  contents: write
+  contents: read
 
 env:
   # Same as upstream CI: ccache and vcpkg caches live in the workspace so they can be restored and saved.
@@ -29,9 +30,14 @@ jobs:
     name: Build and publish
     runs-on: macos-26
     timeout-minutes: 360
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      zip: ${{ steps.package.outputs.zip }}
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set Up Environment
         uses: ./.github/actions/setup
@@ -116,9 +122,32 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
+      - name: Keep the package for publishing
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256
+          compression-level: 0
+
+  # The only step with write access: it publishes what the build made, and runs nothing from the build.
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-package
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          ZIP: ${{ needs.build.outputs.zip }}
         run: |
           cat > notes.md <<'EOF'
           Ladybird with the Arc-style interface, built for Apple Silicon Macs (arm64, macOS 14.4 or later).
@@ -127,9 +156,11 @@ jobs:
           right-click Ladybird.app and choose Open, or run:
 
               xattr -dr com.apple.quarantine /path/to/Ladybird.app
+
+          Once installed, it updates itself from here.
           EOF
-          gh release create "${{ steps.package.outputs.tag }}" \
-            --title "Ladybird (Arc) ${{ steps.package.outputs.tag }}" \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "Ladybird (Arc) $TAG" \
             --notes-file notes.md \
-            --target "${GITHUB_SHA}" \
-            "${{ steps.package.outputs.zip }}" "${{ steps.package.outputs.zip }}.sha256"
+            --target "$GITHUB_SHA" \
+            "$ZIP" "$ZIP.sha256"

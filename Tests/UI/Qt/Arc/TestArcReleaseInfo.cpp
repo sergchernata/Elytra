@@ -123,6 +123,10 @@ TEST_CASE(compares_release_tags)
     EXPECT(is_newer_release("arc-2026.10.23-abc1234", "arc-2026.11.2-def5678"));
     EXPECT(!is_newer_release("arc-2026.10.23-abc1234", "arc-2026.10.23-def5678")); // Same day: can't tell.
 
+    // The two tag styles never compare: a dated build made by hand mustn't outrank (and so block) real releases.
+    EXPECT(!is_newer_release("arc-v0.1.0", "arc-2026.10.24-abc1234"));
+    EXPECT(!is_newer_release("arc-2026.10.24-abc1234", "arc-v0.2.0"));
+
     // Unknown shapes are never newer, so a stray tag can't nag.
     EXPECT(!is_newer_release("arc-v0.1.0", "nightly"));
     EXPECT(!is_newer_release("", "arc-v0.2.0"));

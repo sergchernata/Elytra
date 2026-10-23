@@ -59,19 +59,39 @@ Optional<ReleaseInfo> parse_latest_release(QByteArray const& json)
     return release;
 }
 
-// A tag's version numbers: arc-v1.2.3 -> {1, 2, 3}; arc-2026.10.23-abc -> {2026, 10, 23}. Empty if neither.
-static QList<int> version_of(QString const& tag)
-{
-    static QRegularExpression const pattern(R"(^arc-v?(\d+(?:\.\d+)*)(?:-[0-9a-f]+)?$)");
-    auto match = pattern.match(tag);
-    if (!match.hasMatch())
-        return {};
+// A tag's style and version numbers: arc-v1.2.3 -> {v, {1, 2, 3}}; arc-2026.10.23-abc -> {date, {2026, 10, 23}}.
+struct TagVersion {
+    bool dated { false };
     QList<int> parts;
+};
+
+static Optional<TagVersion> version_of(QString const& tag)
+{
+    static QRegularExpression const versioned(R"(^arc-v(\d+(?:\.\d+)*)$)");
+    static QRegularExpression const dated(R"(^arc-(\d{4}\.\d{1,2}\.\d{1,2})-[0-9a-f]+$)");
+    TagVersion version;
+    auto match = versioned.match(tag);
+    if (!match.hasMatch()) {
+        match = dated.match(tag);
+        if (!match.hasMatch())
+            return {};
+        version.dated = true;
+    }
     for (auto const& part : match.captured(1).split('.'))
-        parts.append(part.toInt());
-    while (parts.size() < 3)
-        parts.append(0);
-    return parts;
+        version.parts.append(part.toInt());
+    while (version.parts.size() < 3)
+        version.parts.append(0);
+    return version;
+}
+
+bool is_newer_release(QString const& current, QString const& candidate)
+{
+    auto current_version = version_of(current);
+    auto candidate_version = version_of(candidate);
+    // The two styles never compare, so a dated build made by hand can't outrank, and then block, real releases.
+    if (!current_version.has_value() || !candidate_version.has_value() || current_version->dated != candidate_version->dated)
+        return false;
+    return std::lexicographical_compare(current_version->parts.begin(), current_version->parts.end(), candidate_version->parts.begin(), candidate_version->parts.end());
 }
 
 QString checksum_for(QByteArray const& checksum_file, QString const& file_name)
@@ -111,13 +131,5 @@ rm -rf "$APP.old"
         .arg(shell_quoted(installed_app), shell_quoted(staged_app), QString::number(browser_pid), relaunch_command);
 }
 
-bool is_newer_release(QString const& current, QString const& candidate)
-{
-    auto current_version = version_of(current);
-    auto candidate_version = version_of(candidate);
-    if (current_version.isEmpty() || candidate_version.isEmpty())
-        return false;
-    return std::lexicographical_compare(current_version.begin(), current_version.end(), candidate_version.begin(), candidate_version.end());
-}
 
 }
