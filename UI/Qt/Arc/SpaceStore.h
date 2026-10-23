@@ -70,6 +70,9 @@ class SpaceStore final : public QObject {
 public:
     static SpaceStore& the();
 
+    // True when this Ladybird profile had no Arc data before this launch.
+    bool is_new_profile() const { return m_is_new_profile; }
+
     QList<Space> const& spaces() const { return m_spaces; }
     QList<Favorite> const& favorites() const { return m_favorites; }
     QList<SessionEntry> const& session() const { return m_session; }
@@ -129,6 +132,7 @@ private:
     QList<Favorite> m_favorites;
     QList<SessionEntry> m_session;
     QString m_last_active_space_id;
+    bool m_is_new_profile { false };
 };
 
 }

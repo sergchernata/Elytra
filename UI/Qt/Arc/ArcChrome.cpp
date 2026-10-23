@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/ArcImporter.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/BrowserWindow.h>
 
 #include <QAction>
@@ -18,17 +19,15 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QPointer>
-#include <QSettings>
 #include <QTimer>
 
 namespace Ladybird::Arc {
 
-// Arc keeps tabs in a sidebar. Turn upstream's vertical tabs on once; after
-// that the user's own choice in Settings wins.
+// Arc keeps tabs in a sidebar. Turn upstream's vertical tabs on the first time a profile runs
+// with the Arc chrome; after that the user's own choice in Settings wins.
 static void enable_sidebar_on_first_run()
 {
-    QSettings arc_settings("Ladybird", "ArcChrome");
-    if (arc_settings.value("sidebar_enabled_once").toBool())
+    if (!SpaceStore::the().is_new_profile())
         return;
 
     auto& settings = WebView::Application::settings();
@@ -36,8 +35,6 @@ static void enable_sidebar_on_first_run()
     tab_settings.vertical_tabs_enabled = true;
     tab_settings.vertical_tabs_expanded = true;
     settings.set_tab_settings(tab_settings);
-
-    arc_settings.setValue("sidebar_enabled_once", true);
 }
 
 // Cmd+T, the File menu item and the sidebar's "+" button all trigger the

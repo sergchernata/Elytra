@@ -33,6 +33,7 @@ SpaceStore::SpaceStore()
     auto directory = QString::fromUtf8(data_directory.characters(), static_cast<qsizetype>(data_directory.length()));
     QDir().mkpath(directory);
     m_path = directory + "/ArcSpaces.json";
+    m_is_new_profile = !QFile::exists(m_path);
     load();
     ensure_default_space();
 }
