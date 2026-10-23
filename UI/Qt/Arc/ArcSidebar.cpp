@@ -44,7 +44,6 @@
 #include <QScrollBar>
 #include <QKeyEvent>
 #include <QScopeGuard>
-#include <QScrollBar>
 #include <QMouseEvent>
 #include <QWindow>
 #include <QGraphicsOpacityEffect>
