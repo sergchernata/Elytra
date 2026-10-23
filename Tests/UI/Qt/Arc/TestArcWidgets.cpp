@@ -153,6 +153,24 @@ TEST_CASE(sidebar_rows_size_and_place_their_buttons)
     }
 }
 
+TEST_CASE(a_loading_pinned_tab_keeps_its_saved_title_and_icon)
+{
+    // Until the tab shows its page, the row keeps what it showed unloaded: no "New Tab" flash.
+    EXPECT(!tab_shows_a_page(""));
+    EXPECT(!tab_shows_a_page("about:blank"));
+    EXPECT(!tab_shows_a_page("about:newtab"));
+    EXPECT(tab_shows_a_page("https://example.com/"));
+
+    auto title = [](QString custom, QString saved, QString live, QString tab_url) {
+        return pinned_row_title(custom, saved, live, "https://example.com/", tab_url);
+    };
+    EXPECT(title("", "Saved", "about:blank", "about:blank") == "Saved");
+    EXPECT(title("", "Saved", "", "https://example.com/") == "Saved");      // Loading: no title yet.
+    EXPECT(title("", "Saved", "Live", "https://example.com/") == "Live");   // Loaded.
+    EXPECT(title("Mine", "Saved", "Live", "https://example.com/") == "Mine"); // Renamed wins.
+    EXPECT(title("", "", "", "about:blank") == "https://example.com/");     // Nothing better: the URL.
+}
+
 TEST_CASE(a_pinned_tab_is_away_only_on_another_page)
 {
     // Trivial differences don't count as navigating away.

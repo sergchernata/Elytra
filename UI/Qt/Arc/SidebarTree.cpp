@@ -92,6 +92,22 @@ bool pinned_urls_match(QString const& pinned, QString const& current)
     return normalized(pinned) == normalized(current);
 }
 
+bool tab_shows_a_page(QString const& tab_url)
+{
+    return !tab_url.isEmpty() && !tab_url.startsWith("about:");
+}
+
+QString pinned_row_title(QString const& custom_title, QString const& saved_title, QString const& live_title, QString const& pinned_url, QString const& tab_url)
+{
+    if (!custom_title.isEmpty())
+        return custom_title;
+    if (tab_shows_a_page(tab_url) && !live_title.isEmpty())
+        return live_title;
+    if (!saved_title.isEmpty())
+        return saved_title;
+    return pinned_url;
+}
+
 QRect SidebarDelegate::pinned_icon_rect(QRect const& row)
 {
     // Centered on the favicon (see paint()), with room for a rounded backdrop.

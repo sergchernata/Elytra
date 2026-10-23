@@ -1393,7 +1393,7 @@ void ArcSidebar::rebuild_favorites()
         auto* tab = tab_for_node(favorite_node(favorite.id));
 
         auto* button = new QToolButton(m_favorites);
-        button->setIcon(icon_for(favorite.url, tab));
+        button->setIcon(icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr));
         button->setIconSize(QSize(16, 16));
         button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
         button->setCheckable(true);
@@ -1428,11 +1428,10 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
             append_nodes(*item, node.children);
         } else {
             auto* tab = tab_for_node(node.id);
-            QString title = node.title;
-            if (title.isEmpty())
-                title = tab ? title_of(*tab) : (node.saved_title.isEmpty() ? node.url : node.saved_title);
-            item->setText(title);
-            item->setIcon(icon_for(tab ? url_of(*tab) : node.url, tab));
+            auto tab_url = tab ? url_of(*tab) : QString();
+            // Until a loading tab shows its page, keep what the row showed unloaded (no "New Tab" flash).
+            item->setText(pinned_row_title(node.title, node.saved_title, tab ? tab->title() : QString(), node.url, tab_url));
+            item->setIcon(icon_for(tab_shows_a_page(tab_url) ? tab_url : node.url, tab_shows_a_page(tab_url) ? tab : nullptr));
             item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
             item->setData(tab != nullptr, IsLoadedRole);
             item->setData(tab && !pinned_urls_match(node.url, url_of(*tab)), NavigatedAwayRole);
@@ -1601,8 +1600,14 @@ void ArcSidebar::update_tab_rows(Tab& tab)
             return;
         if (row_kind(item.index()) == RowKind::PinnedTab) {
             auto const* pinned = SpaceStore::the().node(node);
-            if (pinned && pinned->title.isEmpty())
-                item.setText(title);
+            if (pinned) {
+                auto tab_url = url_of(tab);
+                item.setText(pinned_row_title(pinned->title, pinned->saved_title, tab.title(), pinned->url, tab_url));
+                if (!tab_shows_a_page(tab_url)) {
+                    item.setIcon(icon_for(pinned->url, nullptr));
+                    return;
+                }
+            }
             auto away = pinned && !pinned_urls_match(pinned->url, url_of(tab));
             if (item.data(NavigatedAwayRole).toBool() != away)
                 item.setData(away, NavigatedAwayRole);
@@ -1612,7 +1617,7 @@ void ArcSidebar::update_tab_rows(Tab& tab)
         item.setIcon(icon);
     });
 
-    if (!node.isEmpty() && !tab.title().isEmpty())
+    if (!node.isEmpty() && !tab.title().isEmpty() && tab_shows_a_page(url_of(tab)))
         SpaceStore::the().set_saved_title(node, tab.title());
 }
 
