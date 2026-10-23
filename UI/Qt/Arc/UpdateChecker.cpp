@@ -68,7 +68,7 @@ void UpdateChecker::set_state(State state)
 
 // GETs a URL with Ladybird's own network stack, without cookies, following redirects (GitHub's downloads redirect
 // to its storage). Calls `done` with the body of a 200 response, or nothing.
-void UpdateChecker::fetch(QString const& address, Function<void(Optional<QByteArray>)> done)
+void UpdateChecker::fetch(QString const& address, Function<void(Optional<QByteArray>)> done, int redirects_left)
 {
     auto utf8 = address.toUtf8();
     auto url = URL::Parser::basic_parse(StringView { utf8.constData(), static_cast<size_t>(utf8.size()) });
@@ -86,13 +86,30 @@ void UpdateChecker::fetch(QString const& address, Function<void(Optional<QByteAr
         return;
     }
     m_request->set_buffered_request_finished_callback(
-        [this, done = move(done)](auto, auto const&, auto const& network_error, auto, auto response_code, auto const&, auto, auto, auto, auto payload) mutable {
-            // Let go of this request once its callback has returned (not of one `done` may have started since).
+        [this, address, redirects_left, done = move(done)](auto, auto const&, auto const& network_error, auto response_headers, auto response_code, auto const&, auto, auto, auto, auto payload) mutable {
+            // Let go of this request once its callback has returned (not of one started since).
             Core::deferred_invoke([this, finished = m_request] {
                 if (m_request == finished)
                     m_request = nullptr;
             });
-            if (network_error.has_value() || !response_code.has_value() || *response_code != 200) {
+            if (network_error.has_value() || !response_code.has_value()) {
+                done({});
+                return;
+            }
+            // The network process doesn't follow redirects (the page engine does, for pages); GitHub's release
+            // downloads redirect to its asset storage. Follow those, and only those, a few times.
+            auto location = response_headers->get("Location"sv);
+            auto next = redirect_target(address, static_cast<int>(*response_code), location.has_value() ? QString::fromUtf8(location->characters(), static_cast<qsizetype>(location->length())) : QString());
+            if (next.has_value()) {
+                if (redirects_left <= 0) {
+                    done({});
+                    return;
+                }
+                auto target = next.release_value();
+                Core::deferred_invoke([this, target, redirects_left, done = move(done)]() mutable { fetch(target, move(done), redirects_left - 1); });
+                return;
+            }
+            if (*response_code != 200) {
                 done({});
                 return;
             }

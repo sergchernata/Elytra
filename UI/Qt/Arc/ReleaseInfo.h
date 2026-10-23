@@ -32,6 +32,10 @@ Optional<ReleaseInfo> parse_latest_release(QByteArray const& json);
 // 0), or arc-<year>.<month>.<day>-<commit> for releases made by hand. Anything else is never newer.
 bool is_newer_release(QString const& current, QString const& candidate);
 
+// Where a download redirected with `status` and `location` continues, if it's a redirect to GitHub (github.com or its
+// asset storage, over HTTPS); nothing otherwise.
+Optional<QString> redirect_target(QString const& from, int status, QString const& location);
+
 // The hex SHA-256 a checksum file (as written by `shasum -a 256`) gives for `file_name`; empty if it gives none.
 QString checksum_for(QByteArray const& checksum_file, QString const& file_name);
 

@@ -54,7 +54,7 @@ private:
     void unpack(QString const& directory, QString const& zip_path);
     void fail_preparing(QString const& why);
     void set_state(State);
-    void fetch(QString const& url, Function<void(Optional<QByteArray>)> done);
+    void fetch(QString const& url, Function<void(Optional<QByteArray>)> done, int redirects_left = 5);
 
     QString installed_app_path() const;
     QString staging_directory() const;

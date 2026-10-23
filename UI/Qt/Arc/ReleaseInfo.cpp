@@ -94,6 +94,18 @@ bool is_newer_release(QString const& current, QString const& candidate)
     return std::lexicographical_compare(current_version->parts.begin(), current_version->parts.end(), candidate_version->parts.begin(), candidate_version->parts.end());
 }
 
+Optional<QString> redirect_target(QString const& from, int status, QString const& location)
+{
+    if ((status != 301 && status != 302 && status != 303 && status != 307 && status != 308) || location.isEmpty())
+        return {};
+    auto target = QUrl(from).resolved(QUrl(location));
+    auto host = target.host().toLower();
+    auto is_github = host == "github.com" || host.endsWith(".githubusercontent.com");
+    if (target.scheme() != "https" || !is_github)
+        return {};
+    return target.toString(QUrl::FullyEncoded);
+}
+
 QString checksum_for(QByteArray const& checksum_file, QString const& file_name)
 {
     static QRegularExpression const line(R"(^([0-9a-fA-F]{64})\s+\*?(.+)$)");

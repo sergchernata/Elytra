@@ -132,3 +132,24 @@ TEST_CASE(compares_release_tags)
     EXPECT(!is_newer_release("", "arc-v0.2.0"));
     EXPECT(!is_newer_release("arc-v0.1.0", ""));
 }
+
+TEST_CASE(follows_githubs_download_redirects_and_nothing_else)
+{
+    auto from = QString("https://github.com/someone/ladybird/releases/download/arc-v0.2.0/Ladybird.zip");
+    // GitHub serves release files from its asset storage.
+    EXPECT(redirect_target(from, 302, "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x")
+        == "https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x");
+    EXPECT(redirect_target(from, 302, "https://objects.githubusercontent.com/github-production-release-asset-2e65be/1/2").has_value());
+    for (auto status : { 301, 303, 307, 308 })
+        EXPECT(redirect_target(from, status, "https://objects.githubusercontent.com/x").has_value());
+
+    // Not a redirect, nowhere to go, or somewhere else: not followed.
+    EXPECT(!redirect_target(from, 200, "https://objects.githubusercontent.com/x").has_value());
+    EXPECT(!redirect_target(from, 302, "").has_value());
+    EXPECT(!redirect_target(from, 302, "https://evil.example/Ladybird.zip").has_value());
+    EXPECT(!redirect_target(from, 302, "https://githubusercontent.com.evil.example/x").has_value());
+    EXPECT(!redirect_target(from, 302, "http://objects.githubusercontent.com/x").has_value()); // Never downgraded.
+    // Relative locations resolve against the request.
+    EXPECT(redirect_target(from, 302, "/someone/ladybird/releases/download/arc-v0.2.0/Other.zip")
+        == "https://github.com/someone/ladybird/releases/download/arc-v0.2.0/Other.zip");
+}
