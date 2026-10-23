@@ -11,7 +11,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/main.cpp` | `Ladybird::Arc::install();` just before the first `app->new_window(...)` |
 | `UI/Qt/TabBar.h` | `TabWidget::set_vertical_sidebar_widget()`, the `tabs_changed()` signal, and `m_vertical_sidebar_widget` |
 | `UI/Qt/TabBar.cpp` | `set_vertical_sidebar_widget()`; `emit tabs_changed()` at the end of `insert_tab()` and `take_tab()`; the sidebar branch at the top of `rebuild_layout_for_vertical_tabs()` and `rebuild_layout_for_horizontal_tabs()`; the Arc layout branch in `rebuild_layout()` (full-height sidebar, toolbar above the page); `m_vertical_sidebar_widget` checks in `vertical_tabs_chrome_rect()`, `should_show_window_controls_in_tab_toolbar()` and `update_toolbar_placement()` |
-| `UI/Qt/TabBar.h/.cpp` (hidden sidebar) | `collapsed_vertical_tabs_width()` (a thin hover edge instead of an icon column), `vertical_sidebar_expanded_width()`, hover-to-reveal always on in `can_expand_vertical_tabs_on_hover()`, and the `arcKeepOpen` check in `cursor_is_over_vertical_tabs()` |
+| `UI/Qt/TabBar.h/.cpp` (hidden sidebar) | `collapsed_vertical_tabs_width()` (a thin hover edge instead of an icon column), `vertical_sidebar_expanded_width()`, and upstream's hover-expand switched off in `can_expand_vertical_tabs_on_hover()` (the Arc sidebar floats over the page itself) |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
 
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
@@ -52,6 +52,11 @@ Upstream renamed or reworked something the Arc code uses (for example a method o
 The sidebar also relies on upstream behavior that could change silently:
 - `TabWidget::take_tab()` removes the page from the stack before the tab bar picks a new current tab
   (used to tell a closed tab apart from a tab switch).
+- The hidden sidebar's floating panel is a native child window embedded in the browser window, the same
+  trick upstream's address-bar suggestions use to stack above the page.
+- While the sidebar is hidden, the macOS traffic lights are hidden (and kept hidden against Qt re-showing
+  them) and the floating panel draws its own; the toolbar's left margin is trimmed by finding
+  `LadybirdNavigationToolbar` by object name.
 - The web view gives pages first claim on most key presses, so Arc's space shortcuts are caught in an
   app-wide event filter (`ArcChrome.cpp`).
 

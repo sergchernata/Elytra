@@ -16,6 +16,7 @@
 #include <QPointer>
 #include <QWidget>
 #include <UI/Qt/Arc/SidebarTree.h>
+#include <LibWebView/Settings.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
 class QGridLayout;
@@ -47,7 +48,9 @@ private:
     QPointer<QWidget> m_sidebar;
 };
 
-class ArcSidebar final : public QWidget {
+class ArcSidebar final
+    : public QWidget
+    , public WebView::SettingsObserver {
     Q_OBJECT
 
 public:
@@ -108,8 +111,19 @@ private:
     void rebuild_switcher();
     void show_shelf();
     void hide_shelf();
-    void layout_panel();
-    bool is_floating() const;
+    virtual void tab_settings_changed() override;
+    void update_mode();
+    void dock_panel();
+    void apply_toolbar_inset();
+    void float_panel();
+    void ensure_host();
+    void size_host();
+    void reveal();
+    void retract_if_left();
+    void slide_host(QPoint from, QPoint to, bool revealing);
+    QPoint rest_host_position() const;
+    QPoint hidden_host_position() const;
+    bool pointer_is_over_floating_sidebar() const;
     void update_space_header_icon();
     void position_shelf();
     void append_nodes(QStandardItem& parent, QList<PinnedNode> const&);
@@ -145,6 +159,22 @@ private:
     QWidget* m_favorites { nullptr };
     QGridLayout* m_favorites_layout { nullptr };
     QWidget* m_panel { nullptr };
+    enum class Mode {
+        Docked,
+        Hidden,
+    };
+    Mode m_mode { Mode::Docked };
+    bool m_mode_set { false };
+    QPointer<class FloatingSidebarHost> m_host;
+    QPropertyAnimation* m_host_animation { nullptr };
+    bool m_host_retracting { false };
+    bool m_host_docking { false };
+    class SymbolButton* m_sidebar_toggle { nullptr };
+    QTimer* m_reveal_timer { nullptr };
+    QTimer* m_retract_timer { nullptr };
+    QPointer<QWidget> m_watched_column;
+    QRect m_last_docked_rect;
+    class TrafficLights* m_traffic_lights { nullptr };
     QWidget* m_header { nullptr };
     class SymbolButton* m_space_icon { nullptr };
     class SymbolButton* m_space_menu_button { nullptr };

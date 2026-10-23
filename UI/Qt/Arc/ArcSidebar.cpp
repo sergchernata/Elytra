@@ -8,6 +8,7 @@
 #include <LibWebView/Application.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/Arc/WindowControls.h>
@@ -63,10 +64,14 @@ static constexpr int ExpandedRole = Qt::UserRole + 20;
 static constexpr int FAVORITE_TILE_HEIGHT = 54;
 static constexpr int TOP_STRIP_HEIGHT = 34;
 static constexpr int FLOATING_MARGIN = 6;
-static constexpr int FLOATING_RADIUS = 12;
 static constexpr int FLOATING_PADDING = 8;
 static constexpr int SHELF_SLIDE_DISTANCE = 14;
 static constexpr int SHELF_ANIMATION_MS = 190;
+static constexpr int REVEAL_DELAY_MS = 60;
+static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = 2;
+static constexpr int RETRACT_DELAY_MS = 280;
+static constexpr int REVEAL_ANIMATION_MS = 220;
+static constexpr int RETRACT_ANIMATION_MS = 180;
 
 #if defined(AK_OS_MACOS)
 static constexpr auto SPACE_SHORTCUT_MODIFIER = Qt::META; // The Control key on macOS, as in Arc.
@@ -112,8 +117,9 @@ static void for_each_item(QStandardItem& parent, Callback const& callback)
 
 KeepSidebarOpen::KeepSidebarOpen(QWidget* inside_sidebar)
 {
+    // The sidebar's panel lives either in the sidebar (docked) or in the floating host (hidden mode).
     for (auto* widget = inside_sidebar; widget; widget = widget->parentWidget()) {
-        if (qobject_cast<ArcSidebar*>(widget)) {
+        if (widget->property("arcSidebarRoot").toBool()) {
             m_sidebar = widget;
             break;
         }
@@ -127,11 +133,9 @@ KeepSidebarOpen::~KeepSidebarOpen()
     if (!m_sidebar)
         return;
     m_sidebar->setProperty("arcKeepOpen", false);
-    // Let upstream re-check the pointer now that the menu is gone (it slides away if the pointer left).
-    if (auto* column = m_sidebar->parentWidget()) {
-        QEvent leave(QEvent::Leave);
-        QApplication::sendEvent(column, &leave);
-    }
+    // Re-check the pointer now that the menu is gone; the floating panel slides away if it left.
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(m_sidebar, &leave);
 }
 
 // --- Attaching ----------------------------------------------------------------------------------
@@ -160,7 +164,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     auto& store = SpaceStore::the();
 
     // Everything lives in a panel, so that when the sidebar is hidden and slides out over the page
-    // the panel can keep its full width and move in from the edge (see layout_panel()).
+    // the panel can keep its full width and move in from the edge (see dock_panel() and float_panel()).
     m_panel = new QWidget(this);
     auto* layout = new QVBoxLayout(m_panel);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -170,6 +174,28 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_top_strip = new QWidget(this);
     m_top_strip->setFixedHeight(TOP_STRIP_HEIGHT);
     m_top_strip->installEventFilter(this);
+    auto* strip_layout = new QHBoxLayout(m_top_strip);
+    strip_layout->setContentsMargins(6, 4, 0, 0);
+    // Drawn window controls for the floating panel (hidden mode); docked, the real ones sit over this strip.
+    m_traffic_lights = new TrafficLights(m_top_strip);
+    m_traffic_lights->setProperty("arcBrowserWindow", QVariant::fromValue<QWidget*>(&window));
+    m_traffic_lights->set_drawn(false);
+    strip_layout->addWidget(m_traffic_lights);
+    strip_layout->addSpacing(10);
+    // Sidebar toggle, right of the window controls as in Arc.
+    m_sidebar_toggle = new SymbolButton(m_top_strip);
+    m_sidebar_toggle->set_symbol("sidebar.left");
+    m_sidebar_toggle->set_dimmed(true);
+    m_sidebar_toggle->setFixedSize(28, 22);
+    m_sidebar_toggle->setToolTip("Toggle Sidebar");
+    connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] {
+        auto& settings = WebView::Application::settings();
+        auto tab_settings = settings.tab_settings();
+        tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
+        settings.set_tab_settings(tab_settings);
+    });
+    strip_layout->addWidget(m_sidebar_toggle);
+    strip_layout->addStretch(1);
     layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);
@@ -224,7 +250,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 
     m_switcher = new QWidget(this);
     m_switcher_layout = new QHBoxLayout(m_switcher);
-    m_switcher_layout->setContentsMargins(0, 4, 0, 4);
+    // No bottom margin: the panel's own padding below the buttons then matches the padding at its sides.
+    m_switcher_layout->setContentsMargins(0, 4, 0, 0);
     m_switcher_layout->setSpacing(0);
     layout->addWidget(m_switcher);
 
@@ -240,7 +267,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
             show_shelf();
     });
 
-    m_shelf = new DownloadsShelf(this);
+    m_shelf = new DownloadsShelf(m_panel);
     m_shelf->hide();
     m_shelf->installEventFilter(this);
     m_shelf_opacity = new QGraphicsOpacityEffect(m_shelf);
@@ -296,6 +323,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     });
 
     connect(&m_tabs, &TabWidget::tabs_changed, this, [this] {
+        QTimer::singleShot(0, this, [this] { apply_toolbar_inset(); });
         track_tabs();
         schedule_rebuild();
         save_session();
@@ -312,6 +340,18 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         if (!space.isEmpty() && store.space(space))
             m_space_id = space;
     }
+
+    // Hidden-mode plumbing: edge hover reveals the floating panel, leaving it retracts it.
+    setProperty("arcSidebarRoot", true);
+    m_reveal_timer = new QTimer(this);
+    m_reveal_timer->setSingleShot(true);
+    m_reveal_timer->setInterval(REVEAL_DELAY_MS);
+    connect(m_reveal_timer, &QTimer::timeout, this, [this] { reveal(); });
+    m_retract_timer = new QTimer(this);
+    m_retract_timer->setSingleShot(true);
+    m_retract_timer->setInterval(RETRACT_DELAY_MS);
+    connect(m_retract_timer, &QTimer::timeout, this, &ArcSidebar::retract_if_left);
+    window.installEventFilter(this);
 
     rebuild();
 }
@@ -1182,10 +1222,9 @@ void ArcSidebar::hide_shelf()
 
 void ArcSidebar::position_shelf()
 {
-    auto switcher_top = m_switcher->mapTo(this, QPoint(0, 0)).y();
-    auto top_limit = m_panel->y() + TOP_STRIP_HEIGHT;
-    auto height = qMin(m_shelf->preferred_height(), switcher_top - top_limit);
-    m_shelf->setGeometry(m_panel->x(), switcher_top - height, m_panel->width(), height);
+    auto switcher_top = m_switcher->mapTo(m_panel, QPoint(0, 0)).y();
+    auto height = qMin(m_shelf->preferred_height(), switcher_top - TOP_STRIP_HEIGHT);
+    m_shelf->setGeometry(m_switcher->x(), switcher_top - height, m_switcher->width(), height);
 }
 
 void ArcSidebar::rebuild_switcher()
@@ -1270,79 +1309,233 @@ void ArcSidebar::update_current_highlight()
     });
 }
 
-bool ArcSidebar::is_floating() const
+// --- Docked and hidden modes ---------------------------------------------------------------------
+//
+// Docked: the panel fills this widget inside upstream's sidebar column, and the real window controls show.
+// Hidden (toolbar toggle): upstream shrinks the column to a thin edge. The panel moves into a floating
+// host, a native child window that stacks above the page, which slides in when that edge is hovered.
+// The real window controls are hidden; the panel draws its own, which slide with it.
+
+void ArcSidebar::tab_settings_changed()
 {
-    // Hidden sidebar (toggle in the toolbar): it only appears as a panel over the page on edge hover.
-    return !WebView::Application::settings().tab_settings().vertical_tabs_expanded;
+    // Upstream relayouts on the same notification; act once it's done.
+    QTimer::singleShot(0, this, [this] { update_mode(); });
 }
 
 void ArcSidebar::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    // The native window may not exist yet on the first layout; re-apply window-control visibility once shown.
-    QTimer::singleShot(0, this, [this] { layout_panel(); });
+    if (auto* column = parentWidget(); column && column != m_watched_column) {
+        if (m_watched_column)
+            m_watched_column->removeEventFilter(this);
+        m_watched_column = column;
+        column->installEventFilter(this);
+    }
+    // The native window may not exist on the first pass; settle the mode once shown.
+    QTimer::singleShot(0, this, [this] { update_mode(); });
+}
+
+void ArcSidebar::update_mode()
+{
+    if (!m_window)
+        return;
+    auto hidden = !WebView::Application::settings().tab_settings().vertical_tabs_expanded;
+    set_window_controls_hidden(*window(), hidden);
+
+    auto mode = hidden ? Mode::Hidden : Mode::Docked;
+    auto was_set = m_mode_set;
+    auto previous = m_mode;
+    m_mode_set = true;
+    m_mode = mode;
+    apply_toolbar_inset();
+    if (was_set && mode == previous)
+        return;
+
+    if (mode == Mode::Docked) {
+        // Shown again from hidden: slide the panel into the docked spot, then hand it back to the column.
+        if (was_set && previous == Mode::Hidden && m_host && isVisible() && width() > 80) {
+            m_host_docking = true;
+            auto target = QRect(mapTo(m_window, QPoint(0, 0)), size());
+            m_host->resize(target.width() + FloatingSidebarHost::SHADOW * 2, target.height() + FloatingSidebarHost::SHADOW * 2);
+            m_panel->setGeometry(m_host->card_rect());
+            auto from = m_host->isVisible() ? m_host->pos() : hidden_host_position();
+            slide_host(from, target.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW), true);
+            update();
+            return;
+        }
+        dock_panel();
+        return;
+    }
+
+    float_panel();
+    // Toggled off while docked: lift the sidebar off where it was and slide it away, as Arc does.
+    if (was_set && previous == Mode::Docked && !m_last_docked_rect.isEmpty())
+        slide_host(m_last_docked_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW), hidden_host_position(), false);
+}
+
+// Hidden, upstream's toolbar keeps its 12px left margin after the thin hover edge, which leaves the
+// sidebar button sitting further in than Arc's. Trim it so the button lines up with the page's edge.
+void ArcSidebar::apply_toolbar_inset()
+{
+    if (!m_window || m_mode != Mode::Hidden)
+        return;
+    for (auto* toolbar : m_window->findChildren<QWidget*>("LadybirdNavigationToolbar")) {
+        if (auto* layout = toolbar->layout()) {
+            auto margins = layout->contentsMargins();
+            if (margins.left() != HIDDEN_TOOLBAR_LEFT_MARGIN) {
+                margins.setLeft(HIDDEN_TOOLBAR_LEFT_MARGIN);
+                layout->setContentsMargins(margins);
+            }
+        }
+    }
+}
+
+void ArcSidebar::dock_panel()
+{
+    m_host_docking = false;
+    m_retract_timer->stop();
+    m_reveal_timer->stop();
+    if (m_host_animation)
+        m_host_animation->stop();
+    if (m_host)
+        m_host->hide();
+    m_panel->setParent(this);
+    m_panel->layout()->setContentsMargins(0, 0, 0, 0);
+    m_panel->setGeometry(rect());
+    m_panel->show();
+    m_traffic_lights->set_drawn(false);
+    // Docked, the real window controls sit a little higher than our drawn ones; center the toggle on them.
+    m_top_strip->layout()->setContentsMargins(6, 0, 0, 0);
+    update();
+}
+
+void ArcSidebar::ensure_host()
+{
+    if (m_host || !m_window)
+        return;
+    m_host = new FloatingSidebarHost(*m_window);
+    m_host->setProperty("arcSidebarRoot", true);
+    m_host->installEventFilter(this);
+    connect(m_host, &FloatingSidebarHost::left, this, [this] { m_retract_timer->start(); });
+
+    m_host_animation = new QPropertyAnimation(m_host, "pos", this);
+    connect(m_host_animation, &QAbstractAnimation::finished, this, [this] {
+        if (m_host_docking) {
+            m_host_docking = false;
+            if (m_mode == Mode::Docked)
+                dock_panel();
+            return;
+        }
+        if (m_host_retracting) {
+            m_host->hide();
+            m_host_retracting = false;
+        }
+    });
+}
+
+void ArcSidebar::size_host()
+{
+    auto card_width = m_tabs.vertical_sidebar_expanded_width() - FLOATING_MARGIN;
+    auto card_height = m_window->height() - FLOATING_MARGIN * 2;
+    m_host->resize(card_width + FloatingSidebarHost::SHADOW * 2, card_height + FloatingSidebarHost::SHADOW * 2);
+    m_panel->setGeometry(m_host->card_rect());
+}
+
+void ArcSidebar::float_panel()
+{
+    ensure_host();
+    if (!m_host)
+        return;
+    m_panel->setParent(m_host);
+    m_panel->layout()->setContentsMargins(FLOATING_PADDING, 0, FLOATING_PADDING, FLOATING_PADDING);
+    size_host();
+    m_panel->show();
+    m_traffic_lights->set_drawn(true);
+    m_top_strip->layout()->setContentsMargins(6, 4, 0, 0);
+    m_host->move(hidden_host_position());
+    m_host->hide();
+    update();
+}
+
+QPoint ArcSidebar::rest_host_position() const
+{
+    return QPoint(FLOATING_MARGIN - FloatingSidebarHost::SHADOW, FLOATING_MARGIN - FloatingSidebarHost::SHADOW);
+}
+
+QPoint ArcSidebar::hidden_host_position() const
+{
+    return QPoint(-(m_host ? m_host->width() : 300) - 4, FLOATING_MARGIN - FloatingSidebarHost::SHADOW);
+}
+
+void ArcSidebar::slide_host(QPoint from, QPoint to, bool revealing)
+{
+    m_host_animation->stop();
+    m_host_retracting = !revealing;
+    m_host_animation->setDuration(revealing ? REVEAL_ANIMATION_MS : RETRACT_ANIMATION_MS);
+    m_host_animation->setEasingCurve(revealing ? QEasingCurve::OutCubic : QEasingCurve::InCubic);
+    m_host_animation->setStartValue(from);
+    m_host_animation->setEndValue(to);
+    m_host->move(from);
+    m_host->show();
+    m_host->raise();
+    m_host_animation->start();
+}
+
+void ArcSidebar::reveal()
+{
+    if (m_mode != Mode::Hidden || !m_host)
+        return;
+    m_retract_timer->stop();
+    if (m_host->isVisible() && !m_host_retracting)
+        return;
+    size_host();
+    auto from = m_host->isVisible() ? m_host->pos() : hidden_host_position();
+    slide_host(from, rest_host_position(), true);
+}
+
+bool ArcSidebar::pointer_is_over_floating_sidebar() const
+{
+    if (!m_host || !m_host->isVisible())
+        return false;
+    auto in_window = m_window->mapFromGlobal(QCursor::pos());
+    return m_host->geometry().adjusted(FloatingSidebarHost::SHADOW, 0, -FloatingSidebarHost::SHADOW, 0).contains(in_window)
+        || (m_watched_column && m_watched_column->rect().contains(m_watched_column->mapFromGlobal(QCursor::pos())));
+}
+
+void ArcSidebar::retract_if_left()
+{
+    if (m_mode != Mode::Hidden || !m_host || !m_host->isVisible() || m_host_retracting || m_host_docking)
+        return;
+    // Stay out while a menu or dialog from the panel is open; check again shortly.
+    if (m_host->property("arcKeepOpen").toBool() || QApplication::activePopupWidget() || QApplication::activeModalWidget()) {
+        m_retract_timer->start();
+        return;
+    }
+    if (pointer_is_over_floating_sidebar())
+        return;
+    slide_host(m_host->pos(), hidden_host_position(), false);
 }
 
 void ArcSidebar::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    layout_panel();
-}
-
-void ArcSidebar::layout_panel()
-{
-
-    auto* panel_layout = m_panel->layout();
-    if (!is_floating()) {
+    if (m_mode != Mode::Hidden || !m_mode_set) {
         m_panel->setGeometry(rect());
-        m_panel->show();
-        panel_layout->setContentsMargins(0, 0, 0, 0);
-        set_window_controls_hidden(*window(), false);
-    } else {
-        // Upstream widens the column as the sidebar slides out; keep the panel at full width and
-        // move it with the column's edge, so it slides in rather than squeezing.
-        // The width the column will reach once fully out, minus its own padding.
-        auto padding = parentWidget()->width() - width();
-        auto full = qMax(m_tabs.vertical_sidebar_expanded_width() - padding, width());
-        auto x = width() - full;
-        m_panel->setGeometry(x + FLOATING_MARGIN, FLOATING_MARGIN, full - FLOATING_MARGIN * 2, height() - FLOATING_MARGIN * 2);
-        auto slid_out = width() > FLOATING_MARGIN * 4;
-        m_panel->setVisible(slid_out);
-        // The floating card gets its own inner padding (docked, upstream's column provides it).
-        panel_layout->setContentsMargins(FLOATING_PADDING, 0, FLOATING_PADDING, FLOATING_PADDING);
-        // As in Arc, the window controls leave the main window while the sidebar is hidden and
-        // come back inside the slid-out panel.
-        set_window_controls_hidden(*window(), !slid_out);
+        // Remembered so hiding can lift the sidebar off from exactly where it was.
+        if (width() > 80 && m_window)
+            m_last_docked_rect = QRect(mapTo(m_window, QPoint(0, 0)), size());
     }
     if (m_shelf && m_shelf->isVisible())
         position_shelf();
-    update();
 }
 
 void ArcSidebar::paintEvent(QPaintEvent*)
 {
+    if (m_mode == Mode::Hidden && m_mode_set)
+        return; // Only a thin edge remains; the floating host draws the panel.
+    // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
     QPainter painter(this);
-    auto background = ChromeStyle::chrome_background(palette());
-
-    if (!is_floating()) {
-        // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
-        painter.fillRect(rect(), background);
-        return;
-    }
-    if (!m_panel->isVisible())
-        return;
-
-    // Floating card over the page: soft shadow, rounded corners, hairline edge.
-    painter.setRenderHint(QPainter::Antialiasing);
-    auto card = QRectF(m_panel->geometry());
-    painter.setPen(Qt::NoPen);
-    for (int i = 8; i > 0; i -= 2) {
-        painter.setBrush(QColor(0, 0, 0, 10));
-        painter.drawRoundedRect(card.adjusted(-i / 2.0, -i / 4.0, i / 2.0, i), FLOATING_RADIUS + i / 2.0, FLOATING_RADIUS + i / 2.0);
-    }
-    painter.setBrush(background);
-    painter.setPen(QPen(ChromeStyle::is_dark(palette()) ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 30), 1));
-    painter.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), FLOATING_RADIUS, FLOATING_RADIUS);
+    painter.fillRect(rect(), ChromeStyle::chrome_background(palette()));
 }
 
 // Arc paints the space color across the whole window frame. Upstream derives every chrome surface from
@@ -1525,6 +1718,26 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_watched_column && m_mode == Mode::Hidden) {
+        if (event->type() == QEvent::Enter)
+            m_reveal_timer->start();
+        else if (event->type() == QEvent::Leave)
+            m_reveal_timer->stop();
+        return false;
+    }
+    if (watched == m_host) {
+        if (event->type() == QEvent::Enter)
+            m_retract_timer->stop();
+        return false;
+    }
+    if (watched == m_window) {
+        if (event->type() == QEvent::Resize && m_mode == Mode::Hidden && m_host)
+            size_host();
+        else if (event->type() == QEvent::WindowActivate && m_mode_set)
+            set_window_controls_hidden(*window(), m_mode == Mode::Hidden); // AppKit can restore them on activation.
+        return false;
+    }
+
     if (watched == m_downloads_button || watched == m_shelf) {
         if (event->type() == QEvent::Enter) {
             m_shelf_hide_timer->stop();
@@ -1550,12 +1763,13 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 
     if (watched == m_top_strip) {
         if (event->type() == QEvent::MouseButtonPress && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
-            if (auto* handle = window()->windowHandle())
+            if (auto* handle = m_window ? m_window->windowHandle() : nullptr)
                 handle->startSystemMove();
             return true;
         }
         if (event->type() == QEvent::MouseButtonDblClick) {
-            window()->isMaximized() ? window()->showNormal() : window()->showMaximized();
+            if (m_window)
+                m_window->isMaximized() ? m_window->showNormal() : m_window->showMaximized();
             return true;
         }
         return false;

@@ -9,8 +9,84 @@
 #include <QWidget>
 
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
+
+// Qt refreshes the title bar buttons whenever the window's flags or layout change, which un-hides them.
+// This watches each button's "hidden" flag and puts it back while the Arc sidebar wants them hidden.
+@interface ArcWindowControlsHider : NSObject
+{
+    NSButton* m_buttons[3];
+    BOOL m_hidden;
+    BOOL m_applying;
+}
+- (void)setControlsHidden:(BOOL)hidden window:(NSWindow*)window;
+@end
+
+@implementation ArcWindowControlsHider
+
+- (void)observeButtonsOfWindow:(NSWindow*)window
+{
+    constexpr NSWindowButton types[] = { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton };
+    for (size_t i = 0; i < 3; ++i) {
+        auto* button = [window standardWindowButton:types[i]];
+        if (button == m_buttons[i])
+            continue;
+        // AppKit can replace the buttons (e.g. around full screen); follow the new ones.
+        if (m_buttons[i]) {
+            [m_buttons[i] removeObserver:self forKeyPath:@"hidden"];
+            [m_buttons[i] release];
+        }
+        m_buttons[i] = [button retain];
+        [m_buttons[i] addObserver:self forKeyPath:@"hidden" options:NSKeyValueObservingOptionNew context:nil];
+    }
+}
+
+- (void)apply
+{
+    m_applying = YES;
+    for (auto* button : m_buttons) {
+        if (button && button.hidden != m_hidden)
+            button.hidden = m_hidden;
+    }
+    m_applying = NO;
+}
+
+- (void)setControlsHidden:(BOOL)hidden window:(NSWindow*)window
+{
+    m_hidden = hidden;
+    [self observeButtonsOfWindow:window];
+    [self apply];
+}
+
+- (void)observeValueForKeyPath:(NSString*)keyPath ofObject:(id)object change:(NSDictionary*)change context:(void*)context
+{
+    (void)keyPath;
+    (void)change;
+    (void)context;
+    if (m_applying || [(NSButton*)object isHidden] == m_hidden)
+        return;
+    // Undo the change after the current layout pass, which may set it again otherwise.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self apply];
+    });
+}
+
+- (void)dealloc
+{
+    for (auto* button : m_buttons) {
+        if (!button)
+            continue;
+        [button removeObserver:self forKeyPath:@"hidden"];
+        [button release];
+    }
+    [super dealloc];
+}
+
+@end
 
 namespace Ladybird::Arc {
+
+static char s_hider_key;
 
 void set_window_controls_hidden(QWidget& window, bool hidden)
 {
@@ -19,11 +95,14 @@ void set_window_controls_hidden(QWidget& window, bool hidden)
     if (!ns_window)
         return;
 
-    // Only visibility changes; upstream's offset observer (MacWindow.mm) still owns their position.
-    for (auto type : { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton }) {
-        if (auto* button = [ns_window standardWindowButton:type]; button && button.hidden != hidden)
-            button.hidden = hidden;
+    ArcWindowControlsHider* hider = objc_getAssociatedObject(ns_window, &s_hider_key);
+    if (!hider) {
+        hider = [[ArcWindowControlsHider alloc] init];
+        objc_setAssociatedObject(ns_window, &s_hider_key, hider, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [hider release];
     }
+    // Only visibility changes; upstream's offset observer (MacWindow.mm) still owns their position.
+    [hider setControlsHidden:hidden window:ns_window];
 }
 
 }
