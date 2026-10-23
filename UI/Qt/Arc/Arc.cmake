@@ -6,6 +6,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/ArcImportParser.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcImporter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcSelfTest.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ArcShortcuts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcSidebar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CommandBar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CustomGlyphs.cpp
@@ -19,6 +20,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStoreProfile.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SymbolButton.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/Toast.cpp
     ${CMAKE_CURRENT_LIST_DIR}/UpdateChecker.cpp
 )
 

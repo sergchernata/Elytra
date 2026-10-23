@@ -9,6 +9,7 @@
 #include <LibTest/TestCase.h>
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
+#include <UI/Qt/Arc/ArcShortcuts.h>
 #include <UI/Qt/Arc/ReleaseInfo.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SymbolButton.h>
@@ -450,4 +451,87 @@ TEST_CASE(address_bar_clicks_edit_or_copy)
     send_mouse(bar, QEvent::MouseButtonPress, bar.icon_rect().center());
     send_mouse(bar, QEvent::MouseButtonRelease, QPointF(5, 5));
     EXPECT(edits == 1 && copies == 1);
+}
+
+// --- Arc's keyboard shortcuts --------------------------------------------------------------------
+
+static Optional<ArcCommand> command_for(int key, Qt::KeyboardModifiers modifiers)
+{
+    auto shortcut = arc_shortcut_for(key, modifiers);
+    if (!shortcut.has_value())
+        return {};
+    return shortcut->command;
+}
+
+TEST_CASE(arc_shortcuts_map_to_their_commands)
+{
+    // Qt's Ctrl is Cmd on macOS.
+    EXPECT(command_for(Qt::Key_S, Qt::ControlModifier) == ArcCommand::ToggleSidebar);
+    EXPECT(command_for(Qt::Key_D, Qt::ControlModifier) == ArcCommand::TogglePin);
+    EXPECT(command_for(Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::CopyUrl);
+    EXPECT(command_for(Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier) == ArcCommand::CopyUrlAsMarkdown);
+    EXPECT(command_for(Qt::Key_V, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::NewTabFromClipboard);
+    EXPECT(command_for(Qt::Key_K, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::ClearToday);
+    EXPECT(command_for(Qt::Key_Down, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::NextTab);
+    EXPECT(command_for(Qt::Key_Up, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::PreviousTab);
+    EXPECT(command_for(Qt::Key_Right, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::NextSpace);
+    EXPECT(command_for(Qt::Key_Left, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::PreviousSpace);
+    EXPECT(command_for(Qt::Key_PageDown, Qt::ControlModifier) == ArcCommand::NextTab);
+    EXPECT(command_for(Qt::Key_PageUp, Qt::ControlModifier) == ArcCommand::PreviousTab);
+}
+
+TEST_CASE(arc_shortcuts_take_the_shapes_macos_reports)
+{
+    // Arrow keys carry the keypad modifier on macOS.
+    EXPECT(command_for(Qt::Key_Down, Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier) == ArcCommand::NextTab);
+    // Cmd+Shift+] arrives as }, and Shift+Tab as Backtab.
+    EXPECT(command_for(Qt::Key_BraceRight, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::NextTab);
+    EXPECT(command_for(Qt::Key_BracketLeft, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::PreviousTab);
+    EXPECT(command_for(Qt::Key_BraceLeft, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::PreviousTab);
+#if defined(AK_OS_MACOS)
+    auto control = Qt::MetaModifier;
+#else
+    auto control = Qt::ControlModifier;
+#endif
+    EXPECT(command_for(Qt::Key_Tab, control) == ArcCommand::NextTab);
+    EXPECT(command_for(Qt::Key_Backtab, control | Qt::ShiftModifier) == ArcCommand::PreviousTab);
+}
+
+TEST_CASE(arc_shortcuts_need_their_exact_modifiers)
+{
+    EXPECT(!arc_shortcut_for(Qt::Key_S, Qt::NoModifier).has_value());
+    EXPECT(!arc_shortcut_for(Qt::Key_S, Qt::ControlModifier | Qt::ShiftModifier).has_value()); // Save As, not ours.
+    EXPECT(!arc_shortcut_for(Qt::Key_C, Qt::ControlModifier).has_value());                     // Plain copy.
+    EXPECT(!arc_shortcut_for(Qt::Key_V, Qt::ControlModifier).has_value());                     // Plain paste.
+    EXPECT(!arc_shortcut_for(Qt::Key_Down, Qt::ControlModifier).has_value());                  // End of a text field.
+    EXPECT(!arc_shortcut_for(Qt::Key_Right, Qt::AltModifier).has_value());                     // Word right.
+    EXPECT(!arc_shortcut_for(Qt::Key_T, Qt::ControlModifier).has_value());                     // Upstream's (routed already).
+    EXPECT(!arc_shortcut_for(Qt::Key_I, Qt::ControlModifier | Qt::ShiftModifier).has_value()); // Dev tools stay.
+}
+
+TEST_CASE(arc_shortcuts_number_the_sidebar_items)
+{
+    EXPECT(arc_shortcut_for(Qt::Key_1, Qt::ControlModifier) == ArcShortcut { ArcCommand::SidebarItem, 0 });
+    EXPECT(arc_shortcut_for(Qt::Key_8, Qt::ControlModifier) == ArcShortcut { ArcCommand::SidebarItem, 7 });
+    EXPECT(arc_shortcut_for(Qt::Key_9, Qt::ControlModifier) == ArcShortcut { ArcCommand::SidebarItem, -1 }); // The last.
+    EXPECT(!arc_shortcut_for(Qt::Key_0, Qt::ControlModifier).has_value()); // Zoom reset.
+}
+
+TEST_CASE(urls_as_markdown_links)
+{
+    EXPECT_EQ(url_as_markdown("Example", "https://example.com/"), "[Example](https://example.com/)");
+    EXPECT_EQ(url_as_markdown("", "https://example.com/"), "[https://example.com/](https://example.com/)");
+    EXPECT_EQ(url_as_markdown("[Draft] a\\b", "https://example.com/"), "[\\[Draft\\] a\\\\b](https://example.com/)");
+    EXPECT_EQ(url_as_markdown("Two\nlines", "https://example.com/"), "[Two lines](https://example.com/)");
+    EXPECT_EQ(url_as_markdown("Wiki", "https://en.wikipedia.org/wiki/C_(language)"), "[Wiki](https://en.wikipedia.org/wiki/C_(language))");
+    EXPECT_EQ(url_as_markdown("Odd", "https://example.com/a)b"), "[Odd](https://example.com/a%29b)");
+}
+
+TEST_CASE(inline_rename_field_sits_over_the_title)
+{
+    QRect row(0, 100, 240, 36);
+    auto field = SidebarDelegate::title_edit_rect(row);
+    EXPECT(field.left() < 36 && field.left() > 16); // Clear of the icon (10 to 26), around the title (36).
+    EXPECT(field.right() < row.right());
+    EXPECT(field.top() > row.top() && field.bottom() < row.bottom());
 }

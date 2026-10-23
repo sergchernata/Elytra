@@ -87,6 +87,10 @@ The sidebar also relies on upstream behavior that could change silently:
   `LadybirdNavigationToolbar` by object name.
 - The web view gives pages first claim on most key presses, so Arc's space shortcuts are caught in an
   app-wide event filter (`ArcChrome.cpp`).
+- Arc's other shortcuts (`ArcShortcuts.h`) take some keys upstream binds: Cmd+D (bookmark), Cmd+Shift+C (dev
+  tools, still on Cmd+Shift+I and F12), and next/previous tab (which upstream steps through in tab order, across
+  spaces). The same filter claims the `ShortcutOverride` for those keys, so Qt hands them over as plain key presses
+  instead of firing upstream's actions. If upstream rebinds an action onto one of Arc's keys, Arc's wins.
 
 ## Tests
 

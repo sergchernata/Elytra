@@ -16,6 +16,7 @@
 #include <QSet>
 #include <QPointer>
 #include <QWidget>
+#include <UI/Qt/Arc/ArcShortcuts.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Arc/SpaceStore.h>
@@ -23,6 +24,8 @@
 class QGridLayout;
 class QHBoxLayout;
 class QKeyEvent;
+class QLineEdit;
+class QWheelEvent;
 class QLabel;
 class QTimer;
 class QToolButton;
@@ -67,6 +70,8 @@ public:
     void switch_to_space_at(int index);
     bool handle_key_press(QKeyEvent const&);
     static bool is_space_shortcut(QKeyEvent const&);
+    // Runs one of Arc's keyboard shortcuts (see ArcShortcuts.h) in this window. False if it didn't apply.
+    bool run_shortcut(ArcShortcut const&);
 
     // Opens tabs in the background in the given spaces' Today lists, skipping URLs a space already has open.
     // Returns how many were opened.
@@ -104,6 +109,33 @@ private:
     void restore_session_assignments();
     void save_session();
     void watch_tab(Tab&);
+
+    // What the keyboard steps through, in sidebar order: the favorites, then the list's pinned tabs (in open
+    // folders) and Today's tabs.
+    struct SidebarItem {
+        QString favorite_id;
+        QString node_id;
+        QPointer<Tab> tab;
+    };
+    QList<SidebarItem> sidebar_items() const;
+    int current_sidebar_item(QList<SidebarItem> const&) const;
+    void activate_item(SidebarItem const&);
+    void step_tab(int delta);
+    void step_space(int delta);
+    void copy_current_url(bool as_markdown);
+    void new_tab_from_clipboard();
+    void toggle_current_pin();
+    void duplicate_tab(Tab&);
+    void close_tabs_below(Tab&);
+    static void toggle_sidebar();
+
+    // Two-finger swipes across the sidebar switch spaces, as in Arc.
+    bool handle_wheel(QWheelEvent&);
+
+    // Renaming in place, in the row (as in Arc), rather than in a dialog.
+    void begin_inline_rename(QString const& node_id);
+    void place_inline_rename();
+    void finish_inline_rename(bool commit);
 
     // Actions
     Tab* open_tab(QString const& url); // Null for a malformed URL.
@@ -261,6 +293,17 @@ private:
     QHBoxLayout* m_switcher_layout { nullptr };
 
     bool m_rebuild_pending { false };
+    qreal m_swipe_distance { 0 };
+    enum class SwipeAxis {
+        Undecided,
+        Horizontal,
+        Vertical,
+    };
+    SwipeAxis m_swipe_axis { SwipeAxis::Undecided };
+    bool m_swipe_switched { false };
+    qint64 m_swipe_last_event_ms { 0 };
+    QPointer<QLineEdit> m_rename_editor;
+    QString m_rename_node_id;
     bool m_switching_space { false };
 };
 

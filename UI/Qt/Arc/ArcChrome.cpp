@@ -8,6 +8,7 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
 #include <UI/Qt/Arc/ArcImporter.h>
+#include <UI/Qt/Arc/ArcShortcuts.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/ArcSelfTest.h>
@@ -104,6 +105,25 @@ public:
 
     virtual bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) {
+            // Arc's shortcuts. Where upstream binds the same keys (Cmd+D, Cmd+Shift+C, next/previous tab), claiming
+            // the shortcut override makes Qt deliver a plain key press, below, instead of firing upstream's action.
+            auto& key_event = *static_cast<QKeyEvent*>(event);
+            if (auto shortcut = arc_shortcut_for(key_event.key(), key_event.modifiers()); shortcut.has_value()) {
+                auto* widget = qobject_cast<QWidget*>(watched);
+                auto* window = widget ? qobject_cast<BrowserWindow*>(widget->window()) : nullptr;
+                auto* sidebar = window ? ArcSidebar::for_window(*window) : nullptr;
+                if (!sidebar)
+                    return false;
+                if (event->type() == QEvent::ShortcutOverride) {
+                    event->accept();
+                    return true;
+                }
+                return sidebar->run_shortcut(*shortcut);
+            }
+            if (event->type() != QEvent::KeyPress)
+                return false;
+        }
         if (event->type() == QEvent::KeyPress) {
             // Cheap check first: this sees every key press, often several times as it propagates.
             if (!ArcSidebar::is_space_shortcut(*static_cast<QKeyEvent*>(event)))

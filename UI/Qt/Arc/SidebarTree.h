@@ -68,6 +68,8 @@ public:
     QColor accent;
 
     static QRect close_button_rect(QRect const& row);
+    // Where a field for renaming the row in place goes: over its title, with the text where the title is drawn.
+    static QRect title_edit_rect(QRect const& row);
     static QRect chevron_rect(QRect const& row);
     // The divider row: the rule's strip (with Clear at its right end) above the New Tab button.
     static QRect divider_strip_rect(QRect const& row);
@@ -123,6 +125,7 @@ signals:
     void close_clicked(QModelIndex const&);
     void clear_clicked();
     void background_double_clicked();
+    void pinned_row_double_clicked(QModelIndex const&); // To rename it, as in Arc.
     // An away pinned tab's favicon: back to the pinned URL, or with Shift, separate the page into its own tab.
     void pinned_icon_clicked(QModelIndex const&, bool separate);
     void row_dropped(QModelIndex const& source, QModelIndex const& target, DropPlace);

@@ -14,6 +14,7 @@
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SpaceStore.h>
+#include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/LocationEdit.h>
@@ -30,6 +31,7 @@
 #include <QLineEdit>
 #include <QScrollBar>
 #include <QTimer>
+#include <QWheelEvent>
 
 #include <cstdio>
 #include <functional>
@@ -164,6 +166,26 @@ private:
     void popups_close_themselves();
     void private_windows_write_nothing();
     void address_bar_edits_the_current_tab();
+    void arc_shortcuts_step_through_the_sidebar();
+    void swiping_the_sidebar_switches_spaces();
+    void pinned_tabs_rename_in_place();
+    void duplicate_and_close_tabs_below();
+
+    // Sends a key the way Qt does for a shortcut: the override first (claimed if Arc handles the key), then the press.
+    // Returns whether the override was claimed, i.e. upstream's action for the same key didn't fire.
+    bool press_shortcut(int key, Qt::KeyboardModifiers modifiers)
+    {
+        QWidget* target = QApplication::focusWidget();
+        if (!target || target->window() != &window())
+            target = window().current_tab() ? static_cast<QWidget*>(&window().current_tab()->view()) : &window();
+        QKeyEvent override(QEvent::ShortcutOverride, key, modifiers);
+        override.ignore();
+        QApplication::sendEvent(target, &override);
+        auto claimed = override.isAccepted();
+        QKeyEvent down(QEvent::KeyPress, key, modifiers);
+        QApplication::sendEvent(target, &down);
+        return claimed;
+    }
 
     ArcSidebar& m_sidebar;
     int m_failures { 0 };
@@ -705,6 +727,209 @@ void SelfTest::address_bar_edits_the_current_tab()
     settle(200);
 }
 
+void SelfTest::arc_shortcuts_step_through_the_sidebar()
+{
+    s().switch_to_space(m_alpha);
+    s().clear_today();
+    wait_until([&] { return s().today_tabs(m_alpha).isEmpty(); });
+    QPointer<Tab> first = s().open_tab(page("Step 1"));
+    QPointer<Tab> second = s().open_tab(page("Step 2"));
+    if (!wait_until([&] { return first && second && loaded(*first) && loaded(*second); })) {
+        check(false, "two Today tabs open for the shortcuts");
+        return;
+    }
+    rebuild_now();
+
+    // Cmd+Option+Up/Down and Cmd+Shift+[/] go up and down the sidebar, not upstream's tab order.
+    s().activate(*first);
+    auto items = s().sidebar_items();
+    auto first_at = s().current_sidebar_item(items);
+    check(first_at >= 0 && first_at + 1 < items.size() && items[first_at + 1].tab == second, "the sidebar lists Today's tabs in order");
+    check(press_shortcut(Qt::Key_Down, Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier), "Cmd+Option+Down is Arc's, not upstream's");
+    check(wait_until([&] { return window().current_tab() == second; }, 2000), "Cmd+Option+Down goes to the next tab in the sidebar");
+    press_shortcut(Qt::Key_BraceLeft, Qt::ControlModifier | Qt::ShiftModifier);
+    check(wait_until([&] { return window().current_tab() == first; }, 2000), "Cmd+Shift+[ goes back up");
+    check(press_shortcut(Qt::Key_BracketRight, Qt::ControlModifier | Qt::ShiftModifier), "Cmd+Shift+] takes over upstream's next tab");
+    check(wait_until([&] { return window().current_tab() == second; }, 2000), "and goes down the sidebar too");
+
+    // From the last item, down wraps to the first: the first favorite.
+    press_shortcut(Qt::Key_Down, Qt::ControlModifier | Qt::AltModifier);
+    check(wait_until([&] { auto* tab = window().current_tab(); return tab && ArcSidebar::node_of(*tab).startsWith("fav:"); }, 4000),
+        "down from the last tab wraps to the first favorite");
+
+    // Cmd+1 is the first item, Cmd+9 the last.
+    press_shortcut(Qt::Key_9, Qt::ControlModifier);
+    check(wait_until([&] { return window().current_tab() == second; }, 2000), "Cmd+9 goes to the last tab");
+    press_shortcut(Qt::Key_2, Qt::ControlModifier);
+    check(wait_until([&] { auto* tab = window().current_tab(); return tab && ArcSidebar::node_of(*tab) == "fav:" + m_sidebar.m_favorite_ids.value(1); }, 4000),
+        "Cmd+2 goes to the second item (the second favorite)");
+
+    // Cmd+D pins and unpins.
+    s().activate(*first);
+    check(press_shortcut(Qt::Key_D, Qt::ControlModifier), "Cmd+D is Arc's pin, not upstream's bookmark");
+    check(wait_until([&] { return first && !ArcSidebar::node_of(*first).isEmpty(); }, 2000), "Cmd+D pins a Today tab");
+    auto pinned_node = first ? ArcSidebar::node_of(*first) : QString();
+    check(SpaceStore::the().node(pinned_node) != nullptr, "into the space's pinned tabs");
+    press_shortcut(Qt::Key_D, Qt::ControlModifier);
+    check(wait_until([&] { return first && ArcSidebar::node_of(*first).isEmpty(); }, 2000) && !SpaceStore::the().node(pinned_node),
+        "and again unpins it, back to Today");
+
+    // Cmd+Option+Left/Right step through the spaces, without wrapping.
+    auto const& spaces = SpaceStore::the().spaces();
+    auto alpha_index = -1;
+    for (int i = 0; i < spaces.size(); ++i) {
+        if (spaces[i].id == m_alpha)
+            alpha_index = i;
+    }
+    press_shortcut(Qt::Key_Right, Qt::ControlModifier | Qt::AltModifier);
+    auto expected_next = alpha_index + 1 < spaces.size() ? spaces[alpha_index + 1].id : m_alpha;
+    check(wait_until([&] { return s().current_space_id() == expected_next; }, 2000), "Cmd+Option+Right goes to the next space");
+    press_shortcut(Qt::Key_Left, Qt::ControlModifier | Qt::AltModifier);
+    check(wait_until([&] { return s().current_space_id() == m_alpha; }, 2000), "Cmd+Option+Left comes back");
+    s().switch_to_space(spaces.first().id);
+    press_shortcut(Qt::Key_Left, Qt::ControlModifier | Qt::AltModifier);
+    settle(100);
+    check(s().current_space_id() == spaces.first().id, "and the first space has nothing to its left");
+    s().switch_to_space(m_alpha);
+    settle(100);
+
+    // Cmd+S hides and shows the sidebar.
+    auto expanded = WebView::Application::settings().tab_settings().vertical_tabs_expanded;
+    press_shortcut(Qt::Key_S, Qt::ControlModifier);
+    check(WebView::Application::settings().tab_settings().vertical_tabs_expanded != expanded, "Cmd+S toggles the sidebar");
+    settle(600);
+    press_shortcut(Qt::Key_S, Qt::ControlModifier);
+    check(WebView::Application::settings().tab_settings().vertical_tabs_expanded == expanded, "and again brings it back");
+    settle(600);
+
+    // The toast that confirms copies (not run here: the self-test runs on a real desktop, and leaves the clipboard be).
+    auto* toast = Toast::show_in(window(), "Copied URL", "link");
+    check(toast && toast->isVisible() && toast->text() == "Copied URL", "a toast shows over the page");
+    if (toast && window().current_tab()) {
+        auto& view = window().current_tab()->view();
+        auto page_top_right = view.mapToGlobal(QPoint(view.width(), 0));
+        check(qAbs(toast->geometry().right() - page_top_right.x()) < 40 && qAbs(toast->geometry().top() - page_top_right.y()) < 30,
+            "at the page's top right");
+    }
+    QPointer<Toast> guarded_toast = toast;
+    check(wait_until([&] { return !guarded_toast; }, Toast::VISIBLE_MS + Toast::FADE_MS + 1500), "and fades away by itself");
+
+    // Cmd+Shift+K clears Today.
+    press_shortcut(Qt::Key_K, Qt::ControlModifier | Qt::ShiftModifier);
+    check(wait_until([&] { return s().today_tabs(m_alpha).isEmpty(); }), "Cmd+Shift+K clears Today");
+    settle(200);
+}
+
+void SelfTest::swiping_the_sidebar_switches_spaces()
+{
+    auto const& spaces = SpaceStore::the().spaces();
+    s().switch_to_space(spaces.first().id);
+    settle(100);
+    auto start = s().current_space_id();
+    auto next = spaces.size() > 1 ? spaces[1].id : start;
+    auto* viewport = m_sidebar.m_tree->viewport();
+    auto swipe = [&](int dx, int dy, bool natural) {
+        auto send = [&](Qt::ScrollPhase phase, QPoint delta) {
+            QPointF position(viewport->width() / 2.0, 20);
+            QWheelEvent event(position, viewport->mapToGlobal(position), delta, delta * 4, Qt::NoButton, Qt::NoModifier, phase, natural);
+            QApplication::sendEvent(viewport, &event);
+            return event.isAccepted();
+        };
+        send(Qt::ScrollBegin, {});
+        for (int i = 0; i < 4; ++i)
+            send(Qt::ScrollUpdate, QPoint(dx, dy));
+        send(Qt::ScrollEnd, {});
+        settle(100);
+    };
+
+    // Fingers moving left (natural scrolling: the deltas follow the fingers) bring in the next space.
+    swipe(-20, 0, true);
+    check(s().current_space_id() == next, "swiping left across the sidebar goes to the next space");
+    swipe(20, 0, true);
+    check(s().current_space_id() == start, "swiping right comes back");
+    swipe(-20, 0, false); // Without natural scrolling, the deltas run against the fingers.
+    check(s().current_space_id() == start, "with natural scrolling off, the same deltas are a swipe the other way");
+    swipe(0, -20, true);
+    check(s().current_space_id() == start, "scrolling up and down doesn't switch spaces");
+    s().switch_to_space(m_alpha);
+    settle(100);
+}
+
+void SelfTest::pinned_tabs_rename_in_place()
+{
+    s().switch_to_space(m_alpha);
+    rebuild_now();
+    auto node_id = m_alpha_pinned[2];
+    auto title_before = SpaceStore::the().node(node_id) ? SpaceStore::the().node(node_id)->title : QString();
+    auto index = row_for_node(node_id);
+    check(index.isValid(), "a pinned tab to rename");
+    if (!index.isValid())
+        return;
+    emit m_sidebar.m_tree->pinned_row_double_clicked(index);
+    auto* editor = m_sidebar.m_rename_editor.data();
+    check(editor && editor->isVisible(), "double-clicking a pinned tab edits its name in the row");
+    if (!editor)
+        return;
+    auto row = m_sidebar.m_tree->visualRect(row_for_node(node_id));
+    check(row.contains(editor->geometry().center()), "over the row itself");
+    check(editor->selectedText() == editor->text() && !editor->text().isEmpty(), "with its name selected", editor->text());
+
+    editor->insert("Renamed in place");
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(editor, &enter);
+    check(wait_until([&] { auto const* node = SpaceStore::the().node(node_id); return node && node->title == "Renamed in place"; }, 2000),
+        "Return saves the new name");
+    check(!m_sidebar.m_rename_editor, "and closes the field");
+
+    // Escape leaves the name as it was.
+    s().begin_inline_rename(node_id);
+    editor = m_sidebar.m_rename_editor.data();
+    if (editor) {
+        editor->insert("Not this");
+        QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(editor, &escape);
+    }
+    settle(50);
+    auto const* node = SpaceStore::the().node(node_id);
+    check(editor && node && node->title == "Renamed in place" && !m_sidebar.m_rename_editor, "Escape cancels");
+
+    // Rebuilding the list (which happens all the time) keeps the field over its row.
+    s().begin_inline_rename(node_id);
+    rebuild_now();
+    settle(50);
+    editor = m_sidebar.m_rename_editor.data();
+    check(editor && editor->isVisible() && m_sidebar.m_tree->visualRect(row_for_node(node_id)).contains(editor->geometry().center()),
+        "the field stays on its row when the list is rebuilt");
+    s().finish_inline_rename(false);
+    SpaceStore::the().rename_node(node_id, title_before);
+    rebuild_now();
+}
+
+void SelfTest::duplicate_and_close_tabs_below()
+{
+    s().switch_to_space(m_alpha);
+    QPointer<Tab> a = s().open_tab(page("Dup A"));
+    QPointer<Tab> b = s().open_tab(page("Dup B"));
+    if (!wait_until([&] { return a && b && loaded(*a) && loaded(*b); })) {
+        check(false, "two tabs open to duplicate");
+        return;
+    }
+    s().duplicate_tab(*a);
+    check(wait_until([&] { return s().today_tabs(m_alpha).size() == 3; }), "Duplicate Tab opens a copy");
+    auto today = s().today_tabs(m_alpha);
+    auto a_at = today.indexOf(a.data());
+    QPointer<Tab> copy = a_at >= 0 && a_at + 1 < today.size() ? today[a_at + 1] : nullptr;
+    check(copy && copy != b, "just below the original");
+    check(copy && wait_until([&] { return copy && at(*copy, page("Dup A")); }), "at the same page");
+
+    s().close_tabs_below(*a);
+    check(wait_until([&] { return s().today_tabs(m_alpha).size() == 1; }), "Close Tabs Below closes the tabs under it");
+    check(a && s().today_tabs(m_alpha).value(0) == a, "and keeps it");
+    if (a)
+        s().close_tab(*a);
+    settle(200);
+}
+
 int SelfTest::run()
 {
     seed();
@@ -727,6 +952,10 @@ int SelfTest::run()
     popups_close_themselves();
     private_windows_write_nothing();
     address_bar_edits_the_current_tab();
+    arc_shortcuts_step_through_the_sidebar();
+    swiping_the_sidebar_switches_spaces();
+    pinned_tabs_rename_in_place();
+    duplicate_and_close_tabs_below();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

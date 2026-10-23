@@ -61,6 +61,14 @@ QRect SidebarDelegate::close_button_rect(QRect const& row)
     return QRect(row.right() - 26, row.center().y() - 9, 18, 18);
 }
 
+QRect SidebarDelegate::title_edit_rect(QRect const& row)
+{
+    // The title starts 36px in (icon at 10, 16 wide, then 10); the field's own padding and border take 6.
+    static constexpr int TITLE_LEFT = 36;
+    static constexpr int FIELD_INSET = 6;
+    return QRect(row.left() + TITLE_LEFT - FIELD_INSET, row.top() + 5, row.width() - TITLE_LEFT + FIELD_INSET - 8, row.height() - 10);
+}
+
 QRect SidebarDelegate::chevron_rect(QRect const& row)
 {
     return close_button_rect(row);
@@ -672,14 +680,24 @@ void SidebarTree::mouseReleaseEvent(QMouseEvent* event)
         emit row_clicked(index);
 }
 
-// As in Arc: double-clicking empty sidebar space opens the command bar.
+// As in Arc: double-clicking empty sidebar space opens the command bar, and double-clicking a pinned tab renames it.
 void SidebarTree::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    auto index = indexAt(event->position().toPoint());
+    auto position = event->position().toPoint();
+    auto index = indexAt(position);
     if (event->button() == Qt::LeftButton && (!index.isValid() || row_kind(index) == RowKind::BottomSpace)) {
         emit background_double_clicked();
         event->accept();
         return;
+    }
+    if (event->button() == Qt::LeftButton && row_kind(index) == RowKind::PinnedTab) {
+        auto row = visualRect(index);
+        if (!SidebarDelegate::close_button_rect(row).contains(position) && !SidebarDelegate::pinned_icon_rect(row).contains(position)) {
+            m_pressed_index = QModelIndex(); // The release that follows isn't another click.
+            emit pinned_row_double_clicked(index);
+            event->accept();
+            return;
+        }
     }
     QTreeView::mouseDoubleClickEvent(event);
 }

@@ -17,6 +17,7 @@
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
+#include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/WindowControls.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -27,6 +28,9 @@
 #include <UI/Qt/WebContentView.h>
 
 #include <QButtonGroup>
+#include <QClipboard>
+#include <QDateTime>
+#include <QWheelEvent>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QStandardPaths>
@@ -211,12 +215,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle->setFixedSize(28, 28);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     m_sidebar_toggle->hide();
-    connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] {
-        auto& settings = WebView::Application::settings();
-        auto tab_settings = settings.tab_settings();
-        tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
-        settings.set_tab_settings(tab_settings);
-    });
+    connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);
@@ -367,6 +366,11 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         else
             back_to_pinned_url(node_id);
     });
+    connect(m_tree, &SidebarTree::pinned_row_double_clicked, this, [this](QModelIndex const& index) {
+        begin_inline_rename(index.data(IdRole).toString());
+    });
+    m_tree->viewport()->installEventFilter(this); // Swipes between spaces.
+    m_panel->installEventFilter(this);
     connect(m_tree, &SidebarTree::background_double_clicked, this, [this] {
         if (m_window)
             CommandBar::toggle_for(*m_window);
@@ -458,6 +462,329 @@ bool ArcSidebar::handle_key_press(QKeyEvent const& event)
         return false;
     switch_to_space_at(event.key() - Qt::Key_1);
     return true;
+}
+
+static Optional<URL::URL> parse_stored_url(QString const& text);
+
+void ArcSidebar::toggle_sidebar()
+{
+    auto& settings = WebView::Application::settings();
+    auto tab_settings = settings.tab_settings();
+    tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
+    settings.set_tab_settings(tab_settings);
+}
+
+bool ArcSidebar::run_shortcut(ArcShortcut const& shortcut)
+{
+    if (!m_window)
+        return false;
+    switch (shortcut.command) {
+    case ArcCommand::ToggleSidebar:
+        toggle_sidebar();
+        return true;
+    case ArcCommand::CopyUrl:
+        copy_current_url(false);
+        return true;
+    case ArcCommand::CopyUrlAsMarkdown:
+        copy_current_url(true);
+        return true;
+    case ArcCommand::NewTabFromClipboard:
+        new_tab_from_clipboard();
+        return true;
+    case ArcCommand::TogglePin:
+        toggle_current_pin();
+        return true;
+    case ArcCommand::ClearToday:
+        clear_today();
+        return true;
+    case ArcCommand::NextTab:
+        step_tab(1);
+        return true;
+    case ArcCommand::PreviousTab:
+        step_tab(-1);
+        return true;
+    case ArcCommand::NextSpace:
+        step_space(1);
+        return true;
+    case ArcCommand::PreviousSpace:
+        step_space(-1);
+        return true;
+    case ArcCommand::SidebarItem: {
+        auto items = sidebar_items();
+        if (items.isEmpty())
+            return true;
+        auto index = shortcut.item < 0 ? items.size() - 1 : shortcut.item;
+        if (index < items.size())
+            activate_item(items[index]);
+        return true;
+    }
+    }
+    return false;
+}
+
+QList<ArcSidebar::SidebarItem> ArcSidebar::sidebar_items() const
+{
+    QList<SidebarItem> items;
+    for (auto const& id : m_favorite_ids)
+        items.append({ id, {}, tab_for_node(favorite_node(id)) });
+
+    Function<void(QModelIndex const&)> walk = [&](QModelIndex const& parent) {
+        for (int row = 0; row < m_model->rowCount(parent); ++row) {
+            auto index = m_model->index(row, 0, parent);
+            if (m_tree->isRowHidden(row, parent))
+                continue;
+            switch (row_kind(index)) {
+            case RowKind::PinnedTab:
+                items.append({ {}, index.data(IdRole).toString(), tab_in_row(index) });
+                break;
+            case RowKind::TodayTab:
+                if (auto* tab = tab_in_row(index); tab && m_tabs.index_of(tab) >= 0)
+                    items.append({ {}, {}, tab });
+                break;
+            case RowKind::Folder:
+                if (m_tree->isExpanded(index))
+                    walk(index);
+                break;
+            case RowKind::NewTab:
+            case RowKind::BottomSpace:
+                break;
+            }
+        }
+    };
+    walk({});
+    return items;
+}
+
+int ArcSidebar::current_sidebar_item(QList<SidebarItem> const& items) const
+{
+    auto* current = m_window ? m_window->current_tab() : nullptr;
+    if (!current)
+        return -1;
+    for (int i = 0; i < items.size(); ++i) {
+        if (items[i].tab == current)
+            return i;
+    }
+    return -1;
+}
+
+void ArcSidebar::activate_item(SidebarItem const& item)
+{
+    if (!item.favorite_id.isEmpty())
+        open_or_activate_favorite(item.favorite_id);
+    else if (!item.node_id.isEmpty())
+        open_or_activate_node(item.node_id);
+    else if (item.tab && m_tabs.index_of(item.tab) >= 0)
+        activate(*item.tab);
+}
+
+// Up and down the sidebar (not upstream's tab order, which mixes in other spaces' tabs), wrapping around.
+void ArcSidebar::step_tab(int delta)
+{
+    auto items = sidebar_items();
+    if (items.isEmpty())
+        return;
+    auto count = static_cast<int>(items.size());
+    auto current = current_sidebar_item(items);
+    auto next = current < 0 ? (delta > 0 ? 0 : count - 1) : (current + delta % count + count) % count;
+    if (next != current)
+        activate_item(items[next]);
+}
+
+// To the neighboring space; no wrapping around, as in Arc.
+void ArcSidebar::step_space(int delta)
+{
+    auto const& spaces = SpaceStore::the().spaces();
+    for (int i = 0; i < spaces.size(); ++i) {
+        if (spaces[i].id != m_space_id)
+            continue;
+        auto next = i + delta;
+        if (next >= 0 && next < spaces.size())
+            switch_to_space(spaces[next].id);
+        return;
+    }
+}
+
+void ArcSidebar::copy_current_url(bool as_markdown)
+{
+    auto* tab = m_window ? m_window->current_tab() : nullptr;
+    if (!tab || is_blank(*tab))
+        return;
+    auto url = url_of(*tab);
+    if (url.isEmpty() || url == "about:blank")
+        return;
+    if (as_markdown) {
+        QGuiApplication::clipboard()->setText(url_as_markdown(tab->title(), url));
+        Toast::show_in(*m_window, "Copied URL as Markdown", "link");
+    } else {
+        QGuiApplication::clipboard()->setText(url);
+        Toast::show_in(*m_window, "Copied URL", "link");
+    }
+}
+
+// Whatever is on the clipboard, as if typed into the command bar: a URL opens, anything else is searched for.
+void ArcSidebar::new_tab_from_clipboard()
+{
+    auto text = QGuiApplication::clipboard()->text().simplified();
+    if (text.isEmpty() || !m_window)
+        return;
+    auto& tab = new_tab_for_input();
+    auto& view = tab.view();
+    view.set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
+    view.load_from_user_input(ak_string_from_qstring(text));
+    view.setFocus();
+}
+
+// Pins a Today tab to the top of the list, or moves a pinned tab back to Today. Favorites stay as they are.
+void ArcSidebar::toggle_current_pin()
+{
+    auto* tab = m_window ? m_window->current_tab() : nullptr;
+    if (!tab || is_blank(*tab))
+        return;
+    auto node = node_of(*tab);
+    if (node.isEmpty())
+        pin_tab(*tab, {}, -1);
+    else if (!is_favorite_node(node))
+        unpin_node(node);
+}
+
+// A copy of the tab's page just below it, in Today.
+void ArcSidebar::duplicate_tab(Tab& tab)
+{
+    auto url = parse_stored_url(url_of(tab));
+    if (!url.has_value() || !m_window)
+        return;
+    auto space = space_of(tab).isEmpty() ? m_space_id : space_of(tab);
+    ScopedProfileForNewViews profile(profile_of_tab(tab));
+    auto location = node_of(tab).isEmpty() ? BrowserWindow::TabLocation::after_tab(tab) : BrowserWindow::TabLocation::end();
+    auto& copy = m_window->new_tab_from_url(*url, Web::HTML::ActivateTab::Yes, location);
+    set_tab_space(copy, space);
+}
+
+void ArcSidebar::close_tabs_below(Tab& tab)
+{
+    auto today = today_tabs(space_of(tab));
+    auto index = today.indexOf(&tab);
+    if (index < 0)
+        return;
+    for (auto* below : today.mid(index + 1))
+        close_tab(*below);
+}
+
+bool ArcSidebar::handle_wheel(QWheelEvent& event)
+{
+    static constexpr qreal SWITCH_DISTANCE = 40;
+    static constexpr qint64 GESTURE_GAP_MS = 300; // Wheels without phases (mice): a pause starts a new gesture.
+
+    auto now = QDateTime::currentMSecsSinceEpoch();
+    auto phase = event.phase();
+    auto new_gesture = phase == Qt::ScrollBegin || (phase == Qt::NoScrollPhase && now - m_swipe_last_event_ms > GESTURE_GAP_MS);
+    m_swipe_last_event_ms = now;
+    if (new_gesture) {
+        m_swipe_axis = SwipeAxis::Undecided;
+        m_swipe_distance = 0;
+        m_swipe_switched = false;
+    }
+    auto horizontal = m_swipe_axis == SwipeAxis::Horizontal;
+    if (phase == Qt::ScrollEnd || phase == Qt::ScrollMomentum)
+        return horizontal; // A horizontal swipe's glide doesn't scroll the list either.
+
+    auto delta = event.pixelDelta().isNull() ? QPointF(event.angleDelta()) / 4.0 : QPointF(event.pixelDelta());
+    if (m_swipe_axis == SwipeAxis::Undecided) {
+        if (delta.isNull())
+            return false;
+        m_swipe_axis = qAbs(delta.x()) > qAbs(delta.y()) ? SwipeAxis::Horizontal : SwipeAxis::Vertical;
+    }
+    if (m_swipe_axis != SwipeAxis::Horizontal)
+        return false;
+
+    // Which way the fingers moved: with natural scrolling the deltas already follow them.
+    m_swipe_distance += event.inverted() ? delta.x() : -delta.x();
+    if (!m_swipe_switched && qAbs(m_swipe_distance) >= SWITCH_DISTANCE) {
+        m_swipe_switched = true;
+        // Fingers to the left bring in the space to the right, as when swiping between pages.
+        step_space(m_swipe_distance < 0 ? 1 : -1);
+    }
+    return true;
+}
+
+static QModelIndex index_of_node(QStandardItemModel& model, QString const& node_id)
+{
+    QModelIndex found;
+    for_each_item(*model.invisibleRootItem(), [&](QStandardItem& item) {
+        if (!found.isValid() && item.data(IdRole).toString() == node_id)
+            found = item.index();
+    });
+    return found;
+}
+
+void ArcSidebar::begin_inline_rename(QString const& node_id)
+{
+    finish_inline_rename(true);
+    auto const* node = SpaceStore::the().node(node_id);
+    auto index = index_of_node(*m_model, node_id);
+    if (!node || !index.isValid() || m_tree->isRowHidden(index.row(), index.parent())) {
+        rename_node(node_id);
+        return;
+    }
+    auto current = node->title;
+    if (current.isEmpty()) {
+        auto* tab = tab_for_node(node_id);
+        current = tab ? title_of(*tab) : node->saved_title;
+    }
+
+    m_tree->scrollTo(index);
+    m_rename_node_id = node_id;
+    auto* editor = new QLineEdit(current, m_tree->viewport());
+    m_rename_editor = editor;
+    editor->setObjectName("ArcInlineRename");
+    editor->setFrame(false);
+    auto font = editor->font();
+    font.setPixelSize(14);
+    editor->setFont(font);
+    auto dark = ChromeStyle::is_dark(palette());
+    editor->setStyleSheet(QString("QLineEdit#ArcInlineRename { background: %1; border: 1px solid %2; border-radius: 6px; padding: 0 5px; }")
+            .arg(dark ? "rgba(255, 255, 255, 0.12)" : "rgba(255, 255, 255, 0.75)", dark ? "rgba(255, 255, 255, 0.28)" : "rgba(0, 0, 0, 0.18)"));
+    editor->installEventFilter(this);
+    connect(editor, &QLineEdit::editingFinished, this, [this] { finish_inline_rename(true); });
+    place_inline_rename();
+    editor->selectAll();
+    editor->show();
+    editor->setFocus();
+}
+
+// Over the row's title (the rows are rebuilt whenever anything changes; follow it).
+void ArcSidebar::place_inline_rename()
+{
+    if (!m_rename_editor)
+        return;
+    auto index = index_of_node(*m_model, m_rename_node_id);
+    if (!index.isValid() || m_tree->isRowHidden(index.row(), index.parent())) {
+        finish_inline_rename(false);
+        return;
+    }
+    m_rename_editor->setGeometry(SidebarDelegate::title_edit_rect(m_tree->visualRect(index)));
+}
+
+void ArcSidebar::finish_inline_rename(bool commit)
+{
+    QPointer<QLineEdit> editor = m_rename_editor;
+    if (!editor)
+        return;
+    m_rename_editor = nullptr; // First: hiding it below loses focus, which finishes again.
+    auto title = editor->text().trimmed();
+    auto modified = editor->isModified();
+    auto had_focus = editor->hasFocus();
+    editor->hide();
+    editor->deleteLater();
+
+    if (commit && modified) {
+        if (auto const* node = SpaceStore::the().node(m_rename_node_id); node && !(node->is_folder() && title.isEmpty()))
+            SpaceStore::the().rename_node(m_rename_node_id, title); // Empty: a pinned tab goes back to the page title.
+    }
+    if (had_focus && m_window) {
+        if (auto* tab = m_window->current_tab())
+            tab->view().setFocus();
+    }
 }
 
 // --- Tab bookkeeping ----------------------------------------------------------------------------
@@ -1658,6 +1985,8 @@ void ArcSidebar::fill_tree()
         m_tree->setRowHidden(row, QModelIndex(), collapsed);
 
     update_current_highlight();
+    if (m_rename_editor)
+        QTimer::singleShot(0, this, [this] { place_inline_rename(); }); // Once the rows are laid out.
 }
 
 void ArcSidebar::show_shelf()
@@ -2466,6 +2795,12 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (event->type() == QEvent::Wheel && m_tree && (watched == m_tree->viewport() || watched == m_panel))
+        return handle_wheel(*static_cast<QWheelEvent*>(event));
+    if (watched == m_rename_editor && event->type() == QEvent::KeyPress && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+        finish_inline_rename(false);
+        return true;
+    }
     if ((event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) && watched->property("arc_inset_watched").toBool()) {
         inset_toolbar(*static_cast<QWidget*>(watched));
         if (event->type() == QEvent::Show)
@@ -2641,14 +2976,31 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
         });
         add_move_to_space_menu(menu, m_space_id, move);
         menu.addSeparator();
+        menu.addAction("Copy Link", [this, tab] {
+            if (tab && m_window) {
+                QGuiApplication::clipboard()->setText(url_of(*tab));
+                Toast::show_in(*m_window, "Copied URL", "link");
+            }
+        });
+        menu.addAction("Duplicate Tab", [this, tab] {
+            if (tab)
+                duplicate_tab(*tab);
+        });
+        menu.addSeparator();
         menu.addAction("Close Tab", [this, tab] {
             if (tab)
                 close_tab(*tab);
         });
+        if (auto today = today_tabs(m_space_id); !today.isEmpty() && today.last() != tab) {
+            menu.addAction("Close Tabs Below", [this, tab] {
+                if (tab)
+                    close_tabs_below(*tab);
+            });
+        }
         break;
 
     case RowKind::PinnedTab: {
-        menu.addAction("Rename…", [this, node_id] { rename_node(node_id); });
+        menu.addAction("Rename…", [this, node_id] { begin_inline_rename(node_id); });
         if (tab && persistent.data(NavigatedAwayRole).toBool()) {
             menu.addAction("Back to Pinned URL", [this, node_id] { back_to_pinned_url(node_id); });
             menu.addAction("Separate From Pinned Tab", [this, node_id] { separate_from_pinned_tab(node_id); });
@@ -2665,6 +3017,21 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
         });
         add_move_to_space_menu(menu, m_space_id, move);
         menu.addSeparator();
+        menu.addAction("Copy Link", [this, tab, node_id] {
+            auto const* node = SpaceStore::the().node(node_id);
+            auto url = tab ? url_of(*tab) : node ? node->url : QString();
+            if (url.isEmpty() || !m_window)
+                return;
+            QGuiApplication::clipboard()->setText(url);
+            Toast::show_in(*m_window, "Copied URL", "link");
+        });
+        if (tab) {
+            menu.addAction("Duplicate Tab", [this, tab] {
+                if (tab)
+                    duplicate_tab(*tab);
+            });
+        }
+        menu.addSeparator();
         if (tab) {
             menu.addAction("Close Tab", [this, tab] {
                 if (tab)
@@ -2677,7 +3044,7 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
 
     case RowKind::Folder:
         menu.addAction("New Folder Inside", [this, node_id] { new_folder(node_id, -1); });
-        menu.addAction("Rename…", [this, node_id] { rename_node(node_id); });
+        menu.addAction("Rename…", [this, node_id] { begin_inline_rename(node_id); });
         add_move_to_space_menu(menu, m_space_id, move);
         menu.addSeparator();
         menu.addAction("Delete Folder…", [this, node_id] { delete_folder(node_id); });
