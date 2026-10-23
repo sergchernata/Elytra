@@ -65,6 +65,12 @@ public:
     void switch_to_space_at(int index);
     bool handle_key_press(QKeyEvent const&);
 
+    // Opens tabs in the background in the given spaces' Today lists, skipping URLs a space already has open.
+    // Returns how many were opened.
+    int open_background_tabs(QList<SessionEntry> const&);
+    // Closes the current space's Today tabs (the divider's Clear button).
+    void clear_today();
+
 protected:
     virtual void paintEvent(QPaintEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
@@ -75,6 +81,9 @@ private:
     // Tab bookkeeping
     QList<Tab*> tabs() const;
     QList<Tab*> today_tabs(QString const& space_id) const;
+    static bool is_blank(Tab const&);
+    void before_tab_closes(Tab&);
+    void close_stale_blank_tabs();
     Tab* tab_for_node(QString const& node_id) const;
     static QString space_of(Tab const&);
     static QString node_of(Tab const&);

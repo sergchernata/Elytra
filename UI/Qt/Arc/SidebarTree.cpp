@@ -15,10 +15,13 @@
 #include <QPainter>
 #include <QPainterPath>
 
+#include <cmath>
+
 namespace Ladybird::Arc {
 
 static constexpr int ROW_HEIGHT = 36;
-static constexpr int NEW_TAB_ROW_HEIGHT = 48;
+static constexpr int DIVIDER_STRIP_HEIGHT = 22;
+static constexpr int NEW_TAB_ROW_HEIGHT = DIVIDER_STRIP_HEIGHT + ROW_HEIGHT;
 static constexpr int ROW_RADIUS = 9;
 static constexpr int FOLDER_ICON_SIZE = 20;
 static constexpr int FONT_PIXEL_SIZE = 14;
@@ -53,6 +56,35 @@ QRect SidebarDelegate::close_button_rect(QRect const& row)
 QRect SidebarDelegate::chevron_rect(QRect const& row)
 {
     return close_button_rect(row);
+}
+
+QRect SidebarDelegate::divider_strip_rect(QRect const& row)
+{
+    return QRect(row.left(), row.top(), row.width(), DIVIDER_STRIP_HEIGHT);
+}
+
+QRect SidebarDelegate::clear_button_rect(QRect const& row)
+{
+    auto strip = divider_strip_rect(row);
+    return QRect(strip.right() - 64, strip.center().y() - 9, 56, 18);
+}
+
+// Today's tabs follow the divider row, so it has some exactly when there's a row after it.
+static bool has_today_tabs(QModelIndex const& divider)
+{
+    return divider.siblingAtRow(divider.row() + 1).isValid();
+}
+
+// The soft fill under a hovered row (tabs, folders and the New Tab button alike).
+static QColor row_hover_color(QPalette const& palette)
+{
+    return ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 16) : QColor(255, 255, 255, 120);
+}
+
+static bool cursor_in(QStyleOptionViewItem const& option, QRect const& rect)
+{
+    auto* view = qobject_cast<QAbstractItemView const*>(option.widget);
+    return view && rect.contains(view->viewport()->mapFromGlobal(QCursor::pos()));
 }
 
 QSize SidebarDelegate::sizeHint(QStyleOptionViewItem const& option, QModelIndex const& index) const
@@ -149,15 +181,43 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
     auto row = QRectF(option.rect).adjusted(0, 1, -2, -1);
 
     if (kind == RowKind::NewTab) {
-        // Divider line, then a "+ New Tab" button-row.
-        auto divider_y = row.top() + 6;
-        painter->setPen(QPen(ChromeStyle::chrome_separator(palette), 1));
-        painter->drawLine(QPointF(row.left() + 6, divider_y), QPointF(row.right() - 6, divider_y));
+        // A light rule with a subtle "↓ Clear" at its right end (when there are Today tabs), then the
+        // "+ New Tab" button.
+        auto strip = QRectF(divider_strip_rect(option.rect));
+        auto rule_y = std::floor(strip.center().y()) + 0.5;
+        auto rule_right = row.right() - 6;
+        if (!compact && has_today_tabs(index)) {
+            auto clear = QRectF(clear_button_rect(option.rect));
+            rule_right = clear.left() - 4;
 
-        auto button = row.adjusted(0, 12, 0, 0);
-        if (hovered) {
+            auto clear_color = muted;
+            clear_color.setAlphaF(cursor_in(option, clear_button_rect(option.rect)) ? 1.0 : 0.6);
+            auto font = option.font;
+            font.setPixelSize(12);
+            font.setWeight(QFont::DemiBold);
+            painter->setFont(font);
+            painter->setPen(clear_color);
+            auto text_width = QFontMetricsF(font).horizontalAdvance("Clear");
+            auto text_left = clear.right() - text_width;
+            painter->drawText(QRectF(text_left, clear.top(), text_width + 1, clear.height()), Qt::AlignVCenter | Qt::AlignLeft, "Clear");
+
+            // Down arrow.
+            painter->setPen(QPen(clear_color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            auto arrow_x = text_left - 8;
+            auto top = clear.center().y() - 4.5;
+            auto bottom = clear.center().y() + 4.5;
+            painter->drawLine(QPointF(arrow_x, top), QPointF(arrow_x, bottom));
+            painter->drawLine(QPointF(arrow_x - 3.5, bottom - 3.5), QPointF(arrow_x, bottom));
+            painter->drawLine(QPointF(arrow_x + 3.5, bottom - 3.5), QPointF(arrow_x, bottom));
+        }
+        // A light rule, as in Arc: brighter than the background in dark mode, darker in light mode.
+        painter->setPen(QPen(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 46) : QColor(0, 0, 0, 30), 1));
+        painter->drawLine(QPointF(row.left() + 6, rule_y), QPointF(rule_right, rule_y));
+
+        auto button = row.adjusted(0, DIVIDER_STRIP_HEIGHT, 0, 0);
+        if (hovered && cursor_in(option, button.toRect())) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(ChromeStyle::chrome_surface_hover(palette));
+            painter->setBrush(row_hover_color(palette));
             painter->drawRoundedRect(button, ROW_RADIUS, ROW_RADIUS);
         }
         painter->setPen(QPen(muted, 1.6, Qt::SolidLine, Qt::RoundCap));
@@ -183,7 +243,7 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
         painter->drawRoundedRect(row, ROW_RADIUS, ROW_RADIUS);
     } else if (hovered) {
         painter->setPen(Qt::NoPen);
-        painter->setBrush(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 16) : QColor(255, 255, 255, 120));
+        painter->setBrush(row_hover_color(palette));
         painter->drawRoundedRect(row, ROW_RADIUS, ROW_RADIUS);
     }
 
@@ -293,8 +353,18 @@ void SidebarTree::mousePressEvent(QMouseEvent* event)
 {
     m_pressed_index = indexAt(event->position().toPoint());
     m_pressed_close = false;
+    m_pressed_clear = false;
     if (m_pressed_index.isValid() && event->button() == Qt::LeftButton) {
         auto kind = row_kind(m_pressed_index);
+        auto row = visualRect(m_pressed_index);
+        auto point = event->position().toPoint();
+        // The rule's strip isn't part of the New Tab button: only Clear responds there.
+        if (kind == RowKind::NewTab && SidebarDelegate::divider_strip_rect(row).contains(point)) {
+            m_pressed_clear = has_today_tabs(m_pressed_index) && SidebarDelegate::clear_button_rect(row).contains(point);
+            m_pressed_index = QPersistentModelIndex();
+            event->accept();
+            return;
+        }
         auto loaded = kind == RowKind::TodayTab || (kind == RowKind::PinnedTab && m_pressed_index.data(IsLoadedRole).toBool());
         if (loaded && SidebarDelegate::close_button_rect(visualRect(m_pressed_index)).contains(event->position().toPoint())) {
             m_pressed_close = true;
@@ -329,6 +399,13 @@ void SidebarTree::leaveEvent(QEvent* event)
 void SidebarTree::mouseReleaseEvent(QMouseEvent* event)
 {
     auto index = indexAt(event->position().toPoint());
+    if (m_pressed_clear) {
+        m_pressed_clear = false;
+        if (index.isValid() && row_kind(index) == RowKind::NewTab && SidebarDelegate::clear_button_rect(visualRect(index)).contains(event->position().toPoint()))
+            emit clear_clicked();
+        event->accept();
+        return;
+    }
     if (m_pressed_close) {
         m_pressed_close = false;
         if (index.isValid() && index == m_pressed_index)

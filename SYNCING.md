@@ -14,6 +14,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/TabBar.h/.cpp` (hidden sidebar) | `collapsed_vertical_tabs_width()` (a thin hover edge instead of an icon column), `vertical_sidebar_expanded_width()`, upstream's hover-expand switched off in `can_expand_vertical_tabs_on_hover()`, `on_vertical_sidebar_expanded_will_change` (called at the top of `set_vertical_tabs_expanded()`), and `set_vertical_sidebar_reserved_width()` with its check at the top of `vertical_tabs_layout_width()` (lets the dock/hide animation move the page edge) |
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
+| `UI/Qt/BrowserWindow.h/.cpp` | `on_tab_will_close`, called in `definitely_close_tab()` before the tab is removed (the sidebar picks the next tab from the same space, or leaves an empty page so closing a space's last tab doesn't close the window) |
 
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
 contents of upstream's vertical tab column while reusing its sizing, collapsing and window controls.
@@ -63,21 +64,30 @@ The sidebar also relies on upstream behavior that could change silently:
 
 ## Tests
 
-`Tests/UI/Qt/Arc/` holds the fork's tests (spaces data, and sidebar widget styling: centered icons, uniform
-symbol sizes, drawn window controls, row geometry, downloads wording). They run headless:
+`Tests/UI/Qt/Arc/` holds the fork's tests (spaces data, reading Arc's sidebar data from a made-up fixture,
+and sidebar widget styling: centered icons, uniform symbol sizes, drawn window controls, row geometry,
+downloads wording). They run headless:
 
 ```sh
-ninja -C Build/release TestArcSpaceStore TestArcWidgets
-Build/release/bin/TestArcSpaceStore && Build/release/bin/TestArcWidgets
+ninja -C Build/release TestArcSpaceStore TestArcWidgets TestArcImportParser
+Build/release/bin/TestArcSpaceStore && Build/release/bin/TestArcWidgets && Build/release/bin/TestArcImportParser
 ```
 
 To watch the dock/hide animations without touching the mouse, run with `ARC_DEV_AUTOTOGGLE=1600`
-(milliseconds): the sidebar docks and hides on that interval.
+(milliseconds): the sidebar docks and hides on that interval. `ARC_DEV_IMPORT=1` imports from Arc at
+startup without dialogs and logs the summary (the same as File › Import from Arc…).
+
+## Importing from Arc
+
+File › Import from Arc… reads Arc's `StorableSidebar.json` (spaces, pinned folders and tabs, Today's tabs,
+favorites per Arc profile), each Arc profile's Chromium `Bookmarks` file, and site icons from each profile's
+`Favicons` database (copied first, opened read-only; the import links SQLite for this). Re-importing updates
+the same spaces, matched by Arc's space id, and never adds a favorite twice.
 
 ## Where Arc data is stored
 
 Spaces, folders, pinned tabs and favorites live in `ArcSpaces.json` inside the Ladybird profile's data
-directory, never in this repo. A local pre-commit hook (`.git/hooks/pre-commit`, not pushed) refuses
+directory, with imported site icons in `ArcIcons/` next to it, never in this repo. A local pre-commit hook (`.git/hooks/pre-commit`, not pushed) refuses
 commits containing browser data files.
 
 ## Building on this Mac

@@ -150,6 +150,21 @@ TEST_CASE(sidebar_rows_size_and_place_their_buttons)
     }
 }
 
+TEST_CASE(divider_row_has_a_rule_strip_with_clear_at_its_end)
+{
+    auto row = QRect(0, 100, 240, 58);
+    auto strip = SidebarDelegate::divider_strip_rect(row);
+    auto clear = SidebarDelegate::clear_button_rect(row);
+
+    // The strip sits above the New Tab button, which keeps a full row's height.
+    EXPECT(strip.top() == row.top());
+    EXPECT(row.bottom() - strip.bottom() >= 34);
+    // Clear sits on the rule, at its right end.
+    EXPECT(strip.contains(clear));
+    EXPECT(row.right() - clear.right() <= 12);
+    EXPECT(std::abs(clear.center().y() - strip.center().y()) <= 1);
+}
+
 TEST_CASE(downloads_shelf_wording)
 {
     auto now = QDateTime(QDate(2026, 10, 23), QTime(12, 0));

@@ -15,9 +15,17 @@
 
 namespace Ladybird::Arc {
 
+// A tab from a space's Today list (Arc's unpinned tabs). Opened as a regular tab, not pinned.
+struct ArcTodayTab {
+    QString space_source_id;
+    QString url;
+    QString title;
+};
+
 struct ArcSidebarData {
     QList<Space> spaces; // Ids are left empty; source_id is the Arc space's id.
     QList<Favorite> favorites;
+    QList<ArcTodayTab> today_tabs;
     int folders { 0 };
     int tabs { 0 };
     int skipped_items { 0 }; // Arc-only item kinds (notes, easels) with no Ladybird equivalent.

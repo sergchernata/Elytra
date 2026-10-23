@@ -52,6 +52,9 @@ public:
 
     static QRect close_button_rect(QRect const& row);
     static QRect chevron_rect(QRect const& row);
+    // The divider row: the rule's strip (with Clear at its right end) above the New Tab button.
+    static QRect divider_strip_rect(QRect const& row);
+    static QRect clear_button_rect(QRect const& row);
 
     virtual void paint(QPainter*, QStyleOptionViewItem const&, QModelIndex const&) const override;
     virtual QSize sizeHint(QStyleOptionViewItem const&, QModelIndex const&) const override;
@@ -77,6 +80,7 @@ public:
 signals:
     void row_clicked(QModelIndex const&);
     void close_clicked(QModelIndex const&);
+    void clear_clicked();
     void row_dropped(QModelIndex const& source, QModelIndex const& target, DropPlace);
     void urls_dropped(QList<QUrl> const&, QModelIndex const& target, DropPlace);
 
@@ -96,6 +100,7 @@ private:
     QPersistentModelIndex m_pressed_index;
     QPersistentModelIndex m_hovered_index;
     bool m_pressed_close { false };
+    bool m_pressed_clear { false };
 };
 
 }

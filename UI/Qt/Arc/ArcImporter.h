@@ -21,6 +21,7 @@ struct ImportSummary {
     int folders { 0 };
     int tabs { 0 };
     int favorites { 0 };
+    int today_tabs { 0 }; // Arc's unpinned tabs, reopened as regular tabs.
     int icons { 0 };
     int skipped_items { 0 };
     size_t bookmarks { 0 };

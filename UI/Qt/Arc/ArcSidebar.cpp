@@ -60,6 +60,7 @@
 namespace Ladybird::Arc {
 
 static constexpr char const* SPACE_PROPERTY = "arc_space";
+static constexpr char const* BLANK_PROPERTY = "arc_blank";
 static constexpr char const* NODE_PROPERTY = "arc_node";
 static constexpr auto FAVORITE_PREFIX = "fav:";
 static constexpr int ExpandedRole = Qt::UserRole + 20;
@@ -315,6 +316,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 
     connect(m_tree, &SidebarTree::row_clicked, this, &ArcSidebar::on_row_clicked);
     connect(m_tree, &SidebarTree::close_clicked, this, &ArcSidebar::on_close_clicked);
+    connect(m_tree, &SidebarTree::clear_clicked, this, &ArcSidebar::clear_today);
     connect(m_tree, &SidebarTree::row_dropped, this, &ArcSidebar::on_row_dropped);
     connect(m_tree, &SidebarTree::urls_dropped, this, &ArcSidebar::on_urls_dropped);
     connect(m_tree, &QWidget::customContextMenuRequested, this, &ArcSidebar::show_tree_menu);
@@ -332,6 +334,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         save_session();
     });
     connect(&m_tabs, &TabWidget::current_tab_changed, this, &ArcSidebar::on_current_tab_changed);
+    m_window->on_tab_will_close = [this](Tab& tab) { before_tab_closes(tab); };
     connect(&store, &SpaceStore::changed, this, &ArcSidebar::schedule_rebuild);
 
     m_space_id = store.space(store.last_active_space_id()) ? store.last_active_space_id() : store.first_space_id();
@@ -412,7 +415,7 @@ QList<Tab*> ArcSidebar::today_tabs(QString const& space_id) const
 {
     QList<Tab*> result;
     for (auto* tab : tabs()) {
-        if (space_of(*tab) == space_id && node_of(*tab).isEmpty())
+        if (space_of(*tab) == space_id && node_of(*tab).isEmpty() && !is_blank(*tab))
             result.append(tab);
     }
     return result;
@@ -542,6 +545,41 @@ Tab& ArcSidebar::open_tab(QString const& url)
     return tab;
 }
 
+int ArcSidebar::open_background_tabs(QList<SessionEntry> const& entries)
+{
+    int opened = 0;
+    for (auto const& entry : entries) {
+        if (!SpaceStore::the().space(entry.space_id))
+            continue;
+        auto open_tabs = tabs();
+        auto already_open = std::any_of(open_tabs.begin(), open_tabs.end(), [&](Tab* tab) {
+            return space_of(*tab) == entry.space_id && node_of(*tab).isEmpty() && url_of(*tab) == entry.url;
+        });
+        if (already_open)
+            continue;
+        auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(entry.url)), Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::end());
+        set_tab_space(tab, entry.space_id);
+        ++opened;
+    }
+    if (opened > 0) {
+        schedule_rebuild();
+        save_session();
+    }
+    return opened;
+}
+
+void ArcSidebar::clear_today()
+{
+    auto today = today_tabs(m_space_id);
+    if (today.isEmpty())
+        return;
+
+    for (auto* tab : today) {
+        if (auto index = m_tabs.index_of(tab); index >= 0)
+            m_window->request_to_close_tab(index);
+    }
+}
+
 void ArcSidebar::activate(Tab& tab)
 {
     if (auto index = m_tabs.index_of(&tab); index >= 0)
@@ -550,30 +588,67 @@ void ArcSidebar::activate(Tab& tab)
 
 void ArcSidebar::close_tab(Tab& tab)
 {
-    // Stay in this space: pick a neighbor from the same space before upstream picks any neighbor.
-    if (m_window->current_tab() == &tab) {
-        auto space = space_of(tab);
-        Tab* next = nullptr;
-        auto same_space = today_tabs(space);
-        if (auto i = same_space.indexOf(&tab); i >= 0) {
-            if (i + 1 < same_space.size())
-                next = same_space[i + 1];
-            else if (i > 0)
-                next = same_space[i - 1];
-        }
-        if (!next) {
-            for (auto* other : tabs()) {
-                if (other != &tab && space_of(*other) == space) {
-                    next = other;
-                    break;
-                }
-            }
-        }
-        if (next)
-            activate(*next);
-    }
     if (auto index = m_tabs.index_of(&tab); index >= 0)
         m_window->request_to_close_tab(index);
+}
+
+// A blank page (the new tab page, or the empty space shown after the last tab closes). Not listed in Today.
+bool ArcSidebar::is_blank(Tab const& tab)
+{
+    if (tab.property(BLANK_PROPERTY).toBool())
+        return true;
+    auto url = url_of(tab);
+    return url == "about:newtab" || url == "about:blank" || url == qstring_from_ak_string(WebView::Application::settings().new_tab_page_url().serialize());
+}
+
+// Every close (sidebar, Cmd+W, Clear) comes through here. Like Arc: the next tab comes from the same space,
+// and closing a space's last tab leaves an empty page rather than another space's tab or a closed window.
+void ArcSidebar::before_tab_closes(Tab& tab)
+{
+    if (m_window->current_tab() != &tab)
+        return;
+    auto space = space_of(tab);
+    Tab* next = nullptr;
+    auto same_space = today_tabs(space);
+    if (auto i = same_space.indexOf(&tab); i >= 0) {
+        if (i + 1 < same_space.size())
+            next = same_space[i + 1];
+        else if (i > 0)
+            next = same_space[i - 1];
+    }
+    if (!next) {
+        for (auto* other : tabs()) {
+            if (other != &tab && space_of(*other) == space && !is_blank(*other)) {
+                next = other;
+                break;
+            }
+        }
+    }
+    if (next) {
+        activate(*next);
+        return;
+    }
+    if (is_blank(tab))
+        return; // Closing the empty page itself: upstream behavior (another tab, or the window closes).
+
+    auto& blank = m_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    blank.setProperty(BLANK_PROPERTY, true);
+    set_tab_space(blank, space.isEmpty() ? m_space_id : space);
+    activate(blank);
+}
+
+// Once a real tab is showing, empty pages left over from closing tabs aren't needed.
+void ArcSidebar::close_stale_blank_tabs()
+{
+    auto* current = m_window->current_tab();
+    if (!current || is_blank(*current))
+        return;
+    for (auto* tab : tabs()) {
+        if (tab != current && is_blank(*tab)) {
+            if (auto index = m_tabs.index_of(tab); index >= 0)
+                m_window->request_to_close_tab(index);
+        }
+    }
 }
 
 void ArcSidebar::open_or_activate_node(QString const& node_id)
@@ -968,6 +1043,10 @@ void ArcSidebar::on_current_tab_changed(int index)
     }
     if (!space.isEmpty())
         m_last_tab_in_space[space] = tab;
+    QTimer::singleShot(0, this, [guarded = QPointer(this)] {
+        if (guarded)
+            guarded->close_stale_blank_tabs();
+    });
 
     update_current_highlight();
     rebuild_favorites();

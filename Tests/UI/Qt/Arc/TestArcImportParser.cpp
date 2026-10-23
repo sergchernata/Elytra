@@ -79,7 +79,7 @@ TEST_CASE(spaces_keep_their_pinned_tree_and_order)
     auto const& work = data.spaces[0];
     EXPECT(work.title == "Work");
     EXPECT(work.source_id == "space-work");
-    VERIFY(work.pinned.size() == 3); // Docs, the renamed tab, and Today.
+    VERIFY(work.pinned.size() == 2); // Docs and the renamed tab; Today's tabs stay unpinned.
 
     auto const& docs = work.pinned[0];
     EXPECT(docs.is_folder());
@@ -93,11 +93,13 @@ TEST_CASE(spaces_keep_their_pinned_tree_and_order)
     EXPECT(work.pinned[1].title == "My Example"); // Renamed in Arc.
     EXPECT(work.pinned[1].saved_title == "Example Domain");
 
-    EXPECT(work.pinned[2].title == "Today (from Arc)");
-    EXPECT_EQ(work.pinned[2].children.size(), 1);
+    VERIFY(data.today_tabs.size() == 1);
+    EXPECT(data.today_tabs[0].space_source_id == "space-work");
+    EXPECT(data.today_tabs[0].url == "https://news.example/");
+    EXPECT(data.today_tabs[0].title == "News");
 
-    EXPECT_EQ(data.tabs, 3);
-    EXPECT_EQ(data.folders, 2);
+    EXPECT_EQ(data.tabs, 2);
+    EXPECT_EQ(data.folders, 1);
     EXPECT_EQ(data.skipped_items, 1);
 }
 

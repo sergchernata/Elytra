@@ -13,6 +13,9 @@
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcImportParser.h>
 #include <UI/Qt/Arc/ArcImporter.h>
+#include <UI/Qt/Arc/ArcSidebar.h>
+#include <UI/Qt/Application.h>
+#include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/StringUtils.h>
 
@@ -250,6 +253,8 @@ ErrorOr<ImportSummary> import_from_arc(QString const& arc_directory)
         collect_urls(space.pinned, urls);
     for (auto const& favorite : sidebar.favorites)
         urls.insert(favorite.url);
+    for (auto const& tab : sidebar.today_tabs)
+        urls.insert(tab.url);
     summary.icons = import_icons(arc_directory, urls);
     summary.folders = sidebar.folders;
     summary.tabs = sidebar.tabs;
@@ -259,6 +264,19 @@ ErrorOr<ImportSummary> import_from_arc(QString const& arc_directory)
     summary.spaces_added = merged.spaces_added;
     summary.spaces_updated = merged.spaces_updated;
     summary.favorites = merged.favorites_added;
+
+    // Arc's Today tabs open as regular (unpinned) tabs in their spaces, in the active window.
+    QList<SessionEntry> today;
+    for (auto const& tab : sidebar.today_tabs) {
+        for (auto const& space : SpaceStore::the().spaces()) {
+            if (space.source_id == tab.space_source_id)
+                today.append({ tab.url, space.id, {} });
+        }
+    }
+    if (auto* window = Application::the().active_window_if_any(); window && !today.isEmpty()) {
+        if (auto* arc_sidebar = ArcSidebar::for_window(*window))
+            summary.today_tabs = arc_sidebar->open_background_tabs(today);
+    }
 
     // Arc's ordinary bookmarks (Chromium bookmark files, one per Arc profile) -> Ladybird bookmarks.
     Builder builder;
@@ -292,6 +310,8 @@ QString describe(ImportSummary const& summary)
     lines.append(QString("Spaces: %1 added, %2 updated.").arg(summary.spaces_added).arg(summary.spaces_updated));
     lines.append(QString("Pinned: %1 tabs in %2 folders.").arg(summary.tabs).arg(summary.folders));
     lines.append(QString("Favorites: %1 added.").arg(summary.favorites));
+    if (summary.today_tabs > 0)
+        lines.append(QString("Today: %1 open tabs reopened.").arg(summary.today_tabs));
     lines.append(QString("Site icons: %1 imported.").arg(summary.icons));
     lines.append(QString("Bookmarks: %1 (in the \"Arc\" bookmarks folder).").arg(summary.bookmarks));
     if (summary.skipped_items > 0)

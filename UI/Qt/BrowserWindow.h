@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/Optional.h>
 #include <AK/kmalloc.h>
 #include <LibURL/URL.h>
@@ -99,6 +100,9 @@ class BrowserWindow
 
 public:
     AK_ALLOC_WITH_KMALLOC;
+
+    // Fork hook (Arc): runs before a tab closes, e.g. to pick the next tab or keep the window open.
+    Function<void(Tab&)> on_tab_will_close;
 
     enum class IsPopupWindow {
         No,

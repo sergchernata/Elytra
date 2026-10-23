@@ -182,17 +182,21 @@ ArcSidebarData parse_arc_sidebar(QByteArray const& json)
         space.profile = profile_name(object["profile"]);
         space.pinned = reader.children_of(pinned_id);
 
-        // Today's (unpinned) tabs are pinned into a folder, so nothing open in Arc is lost.
-        if (auto today = reader.children_of(unpinned_id); !today.isEmpty()) {
-            PinnedNode folder;
-            folder.id = SpaceStore::new_id();
-            folder.kind = PinnedNode::Kind::Folder;
-            folder.title = "Today (from Arc)";
-            folder.expanded = false;
-            folder.children = std::move(today);
-            space.pinned.append(std::move(folder));
-            ++data.folders;
-        }
+        // Today's (unpinned) tabs stay unpinned: they open as regular tabs below the divider.
+        auto tabs_before = data.tabs;
+        auto folders_before = data.folders;
+        auto add_today = [&](auto const& self, QList<PinnedNode> const& nodes) -> void {
+            for (auto const& node : nodes) {
+                if (node.is_folder())
+                    self(self, node.children);
+                else
+                    data.today_tabs.append({ space.source_id, node.url, node.title.isEmpty() ? node.saved_title : node.title });
+            }
+        };
+        add_today(add_today, reader.children_of(unpinned_id));
+        // Only pinned tabs and folders are counted; these are listed in today_tabs.
+        data.tabs = tabs_before;
+        data.folders = folders_before;
 
         // NB: const lookups (value()). A non-const operator[] inserts missing keys, which can invalidate other
         //     references into the same object mid-expression.

@@ -772,6 +772,11 @@ bool BrowserWindow::definitely_close_tab(int index)
     }
 
     auto* tab = m_tabs_container->tab(index);
+    // Fork hook (Arc): the hook may open or activate tabs, so look the closing tab up again afterwards.
+    if (on_tab_will_close) {
+        on_tab_will_close(*tab);
+        index = m_tabs_container->index_of(tab);
+    }
     m_tabs_container->remove_tab(index);
     if (auto session_tab_id = tab->view().session_tab_id(); session_tab_id.has_value()) {
         WebView::SessionStore::TabClosed closed {
