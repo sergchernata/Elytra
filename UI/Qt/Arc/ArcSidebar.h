@@ -122,6 +122,8 @@ private:
     void start_transition();
     void step_transition(qreal progress);
     void finish_transition();
+    qreal fade_opacity(qreal progress) const;
+    void set_transition_opacity(qreal);
     void set_panel_card(bool);
     void place_window_controls(QPoint panel_origin, bool match_native);
     void ensure_host();

@@ -24,4 +24,8 @@ QList<QRectF> native_window_control_rects(QWidget& window);
 // to the window as it resizes, which would otherwise cover it mid-animation.
 void keep_native_widget_above_page(QWidget& native_widget);
 
+// Sets a native child widget's layer opacity, which the system compositor applies on the GPU (no repaint).
+// Returns false where that isn't available.
+bool set_native_widget_opacity(QWidget& native_widget, qreal opacity);
+
 }

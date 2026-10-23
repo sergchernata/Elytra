@@ -9,6 +9,7 @@
 #include <QWidget>
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 // Qt refreshes the title bar buttons whenever the window's flags or layout change, which un-hides them.
@@ -114,6 +115,20 @@ void keep_native_widget_above_page(QWidget& native_widget)
     // Sibling layers are ordered by zPosition before insertion order, so later re-attachments of the page's
     // layer can't land on top of this one.
     view.layer.zPosition = 1000;
+}
+
+bool set_native_widget_opacity(QWidget& native_widget, qreal opacity)
+{
+    auto* view = reinterpret_cast<NSView*>(native_widget.winId());
+    if (!view)
+        return false;
+    view.wantsLayer = YES;
+    // Applied by the compositor; skip Core Animation's implicit fade so each frame lands exactly.
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    view.layer.opacity = static_cast<float>(opacity);
+    [CATransaction commit];
+    return true;
 }
 
 static char s_hider_key;

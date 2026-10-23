@@ -21,4 +21,9 @@ void keep_native_widget_above_page(QWidget&)
 {
 }
 
+bool set_native_widget_opacity(QWidget&, qreal)
+{
+    return false;
+}
+
 }

@@ -71,6 +71,8 @@ static constexpr int SHELF_SLIDE_DISTANCE = 14;
 static constexpr int SHELF_ANIMATION_MS = 190;
 static constexpr int REVEAL_DELAY_MS = 60;
 static constexpr int TRANSITION_MS = 300;
+static constexpr int SHOW_SETTLE_MS = 34;
+static constexpr qreal FADE_SPEEDUP = 1.6;
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = 2;
 static constexpr int RETRACT_DELAY_MS = 280;
 static constexpr int REVEAL_ANIMATION_MS = 260;
@@ -1616,7 +1618,17 @@ void ArcSidebar::start_transition()
     // screen aren't blank while Qt gets around to it.
     m_panel->layout()->activate();
     m_host->repaint();
-    m_transition->start();
+
+    if (m_active_transition == Transition::Hide) {
+        m_transition->start();
+        return;
+    }
+    // Showing resized the floating panel, and AppKit takes a couple of frames to put a freshly resized native
+    // window on screen. Start once it has, page and panel together (the page is held where it is meanwhile).
+    QTimer::singleShot(SHOW_SETTLE_MS, this, [this] {
+        if (m_active_transition == Transition::Show && m_transition->state() != QAbstractAnimation::Running)
+            m_transition->start();
+    });
 }
 
 void ArcSidebar::step_transition(qreal progress)
@@ -1626,13 +1638,32 @@ void ArcSidebar::step_transition(qreal progress)
     auto lerp = [progress](qreal from, qreal to) { return from + (to - from) * progress; };
     // One clock for both, so the page's edge travels with the sidebar's.
     m_tabs.set_vertical_sidebar_reserved_width(qRound(lerp(m_transition_width_from, m_transition_width_to)));
+    // The page's own layout would only follow on the next event-loop pass, a frame behind the panel; apply
+    // it now so both land in the same frame.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
     m_host->move(qRound(lerp(m_transition_from.x(), m_transition_to.x())), qRound(lerp(m_transition_from.y(), m_transition_to.y())));
+    set_transition_opacity(fade_opacity(progress));
+}
+
+// The sidebar fades a little faster than it slides: fully there before it lands, gone before it leaves.
+qreal ArcSidebar::fade_opacity(qreal progress) const
+{
+    auto faded = qBound(0.0, progress * FADE_SPEEDUP, 1.0);
+    return m_active_transition == Transition::Show ? faded : 1.0 - qBound(0.0, progress * FADE_SPEEDUP - (FADE_SPEEDUP - 1.0), 1.0);
+}
+
+void ArcSidebar::set_transition_opacity(qreal opacity)
+{
+    // The whole floating window's layer: composited on the GPU, nothing is re-rendered per frame.
+    if (m_host)
+        set_native_widget_opacity(*m_host, opacity);
 }
 
 void ArcSidebar::finish_transition()
 {
     auto finished = m_active_transition;
     m_active_transition = Transition::None;
+    set_transition_opacity(1.0); // Back to fully opaque for the hover slide-out and the docked sidebar.
     m_tabs.set_vertical_sidebar_reserved_width({});
     if (finished == Transition::Hide) {
         m_host_lifting_off = false;
