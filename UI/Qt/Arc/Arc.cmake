@@ -12,6 +12,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/FloatingPanel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ProfileSessions.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ReleaseInfo.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ReleaseSignature.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarTree.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarWidgets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStore.cpp
@@ -20,8 +21,8 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/UpdateChecker.cpp
 )
 
-# The update notice asks GitHub for the latest release through Ladybird's own network stack.
-target_link_libraries(ladybird PRIVATE LibHTTP LibRequests)
+# The update notice asks GitHub for the latest release through Ladybird's own network stack, and checks its signature.
+target_link_libraries(ladybird PRIVATE LibCrypto LibHTTP LibRequests)
 
 # The importer reads Arc's (Chromium) icon databases.
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 4.3.1)

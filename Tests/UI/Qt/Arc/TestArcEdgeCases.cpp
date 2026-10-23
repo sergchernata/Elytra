@@ -58,19 +58,13 @@ TEST_CASE(pinned_row_titles_skip_blank_titles)
 
 // --- Releases --------------------------------------------------------------------------------------
 
-TEST_CASE(release_tags_and_checksums_in_odd_shapes)
+TEST_CASE(release_tags_in_odd_shapes)
 {
     EXPECT(is_newer_release("arc-v0.9.0", "arc-v0.10"));
     EXPECT(!is_newer_release("arc-v0.02.0", "arc-v0.2.0")); // Same version, written differently.
     EXPECT(!is_newer_release("arc-v0.1.0", "arc-v0.2.0-rc1")); // A prerelease-looking tag isn't offered.
     EXPECT(!is_newer_release("arc-v0.1.0", " arc-v0.2.0"));
     EXPECT(!is_newer_release("arc-v0.1.0", "ARC-V0.2.0"));
-
-    auto hash = QString(64, 'A');
-    EXPECT(checksum_for(QString("%1 *Ladybird.zip\r\n").arg(hash).toUtf8(), "Ladybird.zip") == hash.toLower()); // Binary mode, CRLF.
-    EXPECT(checksum_for(QString("%1  Ladybird.zip.old\n%1  Ladybird.zip\n").arg(QString(64, 'b')).toUtf8(), "Ladybird.zip") == QString(64, 'b'));
-    EXPECT(checksum_for(QString("%1  Ladybird.zip").arg(QString(63, 'a')).toUtf8(), "Ladybird.zip").isEmpty()); // Too short.
-    EXPECT(checksum_for(QByteArray(), "Ladybird.zip").isEmpty());
 }
 
 static void make_app(QString const& path, QByteArray const& version)

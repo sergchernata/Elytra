@@ -131,7 +131,8 @@ jobs:
             ${{ steps.package.outputs.zip }}.sha256
           compression-level: 0
 
-  # The only step with write access: it publishes what the build made, and runs nothing from the build.
+  # The only job with write access or the signing key: it signs and publishes what the build made, and runs nothing
+  # from the build.
   publish:
     name: Publish
     needs: build
@@ -142,6 +143,42 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           name: release-package
+
+      # Only for the public key the app trusts, to check the signature against it.
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+          sparse-checkout: UI/Qt/Arc/ReleaseSignature.h
+          sparse-checkout-cone-mode: false
+
+      # The app installs only downloads signed with the release key (see UI/Qt/Arc/ReleaseSignature.h). The key is
+      # in the ARC_RELEASE_SIGNING_KEY secret (an Ed25519 private key, PEM); without it, nothing is published.
+      - name: Sign the release
+        env:
+          SIGNING_KEY: ${{ secrets.ARC_RELEASE_SIGNING_KEY }}
+          TAG: ${{ needs.build.outputs.tag }}
+          ZIP: ${{ needs.build.outputs.zip }}
+        run: |
+          if [[ -z "$SIGNING_KEY" ]]; then
+            echo "::error::The ARC_RELEASE_SIGNING_KEY secret isn't set; refusing to publish an unsigned release."
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/signing-key.pem"
+          trap 'rm -f "$KEY"' EXIT
+          (umask 077; printf '%s\n' "$SIGNING_KEY" > "$KEY")
+
+          # Keep in step with release_statement() in UI/Qt/Arc/ReleaseSignature.cpp.
+          SHA256="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+          printf 'ladybird-arc-release\ntag: %s\nfile: %s\nsha256: %s\n' "$TAG" "$ZIP" "$SHA256" > statement.txt
+          openssl pkeyutl -sign -inkey "$KEY" -rawin -in statement.txt -out signature.bin
+          base64 -w0 signature.bin > "$ZIP.sig"
+
+          # Check it the way the app will, with the app's public key, so a mismatched key fails here, not in the app.
+          PUBLIC_KEY="$(sed -n 's/.*RELEASE_PUBLIC_KEY_BASE64\[\] = "\([^"]*\)".*/\1/p' source/UI/Qt/Arc/ReleaseSignature.h)"
+          test -n "$PUBLIC_KEY"
+          { printf '302a300506032b6570032100' | xxd -r -p; printf '%s' "$PUBLIC_KEY" | base64 -d; } > public-key.der
+          openssl pkeyutl -verify -pubin -keyform DER -inkey public-key.der -rawin -in statement.txt -sigfile signature.bin
 
       - name: Publish release
         env:
@@ -157,10 +194,10 @@ jobs:
 
               xattr -dr com.apple.quarantine /path/to/Ladybird.app
 
-          Once installed, it updates itself from here.
+          Once installed, it updates itself from here. Updates are signed; the .sig file is the download's signature.
           EOF
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "Ladybird (Arc) $TAG" \
             --notes-file notes.md \
             --target "$GITHUB_SHA" \
-            "$ZIP" "$ZIP.sha256"
+            "$ZIP" "$ZIP.sha256" "$ZIP.sig"

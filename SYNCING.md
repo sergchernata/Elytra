@@ -144,3 +144,21 @@ git push -u origin arc
 # after each rebase:
 git push --force-with-lease origin arc
 ```
+
+## Releases and signing
+
+Pushing a tag named `arc-v<major>.<minor>.<patch>` runs `.github/workflows/arc-release-macos.yml`, which builds the
+Apple Silicon app and publishes it as a GitHub release: the zip, its `.sha256`, and its `.sig`.
+
+The app installs an update only if its `.sig` is a valid Ed25519 signature, made with the release key, of a short
+statement naming the release's tag, the file and its SHA-256 (`UI/Qt/Arc/ReleaseSignature.{h,cpp}`). Releases without
+one (`arc-v0.1.0`, `arc-v0.1.1`) only get their page offered.
+
+- The private key is in the repository secret `ARC_RELEASE_SIGNING_KEY` (PEM). The maintainer keeps a copy outside
+  the repository; it is never committed.
+- The public key is `RELEASE_PUBLIC_KEY_BASE64` in `ReleaseSignature.h`. The workflow checks each signature against it
+  before publishing, so a key that doesn't match fails the release rather than shipping one nobody can install.
+- To rotate the key, installed apps must first get the new public key in a release signed with the *old* key: put the
+  new key in `ReleaseSignature.h`, and for that one release point the workflow's check at the old public key. Then
+  switch the secret to the new key. If the private key is lost, installed apps can't update themselves any more;
+  users have to download the next release by hand.

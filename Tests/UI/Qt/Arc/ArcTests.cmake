@@ -62,9 +62,9 @@ set_tests_properties(TestArcProfileSessions PROPERTIES TIMEOUT 120 ENVIRONMENT L
 
 ladybird_test("Arc/TestArcReleaseInfo.cpp" UI/Qt
     CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
-    LIBS Qt::Core Qt::Gui Qt::Widgets
+    LIBS LibCrypto Qt::Core Qt::Gui Qt::Widgets
 )
-target_sources(TestArcReleaseInfo PRIVATE "${ARC_SOURCE_DIR}/ReleaseInfo.cpp")
+target_sources(TestArcReleaseInfo PRIVATE "${ARC_SOURCE_DIR}/ReleaseInfo.cpp" "${ARC_SOURCE_DIR}/ReleaseSignature.cpp")
 deploy_qt_offscreen_platform_plugin(TestArcReleaseInfo)
 
 # The sidebar's integration tests, in a real browser window (see UI/Qt/Arc/ArcSelfTest.cpp). Needs a desktop session.

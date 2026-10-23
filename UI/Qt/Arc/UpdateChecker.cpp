@@ -11,6 +11,7 @@
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/Arc/ReleaseSignature.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 
 #include <QAction>
@@ -169,27 +170,27 @@ void UpdateChecker::fail_preparing(QString const& why)
     set_state(State::PageOnly);
 }
 
-// In the background: download the release and its checksum, check them, unpack the app and check it too.
+// In the background: download the release and its signature, check them, unpack the app and check it too.
 void UpdateChecker::prepare()
 {
-    fetch(m_release->checksum_url, [this](Optional<QByteArray> checksum_file) {
-        if (!checksum_file.has_value())
-            return fail_preparing("couldn't download the checksum");
-        auto expected = checksum_for(*checksum_file, m_release->archive_name);
-        if (expected.isEmpty())
-            return fail_preparing("the checksum file has no checksum for the download");
+    fetch(m_release->signature_url, [this](Optional<QByteArray> signature) {
+        if (!signature.has_value())
+            return fail_preparing("couldn't download the signature");
 
-        fetch(m_release->archive_url, [this, expected](Optional<QByteArray> archive) {
+        fetch(m_release->archive_url, [this, signature = signature.release_value()](Optional<QByteArray> archive) {
             if (!archive.has_value())
                 return fail_preparing("couldn't download the release");
             auto directory = QDir(staging_directory() + "/" + m_release->tag);
             auto zip_path = directory.filePath(m_release->archive_name);
+            auto tag = m_release->tag;
+            auto archive_name = m_release->archive_name;
 
             // Hashing and saving ~100 MB would stall the UI: do it on a thread, then carry on here.
-            auto* worker = QThread::create([archive = archive.release_value(), expected, directory, zip_path, this] {
+            auto* worker = QThread::create([archive = archive.release_value(), signature, tag, archive_name, directory, zip_path, this] {
                 QString error;
-                if (QCryptographicHash::hash(archive, QCryptographicHash::Sha256).toHex() != expected.toLatin1()) {
-                    error = "the download doesn't match its checksum";
+                auto sha256 = QString::fromLatin1(QCryptographicHash::hash(archive, QCryptographicHash::Sha256).toHex());
+                if (!release_signature_is_valid(release_statement(tag, archive_name, sha256), signature)) {
+                    error = "the download isn't signed with the release key";
                 } else {
                     QDir(directory).removeRecursively();
                     QFile zip(zip_path);

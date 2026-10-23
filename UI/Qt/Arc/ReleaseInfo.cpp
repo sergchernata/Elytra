@@ -50,11 +50,11 @@ Optional<ReleaseInfo> parse_latest_release(QByteArray const& json)
             archive_url = url.toString();
         }
     }
-    // Only a download with its published checksum can be installed.
-    if (auto checksum_url = urls_by_name.value(archive_name + ".sha256"); !archive_url.isEmpty() && !checksum_url.isEmpty()) {
+    // Only a signed download can be installed (older, unsigned releases only get their page offered).
+    if (auto signature_url = urls_by_name.value(archive_name + ".sig"); !archive_url.isEmpty() && !signature_url.isEmpty()) {
         release.archive_name = archive_name;
         release.archive_url = archive_url;
-        release.checksum_url = checksum_url;
+        release.signature_url = signature_url;
     }
     return release;
 }
@@ -104,17 +104,6 @@ Optional<QString> redirect_target(QString const& from, int status, QString const
     if (target.scheme() != "https" || !is_github)
         return {};
     return target.toString(QUrl::FullyEncoded);
-}
-
-QString checksum_for(QByteArray const& checksum_file, QString const& file_name)
-{
-    static QRegularExpression const line(R"(^([0-9a-fA-F]{64})\s+\*?(.+)$)");
-    for (auto const& text : QString::fromUtf8(checksum_file).split('\n')) {
-        auto match = line.match(text.trimmed());
-        if (match.hasMatch() && match.captured(2).trimmed() == file_name)
-            return match.captured(1).toLower();
-    }
-    return {};
 }
 
 static QString shell_quoted(QString const& text)
