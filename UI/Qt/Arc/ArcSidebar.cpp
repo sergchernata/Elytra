@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
+#include <UI/Qt/LocationEdit.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
 #include <UI/Qt/TabBar.h>
@@ -32,6 +33,10 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QKeyEvent>
+#include <QMouseEvent>
+#include <QWindow>
+#include <QGraphicsOpacityEffect>
+#include <QApplication>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -45,7 +50,8 @@ static constexpr char const* SPACE_PROPERTY = "arc_space";
 static constexpr char const* NODE_PROPERTY = "arc_node";
 static constexpr auto FAVORITE_PREFIX = "fav:";
 static constexpr int ExpandedRole = Qt::UserRole + 20;
-static constexpr int FAVORITE_TILE_HEIGHT = 44;
+static constexpr int FAVORITE_TILE_HEIGHT = 54;
+static constexpr int TOP_STRIP_HEIGHT = 34;
 
 #if defined(AK_OS_MACOS)
 static constexpr auto SPACE_SHORTCUT_MODIFIER = Qt::META; // The Control key on macOS, as in Arc.
@@ -118,19 +124,25 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     auto& store = SpaceStore::the();
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 2, 0, 0);
-    layout->setSpacing(4);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+
+    // The window buttons (traffic lights) sit over this strip; dragging it moves the window.
+    m_top_strip = new QWidget(this);
+    m_top_strip->setFixedHeight(TOP_STRIP_HEIGHT);
+    m_top_strip->installEventFilter(this);
+    layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);
     m_favorites_layout = new QGridLayout(m_favorites);
-    m_favorites_layout->setContentsMargins(0, 0, 2, 4);
-    m_favorites_layout->setSpacing(6);
+    m_favorites_layout->setContentsMargins(0, 0, 0, 6);
+    m_favorites_layout->setSpacing(8);
     m_favorites->setAcceptDrops(true);
     m_favorites->installEventFilter(this);
     layout->addWidget(m_favorites);
 
     m_space_title = new QLabel(this);
-    m_space_title->setContentsMargins(10, 4, 8, 0);
+    m_space_title->setContentsMargins(8, 2, 8, 2);
     m_space_title->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_space_title, &QLabel::customContextMenuRequested, this, [this](QPoint const& position) {
         show_space_menu(m_space_id, m_space_title->mapToGlobal(position));
@@ -807,13 +819,15 @@ void ArcSidebar::rebuild()
 
     auto muted = ChromeStyle::chrome_muted_text(palette());
     m_space_title->setText(space ? (space->icon.isEmpty() ? space->title : space->icon + "  " + space->title) : QString());
-    m_space_title->setStyleSheet(QString("QLabel { color: %1; font-weight: 600; font-size: 12px; }").arg(muted.name()));
+    m_space_title->setStyleSheet(QString("QLabel { color: %1; font-weight: 600; font-size: 13px; }").arg(muted.name()));
     m_tree->delegate().accent = space_color();
 
     rebuild_favorites();
     rebuild_tree();
     rebuild_switcher();
     update();
+    if (window()->isActiveWindow() || !qApp->activeWindow())
+        apply_space_tint();
 }
 
 void ArcSidebar::rebuild_favorites()
@@ -830,15 +844,18 @@ void ArcSidebar::rebuild_favorites()
         return;
 
     auto dark = ChromeStyle::is_dark(palette());
-    auto tile = dark ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.45)";
-    auto tile_hover = dark ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.65)";
-    auto tile_checked = dark ? "rgba(255,255,255,0.20)" : "rgba(255,255,255,0.95)";
-    auto style = QString("QToolButton { background: %1; border: none; border-radius: 10px; }"
+    auto tile = dark ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.45)";
+    auto tile_hover = dark ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.65)";
+    auto tile_checked = dark ? "rgba(255,255,255,0.24)" : "rgba(255,255,255,0.95)";
+    auto style = QString("QToolButton { background: %1; border: none; border-radius: 12px; }"
                          "QToolButton:hover { background: %2; }"
                          "QToolButton:checked { background: %3; }")
                      .arg(tile, tile_hover, tile_checked);
 
-    auto columns = qMin(4, static_cast<int>(favorites.size()));
+    // Always four equal columns, like Arc, so one favorite is a tile rather than a full-width bar.
+    constexpr int columns = 4;
+    for (int column = 0; column < columns; ++column)
+        m_favorites_layout->setColumnStretch(column, 1);
     auto* current = m_window ? m_window->current_tab() : nullptr;
 
     for (int i = 0; i < favorites.size(); ++i) {
@@ -847,7 +864,7 @@ void ArcSidebar::rebuild_favorites()
 
         auto* button = new QToolButton(m_favorites);
         button->setIcon(icon_for(favorite.url, tab));
-        button->setIconSize(QSize(20, 20));
+        button->setIconSize(QSize(22, 22));
         button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
         button->setCheckable(true);
         button->setChecked(tab && tab == current);
@@ -940,7 +957,6 @@ void ArcSidebar::rebuild_switcher()
 
     auto const& spaces = SpaceStore::the().spaces();
     auto muted = ChromeStyle::chrome_muted_text(palette());
-    m_switcher_layout->addStretch(1);
 
     for (int i = 0; i < spaces.size(); ++i) {
         auto const& space = spaces[i];
@@ -953,14 +969,17 @@ void ArcSidebar::rebuild_switcher()
         button->setFocusPolicy(Qt::NoFocus);
         button->setContextMenuPolicy(Qt::CustomContextMenu);
 
-        auto color = space.color.isValid() ? space.color : muted;
-        auto fill = color;
-        fill.setAlpha(active ? 90 : 0);
-        auto hover = color;
-        hover.setAlpha(active ? 110 : 45);
-        button->setStyleSheet(QString("QToolButton { background: %1; border: none; border-radius: 8px; color: %2; font-weight: 600; }"
-                                      "QToolButton:hover { background: %3; }")
-                                  .arg(rgba(fill), (active ? ChromeStyle::chrome_text(palette()) : muted).name(), rgba(hover)));
+        auto hover = ChromeStyle::chrome_surface_hover(palette());
+        hover.setAlpha(120);
+        button->setStyleSheet(QString("QToolButton { background: transparent; border: none; border-radius: 8px; color: %1; font-weight: 700; font-size: 14px; }"
+                                      "QToolButton:hover { background: %2; }")
+                                  .arg(ChromeStyle::chrome_text(palette()).name(), rgba(hover)));
+        if (!active) {
+            // Emoji can't be recolored, so dim inactive spaces with opacity, as Arc does.
+            auto* dim = new QGraphicsOpacityEffect(button);
+            dim->setOpacity(0.4);
+            button->setGraphicsEffect(dim);
+        }
 
         auto id = space.id;
         connect(button, &QToolButton::clicked, this, [this, id] { switch_to_space(id); });
@@ -968,9 +987,8 @@ void ArcSidebar::rebuild_switcher()
             show_space_menu(id, button->mapToGlobal(position));
         });
         m_switcher_layout->addWidget(button);
+        m_switcher_layout->addStretch(1);
     }
-
-    m_switcher_layout->addStretch(1);
 
     auto* add = new QToolButton(m_switcher);
     add->setText("+");
@@ -1026,12 +1044,49 @@ void ArcSidebar::update_current_highlight()
 
 void ArcSidebar::paintEvent(QPaintEvent*)
 {
+    // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
     QPainter painter(this);
-    auto base = ChromeStyle::chrome_background(palette());
+    painter.fillRect(rect(), ChromeStyle::chrome_background(palette()));
+}
+
+// Arc paints the space color across the whole window frame. Upstream derives every chrome surface from
+// chrome_background(), so tint that and ask the app to restyle.
+void ArcSidebar::apply_space_tint()
+{
+    static QColor applied;
+    static bool initialized = false;
     auto color = space_color();
-    if (color.isValid())
-        base = ChromeStyle::mix(base, color, ChromeStyle::is_dark(palette()) ? 0.17 : 0.26);
-    painter.fillRect(rect(), base);
+    if (initialized && color == applied)
+        return;
+    initialized = true;
+    applied = color;
+
+    ChromeStyle::set_chrome_background_tint(color, ChromeStyle::is_dark(palette()) ? 0.26 : 0.38);
+    // Upstream's chrome widgets restyle themselves on PaletteChange (the path a system theme change takes).
+    // Notify only those; Qt's own widgets would reset their style sheets on a synthetic event.
+    auto notify = [](QWidget* widget) {
+        QEvent palette_change(QEvent::PaletteChange);
+        QApplication::sendEvent(widget, &palette_change);
+        widget->update();
+    };
+    for (auto* top_level : QApplication::topLevelWidgets()) {
+        auto* browser_window = qobject_cast<BrowserWindow*>(top_level);
+        if (!browser_window)
+            continue;
+        notify(browser_window);
+        for (auto* tabs : browser_window->findChildren<TabWidget*>())
+            notify(tabs);
+        for (auto* tab : browser_window->findChildren<Tab*>())
+            notify(tab);
+        for (auto* edit : browser_window->findChildren<LocationEdit*>())
+            notify(edit);
+        for (auto* widget : browser_window->findChildren<QWidget*>())
+            widget->update();
+    }
+
+    // Arc has no line between the sidebar and the page; upstream's column style draws one.
+    if (auto* column = parentWidget())
+        column->setStyleSheet("QWidget#LadybirdVerticalTabBar { border: none; }");
 }
 
 // --- Interaction --------------------------------------------------------------------------------
@@ -1174,6 +1229,19 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_top_strip) {
+        if (event->type() == QEvent::MouseButtonPress && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
+            if (auto* handle = window()->windowHandle())
+                handle->startSystemMove();
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            window()->isMaximized() ? window()->showNormal() : window()->showMaximized();
+            return true;
+        }
+        return false;
+    }
+
     if (watched != m_favorites)
         return QWidget::eventFilter(watched, event);
 

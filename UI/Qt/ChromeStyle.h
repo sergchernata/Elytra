@@ -19,6 +19,9 @@ namespace Ladybird::ChromeStyle {
 constexpr inline int LOCATION_EDIT_CORNER_RADIUS = 16;
 constexpr inline int LOADING_SWIRL_PERIOD_MS = 2000;
 
+// Fork hook (Arc): blends a space's color into the chrome background. An invalid color turns it off.
+void set_chrome_background_tint(QColor const&, double amount);
+
 bool is_dark(QPalette const&);
 QColor mix(QColor const& from, QColor const& to, double amount);
 QColor chrome_text(QPalette const&);

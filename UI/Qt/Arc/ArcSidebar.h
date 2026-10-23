@@ -92,6 +92,7 @@ private:
     void update_tab_rows(Tab&);
     void update_current_highlight();
     QColor space_color() const;
+    void apply_space_tint();
     QIcon icon_for(QString const& url, Tab const* tab) const;
 
     void on_current_tab_changed(int index);
@@ -116,6 +117,7 @@ private:
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;
     QPointer<Tab> m_current_tab;
 
+    QWidget* m_top_strip { nullptr };
     QWidget* m_favorites { nullptr };
     QGridLayout* m_favorites_layout { nullptr };
     QLabel* m_space_title { nullptr };

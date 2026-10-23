@@ -16,9 +16,11 @@
 
 namespace Ladybird::Arc {
 
-static constexpr int ROW_HEIGHT = 32;
-static constexpr int NEW_TAB_ROW_HEIGHT = 44;
-static constexpr int ROW_RADIUS = 8;
+static constexpr int ROW_HEIGHT = 36;
+static constexpr int NEW_TAB_ROW_HEIGHT = 48;
+static constexpr int ROW_RADIUS = 9;
+static constexpr int FOLDER_ICON_SIZE = 20;
+static constexpr int FONT_PIXEL_SIZE = 14;
 static constexpr int ICON_SIZE = 16;
 static constexpr int COMPACT_WIDTH = 90;
 static constexpr char const* INTERNAL_MIME = "application/x-qstandarditemmodeldatalist";
@@ -73,21 +75,38 @@ static void draw_chevron(QPainter& painter, QRectF rect, bool expanded, QColor c
     painter.restore();
 }
 
-static void draw_folder_glyph(QPainter& painter, QRectF rect, QColor color)
+static void draw_folder_glyph(QPainter& painter, QRectF rect, QColor color, bool open)
 {
     painter.save();
-    painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
-    auto r = rect.adjusted(1, 3, -1, -2);
-    QPainterPath path;
-    path.moveTo(r.left(), r.top() + 2);
-    path.lineTo(r.left() + r.width() * 0.38, r.top() + 2);
-    path.lineTo(r.left() + r.width() * 0.5, r.top() + 4);
-    path.lineTo(r.right(), r.top() + 4);
-    path.lineTo(r.right(), r.bottom());
-    path.lineTo(r.left(), r.bottom());
-    path.closeSubpath();
-    painter.drawPath(path);
+    auto r = rect.adjusted(1, 3, -1, -3);
+    auto tab_right = r.left() + r.width() * 0.4;
+    QPainterPath back;
+    back.moveTo(r.left(), r.bottom());
+    back.lineTo(r.left(), r.top() + 1.5);
+    back.quadTo(r.left(), r.top(), r.left() + 1.5, r.top());
+    back.lineTo(tab_right - 1, r.top());
+    back.lineTo(tab_right + 1.5, r.top() + 2.5);
+    back.lineTo(r.right() - 1.5, r.top() + 2.5);
+    back.quadTo(r.right(), r.top() + 2.5, r.right(), r.top() + 4);
+    if (!open) {
+        back.lineTo(r.right(), r.bottom() - 1.5);
+        back.quadTo(r.right(), r.bottom(), r.right() - 1.5, r.bottom());
+        back.closeSubpath();
+        painter.drawPath(back);
+    } else {
+        // Open folder: the front flap tilts forward.
+        back.lineTo(r.right(), r.top() + r.height() * 0.42);
+        painter.drawPath(back);
+        QPainterPath front;
+        front.moveTo(r.left(), r.bottom());
+        front.lineTo(r.left() + r.width() * 0.18, r.top() + r.height() * 0.42);
+        front.lineTo(r.right() + 2, r.top() + r.height() * 0.42);
+        front.lineTo(r.right() - r.width() * 0.16, r.bottom());
+        front.closeSubpath();
+        painter.drawPath(front);
+    }
     painter.restore();
 }
 
@@ -140,8 +159,12 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
         painter->drawLine(plus_center + QPointF(-5, 0), plus_center + QPointF(5, 0));
         painter->drawLine(plus_center + QPointF(0, -5), plus_center + QPointF(0, 5));
         if (!compact) {
+            auto font = option.font;
+            font.setPixelSize(FONT_PIXEL_SIZE);
+            font.setWeight(QFont::Medium);
+            painter->setFont(font);
             painter->setPen(muted);
-            painter->drawText(button.adjusted(34, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, "New Tab");
+            painter->drawText(button.adjusted(36, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, "New Tab");
         }
         painter->restore();
         return;
@@ -150,15 +173,11 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
     // Row background: the current tab gets a raised "card", hover a soft fill.
     if (is_current) {
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(0, 0, 0, ChromeStyle::is_dark(palette) ? 60 : 18));
-        painter->drawRoundedRect(row.translated(0, 1), ROW_RADIUS, ROW_RADIUS);
-        painter->setBrush(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 34) : QColor(255, 255, 255, 235));
+        painter->setBrush(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 38) : QColor(255, 255, 255, 230));
         painter->drawRoundedRect(row, ROW_RADIUS, ROW_RADIUS);
     } else if (hovered) {
         painter->setPen(Qt::NoPen);
-        auto fill = ChromeStyle::chrome_surface_hover(palette);
-        fill.setAlpha(150);
-        painter->setBrush(fill);
+        painter->setBrush(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 16) : QColor(255, 255, 255, 120));
         painter->drawRoundedRect(row, ROW_RADIUS, ROW_RADIUS);
     }
 
@@ -169,7 +188,8 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
 
     if (kind == RowKind::Folder) {
         auto expanded = option.state & QStyle::State_Open;
-        draw_folder_glyph(*painter, icon_rect, muted);
+        auto folder_rect = QRectF(icon_rect.center().x() - FOLDER_ICON_SIZE / 2.0, icon_rect.center().y() - FOLDER_ICON_SIZE / 2.0, FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
+        draw_folder_glyph(*painter, folder_rect, text_color, expanded);
         if (!compact) {
             auto chevron_rect = QRectF(row.right() - 22, row.center().y() - 6, 12, 12);
             if (hovered)
@@ -192,8 +212,8 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
         auto text_rect = QRectF(icon_rect.right() + 10, row.top(), text_right - icon_rect.right() - 10, row.height());
 
         auto font = option.font;
-        if (kind == RowKind::Folder)
-            font.setWeight(QFont::DemiBold);
+        font.setPixelSize(FONT_PIXEL_SIZE);
+        font.setWeight(kind == RowKind::Folder ? QFont::Medium : QFont::Normal);
         painter->setFont(font);
         painter->setPen(kind == RowKind::PinnedTab && !loaded ? muted : text_color);
         auto text = QFontMetrics(font).elidedText(index.data(Qt::DisplayRole).toString(), Qt::ElideRight, static_cast<int>(text_rect.width()));
@@ -219,7 +239,7 @@ SidebarTree::SidebarTree(QWidget* parent)
     setItemDelegate(m_delegate);
     setHeaderHidden(true);
     setRootIsDecorated(false);
-    setIndentation(14);
+    setIndentation(16);
     setFrameShape(QFrame::NoFrame);
     setFocusPolicy(Qt::NoFocus);
     setMouseTracking(true);

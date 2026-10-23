@@ -2474,12 +2474,14 @@ int TabWidget::vertical_tabs_layout_width() const
 
 bool TabWidget::should_show_window_controls_in_tab_toolbar() const
 {
+    if (m_vertical_sidebar_widget) // Fork hook (Arc): window controls sit at the top of the sidebar.
+        return false;
     return m_window_controls_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal;
 }
 
 void TabWidget::update_toolbar_placement()
 {
-    auto use_full_width_toolbar = current_tab_layout() != TabLayout::Horizontal;
+    auto use_full_width_toolbar = current_tab_layout() != TabLayout::Horizontal && !m_vertical_sidebar_widget; // Fork hook (Arc)
 
     for (int index = 0; index < m_stacked_widget->count(); ++index) {
         auto* current_tab = tab(index);
@@ -2534,7 +2536,21 @@ void TabWidget::rebuild_layout()
     m_tab_bar->set_tab_layout(current_tab_layout());
     update_toolbar_placement();
 
-    if (m_tab_bar->tab_layout() != TabLayout::Horizontal) {
+    if (m_tab_bar->tab_layout() != TabLayout::Horizontal && m_vertical_sidebar_widget) {
+        // Fork hook (Arc): the sidebar runs the full window height and the toolbar sits above the page.
+        rebuild_layout_for_vertical_tabs();
+        rebuild_page_column();
+        if (vertical_tabs_are_on_right()) {
+            m_vertical_tabs_content_layout->addWidget(m_page_column, 1);
+            m_vertical_tabs_content_layout->addWidget(m_vertical_tabs_reserved_space);
+        } else {
+            m_vertical_tabs_content_layout->addWidget(m_vertical_tabs_reserved_space);
+            m_vertical_tabs_content_layout->addWidget(m_page_column, 1);
+        }
+        m_page_column->show();
+        m_main_layout->addWidget(m_vertical_tabs_content, 1);
+        m_vertical_tabs_content->show();
+    } else if (m_tab_bar->tab_layout() != TabLayout::Horizontal) {
         rebuild_layout_for_vertical_tabs();
         m_main_layout->addWidget(m_toolbar_container);
         m_page_column->hide();
@@ -2733,7 +2749,7 @@ void TabWidget::update_vertical_tabs_hover_layout()
 
 QRect TabWidget::vertical_tabs_chrome_rect() const
 {
-    auto chrome_height = m_toolbar_container->height();
+    auto chrome_height = m_vertical_sidebar_widget ? 0 : m_toolbar_container->height(); // Fork hook (Arc): full height
     auto chrome_width = current_vertical_tabs_width();
     return {
         vertical_tabs_are_on_right() ? max(0, width() - chrome_width) : 0,

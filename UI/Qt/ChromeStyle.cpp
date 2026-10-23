@@ -118,13 +118,31 @@ QColor mix(QColor const& from, QColor const& to, double amount)
     };
 }
 
-QColor chrome_background(QPalette const& palette)
+// Fork hook (Arc)
+static QColor s_chrome_background_tint;
+static double s_chrome_background_tint_amount = 0;
+
+void set_chrome_background_tint(QColor const& color, double amount)
+{
+    s_chrome_background_tint = color;
+    s_chrome_background_tint_amount = amount;
+}
+
+static QColor untinted_chrome_background(QPalette const& palette)
 {
     auto window = chrome_window(palette);
     auto dark = is_dark(palette);
     if (dark)
         return mix(window, QColor(17, 20, 25), 0.70);
     return mix(window, material_color_anchors(dark).background, 0.68);
+}
+
+QColor chrome_background(QPalette const& palette)
+{
+    auto background = untinted_chrome_background(palette);
+    if (s_chrome_background_tint.isValid()) // Fork hook (Arc)
+        return mix(background, s_chrome_background_tint, s_chrome_background_tint_amount);
+    return background;
 }
 
 QColor chrome_surface(QPalette const& palette)
