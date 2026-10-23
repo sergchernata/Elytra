@@ -2113,15 +2113,6 @@ void TabWidget::set_new_tab_action(QAction* action)
 }
 
 // Fork hook (Arc)
-void TabWidget::set_vertical_sidebar_page_width_locked(bool locked)
-{
-    if (m_vertical_sidebar_page_width_locked == locked)
-        return;
-    m_vertical_sidebar_page_width_locked = locked;
-    rebuild_layout();
-}
-
-// Fork hook (Arc)
 void TabWidget::set_vertical_sidebar_reserved_width(Optional<int> width)
 {
     if (m_vertical_sidebar_reserved_width == width)
@@ -2573,11 +2564,7 @@ void TabWidget::rebuild_layout()
         // Fork hook (Arc): the sidebar runs the full window height and the toolbar sits above the page.
         rebuild_layout_for_vertical_tabs();
         rebuild_page_column();
-        if (m_vertical_sidebar_page_width_locked) {
-            // Placed by hand in update_tab_layout() for the duration of the animation.
-            m_vertical_tabs_content_layout->addWidget(m_vertical_tabs_reserved_space);
-            m_vertical_tabs_content_layout->addStretch(1);
-        } else if (vertical_tabs_are_on_right()) {
+        if (vertical_tabs_are_on_right()) {
             m_vertical_tabs_content_layout->addWidget(m_page_column, 1);
             m_vertical_tabs_content_layout->addWidget(m_vertical_tabs_reserved_space);
         } else {
@@ -2828,10 +2815,6 @@ void TabWidget::update_tab_layout()
         update_vertical_tabs_button_layout();
         update_vertical_tabs_overlay_geometry();
         m_vertical_tabs_content_layout->activate();
-        if (m_vertical_sidebar_widget && m_vertical_sidebar_page_width_locked) { // Fork hook (Arc)
-            auto page_width = m_vertical_tabs_content->width() - collapsed_vertical_tabs_width();
-            m_page_column->setGeometry(reserved_width, 0, page_width, m_vertical_tabs_content->height());
-        }
         m_tab_bar->set_available_width(vertical_tabs_tab_width());
         update_vertical_tabs_resize_handle();
         update_vertical_tabs_content_separator();
