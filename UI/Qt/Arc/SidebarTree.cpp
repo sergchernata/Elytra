@@ -418,6 +418,17 @@ void SidebarTree::mouseReleaseEvent(QMouseEvent* event)
         emit row_clicked(index);
 }
 
+// As in Arc: double-clicking empty sidebar space opens the command bar.
+void SidebarTree::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && !indexAt(event->position().toPoint()).isValid()) {
+        emit background_double_clicked();
+        event->accept();
+        return;
+    }
+    QTreeView::mouseDoubleClickEvent(event);
+}
+
 SidebarTree::DropPlace SidebarTree::drop_place_for(QModelIndex const& target) const
 {
     if (!target.isValid())

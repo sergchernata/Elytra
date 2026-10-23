@@ -74,6 +74,7 @@ public:
 protected:
     virtual void paintEvent(QPaintEvent*) override;
     virtual void resizeEvent(QResizeEvent*) override;
+    virtual void mouseDoubleClickEvent(QMouseEvent*) override;
     virtual void showEvent(QShowEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
 

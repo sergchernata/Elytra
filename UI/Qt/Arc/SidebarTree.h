@@ -81,12 +81,14 @@ signals:
     void row_clicked(QModelIndex const&);
     void close_clicked(QModelIndex const&);
     void clear_clicked();
+    void background_double_clicked();
     void row_dropped(QModelIndex const& source, QModelIndex const& target, DropPlace);
     void urls_dropped(QList<QUrl> const&, QModelIndex const& target, DropPlace);
 
 protected:
     virtual void mousePressEvent(QMouseEvent*) override;
     virtual void mouseReleaseEvent(QMouseEvent*) override;
+    virtual void mouseDoubleClickEvent(QMouseEvent*) override;
     virtual void mouseMoveEvent(QMouseEvent*) override;
     virtual void leaveEvent(QEvent*) override;
     virtual void dragMoveEvent(QDragMoveEvent*) override;

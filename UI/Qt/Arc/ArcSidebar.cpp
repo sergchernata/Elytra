@@ -317,6 +317,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     connect(m_tree, &SidebarTree::row_clicked, this, &ArcSidebar::on_row_clicked);
     connect(m_tree, &SidebarTree::close_clicked, this, &ArcSidebar::on_close_clicked);
     connect(m_tree, &SidebarTree::clear_clicked, this, &ArcSidebar::clear_today);
+    connect(m_tree, &SidebarTree::background_double_clicked, this, [this] {
+        if (m_window)
+            CommandBar::toggle_for(*m_window);
+    });
     connect(m_tree, &SidebarTree::row_dropped, this, &ArcSidebar::on_row_dropped);
     connect(m_tree, &SidebarTree::urls_dropped, this, &ArcSidebar::on_urls_dropped);
     connect(m_tree, &QWidget::customContextMenuRequested, this, &ArcSidebar::show_tree_menu);
@@ -1109,6 +1113,17 @@ QIcon ArcSidebar::icon_for(QString const& url, Tab const* tab) const
     if (auto cached = ArcIcons::icon_for_url(url); !cached.isNull())
         return cached;
     return letter_icon(QUrl(url).host());
+}
+
+// Empty sidebar space outside the list (between sections, around the favorites): also the command bar.
+void ArcSidebar::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && m_window) {
+        CommandBar::toggle_for(*m_window);
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
 }
 
 void ArcSidebar::schedule_rebuild()
