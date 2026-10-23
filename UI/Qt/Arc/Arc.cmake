@@ -4,6 +4,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/ArcIcons.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcImportParser.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcImporter.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ArcSelfTest.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcSidebar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CommandBar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CustomGlyphs.cpp

@@ -54,6 +54,7 @@ class ArcSidebar final
     : public QWidget
     , public WebView::SettingsObserver {
     Q_OBJECT
+    friend class SelfTest; // ArcSelfTest.cpp
 
 public:
     static void attach(BrowserWindow&);

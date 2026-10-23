@@ -64,3 +64,9 @@ ladybird_test("Arc/TestArcReleaseInfo.cpp" UI/Qt
 )
 target_sources(TestArcReleaseInfo PRIVATE "${ARC_SOURCE_DIR}/ReleaseInfo.cpp")
 deploy_qt_offscreen_platform_plugin(TestArcReleaseInfo)
+
+# The sidebar's integration tests, in a real browser window (see UI/Qt/Arc/ArcSelfTest.cpp). Needs a desktop session.
+if (APPLE)
+    add_test(NAME TestArcSelfTest COMMAND "${CMAKE_CURRENT_LIST_DIR}/run-arc-self-test.sh" "$<TARGET_FILE:ladybird>")
+    set_tests_properties(TestArcSelfTest PROPERTIES TIMEOUT 300 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
+endif()

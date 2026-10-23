@@ -372,7 +372,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     });
 
     connect(&m_tabs, &TabWidget::tabs_changed, this, [this] {
-        QTimer::singleShot(0, this, [this] { apply_toolbar_inset(); });
+        apply_toolbar_inset(); // Now, before the new tab's toolbar is first shown.
         track_tabs();
         schedule_rebuild();
         save_session();
@@ -1754,18 +1754,31 @@ void ArcSidebar::update_mode()
 
 // Upstream's toolbar has a 12px left margin, which leaves its sidebar button sitting in from the page's
 // left edge. Trim it so the button lines up with the page, docked or hidden.
+// Upstream sets each tab's toolbar margins itself (e.g. on tab switches). Correcting them afterwards let a new tab's
+// toolbar show at upstream's margin for a frame, then jump. So each toolbar is watched and corrected as it asks for
+// a layout, before it's laid out and painted.
+static void inset_toolbar(QWidget& toolbar)
+{
+    auto* layout = toolbar.layout();
+    if (!layout)
+        return;
+    auto margins = layout->contentsMargins();
+    if (margins.left() != HIDDEN_TOOLBAR_LEFT_MARGIN) {
+        margins.setLeft(HIDDEN_TOOLBAR_LEFT_MARGIN);
+        layout->setContentsMargins(margins);
+    }
+}
+
 void ArcSidebar::apply_toolbar_inset()
 {
     if (!m_window)
         return;
     for (auto* toolbar : m_window->findChildren<QWidget*>("LadybirdNavigationToolbar")) {
-        if (auto* layout = toolbar->layout()) {
-            auto margins = layout->contentsMargins();
-            if (margins.left() != HIDDEN_TOOLBAR_LEFT_MARGIN) {
-                margins.setLeft(HIDDEN_TOOLBAR_LEFT_MARGIN);
-                layout->setContentsMargins(margins);
-            }
+        if (!toolbar->property("arc_inset_watched").toBool()) {
+            toolbar->setProperty("arc_inset_watched", true);
+            toolbar->installEventFilter(this);
         }
+        inset_toolbar(*toolbar);
     }
 }
 
@@ -2319,6 +2332,10 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if ((event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) && watched->property("arc_inset_watched").toBool()) {
+        inset_toolbar(*static_cast<QWidget*>(watched));
+        return false;
+    }
     if (watched == m_watched_column && m_mode == Mode::Hidden) {
         if (event->type() == QEvent::Enter)
             m_reveal_timer->start();
