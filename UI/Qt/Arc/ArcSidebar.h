@@ -125,6 +125,7 @@ private:
     void rebuild();
     void rebuild_favorites();
     void rebuild_tree();
+    void fill_tree();
     void rebuild_switcher();
     void show_shelf();
     void hide_shelf();
@@ -184,6 +185,8 @@ private:
 
     QPointer<BrowserWindow> m_window;
     QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
+    QString m_tree_space_id;                // The space the list shows.
+    QHash<QString, int> m_scroll_positions; // Each space's list scroll position.
     TabWidget& m_tabs;
     QString m_space_id;
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;

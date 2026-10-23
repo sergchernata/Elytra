@@ -17,6 +17,7 @@
 #include <QApplication>
 #include <QImage>
 #include <QMouseEvent>
+#include <QScrollBar>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
 
@@ -187,6 +188,12 @@ TEST_CASE(a_pinned_tab_is_away_only_on_another_page)
     EXPECT(!pinned_urls_match("https://example.com/app", "http://example.com/app"));
     // A tab that hasn't loaded anything yet hasn't gone anywhere.
     EXPECT(pinned_urls_match("https://example.com/app", ""));
+
+    // Nor has one still on a blank page while its pinned URL loads: no "|" flashing in.
+    EXPECT(!pinned_tab_is_away("https://example.com/app", "about:blank"));
+    EXPECT(!pinned_tab_is_away("https://example.com/app", ""));
+    EXPECT(!pinned_tab_is_away("https://example.com/app", "https://example.com/app/"));
+    EXPECT(pinned_tab_is_away("https://example.com/app", "https://example.com/other"));
 }
 
 TEST_CASE(a_pinned_tab_icon_is_a_button_with_arcs_labels)
@@ -311,6 +318,35 @@ TEST_CASE(the_list_ends_with_empty_space_that_scrolls_with_it)
     QMouseEvent event(QEvent::MouseButtonDblClick, QPointF(point), QPointF(tree.viewport()->mapToGlobal(point)), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(tree.viewport(), &event);
     EXPECT_EQ(double_clicks, 1);
+}
+
+TEST_CASE(rebuilding_the_list_keeps_its_scroll_position)
+{
+    QStandardItemModel model;
+    auto fill = [&] {
+        for (int i = 0; i < 100; ++i) {
+            auto* item = new QStandardItem(QString("Tab %1").arg(i));
+            item->setData(static_cast<int>(RowKind::TodayTab), KindRole);
+            model.appendRow(item);
+        }
+    };
+    fill();
+
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    QApplication::processEvents();
+    tree.verticalScrollBar()->setValue(900);
+    VERIFY(tree.verticalScrollBar()->value() == 900);
+
+    tree.rebuild_keeping_scroll_position([&] {
+        model.clear();
+        fill();
+    });
+    EXPECT_EQ(tree.verticalScrollBar()->value(), 900);
+    QApplication::processEvents(); // And it stays there once the view settles.
+    EXPECT_EQ(tree.verticalScrollBar()->value(), 900);
 }
 
 TEST_CASE(divider_row_has_a_rule_strip_with_clear_at_its_end)

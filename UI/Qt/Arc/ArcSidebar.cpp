@@ -1434,7 +1434,7 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
             item->setIcon(icon_for(tab_shows_a_page(tab_url) ? tab_url : node.url, tab_shows_a_page(tab_url) ? tab : nullptr));
             item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
             item->setData(tab != nullptr, IsLoadedRole);
-            item->setData(tab && !pinned_urls_match(node.url, url_of(*tab)), NavigatedAwayRole);
+            item->setData(pinned_tab_is_away(node.url, tab_url), NavigatedAwayRole);
             item->setData(QVariant::fromValue(reinterpret_cast<quintptr>(tab)), TabRole);
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
         }
@@ -1444,15 +1444,19 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
 
 void ArcSidebar::rebuild_tree()
 {
-    // Restoring folders' expansion isn't the user opening them: no expand animation, which would replay on every
-    // tab change. Nor intermediate repaints: the list changes once, in place.
-    m_tree->setAnimated(false);
-    m_tree->setUpdatesEnabled(false);
-    auto restore = qScopeGuard([this] {
-        m_tree->setUpdatesEnabled(true);
-        m_tree->setAnimated(true);
-    });
-    auto scroll = m_tree->verticalScrollBar()->value();
+    // Each space keeps its own scroll position, as in Arc; refreshing the same space never moves the list.
+    auto switching_space = m_tree_space_id != m_space_id;
+    if (switching_space && !m_tree_space_id.isEmpty())
+        m_scroll_positions.insert(m_tree_space_id, m_tree->verticalScrollBar()->value());
+    m_tree_space_id = m_space_id;
+
+    m_tree->rebuild_keeping_scroll_position([this] { fill_tree(); });
+    if (switching_space)
+        m_tree->verticalScrollBar()->setValue(m_scroll_positions.value(m_space_id, 0));
+}
+
+void ArcSidebar::fill_tree()
+{
     m_model->clear();
 
     auto const* space = SpaceStore::the().space(m_space_id);
@@ -1493,7 +1497,6 @@ void ArcSidebar::rebuild_tree()
         m_tree->setRowHidden(row, QModelIndex(), collapsed);
 
     update_current_highlight();
-    m_tree->verticalScrollBar()->setValue(scroll);
 }
 
 void ArcSidebar::show_shelf()
@@ -1605,10 +1608,11 @@ void ArcSidebar::update_tab_rows(Tab& tab)
                 item.setText(pinned_row_title(pinned->title, pinned->saved_title, tab.title(), pinned->url, tab_url));
                 if (!tab_shows_a_page(tab_url)) {
                     item.setIcon(icon_for(pinned->url, nullptr));
+                    item.setData(false, NavigatedAwayRole);
                     return;
                 }
             }
-            auto away = pinned && !pinned_urls_match(pinned->url, url_of(tab));
+            auto away = pinned && pinned_tab_is_away(pinned->url, url_of(tab));
             if (item.data(NavigatedAwayRole).toBool() != away)
                 item.setData(away, NavigatedAwayRole);
         } else {

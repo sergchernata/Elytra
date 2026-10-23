@@ -10,6 +10,7 @@
 #include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QVariantAnimation>
+#include <AK/Function.h>
 #include <AK/Optional.h>
 #include <QUrl>
 
@@ -38,6 +39,8 @@ bool pinned_urls_match(QString const& pinned, QString const& current);
 
 // Whether a tab at this URL shows a page yet (not a blank or new-tab page, nor nothing at all).
 bool tab_shows_a_page(QString const& tab_url);
+// Whether a pinned tab at `tab_url` has navigated away from its pinned URL (Arc's "|" before the title).
+bool pinned_tab_is_away(QString const& pinned_url, QString const& tab_url);
 // A pinned row's title: its custom title, else the live tab's once it shows its page and has one, else the title
 // saved from its last visit, else its URL.
 QString pinned_row_title(QString const& custom_title, QString const& saved_title, QString const& live_title, QString const& pinned_url, QString const& tab_url);
@@ -103,6 +106,10 @@ public:
     SidebarDelegate& delegate() { return *m_delegate; }
     bool is_dragging() const { return state() == DraggingState; }
     void reset_drag_state() { setState(NoState); }
+
+    // Replaces the rows (via `rebuild`) without moving the list: same scroll position, no expand animations, no
+    // repaint midway.
+    void rebuild_keeping_scroll_position(Function<void()> const& rebuild);
 
     enum class DropPlace {
         Above,

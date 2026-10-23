@@ -19,6 +19,7 @@
 #include <QPainter>
 #include <QEasingCurve>
 #include <QPainterPath>
+#include <QScrollBar>
 
 #include <cmath>
 
@@ -95,6 +96,11 @@ bool pinned_urls_match(QString const& pinned, QString const& current)
 bool tab_shows_a_page(QString const& tab_url)
 {
     return !tab_url.isEmpty() && !tab_url.startsWith("about:");
+}
+
+bool pinned_tab_is_away(QString const& pinned_url, QString const& tab_url)
+{
+    return tab_shows_a_page(tab_url) && !pinned_urls_match(pinned_url, tab_url);
 }
 
 QString pinned_row_title(QString const& custom_title, QString const& saved_title, QString const& live_title, QString const& pinned_url, QString const& tab_url)
@@ -494,6 +500,24 @@ SidebarTree::SidebarTree(QWidget* parent)
         if (m_delegate->pinned_hover_index.isValid())
             viewport()->update(visualRect(m_delegate->pinned_hover_index));
     });
+}
+
+void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuild)
+{
+    auto scroll = verticalScrollBar()->value();
+    setUpdatesEnabled(false);
+    setAnimated(false);
+
+    rebuild();
+
+    // The view lays out new rows later; until then the scroll range is that of an empty list, and restoring the
+    // position would clamp it to the top. Lay them out now, then restore.
+    executeDelayedItemsLayout();
+    updateGeometries();
+    verticalScrollBar()->setValue(scroll);
+
+    setAnimated(true);
+    setUpdatesEnabled(true);
 }
 
 // Starts the icon-hover animation of the row under the pointer, or reverses the one showing.
