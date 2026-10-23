@@ -11,6 +11,7 @@
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
+#include <UI/Qt/Arc/TabMatching.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/StringUtils.h>
@@ -46,11 +47,7 @@ int CommandBar::card_height_for_rows(int rows)
 
 bool CommandBar::tab_matches(QString const& query, QString const& title, QString const& url)
 {
-    for (auto const& word : query.split(' ', Qt::SkipEmptyParts)) {
-        if (!title.contains(word, Qt::CaseInsensitive) && !url.contains(word, Qt::CaseInsensitive))
-            return false;
-    }
-    return true;
+    return tab_matches_query(query, title, url);
 }
 
 void CommandBar::toggle_for(BrowserWindow& window)

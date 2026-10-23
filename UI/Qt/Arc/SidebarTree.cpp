@@ -85,6 +85,9 @@ bool pinned_urls_match(QString const& pinned, QString const& current)
         QUrl url(text);
         url.setFragment({});
         url.setHost(url.host().toLower());
+        // A default port is no port.
+        if ((url.scheme() == "https" && url.port() == 443) || (url.scheme() == "http" && url.port() == 80))
+            url.setPort(-1);
         auto path = url.path();
         while (path.endsWith('/'))
             path.chop(1);
@@ -106,11 +109,12 @@ bool pinned_tab_is_away(QString const& pinned_url, QString const& tab_url)
 
 QString pinned_row_title(QString const& custom_title, QString const& saved_title, QString const& live_title, QString const& pinned_url, QString const& tab_url)
 {
-    if (!custom_title.isEmpty())
+    // A title of only spaces isn't one.
+    if (!custom_title.trimmed().isEmpty())
         return custom_title;
-    if (tab_shows_a_page(tab_url) && !live_title.isEmpty())
+    if (tab_shows_a_page(tab_url) && !live_title.trimmed().isEmpty())
         return live_title;
-    if (!saved_title.isEmpty())
+    if (!saved_title.trimmed().isEmpty())
         return saved_title;
     return pinned_url;
 }

@@ -70,3 +70,25 @@ if (APPLE)
     add_test(NAME TestArcSelfTest COMMAND "${CMAKE_CURRENT_LIST_DIR}/run-arc-self-test.sh" "$<TARGET_FILE:ladybird>")
     set_tests_properties(TestArcSelfTest PROPERTIES TIMEOUT 300 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
 endif()
+
+ladybird_test("Arc/TestArcEdgeCases.cpp" UI/Qt
+    CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
+    LIBS LibURL Qt::Core Qt::Gui Qt::Widgets
+)
+target_sources(TestArcEdgeCases PRIVATE
+    "${ARC_SOURCE_DIR}/ArcIcons.cpp"
+    "${ARC_SOURCE_DIR}/CustomGlyphs.cpp"
+    "${ARC_SOURCE_DIR}/ReleaseInfo.cpp"
+    "${ARC_SOURCE_DIR}/SidebarTree.cpp"
+    "${ARC_SOURCE_DIR}/SymbolButton.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
+)
+if (APPLE)
+    target_sources(TestArcEdgeCases PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm")
+    target_link_libraries(TestArcEdgeCases PRIVATE "-framework AppKit")
+else()
+    target_sources(TestArcEdgeCases PRIVATE "${ARC_SOURCE_DIR}/SymbolIconOther.cpp")
+endif()
+set_target_properties(TestArcEdgeCases PROPERTIES AUTOMOC ON)
+deploy_qt_offscreen_platform_plugin(TestArcEdgeCases)
