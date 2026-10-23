@@ -24,6 +24,8 @@ static constexpr int BAR_WIDTH = 640;
 static constexpr int SHADOW_MARGIN = 24;
 static constexpr int CORNER_RADIUS = 14;
 static constexpr int INNER_PADDING = 10;
+// Upstream's suggestion popup is clipped to the window that owns the input, so leave room for it below.
+static constexpr int SUGGESTIONS_SPACE = 380;
 
 void CommandBar::toggle_for(BrowserWindow& window)
 {
@@ -50,6 +52,7 @@ CommandBar::CommandBar(BrowserWindow& window)
     m_edit = new LocationEdit(this, window.is_private());
     m_edit->setMinimumHeight(40);
     layout->addWidget(m_edit);
+    layout->addStretch(1);
 
     m_edit->on_navigation = [this](auto input, auto url, auto destination_kind) {
         open_in_new_tab(AK::move(input), AK::move(url), destination_kind);
@@ -114,8 +117,7 @@ void CommandBar::reposition()
         return;
     auto frame = m_window->geometry();
     auto width = qMin(BAR_WIDTH, frame.width() - 80) + SHADOW_MARGIN * 2;
-    adjustSize();
-    auto height = sizeHint().height();
+    auto height = SHADOW_MARGIN * 2 + INNER_PADDING * 2 + m_edit->sizeHint().height() + SUGGESTIONS_SPACE;
     auto x = frame.x() + (frame.width() - width) / 2;
     auto y = frame.y() + frame.height() / 5;
     setGeometry(x, y, width, height);
@@ -153,6 +155,21 @@ bool CommandBar::eventFilter(QObject* watched, QEvent* event)
     return false;
 }
 
+QRectF CommandBar::card_rect() const
+{
+    // Just around the input; the suggestion popup draws its own frame below it.
+    auto bottom = m_edit->geometry().bottom() + INNER_PADDING + 1;
+    return QRectF(SHADOW_MARGIN, SHADOW_MARGIN, width() - SHADOW_MARGIN * 2, bottom - SHADOW_MARGIN);
+}
+
+void CommandBar::mousePressEvent(QMouseEvent* event)
+{
+    // Clicks in the transparent space around the card dismiss the bar.
+    if (!card_rect().contains(event->position()))
+        dismiss();
+    QWidget::mousePressEvent(event);
+}
+
 void CommandBar::keyPressEvent(QKeyEvent* event)
 {
     if (event->key() == Qt::Key_Escape) {
@@ -167,7 +184,7 @@ void CommandBar::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    auto card = QRectF(rect()).adjusted(SHADOW_MARGIN, SHADOW_MARGIN, -SHADOW_MARGIN, -SHADOW_MARGIN);
+    auto card = card_rect();
 
     // Soft shadow: stacked translucent rounded rects, offset slightly downward.
     painter.setPen(Qt::NoPen);

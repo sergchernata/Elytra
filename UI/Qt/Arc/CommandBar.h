@@ -39,11 +39,13 @@ protected:
     virtual bool eventFilter(QObject*, QEvent*) override;
     virtual void paintEvent(QPaintEvent*) override;
     virtual void keyPressEvent(QKeyEvent*) override;
+    virtual void mousePressEvent(QMouseEvent*) override;
 
 private:
     void open_in_new_tab(String input, Optional<URL::URL>, WebView::OmniboxDestinationKind);
     void reposition();
     bool owns_widget(QWidget*) const;
+    QRectF card_rect() const;
 
     QPointer<BrowserWindow> m_window;
     LocationEdit* m_edit { nullptr };
