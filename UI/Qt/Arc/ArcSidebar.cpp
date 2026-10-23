@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
+#include <UI/Qt/Arc/WindowControls.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
@@ -42,6 +43,10 @@
 #include <QWindow>
 #include <QGraphicsOpacityEffect>
 #include <QApplication>
+#include <QParallelAnimationGroup>
+#include <QPropertyAnimation>
+#include <QResizeEvent>
+#include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -57,6 +62,11 @@ static constexpr auto FAVORITE_PREFIX = "fav:";
 static constexpr int ExpandedRole = Qt::UserRole + 20;
 static constexpr int FAVORITE_TILE_HEIGHT = 54;
 static constexpr int TOP_STRIP_HEIGHT = 34;
+static constexpr int FLOATING_MARGIN = 6;
+static constexpr int FLOATING_RADIUS = 12;
+static constexpr int FLOATING_PADDING = 8;
+static constexpr int SHELF_SLIDE_DISTANCE = 14;
+static constexpr int SHELF_ANIMATION_MS = 190;
 
 #if defined(AK_OS_MACOS)
 static constexpr auto SPACE_SHORTCUT_MODIFIER = Qt::META; // The Control key on macOS, as in Arc.
@@ -98,6 +108,32 @@ static void for_each_item(QStandardItem& parent, Callback const& callback)
     }
 }
 
+// --- Keeping the slid-out sidebar open ---
+
+KeepSidebarOpen::KeepSidebarOpen(QWidget* inside_sidebar)
+{
+    for (auto* widget = inside_sidebar; widget; widget = widget->parentWidget()) {
+        if (qobject_cast<ArcSidebar*>(widget)) {
+            m_sidebar = widget;
+            break;
+        }
+    }
+    if (m_sidebar)
+        m_sidebar->setProperty("arcKeepOpen", true);
+}
+
+KeepSidebarOpen::~KeepSidebarOpen()
+{
+    if (!m_sidebar)
+        return;
+    m_sidebar->setProperty("arcKeepOpen", false);
+    // Let upstream re-check the pointer now that the menu is gone (it slides away if the pointer left).
+    if (auto* column = m_sidebar->parentWidget()) {
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(column, &leave);
+    }
+}
+
 // --- Attaching ----------------------------------------------------------------------------------
 
 void ArcSidebar::attach(BrowserWindow& window)
@@ -123,7 +159,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 {
     auto& store = SpaceStore::the();
 
-    auto* layout = new QVBoxLayout(this);
+    // Everything lives in a panel, so that when the sidebar is hidden and slides out over the page
+    // the panel can keep its full width and move in from the edge (see layout_panel()).
+    m_panel = new QWidget(this);
+    auto* layout = new QVBoxLayout(m_panel);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
 
@@ -141,21 +180,42 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_favorites->installEventFilter(this);
     layout->addWidget(m_favorites);
 
-    auto* header = new QWidget(this);
-    auto* header_layout = new QHBoxLayout(header);
-    header_layout->setContentsMargins(10, 2, 8, 2);
-    header_layout->setSpacing(8);
-    m_space_icon = new QLabel(header);
-    m_space_icon->setFixedSize(18, 18);
-    m_space_icon->setAlignment(Qt::AlignCenter);
-    m_space_title = new QLabel(header);
+    // Space header: icon and name. On hover (as in Arc) the icon becomes a chevron that folds the
+    // pinned section away, and a "..." button opens the space menu.
+    m_header = new QWidget(this);
+    m_header->setObjectName("ArcSpaceHeader");
+    m_header->setAttribute(Qt::WA_StyledBackground);
+    m_header->setFixedHeight(32);
+    auto* header_layout = new QHBoxLayout(m_header);
+    header_layout->setContentsMargins(2, 0, 2, 0);
+    header_layout->setSpacing(4);
+    m_space_icon = new SymbolButton(m_header);
+    m_space_icon->setFixedSize(28, 28);
+    m_space_title = new QLabel(m_header);
+    m_space_menu_button = new SymbolButton(m_header);
+    m_space_menu_button->set_symbol("ellipsis");
+    m_space_menu_button->setFixedSize(26, 26);
+    m_space_menu_button->setToolTip("Space Options");
+    m_space_menu_button->hide();
     header_layout->addWidget(m_space_icon);
     header_layout->addWidget(m_space_title, 1);
-    header->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(header, &QWidget::customContextMenuRequested, this, [this, header](QPoint const& position) {
-        show_space_menu(m_space_id, header->mapToGlobal(position));
+    header_layout->addWidget(m_space_menu_button);
+    m_header->installEventFilter(this);
+    m_header->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_header, &QWidget::customContextMenuRequested, this, [this](QPoint const& position) {
+        show_space_menu(m_space_id, m_header->mapToGlobal(position));
     });
-    layout->addWidget(header);
+    connect(m_space_menu_button, &QAbstractButton::clicked, this, [this] {
+        show_space_menu(m_space_id, m_space_menu_button->mapToGlobal(QPoint(0, m_space_menu_button->height() + 2)));
+    });
+    connect(m_space_icon, &QAbstractButton::clicked, this, [this] {
+        if (m_collapsed_spaces.contains(m_space_id))
+            m_collapsed_spaces.remove(m_space_id);
+        else
+            m_collapsed_spaces.insert(m_space_id);
+        rebuild();
+    });
+    layout->addWidget(m_header);
 
     m_model = new SidebarModel(this);
     m_tree = new SidebarTree(this);
@@ -174,7 +234,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_downloads_button->setToolTip("Downloads");
     m_downloads_button->installEventFilter(this);
     connect(m_downloads_button, &QAbstractButton::clicked, this, [this] {
-        if (m_shelf->isVisible())
+        if (m_shelf->isVisible() && !m_shelf_hiding)
             QDesktopServices::openUrl(QUrl::fromLocalFile(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)));
         else
             show_shelf();
@@ -183,6 +243,24 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_shelf = new DownloadsShelf(this);
     m_shelf->hide();
     m_shelf->installEventFilter(this);
+    m_shelf_opacity = new QGraphicsOpacityEffect(m_shelf);
+    m_shelf_opacity->setOpacity(0);
+    m_shelf->setGraphicsEffect(m_shelf_opacity);
+    m_shelf_position_animation = new QPropertyAnimation(m_shelf, "pos", this);
+    m_shelf_position_animation->setDuration(SHELF_ANIMATION_MS);
+    m_shelf_position_animation->setEasingCurve(QEasingCurve::OutCubic);
+    m_shelf_opacity_animation = new QPropertyAnimation(m_shelf_opacity, "opacity", this);
+    m_shelf_opacity_animation->setDuration(SHELF_ANIMATION_MS);
+    m_shelf_opacity_animation->setEasingCurve(QEasingCurve::OutCubic);
+    m_shelf_animation = new QParallelAnimationGroup(this);
+    m_shelf_animation->addAnimation(m_shelf_position_animation);
+    m_shelf_animation->addAnimation(m_shelf_opacity_animation);
+    connect(m_shelf_animation, &QAbstractAnimation::finished, this, [this] {
+        if (m_shelf_hiding) {
+            m_shelf->hide();
+            m_shelf_hiding = false;
+        }
+    });
 
     m_shelf_show_timer = new QTimer(this);
     m_shelf_show_timer->setSingleShot(true);
@@ -191,7 +269,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_shelf_hide_timer = new QTimer(this);
     m_shelf_hide_timer->setSingleShot(true);
     m_shelf_hide_timer->setInterval(320);
-    connect(m_shelf_hide_timer, &QTimer::timeout, m_shelf, &QWidget::hide);
+    connect(m_shelf_hide_timer, &QTimer::timeout, this, &ArcSidebar::hide_shelf);
     m_shelf_refresh_timer = new QTimer(this);
     m_shelf_refresh_timer->setInterval(1000);
     connect(m_shelf_refresh_timer, &QTimer::timeout, this, [this] {
@@ -199,6 +277,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
             m_shelf_refresh_timer->stop();
             return;
         }
+        if (m_shelf_animation->state() == QAbstractAnimation::Running)
+            return;
         m_shelf->refresh(); // Keeps in-progress percentages moving.
         position_shelf();
     });
@@ -624,7 +704,7 @@ public:
         if (!current.isEmpty() && !is_symbol_icon(current))
             add(current, current, "Current icon");
         for (auto const& name : space_symbol_names()) {
-            if (symbol_pixmap(name, 15, Qt::black, 1).isNull())
+            if (fitted_symbol_pixmap(name, ICON_BOX, Qt::black, 1).isNull())
                 continue; // Not available on this macOS version.
             add("sf:" + name, "sf:" + name, name);
         }
@@ -672,6 +752,7 @@ static QDialog* make_space_dialog(QWidget* parent, QString const& title, QString
 
 void ArcSidebar::new_space()
 {
+    KeepSidebarOpen keep_open(this);
     auto& store = SpaceStore::the();
     auto preset = COLOR_PRESETS[store.spaces().size() % std::size(COLOR_PRESETS)];
 
@@ -908,17 +989,12 @@ void ArcSidebar::rebuild()
 
     auto muted = ChromeStyle::chrome_muted_text(palette());
     m_space_title->setText(space ? space->title : QString());
-    m_space_icon->clear();
-    if (space) {
-        auto icon = space->icon.isEmpty() ? space->title.left(1).toUpper() : space->icon;
-        auto pixmap = is_symbol_icon(icon) ? symbol_pixmap(symbol_name(icon), 13, muted, devicePixelRatioF()) : QPixmap();
-        if (!pixmap.isNull())
-            m_space_icon->setPixmap(pixmap);
-        else
-            m_space_icon->setText(is_symbol_icon(icon) ? space->title.left(1).toUpper() : icon);
-        m_space_icon->setStyleSheet(QString("QLabel { color: %1; font-weight: 700; font-size: 13px; }").arg(muted.name()));
-    }
     m_space_title->setStyleSheet(QString("QLabel { color: %1; font-weight: 600; font-size: 13px; }").arg(muted.name()));
+    auto hover = ChromeStyle::is_dark(palette()) ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.05)";
+    m_header->setStyleSheet(QString("QWidget#ArcSpaceHeader { border-radius: 9px; background: transparent; }"
+                                    "QWidget#ArcSpaceHeader[hovered=\"true\"] { background: %1; }")
+                                .arg(hover));
+    update_space_header_icon();
     m_tree->delegate().accent = space_color();
 
     rebuild_favorites();
@@ -927,6 +1003,22 @@ void ArcSidebar::rebuild()
     update();
     if (window()->isActiveWindow() || !qApp->activeWindow())
         apply_space_tint();
+}
+
+void ArcSidebar::update_space_header_icon()
+{
+    auto const* space = SpaceStore::the().space(m_space_id);
+    if (!space)
+        return;
+    auto collapsed = m_collapsed_spaces.contains(m_space_id);
+    if (m_header_hovered || collapsed) {
+        m_space_icon->set_symbol(collapsed ? "chevron.right" : "chevron.down");
+        m_space_icon->setToolTip(collapsed ? "Show Pinned Tabs" : "Hide Pinned Tabs");
+    } else {
+        m_space_icon->set_icon_text(space->icon.isEmpty() ? space->title.left(1).toUpper() : space->icon);
+        m_space_icon->setToolTip({});
+    }
+    m_space_icon->set_dimmed(true);
 }
 
 void ArcSidebar::rebuild_favorites()
@@ -1023,6 +1115,7 @@ void ArcSidebar::rebuild_tree()
     auto& root = *m_model->invisibleRootItem();
     append_nodes(root, space->pinned);
 
+    auto pinned_rows = root.rowCount();
     auto* new_tab = new QStandardItem;
     new_tab->setData(static_cast<int>(RowKind::NewTab), KindRole);
     new_tab->setFlags(Qt::ItemIsEnabled);
@@ -1042,6 +1135,10 @@ void ArcSidebar::rebuild_tree()
             m_tree->setExpanded(item.index(), item.data(ExpandedRole).toBool());
     });
 
+    auto collapsed = m_collapsed_spaces.contains(m_space_id);
+    for (int row = 0; row < pinned_rows; ++row)
+        m_tree->setRowHidden(row, QModelIndex(), collapsed);
+
     update_current_highlight();
     m_tree->verticalScrollBar()->setValue(scroll);
 }
@@ -1051,17 +1148,44 @@ void ArcSidebar::show_shelf()
     m_shelf->refresh();
     if (m_shelf->is_empty())
         return;
+
+    // Slide up a little and fade in, like Arc.
     position_shelf();
+    auto end = m_shelf->pos();
+    m_shelf_animation->stop();
+    m_shelf_position_animation->setStartValue(end + QPoint(0, SHELF_SLIDE_DISTANCE));
+    m_shelf_position_animation->setEndValue(end);
+    m_shelf_opacity_animation->setStartValue(m_shelf->isVisible() ? m_shelf_opacity->opacity() : 0.0);
+    m_shelf_opacity_animation->setEndValue(1.0);
+    m_shelf_animation->setDirection(QAbstractAnimation::Forward);
+    m_shelf_hiding = false;
+    m_shelf->move(end + QPoint(0, SHELF_SLIDE_DISTANCE));
     m_shelf->raise();
     m_shelf->show();
+    m_shelf_animation->start();
     m_shelf_refresh_timer->start();
+}
+
+void ArcSidebar::hide_shelf()
+{
+    if (!m_shelf->isVisible() || m_shelf_hiding)
+        return;
+    m_shelf_hiding = true;
+    auto start = m_shelf->pos();
+    m_shelf_animation->stop();
+    m_shelf_position_animation->setStartValue(start);
+    m_shelf_position_animation->setEndValue(start + QPoint(0, SHELF_SLIDE_DISTANCE / 2));
+    m_shelf_opacity_animation->setStartValue(m_shelf_opacity->opacity());
+    m_shelf_opacity_animation->setEndValue(0.0);
+    m_shelf_animation->start();
 }
 
 void ArcSidebar::position_shelf()
 {
-    auto bottom = m_switcher->geometry().top();
-    auto height = qMin(m_shelf->preferred_height(), bottom - TOP_STRIP_HEIGHT);
-    m_shelf->setGeometry(0, bottom - height, width(), height);
+    auto switcher_top = m_switcher->mapTo(this, QPoint(0, 0)).y();
+    auto top_limit = m_panel->y() + TOP_STRIP_HEIGHT;
+    auto height = qMin(m_shelf->preferred_height(), switcher_top - top_limit);
+    m_shelf->setGeometry(m_panel->x(), switcher_top - height, m_panel->width(), height);
 }
 
 void ArcSidebar::rebuild_switcher()
@@ -1146,11 +1270,79 @@ void ArcSidebar::update_current_highlight()
     });
 }
 
+bool ArcSidebar::is_floating() const
+{
+    // Hidden sidebar (toggle in the toolbar): it only appears as a panel over the page on edge hover.
+    return !WebView::Application::settings().tab_settings().vertical_tabs_expanded;
+}
+
+void ArcSidebar::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // The native window may not exist yet on the first layout; re-apply window-control visibility once shown.
+    QTimer::singleShot(0, this, [this] { layout_panel(); });
+}
+
+void ArcSidebar::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    layout_panel();
+}
+
+void ArcSidebar::layout_panel()
+{
+
+    auto* panel_layout = m_panel->layout();
+    if (!is_floating()) {
+        m_panel->setGeometry(rect());
+        m_panel->show();
+        panel_layout->setContentsMargins(0, 0, 0, 0);
+        set_window_controls_hidden(*window(), false);
+    } else {
+        // Upstream widens the column as the sidebar slides out; keep the panel at full width and
+        // move it with the column's edge, so it slides in rather than squeezing.
+        // The width the column will reach once fully out, minus its own padding.
+        auto padding = parentWidget()->width() - width();
+        auto full = qMax(m_tabs.vertical_sidebar_expanded_width() - padding, width());
+        auto x = width() - full;
+        m_panel->setGeometry(x + FLOATING_MARGIN, FLOATING_MARGIN, full - FLOATING_MARGIN * 2, height() - FLOATING_MARGIN * 2);
+        auto slid_out = width() > FLOATING_MARGIN * 4;
+        m_panel->setVisible(slid_out);
+        // The floating card gets its own inner padding (docked, upstream's column provides it).
+        panel_layout->setContentsMargins(FLOATING_PADDING, 0, FLOATING_PADDING, FLOATING_PADDING);
+        // As in Arc, the window controls leave the main window while the sidebar is hidden and
+        // come back inside the slid-out panel.
+        set_window_controls_hidden(*window(), !slid_out);
+    }
+    if (m_shelf && m_shelf->isVisible())
+        position_shelf();
+    update();
+}
+
 void ArcSidebar::paintEvent(QPaintEvent*)
 {
-    // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
     QPainter painter(this);
-    painter.fillRect(rect(), ChromeStyle::chrome_background(palette()));
+    auto background = ChromeStyle::chrome_background(palette());
+
+    if (!is_floating()) {
+        // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
+        painter.fillRect(rect(), background);
+        return;
+    }
+    if (!m_panel->isVisible())
+        return;
+
+    // Floating card over the page: soft shadow, rounded corners, hairline edge.
+    painter.setRenderHint(QPainter::Antialiasing);
+    auto card = QRectF(m_panel->geometry());
+    painter.setPen(Qt::NoPen);
+    for (int i = 8; i > 0; i -= 2) {
+        painter.setBrush(QColor(0, 0, 0, 10));
+        painter.drawRoundedRect(card.adjusted(-i / 2.0, -i / 4.0, i / 2.0, i), FLOATING_RADIUS + i / 2.0, FLOATING_RADIUS + i / 2.0);
+    }
+    painter.setBrush(background);
+    painter.setPen(QPen(ChromeStyle::is_dark(palette()) ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 30), 1));
+    painter.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), FLOATING_RADIUS, FLOATING_RADIUS);
 }
 
 // Arc paints the space color across the whole window frame. Upstream derives every chrome surface from
@@ -1190,7 +1382,7 @@ void ArcSidebar::apply_space_tint()
 
     // Arc has no line between the sidebar and the page; upstream's column style draws one.
     if (auto* column = parentWidget())
-        column->setStyleSheet("QWidget#LadybirdVerticalTabBar { border: none; }");
+        column->setStyleSheet("QWidget#LadybirdVerticalTabBar { border: none; background: transparent; }");
 }
 
 // --- Interaction --------------------------------------------------------------------------------
@@ -1336,13 +1528,23 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
     if (watched == m_downloads_button || watched == m_shelf) {
         if (event->type() == QEvent::Enter) {
             m_shelf_hide_timer->stop();
-            if (watched == m_downloads_button && !m_shelf->isVisible())
+            if (watched == m_downloads_button && (!m_shelf->isVisible() || m_shelf_hiding))
                 m_shelf_show_timer->start();
         } else if (event->type() == QEvent::Leave) {
             m_shelf_show_timer->stop();
             if (m_shelf->isVisible())
                 m_shelf_hide_timer->start();
         }
+        return false;
+    }
+
+    if (watched == m_header && (event->type() == QEvent::Enter || event->type() == QEvent::Leave)) {
+        m_header_hovered = event->type() == QEvent::Enter;
+        m_header->setProperty("hovered", m_header_hovered);
+        m_header->style()->unpolish(m_header);
+        m_header->style()->polish(m_header);
+        m_space_menu_button->setVisible(m_header_hovered);
+        update_space_header_icon();
         return false;
     }
 
@@ -1509,6 +1711,7 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
         break;
     }
 
+    KeepSidebarOpen keep_open(this);
     menu.exec(m_tree->viewport()->mapToGlobal(position));
 }
 
@@ -1520,9 +1723,18 @@ void ArcSidebar::show_space_menu(QString const& space_id, QPoint const& global_p
         return;
 
     QMenu menu(this);
-    menu.addAction("Edit Space…", [this, space_id] { edit_space(space_id); });
+    menu.addAction("Change Space Icon\u2026", [this, space_id] { edit_space(space_id); });
+    menu.addAction("Rename Space\u2026", [this, space_id] {
+        auto const* space = SpaceStore::the().space(space_id);
+        if (!space)
+            return;
+        bool ok = false;
+        auto title = QInputDialog::getText(m_window, "Rename Space", "Space name:", QLineEdit::Normal, space->title, &ok).trimmed();
+        if (ok && !title.isEmpty())
+            SpaceStore::the().update_space(space_id, title, space->icon, space->color);
+    });
 
-    auto* colors = menu.addMenu("Color");
+    auto* colors = menu.addMenu("Edit Theme Color");
     for (auto const& preset : COLOR_PRESETS) {
         QPixmap swatch(14, 14);
         swatch.fill(QColor(preset.hex));
@@ -1536,22 +1748,26 @@ void ArcSidebar::show_space_menu(QString const& space_id, QPoint const& global_p
         action->setChecked(space->color == QColor(preset.hex));
     }
 
+    menu.addSeparator();
+    menu.addAction("New Folder", [this] { new_folder({}, -1); });
+
+    menu.addSeparator();
     int index = 0;
     for (int i = 0; i < store.spaces().size(); ++i) {
         if (store.spaces()[i].id == space_id)
             index = i;
     }
     if (index > 0)
-        menu.addAction("Move Left", [space_id, index] { SpaceStore::the().move_space(space_id, index - 1); });
+        menu.addAction("Move Space Left", [space_id, index] { SpaceStore::the().move_space(space_id, index - 1); });
     if (index + 1 < store.spaces().size())
-        menu.addAction("Move Right", [space_id, index] { SpaceStore::the().move_space(space_id, index + 1); });
+        menu.addAction("Move Space Right", [space_id, index] { SpaceStore::the().move_space(space_id, index + 1); });
+    menu.addAction("New Space\u2026", [this] { new_space(); });
 
     menu.addSeparator();
-    menu.addAction("New Space…", [this] { new_space(); });
-    menu.addAction("New Folder", [this] { new_folder({}, -1); });
-    auto* remove = menu.addAction("Delete Space…", [this, space_id] { delete_space(space_id); });
+    auto* remove = menu.addAction("Delete Space", [this, space_id] { delete_space(space_id); });
     remove->setEnabled(store.spaces().size() > 1);
 
+    KeepSidebarOpen keep_open(this);
     menu.exec(global_position);
 }
 
@@ -1579,6 +1795,7 @@ void ArcSidebar::show_favorite_menu(QString const& favorite_id, QPoint const& gl
         SpaceStore::the().remove_favorite(favorite_id);
         save_session();
     });
+    KeepSidebarOpen keep_open(this);
     menu.exec(global_position);
 }
 

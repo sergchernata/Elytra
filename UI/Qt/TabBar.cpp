@@ -77,6 +77,7 @@ static constexpr int HORIZONTAL_TAB_MIN_CONTENT_WIDTH_FOR_TITLE = 48;
 static constexpr int HORIZONTAL_TAB_MAX_WIDTH = 232;
 static constexpr int VERTICAL_TAB_HEIGHT = 38;
 static constexpr int VERTICAL_TABS_COLLAPSED_WIDTH = browser_chrome_layout_policy().collapsed_sidebar_width;
+static constexpr int ARC_HIDDEN_SIDEBAR_WIDTH = 10; // Fork hook (Arc)
 static constexpr int VERTICAL_TABS_DEFAULT_EXPANDED_WIDTH = browser_chrome_layout_policy().expanded_sidebar_width;
 static constexpr int VERTICAL_TABS_MIN_EXPANDED_WIDTH = 190;
 static constexpr int VERTICAL_TABS_MAX_EXPANDED_WIDTH = 400;
@@ -2441,13 +2442,25 @@ bool TabWidget::vertical_tabs_effectively_expanded() const
 
 bool TabWidget::can_expand_vertical_tabs_on_hover() const
 {
-    return m_tab_bar_visible && m_vertical_tabs_enabled && m_vertical_tabs_expand_on_hover && !m_vertical_tabs_expanded;
+    // Fork hook (Arc): a hidden Arc sidebar always slides out from the window edge on hover.
+    auto expand_on_hover = m_vertical_tabs_expand_on_hover || m_vertical_sidebar_widget;
+    return m_tab_bar_visible && m_vertical_tabs_enabled && expand_on_hover && !m_vertical_tabs_expanded;
+}
+
+// Fork hook (Arc): a hidden Arc sidebar leaves only a thin edge to hover, not a column of icons.
+int TabWidget::collapsed_vertical_tabs_width() const
+{
+    return m_vertical_sidebar_widget ? ARC_HIDDEN_SIDEBAR_WIDTH : VERTICAL_TABS_COLLAPSED_WIDTH;
 }
 
 bool TabWidget::cursor_is_over_vertical_tabs() const
 {
     if (!m_vertical_tabs_content->isVisible())
         return false;
+
+    // Fork hook (Arc): keep a slid-out sidebar open while one of its menus or dialogs is up.
+    if (m_vertical_sidebar_widget && m_vertical_sidebar_widget->property("arcKeepOpen").toBool())
+        return true;
 
     if (m_vertical_tab_bar_column->underMouse() || m_tab_bar->underMouse() || m_new_tab_button->underMouse())
         return true;
@@ -2469,12 +2482,12 @@ int TabWidget::vertical_tabs_layout_width() const
 {
     if (!m_tab_bar_visible)
         return 0;
-    return m_vertical_tabs_expanded ? m_vertical_tabs_expanded_width : VERTICAL_TABS_COLLAPSED_WIDTH;
+    return m_vertical_tabs_expanded ? m_vertical_tabs_expanded_width : collapsed_vertical_tabs_width();
 }
 
 bool TabWidget::should_show_window_controls_in_tab_toolbar() const
 {
-    if (m_vertical_sidebar_widget) // Fork hook (Arc): window controls sit at the top of the sidebar.
+    if (m_vertical_sidebar_widget) // Fork hook (Arc): window controls live in the sidebar (docked or slid out), never the toolbar.
         return false;
     return m_window_controls_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal;
 }
@@ -2650,9 +2663,9 @@ void TabWidget::rebuild_page_column()
 int TabWidget::current_vertical_tabs_width() const
 {
     if (m_vertical_tabs_hover_expanded)
-        return VERTICAL_TABS_COLLAPSED_WIDTH + qRound((m_vertical_tabs_expanded_width - VERTICAL_TABS_COLLAPSED_WIDTH) * m_vertical_tabs_hover_expand_progress);
+        return collapsed_vertical_tabs_width() + qRound((m_vertical_tabs_expanded_width - collapsed_vertical_tabs_width()) * m_vertical_tabs_hover_expand_progress);
 
-    return vertical_tabs_effectively_expanded() ? m_vertical_tabs_expanded_width : VERTICAL_TABS_COLLAPSED_WIDTH;
+    return vertical_tabs_effectively_expanded() ? m_vertical_tabs_expanded_width : collapsed_vertical_tabs_width();
 }
 
 void TabWidget::apply_vertical_tabs_expanded_width(int width)

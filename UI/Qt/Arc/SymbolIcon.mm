@@ -67,6 +67,21 @@ QPixmap symbol_pixmap(QString const& name, int point_size, QColor const& color, 
     return result;
 }
 
+QPixmap fitted_symbol_pixmap(QString const& name, int box, QColor const& color, qreal device_pixel_ratio)
+{
+    // Render large, then scale down to the box, so every symbol ends up the same visual size.
+    auto rendered = symbol_pixmap(name + ".fill", box * 2, color, device_pixel_ratio);
+    if (rendered.isNull())
+        rendered = symbol_pixmap(name, box * 2, color, device_pixel_ratio);
+    if (rendered.isNull())
+        return {};
+
+    auto target = static_cast<int>(std::round(box * device_pixel_ratio));
+    auto scaled = rendered.scaled(target, target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(device_pixel_ratio);
+    return scaled;
+}
+
 QStringList const& space_symbol_names()
 {
     static QStringList const names {

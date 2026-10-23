@@ -13,6 +13,11 @@ QPixmap symbol_pixmap(QString const&, int, QColor const&, qreal)
     return {};
 }
 
+QPixmap fitted_symbol_pixmap(QString const&, int, QColor const&, qreal)
+{
+    return {};
+}
+
 QStringList const& space_symbol_names()
 {
     static QStringList const names;

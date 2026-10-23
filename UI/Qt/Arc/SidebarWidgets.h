@@ -14,6 +14,9 @@
 
 namespace Ladybird::Arc {
 
+// Every symbol in the sidebar (bottom bar, space header) is fitted into a square of this size.
+static constexpr int ICON_BOX = 15;
+
 // A square button that draws one SF Symbol (or a letter) exactly in its center, as in Arc's bottom bar.
 class SymbolButton final : public QAbstractButton {
     Q_OBJECT
@@ -39,7 +42,7 @@ private:
     QString m_text;
     bool m_dimmed { false };
     bool m_hovered { false };
-    int m_point_size { 15 };
+    int m_point_size { ICON_BOX };
 };
 
 // Recent downloads shown above the sidebar's bottom bar while the downloads button is hovered.

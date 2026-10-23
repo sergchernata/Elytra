@@ -6,6 +6,7 @@
 
 #include <LibWebView/Application.h>
 #include <LibWebView/FileDownloader.h>
+#include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -101,7 +102,7 @@ void SymbolButton::paintEvent(QPaintEvent*)
     painter.setOpacity(m_dimmed && !m_hovered ? 0.42 : 0.92);
 
     if (!m_symbol.isEmpty()) {
-        auto pixmap = symbol_pixmap(m_symbol, m_point_size, color, devicePixelRatioF());
+        auto pixmap = fitted_symbol_pixmap(m_symbol, m_point_size, color, devicePixelRatioF());
         if (!pixmap.isNull()) {
             auto logical = pixmap.deviceIndependentSize();
             auto top_left = QPointF((width() - logical.width()) / 2.0, (height() - logical.height()) / 2.0);
@@ -113,8 +114,8 @@ void SymbolButton::paintEvent(QPaintEvent*)
     // No symbol (or not on macOS): a centered letter or emoji.
     auto text = m_text.isEmpty() ? m_symbol.left(1).toUpper() : m_text;
     auto font = painter.font();
-    font.setPixelSize(14);
-    font.setWeight(QFont::DemiBold);
+    font.setPixelSize(m_point_size - 1);
+    font.setWeight(QFont::Bold);
     painter.setFont(font);
     painter.setPen(color);
     painter.drawText(rect(), Qt::AlignCenter, text);
@@ -370,6 +371,7 @@ void DownloadsShelf::show_menu(int index, QPoint global_position)
     menu.addAction("Open Downloads Folder", [] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)));
     });
+    KeepSidebarOpen keep_open(this);
     menu.exec(global_position);
 }
 

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <QHash>
+#include <QSet>
 #include <QPointer>
 #include <QWidget>
 #include <UI/Qt/Arc/SidebarTree.h>
@@ -23,6 +24,9 @@ class QKeyEvent;
 class QLabel;
 class QTimer;
 class QToolButton;
+class QGraphicsOpacityEffect;
+class QPropertyAnimation;
+class QParallelAnimationGroup;
 
 namespace Ladybird {
 
@@ -31,6 +35,17 @@ class Tab;
 class TabWidget;
 
 namespace Arc {
+
+// While alive, keeps the sidebar slid out (when hidden) even though the pointer is over a menu or dialog.
+// Construct it around menu.exec() and modal dialogs opened from the sidebar.
+class KeepSidebarOpen {
+public:
+    explicit KeepSidebarOpen(QWidget* inside_sidebar);
+    ~KeepSidebarOpen();
+
+private:
+    QPointer<QWidget> m_sidebar;
+};
 
 class ArcSidebar final : public QWidget {
     Q_OBJECT
@@ -48,6 +63,8 @@ public:
 
 protected:
     virtual void paintEvent(QPaintEvent*) override;
+    virtual void resizeEvent(QResizeEvent*) override;
+    virtual void showEvent(QShowEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
 
 private:
@@ -90,6 +107,10 @@ private:
     void rebuild_tree();
     void rebuild_switcher();
     void show_shelf();
+    void hide_shelf();
+    void layout_panel();
+    bool is_floating() const;
+    void update_space_header_icon();
     void position_shelf();
     void append_nodes(QStandardItem& parent, QList<PinnedNode> const&);
     void update_tab_rows(Tab&);
@@ -123,7 +144,17 @@ private:
     QWidget* m_top_strip { nullptr };
     QWidget* m_favorites { nullptr };
     QGridLayout* m_favorites_layout { nullptr };
-    QLabel* m_space_icon { nullptr };
+    QWidget* m_panel { nullptr };
+    QWidget* m_header { nullptr };
+    class SymbolButton* m_space_icon { nullptr };
+    class SymbolButton* m_space_menu_button { nullptr };
+    bool m_header_hovered { false };
+    QSet<QString> m_collapsed_spaces;
+    class QGraphicsOpacityEffect* m_shelf_opacity { nullptr };
+    class QPropertyAnimation* m_shelf_position_animation { nullptr };
+    class QPropertyAnimation* m_shelf_opacity_animation { nullptr };
+    class QParallelAnimationGroup* m_shelf_animation { nullptr };
+    bool m_shelf_hiding { false };
     QLabel* m_space_title { nullptr };
     class SymbolButton* m_downloads_button { nullptr };
     class DownloadsShelf* m_shelf { nullptr };

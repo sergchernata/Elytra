@@ -17,6 +17,10 @@ namespace Ladybird::Arc {
 // Renders an SF Symbol tinted with one color. point_size is in logical pixels.
 QPixmap symbol_pixmap(QString const& name, int point_size, QColor const& color, qreal device_pixel_ratio);
 
+// Like symbol_pixmap(), but prefers the filled variant ("<name>.fill") as Arc does, and scales the
+// symbol so its larger side is exactly box logical pixels. Use this wherever icons sit side by side.
+QPixmap fitted_symbol_pixmap(QString const& name, int box, QColor const& color, qreal device_pixel_ratio);
+
 // Symbols offered for spaces, in picker order. Ones the system lacks are skipped at runtime.
 QStringList const& space_symbol_names();
 

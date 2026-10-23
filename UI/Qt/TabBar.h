@@ -212,10 +212,12 @@ public:
     void set_vertical_tabs_expand_on_hover(bool);
     void set_vertical_tabs_position(WebView::VerticalTabsPosition);
     bool can_expand_vertical_tabs_on_hover() const;
+    int collapsed_vertical_tabs_width() const; // Fork hook (Arc)
     void update_tab_button_visibility();
 
     // Fork hook (Arc): show this widget in the vertical sidebar in place of the tab list.
     void set_vertical_sidebar_widget(QWidget*);
+    int vertical_sidebar_expanded_width() const { return m_vertical_tabs_expanded_width; } // Fork hook (Arc)
 
 signals:
     void current_tab_changed(int index);
