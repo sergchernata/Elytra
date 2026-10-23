@@ -46,7 +46,14 @@
 {
     m_applying = YES;
     for (auto* button : m_buttons) {
-        if (button && button.hidden != m_hidden)
+        if (!button)
+            continue;
+        // Transparent as well as hidden: Qt un-hides the buttons during relayouts (we put that back right after),
+        // but never touches their alpha, so they can't flash on screen in between.
+        auto alpha = m_hidden ? 0.0 : 1.0;
+        if (button.alphaValue != alpha)
+            button.alphaValue = alpha;
+        if (button.hidden != m_hidden)
             button.hidden = m_hidden;
     }
     m_applying = NO;
@@ -66,7 +73,8 @@
     (void)context;
     if (m_applying || [(NSButton*)object isHidden] == m_hidden)
         return;
-    // Undo the change after the current layout pass, which may set it again otherwise.
+    // Undo it now, and again after the current layout pass, which may set it once more.
+    [self apply];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self apply];
     });

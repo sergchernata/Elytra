@@ -72,6 +72,7 @@ static constexpr int SHELF_ANIMATION_MS = 190;
 static constexpr int REVEAL_DELAY_MS = 60;
 static constexpr int TRANSITION_MS = 300;
 static constexpr int SHOW_SETTLE_MS = 34;
+static constexpr int HANDOFF_MS = 34; // Two frames, for the window server to show one before the other goes.
 static constexpr qreal FADE_SPEEDUP = 1.6;
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = 2;
 static constexpr int RETRACT_DELAY_MS = 280;
@@ -1570,7 +1571,12 @@ void ArcSidebar::begin_transition(bool expanding)
         show_flat_host(m_last_docked_rect);
         m_host->show();
         m_host->raise();
-        set_window_controls_hidden(*window(), true);
+        // The drawn lights are on screen over the real ones now; hide the real ones a frame later, so there's
+        // never a frame with neither.
+        QTimer::singleShot(HANDOFF_MS, this, [this] {
+            if (m_mode == Mode::Hidden || m_active_transition == Transition::Hide)
+                set_window_controls_hidden(*window(), true);
+        });
         m_pending_transition = Transition::Hide;
         start_transition();
     } else {
@@ -1670,9 +1676,17 @@ void ArcSidebar::finish_transition()
         if (m_mode == Mode::Hidden)
             prepare_card_panel();
     } else if (finished == Transition::Show) {
-        m_host_docking = false;
-        if (m_mode == Mode::Docked)
-            dock_panel();
+        // Real lights back first, under the drawn ones; drop the panel copy a frame later.
+        if (m_mode == Mode::Docked) {
+            set_window_controls_hidden(*window(), false);
+            QTimer::singleShot(HANDOFF_MS, this, [this] {
+                m_host_docking = false;
+                if (m_mode == Mode::Docked)
+                    dock_panel();
+            });
+        } else {
+            m_host_docking = false;
+        }
     }
 }
 
