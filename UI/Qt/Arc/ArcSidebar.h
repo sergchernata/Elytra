@@ -70,6 +70,8 @@ public:
     int open_background_tabs(QList<SessionEntry> const&);
     // Closes the current space's Today tabs (the divider's Clear button).
     void clear_today();
+    void back_to_pinned_url(QString const& node_id);
+    void separate_from_pinned_tab(QString const& node_id);
 
 protected:
     virtual void paintEvent(QPaintEvent*) override;
@@ -99,6 +101,10 @@ private:
 
     // Actions
     Tab& open_tab(QString const& url);
+    void prepare_spare_tab();
+    void schedule_spare_tab();
+    Tab* take_spare_tab(QString const& profile);
+    static bool tab_is_in_profile(Tab const&, QString const& profile);
     void activate(Tab&);
     void close_tab(Tab&);
     void open_or_activate_node(QString const& node_id);
@@ -177,6 +183,7 @@ private:
     DropTarget resolve_drop(QModelIndex const& target, SidebarTree::DropPlace) const;
 
     QPointer<BrowserWindow> m_window;
+    QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
     TabWidget& m_tabs;
     QString m_space_id;
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;

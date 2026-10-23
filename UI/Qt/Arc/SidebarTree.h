@@ -9,6 +9,8 @@
 #include <QStandardItemModel>
 #include <QStyledItemDelegate>
 #include <QTreeView>
+#include <QVariantAnimation>
+#include <AK/Optional.h>
 #include <QUrl>
 
 namespace Ladybird::Arc {
@@ -18,6 +20,7 @@ enum class RowKind : int {
     Folder,
     NewTab, // Also the divider between pinned and Today.
     TodayTab,
+    BottomSpace, // Empty room after the last row, as in Arc (double-click: new tab).
 };
 
 enum Role : int {
@@ -26,7 +29,12 @@ enum Role : int {
     TabRole,       // quintptr of the live Tab, if any.
     IsCurrentRole, // The window's current tab.
     IsLoadedRole,  // Pinned tabs: has a live tab.
+    NavigatedAwayRole, // Pinned tabs: the live tab is on another page than the pinned URL.
 };
+
+// Whether a pinned tab showing `current` is still on its pinned URL (ignoring a trailing slash, the fragment and the
+// host's case). An empty `current` (nothing loaded yet) counts as on it.
+bool pinned_urls_match(QString const& pinned, QString const& current);
 
 RowKind row_kind(QModelIndex const&);
 
@@ -55,6 +63,26 @@ public:
     // The divider row: the rule's strip (with Clear at its right end) above the New Tab button.
     static QRect divider_strip_rect(QRect const& row);
     static QRect clear_button_rect(QRect const& row);
+    static bool divider_has_today_tabs(QModelIndex const& divider);
+    // A pinned tab's favicon, a button while the tab is away from its pinned URL (as in Arc).
+    static QRect pinned_icon_rect(QRect const& row);
+    static QString pinned_icon_label(bool separate);
+
+    enum class PinnedRowState {
+        OnPinnedUrl,           // Or not a loaded pinned tab.
+        Away,                  // "/ Title".
+        BackToPinnedUrl,       // Icon hovered.
+        SeparateFromPinnedTab, // Icon hovered with Shift.
+    };
+    static PinnedRowState pinned_row_state(QModelIndex const&, QRect const& row, Optional<QPoint> hover_position, bool shift);
+
+    // Where the pointer is over the view (set by SidebarTree), and whether Shift is held.
+    Optional<QPoint> hover_position;
+    bool shift_held { false };
+    // The pinned row whose icon hover is animating in or out (0: resting, 1: showing its label).
+    QPersistentModelIndex pinned_hover_index;
+    qreal pinned_hover_progress { 0 };
+    bool pinned_hover_separate { false };
 
     virtual void paint(QPainter*, QStyleOptionViewItem const&, QModelIndex const&) const override;
     virtual QSize sizeHint(QStyleOptionViewItem const&, QModelIndex const&) const override;
@@ -82,6 +110,8 @@ signals:
     void close_clicked(QModelIndex const&);
     void clear_clicked();
     void background_double_clicked();
+    // An away pinned tab's favicon: back to the pinned URL, or with Shift, separate the page into its own tab.
+    void pinned_icon_clicked(QModelIndex const&, bool separate);
     void row_dropped(QModelIndex const& source, QModelIndex const& target, DropPlace);
     void urls_dropped(QList<QUrl> const&, QModelIndex const& target, DropPlace);
 
@@ -91,6 +121,7 @@ protected:
     virtual void mouseDoubleClickEvent(QMouseEvent*) override;
     virtual void mouseMoveEvent(QMouseEvent*) override;
     virtual void leaveEvent(QEvent*) override;
+    virtual bool eventFilter(QObject*, QEvent*) override;
     virtual void dragMoveEvent(QDragMoveEvent*) override;
     virtual void dropEvent(QDropEvent*) override;
     virtual void drawBranches(QPainter*, QRect const&, QModelIndex const&) const override { }
@@ -103,6 +134,9 @@ private:
     QPersistentModelIndex m_hovered_index;
     bool m_pressed_close { false };
     bool m_pressed_clear { false };
+    bool m_pressed_pinned_icon { false };
+    QVariantAnimation* m_pinned_hover_animation { nullptr };
+    void update_pinned_hover();
 };
 
 }

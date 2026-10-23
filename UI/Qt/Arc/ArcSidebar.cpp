@@ -43,6 +43,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QKeyEvent>
+#include <QScopeGuard>
 #include <QMouseEvent>
 #include <QWindow>
 #include <QGraphicsOpacityEffect>
@@ -61,8 +62,10 @@
 
 namespace Ladybird::Arc {
 
+
 static constexpr char const* SPACE_PROPERTY = "arc_space";
 static constexpr char const* BLANK_PROPERTY = "arc_blank";
+static constexpr int SPARE_TAB_DELAY_MS = 1200;
 static constexpr char const* NODE_PROPERTY = "arc_node";
 static constexpr auto FAVORITE_PREFIX = "fav:";
 static constexpr int ExpandedRole = Qt::UserRole + 20;
@@ -263,6 +266,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 
     // Downloads: hovering the left-most button raises a shelf of recent files, as in Arc.
     m_downloads_button = new SymbolButton(m_switcher);
+    m_downloads_button->set_dimmed(true); // Faded like the + button.
     m_downloads_button->set_symbol("tray.and.arrow.down");
     m_downloads_button->setToolTip("Downloads");
     m_downloads_button->installEventFilter(this);
@@ -319,6 +323,13 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     connect(m_tree, &SidebarTree::row_clicked, this, &ArcSidebar::on_row_clicked);
     connect(m_tree, &SidebarTree::close_clicked, this, &ArcSidebar::on_close_clicked);
     connect(m_tree, &SidebarTree::clear_clicked, this, &ArcSidebar::clear_today);
+    connect(m_tree, &SidebarTree::pinned_icon_clicked, this, [this](QModelIndex const& index, bool separate) {
+        auto node_id = index.data(IdRole).toString();
+        if (separate)
+            separate_from_pinned_tab(node_id);
+        else
+            back_to_pinned_url(node_id);
+    });
     connect(m_tree, &SidebarTree::background_double_clicked, this, [this] {
         if (m_window)
             CommandBar::toggle_for(*m_window);
@@ -345,6 +356,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
 
     m_space_id = store.space(store.last_active_space_id()) ? store.last_active_space_id() : store.first_space_id();
     restore_session_assignments();
+    schedule_spare_tab();
     track_tabs();
 
     if (auto* current = m_window->current_tab()) {
@@ -479,6 +491,7 @@ void ArcSidebar::watch_tab(Tab& tab)
     };
     connect(&tab, &Tab::title_changed, this, refresh);
     connect(&tab, &Tab::favicon_changed, this, refresh);
+    connect(&tab, &Tab::loading_changed, this, refresh); // Navigations: a pinned tab may have left its URL.
     connect(&tab, &Tab::loading_finished, this, [this, refresh] {
         refresh();
         save_session();
@@ -546,10 +559,94 @@ void ArcSidebar::save_session()
 
 Tab& ArcSidebar::open_tab(QString const& url)
 {
+    // A spare tab is ready for this: navigating it is much quicker than building a new tab's widgets.
+    if (auto* spare = take_spare_tab(current_profile())) {
+        spare->setProperty(BLANK_PROPERTY, false);
+        set_tab_space(*spare, m_space_id);
+        spare->navigate(ak_url_from_qurl(QUrl(url)));
+        activate(*spare);
+        return *spare;
+    }
     ScopedProfileForNewViews profile(current_profile());
     auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(url)), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     set_tab_space(tab, m_space_id);
     return tab;
+}
+
+// A blank tab built ahead of time, while the app is idle, in the current space's profile. Not listed anywhere; used
+// by the next tab the sidebar opens, or as the empty page when a space's last tab closes.
+void ArcSidebar::prepare_spare_tab()
+{
+    auto profile = current_profile();
+    if (m_spare_tab) {
+        if (tab_is_in_profile(*m_spare_tab, profile))
+            return;
+        auto old = m_spare_tab;
+        m_spare_tab = nullptr;
+        if (auto index = m_tabs.index_of(old); index >= 0 && m_window->current_tab() != old)
+            m_window->request_to_close_tab(index);
+    }
+    ScopedProfileForNewViews scope(profile);
+    auto& spare = m_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::end());
+    spare.setProperty(BLANK_PROPERTY, true);
+    set_tab_space(spare, {}); // In no space.
+    m_spare_tab = &spare;
+}
+
+void ArcSidebar::schedule_spare_tab()
+{
+    QTimer::singleShot(SPARE_TAB_DELAY_MS, this, [guarded = QPointer(this)] {
+        if (guarded && guarded->m_window && guarded->m_window->isVisible())
+            guarded->prepare_spare_tab();
+    });
+}
+
+Tab* ArcSidebar::take_spare_tab(QString const& profile)
+{
+    if (!m_spare_tab || m_tabs.index_of(m_spare_tab) < 0 || !tab_is_in_profile(*m_spare_tab, profile)) {
+        schedule_spare_tab();
+        return nullptr;
+    }
+    auto* spare = m_spare_tab.data();
+    m_spare_tab = nullptr;
+    schedule_spare_tab();
+    return spare;
+}
+
+bool ArcSidebar::tab_is_in_profile(Tab const& tab, QString const& profile)
+{
+    auto expected = session_for_profile(profile);
+    return &tab.view().session() == (expected ? expected.ptr() : &WebView::Application::default_session());
+}
+
+// Arc: an away pinned tab's favicon takes it back to its pinned URL.
+void ArcSidebar::back_to_pinned_url(QString const& node_id)
+{
+    auto const* node = SpaceStore::the().node(node_id);
+    auto* tab = tab_for_node(node_id);
+    if (!node || !tab)
+        return;
+    tab->navigate(ak_url_from_qurl(QUrl(node->url)));
+    activate(*tab);
+}
+
+// Arc: Shift-clicking it keeps the page it's on in a tab of its own (in Today, next to it), and takes the pinned tab
+// back to its pinned URL.
+void ArcSidebar::separate_from_pinned_tab(QString const& node_id)
+{
+    auto const* node = SpaceStore::the().node(node_id);
+    auto* tab = tab_for_node(node_id);
+    if (!node || !tab)
+        return;
+    auto space = space_of(*tab);
+    Tab* separated = nullptr;
+    {
+        ScopedProfileForNewViews profile(profile_of_space(space));
+        separated = &m_window->new_tab_from_url(tab->view().url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*tab));
+    }
+    set_tab_space(*separated, space);
+    tab->navigate(ak_url_from_qurl(QUrl(node->url)));
+    schedule_rebuild();
 }
 
 int ArcSidebar::open_background_tabs(QList<SessionEntry> const& entries)
@@ -639,10 +736,17 @@ void ArcSidebar::before_tab_closes(Tab& tab)
     if (is_blank(tab))
         return; // Closing the empty page itself: upstream behavior (another tab, or the window closes).
 
-    auto& blank = m_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
-    blank.setProperty(BLANK_PROPERTY, true);
-    set_tab_space(blank, space.isEmpty() ? m_space_id : space);
-    activate(blank);
+    // The spare tab, if ready, is that empty page; any profile will do, as a blank page has no site data.
+    Tab* blank = m_spare_tab && m_tabs.index_of(m_spare_tab) >= 0 ? m_spare_tab.data() : nullptr;
+    if (blank) {
+        m_spare_tab = nullptr;
+        schedule_spare_tab();
+    } else {
+        blank = &m_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    }
+    blank->setProperty(BLANK_PROPERTY, true);
+    set_tab_space(*blank, space.isEmpty() ? m_space_id : space);
+    activate(*blank);
 }
 
 // Once a real tab is showing, empty pages left over from closing tabs aren't needed.
@@ -652,7 +756,7 @@ void ArcSidebar::close_stale_blank_tabs()
     if (!current || is_blank(*current))
         return;
     for (auto* tab : tabs()) {
-        if (tab != current && is_blank(*tab)) {
+        if (tab != current && tab != m_spare_tab && is_blank(*tab)) {
             if (auto index = m_tabs.index_of(tab); index >= 0)
                 m_window->request_to_close_tab(index);
         }
@@ -1331,6 +1435,7 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
             item->setIcon(icon_for(tab ? url_of(*tab) : node.url, tab));
             item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
             item->setData(tab != nullptr, IsLoadedRole);
+            item->setData(tab && !pinned_urls_match(node.url, url_of(*tab)), NavigatedAwayRole);
             item->setData(QVariant::fromValue(reinterpret_cast<quintptr>(tab)), TabRole);
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
         }
@@ -1340,6 +1445,14 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
 
 void ArcSidebar::rebuild_tree()
 {
+    // Restoring folders' expansion isn't the user opening them: no expand animation, which would replay on every
+    // tab change. Nor intermediate repaints: the list changes once, in place.
+    m_tree->setAnimated(false);
+    m_tree->setUpdatesEnabled(false);
+    auto restore = qScopeGuard([this] {
+        m_tree->setUpdatesEnabled(true);
+        m_tree->setAnimated(true);
+    });
     auto scroll = m_tree->verticalScrollBar()->value();
     m_model->clear();
 
@@ -1364,6 +1477,12 @@ void ArcSidebar::rebuild_tree()
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
         root.appendRow(item);
     }
+
+    // Empty room after the last row, scrolling with the list, to double-click for a new tab (as in Arc).
+    auto* bottom_space = new QStandardItem;
+    bottom_space->setData(static_cast<int>(RowKind::BottomSpace), KindRole);
+    bottom_space->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled);
+    root.appendRow(bottom_space);
 
     for_each_item(root, [&](QStandardItem& item) {
         if (row_kind(item.index()) == RowKind::Folder)
@@ -1484,6 +1603,9 @@ void ArcSidebar::update_tab_rows(Tab& tab)
             auto const* pinned = SpaceStore::the().node(node);
             if (pinned && pinned->title.isEmpty())
                 item.setText(title);
+            auto away = pinned && !pinned_urls_match(pinned->url, url_of(tab));
+            if (item.data(NavigatedAwayRole).toBool() != away)
+                item.setData(away, NavigatedAwayRole);
         } else {
             item.setText(title);
         }
@@ -1944,9 +2066,8 @@ void ArcSidebar::paintEvent(QPaintEvent*)
     // Hidden or mid-animation the panel is in the floating host; painting here would cover the toolbar.
     if (m_panel->parentWidget() != this)
         return;
-    // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
-    QPainter painter(this);
-    painter.fillRect(rect(), ChromeStyle::chrome_background(palette()));
+    // Docked, the window's own (tinted) background shows through, so the two can never differ by a shade; see
+    // apply_space_tint(). Painting the same color here came out one step off on macOS.
 }
 
 // Arc paints the space color across the whole window frame. Upstream derives every chrome surface from
@@ -2008,6 +2129,8 @@ void ArcSidebar::on_row_clicked(QModelIndex const& index)
         if (auto* tab = tab_in_row(index); tab && m_tabs.index_of(tab) >= 0)
             activate(*tab);
         break;
+    case RowKind::BottomSpace:
+        break;
     }
 }
 
@@ -2023,6 +2146,8 @@ ArcSidebar::DropTarget ArcSidebar::resolve_drop(QModelIndex const& target, Sideb
         return { false, {}, -1 };
 
     switch (row_kind(target)) {
+    case RowKind::BottomSpace:
+        return { false, {}, -1 }; // The end of Today.
     case RowKind::NewTab:
         if (place == SidebarTree::DropPlace::Above)
             return { true, {}, -1 };
@@ -2273,6 +2398,7 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
     };
 
     switch (kind) {
+    case RowKind::BottomSpace:
     case RowKind::NewTab:
         menu.addAction("New Tab", [this] {
             if (m_window)
@@ -2302,15 +2428,14 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
 
     case RowKind::PinnedTab: {
         menu.addAction("Rename…", [this, node_id] { rename_node(node_id); });
-        if (tab) {
-            menu.addAction("Save Current Page as Pinned URL", [tab, node_id] {
-                if (tab)
-                    SpaceStore::the().set_node_url(node_id, url_of(*tab));
-            });
-            menu.addAction("Go Back to Pinned URL", [tab, node_id] {
-                auto const* node = SpaceStore::the().node(node_id);
-                if (tab && node)
-                    tab->navigate(ak_url_from_qurl(QUrl(node->url)));
+        if (tab && persistent.data(NavigatedAwayRole).toBool()) {
+            menu.addAction("Back to Pinned URL", [this, node_id] { back_to_pinned_url(node_id); });
+            menu.addAction("Separate From Pinned Tab", [this, node_id] { separate_from_pinned_tab(node_id); });
+            menu.addAction("Set Pinned URL to Current Page", [this, tab, node_id] {
+                if (!tab)
+                    return;
+                SpaceStore::the().set_node_url(node_id, url_of(*tab));
+                update_tab_rows(*tab);
             });
         }
         menu.addAction("Add to Favorites", [this, node_id] {

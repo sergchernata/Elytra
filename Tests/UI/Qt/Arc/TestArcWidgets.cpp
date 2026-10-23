@@ -13,7 +13,10 @@
 #include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 
+#include <AK/Vector.h>
+#include <QApplication>
 #include <QImage>
+#include <QMouseEvent>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
 
@@ -148,6 +151,148 @@ TEST_CASE(sidebar_rows_size_and_place_their_buttons)
         EXPECT(row.right() - button.right() <= 12);
         EXPECT(std::abs(button.center().y() - row.center().y()) <= 1);
     }
+}
+
+TEST_CASE(a_pinned_tab_is_away_only_on_another_page)
+{
+    // Trivial differences don't count as navigating away.
+    EXPECT(pinned_urls_match("https://example.com/app", "https://example.com/app"));
+    EXPECT(pinned_urls_match("https://example.com/app", "https://example.com/app/"));
+    EXPECT(pinned_urls_match("https://example.com/app/", "https://example.com/app"));
+    EXPECT(pinned_urls_match("https://example.com/app", "https://example.com/app#inbox"));
+    EXPECT(pinned_urls_match("https://Example.com/app", "https://example.com/app"));
+    EXPECT(pinned_urls_match("https://example.com", "https://example.com/"));
+
+    EXPECT(!pinned_urls_match("https://example.com/app", "https://example.com/app/settings"));
+    EXPECT(!pinned_urls_match("https://example.com/app", "https://example.com/app?tab=2"));
+    EXPECT(!pinned_urls_match("https://example.com/app", "https://other.example/app"));
+    EXPECT(!pinned_urls_match("https://example.com/app", "http://example.com/app"));
+    // A tab that hasn't loaded anything yet hasn't gone anywhere.
+    EXPECT(pinned_urls_match("https://example.com/app", ""));
+}
+
+TEST_CASE(a_pinned_tab_icon_is_a_button_with_arcs_labels)
+{
+    auto row = QRect(0, 40, 240, 36);
+    auto button = SidebarDelegate::pinned_icon_rect(row);
+    EXPECT(row.contains(button));
+    EXPECT(button.left() - row.left() <= 8);
+    EXPECT(button.width() == button.height());
+    EXPECT(std::abs(button.center().y() - row.center().y()) <= 1);
+
+    EXPECT(SidebarDelegate::pinned_icon_label(false) == "Back to Pinned URL");
+    EXPECT(SidebarDelegate::pinned_icon_label(true) == "Separate From Pinned Tab");
+}
+
+TEST_CASE(an_away_pinned_tab_shows_a_slash_and_explains_its_icon_on_hover)
+{
+    QStandardItemModel model;
+    auto* item = new QStandardItem("Pinned");
+    item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
+    item->setData(true, IsLoadedRole);
+    item->setData(true, NavigatedAwayRole);
+    model.appendRow(item);
+    auto index = item->index();
+    auto row = QRect(0, 0, 240, 36);
+    auto icon = SidebarDelegate::pinned_icon_rect(row).center();
+    auto title = QPoint(120, 18);
+
+    using State = SidebarDelegate::PinnedRowState;
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, {}, false) == State::Away);
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, title, false) == State::Away);
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, title, true) == State::Away);
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, icon, false) == State::BackToPinnedUrl);
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, icon, true) == State::SeparateFromPinnedTab);
+
+    item->setData(false, NavigatedAwayRole);
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, icon, false) == State::OnPinnedUrl);
+    item->setData(true, NavigatedAwayRole);
+    item->setData(false, IsLoadedRole); // Not loaded: nowhere to go back from.
+    EXPECT(SidebarDelegate::pinned_row_state(index, row, icon, false) == State::OnPinnedUrl);
+}
+
+TEST_CASE(clicking_an_away_pinned_tabs_icon_goes_back_or_separates)
+{
+    QStandardItemModel model;
+    auto add_pinned = [&](bool away) {
+        auto* item = new QStandardItem("Pinned");
+        item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
+        item->setData(true, IsLoadedRole);
+        item->setData(away, NavigatedAwayRole);
+        model.appendRow(item);
+        return item;
+    };
+    auto* away = add_pinned(true);
+    auto* home = add_pinned(false);
+
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 200);
+    tree.show();
+
+    struct Click {
+        int row;
+        bool separate;
+    };
+    Vector<Click> icon_clicks;
+    Vector<int> row_clicks;
+    QObject::connect(&tree, &SidebarTree::pinned_icon_clicked, [&](QModelIndex const& index, bool separate) { icon_clicks.append({ index.row(), separate }); });
+    QObject::connect(&tree, &SidebarTree::row_clicked, [&](QModelIndex const& index) { row_clicks.append(index.row()); });
+
+    auto click = [&](QStandardItem* item, QPoint point, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        (void)item;
+        auto global = tree.viewport()->mapToGlobal(point);
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(point), QPointF(global), Qt::LeftButton, Qt::LeftButton, modifiers);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(point), QPointF(global), Qt::LeftButton, Qt::NoButton, modifiers);
+        QApplication::sendEvent(tree.viewport(), &press);
+        QApplication::sendEvent(tree.viewport(), &release);
+    };
+    auto icon_of = [&](QStandardItem* item) { return SidebarDelegate::pinned_icon_rect(tree.visualRect(item->index())).center(); };
+    auto title_of = [&](QStandardItem* item) { return tree.visualRect(item->index()).center(); };
+
+    click(away, icon_of(away));
+    click(away, icon_of(away), Qt::ShiftModifier);
+    VERIFY(icon_clicks.size() == 2);
+    EXPECT(icon_clicks[0].row == 0 && !icon_clicks[0].separate);
+    EXPECT(icon_clicks[1].row == 0 && icon_clicks[1].separate);
+    EXPECT(row_clicks.is_empty());
+
+    // On its pinned page, or outside the icon, the row just activates as before.
+    click(home, icon_of(home));
+    click(away, title_of(away));
+    EXPECT(icon_clicks.size() == 2);
+    EXPECT(row_clicks.size() == 2);
+}
+
+TEST_CASE(the_list_ends_with_empty_space_that_scrolls_with_it)
+{
+    // As in Arc: room after the last row to double-click for a new tab, part of the list rather than a band that
+    // cuts it off.
+    QStandardItemModel model;
+    auto* divider = new QStandardItem;
+    divider->setData(static_cast<int>(RowKind::NewTab), KindRole);
+    auto* space = new QStandardItem;
+    space->setData(static_cast<int>(RowKind::BottomSpace), KindRole);
+    model.appendRow(divider);
+    model.appendRow(space);
+
+    SidebarDelegate delegate;
+    QStyleOptionViewItem option;
+    option.rect = QRect(0, 0, 240, 36);
+    EXPECT(delegate.sizeHint(option, space->index()).height() >= 40);
+    // The space isn't a Today tab: no Clear on the divider above it.
+    EXPECT(!SidebarDelegate::divider_has_today_tabs(divider->index()));
+
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    int double_clicks = 0;
+    QObject::connect(&tree, &SidebarTree::background_double_clicked, [&] { ++double_clicks; });
+    auto point = tree.visualRect(space->index()).center();
+    QMouseEvent event(QEvent::MouseButtonDblClick, QPointF(point), QPointF(tree.viewport()->mapToGlobal(point)), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(tree.viewport(), &event);
+    EXPECT_EQ(double_clicks, 1);
 }
 
 TEST_CASE(divider_row_has_a_rule_strip_with_clear_at_its_end)
