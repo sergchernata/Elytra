@@ -279,6 +279,13 @@ ErrorOr<NonnullRefPtr<Requests::RequestClient>> Application::request_server_clie
     return instance->ui_client();
 }
 
+// Fork hook (Arc profiles)
+ErrorOr<NonnullRefPtr<Requests::RequestClient>> Application::request_server_client(BrowsingSession& session)
+{
+    auto instance = TRY(request_server_manager().browser_instance(session));
+    return instance->ui_client();
+}
+
 Requests::RequestControlClient& Application::request_server_control_client()
 {
     auto instance = request_server_manager().browser_instance(default_session());
@@ -1104,10 +1111,10 @@ void Application::open_bookmark_in_new_window(String const& bookmark_id, IsPriva
         open_url_in_new_window(bookmark->bookmark().url, is_private);
 }
 
-ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(IsPrivate is_private, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt, Optional<Web::HTML::CrossProcessId> initial_document_state_id, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
+ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(BrowsingSession& session, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt, Optional<Web::HTML::CrossProcessId> initial_document_state_id, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
 {
     // The client's WebContentClient picks up this same session when it is created.
-    auto request_server_connection = TRY(connect_new_request_server_client(session_for_new_view(is_private), RequestServer::SiteBinding::Bound));
+    auto request_server_connection = TRY(connect_new_request_server_client(session, RequestServer::SiteBinding::Bound));
     auto image_decoder = TRY(launch_image_decoder_process());
 
     auto cross_process_id_allocator = allocate_cross_process_id_allocator();
@@ -1116,7 +1123,7 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(
         initial_document_state_id = cross_process_id_allocator.allocate();
     auto initial_document_id = cross_process_id_allocator.allocate();
 
-    auto client = TRY(WebView::launch_web_content_process(is_private, initial_page_id, root_navigable_id));
+    auto client = TRY(WebView::launch_web_content_process(session, initial_page_id, root_navigable_id));
     TRY(Application::the().connect_web_content_to_compositor(*client));
 
     // A tab's first process creates its traversable from this entry. A process hosting a navigable of an existing tab
@@ -1240,6 +1247,28 @@ RefPtr<BrowsingSession> Application::session_for_request_server_client(int clien
     if (auto it = m_request_server_client_sessions.find(client_id); it != m_request_server_client_sessions.end())
         return it->value.strong_ref();
     return {};
+}
+
+// Fork hook (Arc profiles)
+void Application::set_session_for_new_views(RefPtr<BrowsingSession> session)
+{
+    the().m_session_for_new_views = move(session);
+}
+
+// Fork hook (Arc profiles): profile sessions get the browser-wide care the default session gets, like clearing data.
+void Application::did_create_profile_session(BrowsingSession& session)
+{
+    the().m_profile_sessions.remove_all_matching([](auto const& weak) { return !weak.strong_ref(); });
+    the().m_profile_sessions.append(session.make_weak_ptr());
+}
+
+// Fork hook (Arc profiles): a new web view's session is the profile chosen for new views, if any. Windows and the
+// browser's own requests keep using session_for_new_view().
+NonnullRefPtr<BrowsingSession> Application::session_for_new_web_view(IsPrivate is_private)
+{
+    if (is_private == IsPrivate::No && the().m_session_for_new_views)
+        return *the().m_session_for_new_views;
+    return session_for_new_view(is_private);
 }
 
 RefPtr<BrowsingSession> Application::existing_session(IsPrivate is_private)
@@ -1527,26 +1556,27 @@ void Application::crash_compositor_process()
     m_compositor_client->async_crash();
 }
 
-ErrorOr<NonnullRefPtr<WebContentPage>> Application::open_page_for_new_tab(IsPrivate is_private)
+ErrorOr<NonnullRefPtr<WebContentPage>> Application::open_page_for_new_tab(BrowsingSession& session)
 {
     RefPtr<WebContentClient> web_content_client;
-    if (is_private == IsPrivate::Yes) {
-        web_content_client = TRY(create_web_content_client(IsPrivate::Yes, allocate_page_id()));
+    // Fork hook (Arc profiles): the spare process belongs to the default session, so only its views take it.
+    if (&session != m_default_session.ptr()) {
+        web_content_client = TRY(create_web_content_client(session, allocate_page_id()));
     } else if (m_spare_web_content_process) {
         web_content_client = m_spare_web_content_process.release_nonnull();
         launch_spare_web_content_process();
     } else {
         launch_spare_web_content_process();
-        web_content_client = TRY(create_web_content_client(IsPrivate::No, allocate_page_id()));
+        web_content_client = TRY(create_web_content_client(*m_default_session, allocate_page_id()));
     }
     return web_content_client->open_initial_page_for_new_top_level_traversable();
 }
 
-ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(IsPrivate is_private, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
+ErrorOr<Application::ChildFrameWebContentProcess> Application::launch_child_frame_web_content_process(BrowsingSession& session, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state)
 {
     auto page_id = allocate_page_id();
     auto initial_document_state_id = initial_history_entry.document_state.id;
-    auto client = TRY(create_web_content_client(is_private, page_id, root_navigable_id, initial_document_state_id, move(remote_navigables), move(initial_history_entry), system_visibility_state));
+    auto client = TRY(create_web_content_client(session, page_id, root_navigable_id, initial_document_state_id, move(remote_navigables), move(initial_history_entry), system_visibility_state));
     return ChildFrameWebContentProcess {
         .client = move(client),
         .page_id = page_id,
@@ -1574,7 +1604,7 @@ void Application::launch_spare_web_content_process()
     Core::deferred_invoke([this]() {
         m_has_queued_task_to_launch_spare_web_content_process = false;
 
-        auto web_content_client = create_web_content_client(IsPrivate::No, allocate_page_id());
+        auto web_content_client = create_web_content_client(*m_default_session, allocate_page_id());
         if (web_content_client.is_error()) {
             dbgln("Unable to create spare web content client: {}", web_content_client.error());
             return;
@@ -2411,6 +2441,15 @@ NonnullRefPtr<Core::Promise<Empty>> Application::clear_browsing_data(ClearBrowsi
             private_session->cookie_jar->expire_cookies_accessed_since(options.since);
             private_session->storage_jar->remove_items_accessed_since(options.since);
             private_session->hsts_store->remove_policies_observed_since(options.since);
+        }
+
+        // Fork hook (Arc profiles)
+        for (auto const& weak_session : m_profile_sessions) {
+            if (auto session = weak_session.strong_ref()) {
+                session->cookie_jar->expire_cookies_accessed_since(options.since);
+                session->storage_jar->remove_items_accessed_since(options.since);
+                session->hsts_store->remove_policies_observed_since(options.since);
+            }
         }
     }
 

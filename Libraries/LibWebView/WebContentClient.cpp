@@ -107,9 +107,14 @@ static constexpr auto close_server_exit_timeout_ms = 5000;
 static constexpr auto detached_page_forced_exit_timeout_ms = detached_page_close_timeout_ms + close_server_exit_timeout_ms;
 
 WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id)
+    : WebContentClient(move(transport), *Application::existing_session(is_private), initial_page_id, root_navigable_id)
+{
+}
+
+WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, BrowsingSession& session, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id)
     : IPC::ConnectionToServer<WebContentClientEndpoint, WebContentServerEndpoint, WebContentClientPageRoutingStub>(*this, move(transport))
-    , m_is_private(is_private)
-    , m_session(Application::existing_session(is_private))
+    , m_is_private(session.is_private())
+    , m_session(session) // Fork hook (Arc profiles): the session it was launched for, not just private-or-not.
     , m_unassigned_initial_page_id(initial_page_id)
     , m_root_navigable_id(root_navigable_id)
     , m_audio_tab_id(allocate_audio_tab_id())

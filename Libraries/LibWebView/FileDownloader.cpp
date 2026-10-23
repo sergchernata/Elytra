@@ -35,6 +35,8 @@
 
 namespace WebView {
 
+
+
 struct FileDownloader::Segment {
     u64 start_offset { 0 };
     u64 end_offset { NumericLimits<u64>::max() };
@@ -175,9 +177,9 @@ static String status_to_error_string(Optional<Requests::NetworkError> const& net
     return MUST(String::formatted("Received error response code {} while downloading file", *response_code));
 }
 
-u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination)
+u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination, BrowsingSession* session)
 {
-    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination);
+    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination, session);
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -204,7 +206,7 @@ void FileDownloader::start_download_request(u64 download_id, URL::URL const& url
     auto request_headers = HTTP::HeaderList::create();
     request_headers->set({ "User-Agent"sv, Web::default_user_agent });
 
-    auto client = Application::request_server_client(download->is_private);
+    auto client = request_server_client_for(*download); // Fork hook (Arc profiles): its session's cookies
     if (client.is_error()) {
         fail_download(download_id, MUST(String::formatted("Unable to launch RequestServer: {}", client.error())));
         return;
@@ -248,9 +250,9 @@ void FileDownloader::follow_download_redirect(u64 download_id, HTTP::HeaderList 
     start_download_request(download_id, redirect_url.release_value());
 }
 
-u64 FileDownloader::adopt_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data)
+u64 FileDownloader::adopt_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data, BrowsingSession* session)
 {
-    auto download_id = start_download(is_private, url, move(destination), total_size);
+    auto download_id = start_download(is_private, url, move(destination), total_size, MayReplaceDestination::No, session);
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -567,7 +569,7 @@ void FileDownloader::start_segment_request(u64 download_id, size_t segment_index
 
     segment.request_is_ranged = true;
 
-    auto client = Application::request_server_client(download->is_private);
+    auto client = request_server_client_for(*download); // Fork hook (Arc profiles): its session's cookies
     if (client.is_error()) {
         fail_download(download_id, MUST(String::formatted("Unable to launch RequestServer: {}", client.error())));
         return;
@@ -884,9 +886,21 @@ void FileDownloader::restart_download_from_zero(u64 download_id, String reason_i
     start_download_request(download_id, active->effective_url);
 }
 
-u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination)
+// Fork hook (Arc profiles): a download's requests use the cookies of the session it was started in.
+ErrorOr<NonnullRefPtr<Requests::RequestClient>> FileDownloader::request_server_client_for(Download const& download) const
+{
+    if (auto it = m_download_sessions.find(download.id); it != m_download_sessions.end()) {
+        if (auto session = it->value.strong_ref())
+            return Application::request_server_client(*session);
+    }
+    return Application::request_server_client(download.is_private);
+}
+
+u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination, BrowsingSession* session)
 {
     auto download_id = m_next_download_id++;
+    if (session) // Fork hook (Arc profiles)
+        m_download_sessions.set(download_id, session->make_weak_ptr());
 
     m_downloads.append(Download {
         .id = download_id,

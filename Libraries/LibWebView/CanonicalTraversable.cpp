@@ -460,7 +460,7 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalTraversable::obtain_page_to_host
         host->register_embedded_page(page_id, *this);
         represent_group_in(*host);
     } else {
-        auto process = TRY(Application::the().launch_child_frame_web_content_process(view->is_private(), remote_navigable_graph(), id(), current_entry_descriptor, system_visibility_state()));
+        auto process = TRY(Application::the().launch_child_frame_web_content_process(view->session(), remote_navigable_graph(), id(), current_entry_descriptor, system_visibility_state()));
         host = move(process.client);
         page_id = process.page_id;
         host->register_embedded_page(page_id, *this);

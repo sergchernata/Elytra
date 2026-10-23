@@ -8,6 +8,8 @@
 #include <LibWebView/Application.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
+#include <UI/Qt/Arc/ProfileSessions.h>
+#include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
@@ -544,6 +546,7 @@ void ArcSidebar::save_session()
 
 Tab& ArcSidebar::open_tab(QString const& url)
 {
+    ScopedProfileForNewViews profile(current_profile());
     auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(url)), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     set_tab_space(tab, m_space_id);
     return tab;
@@ -561,6 +564,7 @@ int ArcSidebar::open_background_tabs(QList<SessionEntry> const& entries)
         });
         if (already_open)
             continue;
+        ScopedProfileForNewViews profile(profile_of_space(entry.space_id));
         auto& tab = m_window->new_tab_from_url(ak_url_from_qurl(QUrl(entry.url)), Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::end());
         set_tab_space(tab, entry.space_id);
         ++opened;
@@ -986,6 +990,7 @@ void ArcSidebar::switch_to_space(QString const& id)
 
     m_space_id = id;
     store.set_last_active_space_id(id);
+    apply_profile_for_new_views(); // Before a new-tab page might open below.
 
     // Show the tab last used in this space, else any of its tabs, else a fresh new-tab page.
     Tab* target = m_last_tab_in_space.value(id);
@@ -1060,8 +1065,62 @@ void ArcSidebar::on_current_tab_changed(int index)
 
 QString ArcSidebar::current_profile() const
 {
-    auto const* space = SpaceStore::the().space(m_space_id);
+    return profile_of_space(m_space_id);
+}
+
+QString ArcSidebar::profile_of_space(QString const& space_id)
+{
+    auto const* space = SpaceStore::the().space(space_id);
     return space ? space->profile : QString();
+}
+
+// A tab's profile: its favorite's (favorites belong to a profile), else its space's.
+QString ArcSidebar::profile_of_tab(Tab const& tab)
+{
+    auto node = node_of(tab);
+    if (is_favorite_node(node)) {
+        if (auto const* favorite = SpaceStore::the().favorite(node.mid(4)))
+            return favorite->profile;
+    }
+    return profile_of_space(space_of(tab));
+}
+
+// New tabs (links, the command bar, Cmd+T) open in the profile of the space shown in the active window.
+void ArcSidebar::apply_profile_for_new_views()
+{
+    if (m_window && (m_window->isActiveWindow() || !QApplication::activeWindow()))
+        set_profile_for_new_views(current_profile());
+}
+
+// A tab's cookies and site data come from the session its page was created in, which can't change. A tab whose
+// profile differs from its page's (moved to another profile's space, or opened before its space was known) is
+// reopened in its profile, at the same place. Blank pages hold no site data, so they stay.
+void ArcSidebar::place_tabs_in_their_profiles()
+{
+    for (auto* tab : tabs()) {
+        auto profile = profile_of_tab(*tab);
+        auto expected = session_for_profile(profile);
+        auto* expected_session = expected ? expected.ptr() : &WebView::Application::default_session();
+        if (&tab->view().session() == expected_session || tab->view().is_private() == WebView::IsPrivate::Yes || is_blank(*tab))
+            continue;
+
+        auto url = tab->view().url();
+        auto index = m_tabs.index_of(tab);
+        auto was_current = m_window->current_tab() == tab;
+        auto space = space_of(*tab);
+        auto node = node_of(*tab);
+        set_tab_node(*tab, {}); // So the reopened tab is the one bound to the node.
+
+        Tab* reopened = nullptr;
+        {
+            ScopedProfileForNewViews scope(profile);
+            reopened = &m_window->new_tab_from_url(url, was_current ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No, BrowserWindow::TabLocation::at_index(index + 1));
+        }
+        set_tab_space(*reopened, space);
+        set_tab_node(*reopened, node);
+        if (auto old_index = m_tabs.index_of(tab); old_index >= 0)
+            m_window->request_to_close_tab(old_index);
+    }
 }
 
 QColor ArcSidebar::space_color() const
@@ -1143,6 +1202,9 @@ void ArcSidebar::rebuild()
         return;
     }
     m_rebuild_pending = false;
+
+    place_tabs_in_their_profiles();
+    apply_profile_for_new_views();
 
     auto const* space = SpaceStore::the().space(m_space_id);
     if (!space) {
@@ -2084,6 +2146,8 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
             size_host();
         else if (event->type() == QEvent::WindowActivate && m_mode_set)
             set_window_controls_hidden(*window(), m_mode == Mode::Hidden || m_host_docking); // AppKit can restore them on activation.
+        if (event->type() == QEvent::WindowActivate)
+            apply_profile_for_new_views();
         return false;
     }
 

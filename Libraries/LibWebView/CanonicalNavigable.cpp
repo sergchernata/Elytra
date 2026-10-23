@@ -772,7 +772,7 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host_i
         host->register_embedded_page(page_id, traversable);
         traversable.represent_group_in(*host);
     } else {
-        auto process = TRY(Application::the().launch_child_frame_web_content_process(reporting_page()->client().is_private(), traversable.remote_navigable_graph(), id(), current_entry_descriptor(), traversable.system_visibility_state()));
+        auto process = TRY(Application::the().launch_child_frame_web_content_process(reporting_page()->client().session(), traversable.remote_navigable_graph(), id(), current_entry_descriptor(), traversable.system_visibility_state()));
         host = move(process.client);
         page_id = process.page_id;
         host->register_embedded_page(page_id, traversable);

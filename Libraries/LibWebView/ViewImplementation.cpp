@@ -76,7 +76,7 @@ Optional<ViewImplementation&> ViewImplementation::find_view_by_id(u64 id)
 
 ViewImplementation::ViewImplementation(IsPrivate is_private)
     : m_is_private(is_private)
-    , m_session(Application::session_for_new_view(is_private))
+    , m_session(Application::session_for_new_web_view(is_private)) // Fork hook (Arc profiles)
     , m_document_cookie_version_buffer(Core::create_shared_version_buffer())
     , m_view_id(s_view_count++)
 {
@@ -130,7 +130,7 @@ pid_t ViewImplementation::web_content_pid() const
 
 Vector<HistoryEntry> ViewImplementation::recent_history_entries(size_t limit) const
 {
-    return m_session->history_store->list_entries({}, 0, limit);
+    return m_session->records().history_store->list_entries({}, 0, limit);
 }
 
 CanonicalTraversable& ViewImplementation::traversable() const
@@ -248,12 +248,12 @@ void ViewImplementation::set_favicon(Optional<Gfx::Bitmap const&> favicon)
 
     if (favicon.has_value()) {
         if (auto favicon_png = Gfx::PNGWriter::encode(*favicon); !favicon_png.is_error())
-            m_favicon_hash = m_session->favicon_store->add_favicon(favicon_png.release_value());
+            m_favicon_hash = m_session->records().favicon_store->add_favicon(favicon_png.release_value());
 
         if (m_favicon_hash.has_value()) {
             if (m_is_private == IsPrivate::No)
                 Application::bookmark_store().update_favicon(url(), *m_favicon_hash);
-            m_session->history_store->update_favicon(url(), *m_favicon_hash);
+            m_session->records().history_store->update_favicon(url(), *m_favicon_hash);
         }
     }
 
@@ -625,7 +625,7 @@ Vector<ViewImplementation::SessionHistoryTraversalMenuItem> ViewImplementation::
     auto append_item = [&](size_t target_step_index) {
         auto target_step = used_steps[target_step_index];
         auto const& target_entry = *session_history.top_level_entry_for_step(target_step);
-        auto history_entry = m_session->history_store->entry_for_url(target_entry.url);
+        auto history_entry = m_session->records().history_store->entry_for_url(target_entry.url);
         auto url = target_entry.url.serialize();
         auto title = history_entry.has_value() && history_entry->title.has_value() && !history_entry->title->is_empty()
             ? move(*history_entry->title)
@@ -2765,10 +2765,12 @@ void ViewImplementation::initialize_tab(Web::HTML::VisibilityState system_visibi
 {
     if (!traversable.has_value()) {
         // FIXME: Fail to open the tab, rather than crashing the whole application if this fails.
-        auto page = MUST(Application::the().open_page_for_new_tab(m_is_private));
+        auto page = MUST(Application::the().open_page_for_new_tab(*m_session));
         traversable = page->traversable();
     }
     display_traversable(*traversable, system_visibility_state);
+    // Fork hook (Arc profiles): a view belongs to the session of the process showing it (a popup to its opener's).
+    m_session = page().client().session();
     // The launched process's initial page, or the page the opener's process opened for the tab, displays it.
     VERIFY(page().is_open());
     VERIFY(page().client().is_private() == m_is_private);
@@ -3574,7 +3576,7 @@ bool ViewImplementation::register_session_store_tab_for_testing(Badge<WebContent
     if (m_session_tab_id.has_value())
         return true;
 
-    auto tab_id = m_session->session_store->tab_opened({ .window_id = {}, .initial_url = url(), .insertion_index = {}, .is_active = SessionStore::IsActive::No });
+    auto tab_id = m_session->records().session_store->tab_opened({ .window_id = {}, .initial_url = url(), .insertion_index = {}, .is_active = SessionStore::IsActive::No });
     if (tab_id.is_error())
         return false;
     set_session_tab_id(tab_id.value());
@@ -3602,7 +3604,7 @@ String ViewImplementation::session_store_tab_state_for_testing(Badge<WebContentP
     if (!m_session_tab_id.has_value())
         return serialized.serialized();
 
-    auto cached_state = m_session->session_store->cached_tab_state_for_testing(*m_session_tab_id);
+    auto cached_state = m_session->records().session_store->cached_tab_state_for_testing(*m_session_tab_id);
     if (!cached_state.has_value())
         return serialized.serialized();
 
@@ -3628,7 +3630,7 @@ void ViewImplementation::notify_session_history_changed()
         .history = session_history_snapshot(),
         .url = move(url),
     };
-    m_session->session_store->update_tab_state(move(update));
+    m_session->records().session_store->update_tab_state(move(update));
 }
 
 NonnullRefPtr<Core::Promise<Empty>> ViewImplementation::reset_session_history_for_testing()
@@ -4828,7 +4830,7 @@ void ViewImplementation::download_context_menu_url(PromptForPath prompt_for_path
     auto may_replace_destination = prompt_for_path == PromptForPath::Yes && FileSystem::exists(download_path.value().string())
         ? FileDownloader::MayReplaceDestination::Yes
         : FileDownloader::MayReplaceDestination::No;
-    Application::the().file_downloader().download_file(is_private(), m_context_menu_url, download_path.release_value(), may_replace_destination);
+    Application::the().file_downloader().download_file(is_private(), m_context_menu_url, download_path.release_value(), may_replace_destination, m_session.ptr());
 }
 
 void ViewImplementation::did_request_image_context_menu(Badge<WebContentPage>, Gfx::IntPoint content_position, Web::HTML::PreparedNavigationDescriptor navigation, Optional<Gfx::ShareableBitmap> bitmap)

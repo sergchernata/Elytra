@@ -37,6 +37,7 @@ public:
 
     struct SharedWorkerKey {
         IsPrivate is_private { IsPrivate::No };
+        BrowsingSession const* session { nullptr }; // Fork hook (Arc profiles): no sharing across sessions.
         Web::StorageAPI::StorageKey storage_key;
         URL::URL url;
         Utf16String name;
@@ -64,7 +65,7 @@ public:
     void remove_web_content_owner(WebContentClient&);
     void remove_web_worker_owner(WebWorkerClient&);
 
-    void post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage, CanonicalEnvironmentSettingsObject const& source_settings, pid_t source_process_id, IsPrivate);
+    void post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage, CanonicalEnvironmentSettingsObject const& source_settings, pid_t source_process_id, BrowsingSession const&); // Fork hook (Arc profiles): by session
     // Reconnects the workers whose RequestServer client the predicate picks out to the given RequestServer.
     ErrorOr<void> reconnect_to_request_server(RequestServerInstance&, Function<bool(RequestServerSiteBindings const&)> should_reconnect);
     void for_each_request_server_site_bindings(Function<IterationDecision(RequestServerSiteBindings&)> const&);
@@ -102,7 +103,7 @@ private:
         Web::HTML::WorkerAgentOwnerToken token { 0 };
     };
 
-    Web::HTML::WorkerAgentId start_worker_agent(Owner, Optional<CanonicalEnvironmentSettingsObject const&> outside_settings, Web::HTML::WorkerAgentStartRequest, IsPrivate);
+    Web::HTML::WorkerAgentId start_worker_agent(Owner, Optional<CanonicalEnvironmentSettingsObject const&> outside_settings, Web::HTML::WorkerAgentStartRequest, RefPtr<BrowsingSession>); // Fork hook (Arc profiles): the owner's session
 
     void notify_worker_script_load_failure(Owner const&);
     void notify_worker_exception(Owner const&, Utf16String const& message, Utf16String const& filename, u32 lineno, u32 colno);
@@ -134,6 +135,7 @@ private:
         Optional<bool> worker_is_secure_context;
         bool closing { false };
         IsPrivate is_private { IsPrivate::No };
+        BrowsingSession const* session { nullptr }; // Fork hook (Arc profiles)
         Optional<URL::Origin> top_level_origin;
         Optional<SharedWorkerKey> shared_worker_key;
         Vector<Owner> owners;
@@ -149,6 +151,7 @@ private:
     struct ExitingWorker {
         NonnullRefPtr<WebWorkerClient> client;
         IsPrivate is_private { IsPrivate::No };
+        BrowsingSession const* session { nullptr }; // Fork hook (Arc profiles)
         Optional<URL::Origin> top_level_origin;
         RefPtr<Core::Timer> termination_timer;
     };
@@ -168,6 +171,7 @@ struct Traits<WebView::WorkerProcessManager::SharedWorkerKey> : public DefaultTr
     static unsigned hash(WebView::WorkerProcessManager::SharedWorkerKey const& key)
     {
         auto hash = pair_int_hash(pair_int_hash(pair_int_hash(Traits<Web::StorageAPI::StorageKey>::hash(key.storage_key), Traits<URL::URL>::hash(key.url)), key.name.hash()), static_cast<unsigned>(key.is_private));
+        hash = pair_int_hash(hash, ptr_hash(key.session)); // Fork hook (Arc profiles)
         if (key.top_level_site.has_value())
             hash = pair_int_hash(hash, key.top_level_site->hash());
         return pair_int_hash(hash, static_cast<unsigned>(key.has_cross_site_ancestor));

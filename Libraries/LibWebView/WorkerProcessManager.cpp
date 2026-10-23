@@ -41,7 +41,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(WebContentClie
         },
         .token = request.owner_token,
     };
-    return start_worker_agent(move(abstract_owner), outside_settings, move(request), owner.is_private());
+    return start_worker_agent(move(abstract_owner), outside_settings, move(request), owner.session());
 }
 
 Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(WebWorkerClient& owner, Optional<CanonicalEnvironmentSettingsObject const&> outside_settings, Web::HTML::WorkerAgentStartRequest request)
@@ -52,7 +52,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(WebWorkerClien
         },
         .token = request.owner_token,
     };
-    return start_worker_agent(move(abstract_owner), outside_settings, move(request), owner.is_private());
+    return start_worker_agent(move(abstract_owner), outside_settings, move(request), owner.session());
 }
 
 Optional<CanonicalWorkerEnvironmentSettingsObject const&> WorkerProcessManager::inside_settings(Web::HTML::WorkerAgentId agent_id) const
@@ -64,8 +64,15 @@ Optional<CanonicalWorkerEnvironmentSettingsObject const&> WorkerProcessManager::
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#dom-sharedworker
-Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, Optional<CanonicalEnvironmentSettingsObject const&> outside_settings, Web::HTML::WorkerAgentStartRequest request, IsPrivate is_private)
+Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, Optional<CanonicalEnvironmentSettingsObject const&> outside_settings, Web::HTML::WorkerAgentStartRequest request, RefPtr<BrowsingSession> session_of_owner)
 {
+    // Fork hook (Arc profiles): a worker belongs to its owner's session, and is kept apart from other sessions' workers.
+    if (!session_of_owner) {
+        notify_worker_script_load_failure(owner);
+        return 0;
+    }
+    auto is_private = session_of_owner->is_private();
+
     // The owner names outside settings, which must be an environment it holds.
     // FIXME: The worker takes the rest of the outside settings, such as their top-level origin, policy container and
     //        cross-origin isolated capability, as the owner's process gave them.
@@ -99,6 +106,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
     if (request.agent_type == Web::HTML::AgentType::SharedWorker) {
         SharedWorkerKey key {
             .is_private = is_private,
+            .session = session_of_owner.ptr(),
             .storage_key = outside_storage_key,
             .url = request.url,
             .name = Utf16String::from_utf8(request.name),
@@ -166,16 +174,16 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
         notify_worker_script_load_failure(owner);
         return 0;
     }
-    auto counts_toward_top_level_site = [&](IsPrivate worker_is_private, Optional<URL::Origin> const& worker_top_level_origin) {
-        return worker_is_private == is_private && worker_top_level_origin.has_value() && worker_top_level_origin->is_same_site(*top_level_origin);
+    auto counts_toward_top_level_site = [&](BrowsingSession const* worker_session, Optional<URL::Origin> const& worker_top_level_origin) {
+        return worker_session == session_of_owner.ptr() && worker_top_level_origin.has_value() && worker_top_level_origin->is_same_site(*top_level_origin);
     };
     size_t worker_count_of_top_level_site = 0;
     for (auto const& [id, agent] : m_agents) {
-        if (counts_toward_top_level_site(agent.is_private, agent.top_level_origin))
+        if (counts_toward_top_level_site(agent.session, agent.top_level_origin))
             ++worker_count_of_top_level_site;
     }
     for (auto const& exiting_worker : m_exiting_workers) {
-        if (counts_toward_top_level_site(exiting_worker.is_private, exiting_worker.top_level_origin))
+        if (counts_toward_top_level_site(exiting_worker.session, exiting_worker.top_level_origin))
             ++worker_count_of_top_level_site;
     }
     if (worker_count_of_top_level_site >= maximum_worker_count_per_top_level_site) {
@@ -189,12 +197,12 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
     //         worker process here.
     auto agent_id = ++m_next_agent_id;
     auto client_or_error = [&]() -> ErrorOr<NonnullRefPtr<WebWorkerClient>> {
-        auto client = TRY(launch_web_worker_process(request.agent_type, is_private, agent_id));
+        auto client = TRY(launch_web_worker_process(request.agent_type, *session_of_owner, agent_id));
 
         // The worker's RequestServer client uses the cookies of the session the worker itself belongs to.
         auto session = client->session();
         if (!session)
-            session = Application::session_for_new_view(is_private);
+            session = session_of_owner;
         // The worker makes its requests for the sites its owner makes them for.
         owner.client.visit(
             [&](WebContentOwner const& web_content_owner) {
@@ -289,6 +297,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
         .extended_lifetime = request.extended_lifetime,
         .worker_is_secure_context = request.caller_is_secure_context,
         .is_private = is_private,
+        .session = session_of_owner.ptr(),
         .top_level_origin = top_level_origin,
         .shared_worker_key = {},
         .owners = move(owners),
@@ -305,6 +314,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
     if (request.agent_type == Web::HTML::AgentType::SharedWorker) {
         agent.shared_worker_key = SharedWorkerKey {
             .is_private = is_private,
+            .session = session_of_owner.ptr(),
             .storage_key = move(outside_storage_key),
             .url = request.url,
             .name = Utf16String::from_utf8(request.name),
@@ -400,7 +410,7 @@ void WorkerProcessManager::remove_web_worker_owner(WebWorkerClient& client)
 // https://html.spec.whatwg.org/multipage/web-messaging.html#dom-broadcastchannel-postmessage
 // NB: The processes holding the destinations of step 6 are those hosting an environment whose storage key is
 //     sourceStorageKey. Each finds the destinations among its own BroadcastChannel objects.
-void WorkerProcessManager::post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage posted_message, CanonicalEnvironmentSettingsObject const& source_settings, pid_t source_process_id, IsPrivate is_private)
+void WorkerProcessManager::post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage posted_message, CanonicalEnvironmentSettingsObject const& source_settings, pid_t source_process_id, BrowsingSession const& session)
 {
     // 4. Let sourceOrigin be this's relevant settings object's origin.
     // 5. Let sourceStorageKey be the result of running obtain a storage key for non-storage purposes with this's relevant
@@ -418,7 +428,7 @@ void WorkerProcessManager::post_broadcast_channel_message(Web::HTML::PostedBroad
     };
 
     WebContentClient::for_each_client([&](auto& client) {
-        if (client.pid() == source_process_id || client.is_private() != is_private)
+        if (client.pid() == source_process_id || &client.session() != &session)
             return IterationDecision::Continue;
         if (client.hosts_an_environment_with_storage_key(source_storage_key))
             client.async_broadcast_channel_message(message);
@@ -427,7 +437,7 @@ void WorkerProcessManager::post_broadcast_channel_message(Web::HTML::PostedBroad
 
     for (auto& entry : m_agents) {
         auto& agent = entry.value;
-        if (agent.client->pid() == source_process_id || agent.is_private != is_private)
+        if (agent.client->pid() == source_process_id || agent.session != &session)
             continue;
         if (obtain_a_storage_key_for_non_storage_purposes(*agent.inside_settings) == source_storage_key)
             agent.client->async_broadcast_channel_message(message);
@@ -676,7 +686,7 @@ void WorkerProcessManager::remove_agent(Web::HTML::WorkerAgentId agent_id, Agent
             client->terminate_process();
     });
     termination_timer->start();
-    m_exiting_workers.append({ agent.client, agent.is_private, move(agent.top_level_origin), move(termination_timer) });
+    m_exiting_workers.append({ agent.client, agent.is_private, agent.session, move(agent.top_level_origin), move(termination_timer) });
 }
 
 void WorkerProcessManager::worker_process_did_exit(WebWorkerClient& client)

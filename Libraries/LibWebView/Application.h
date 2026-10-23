@@ -118,6 +118,7 @@ public:
     static RequestServerManager& request_server_manager() { return *the().m_request_server_manager; }
     // The UI process's own client of the session's RequestServer with no site.
     static ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client(IsPrivate = IsPrivate::No);
+    static ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client(BrowsingSession&); // Fork hook (Arc profiles)
     // The control connection of the default session's RequestServer with no site.
     static Requests::RequestControlClient& request_server_control_client();
 
@@ -190,6 +191,10 @@ public:
     static NonnullRefPtr<BrowsingSession> session_for_new_view(IsPrivate);
 
     static RefPtr<BrowsingSession> existing_session(IsPrivate);
+    // Fork hook (Arc profiles): the session new non-private views use instead of the default one; null for the default.
+    static void set_session_for_new_views(RefPtr<BrowsingSession>);
+    static NonnullRefPtr<BrowsingSession> session_for_new_web_view(IsPrivate); // Fork hook (Arc profiles)
+    static void did_create_profile_session(BrowsingSession&);                  // Fork hook (Arc profiles)
 
     // A RequestServer client uses the cookies of the browsing session it was created for, whatever RequestServer says.
     void did_connect_request_server_client(int client_id, BrowsingSession&, RequestServer::SiteBinding);
@@ -220,12 +225,12 @@ public:
     ErrorOr<Core::GeolocationProvider::WatchId, Core::GeolocationError> start_watching_geolocation_position(Core::GeolocationProvider::SuccessCallback on_success, Core::GeolocationProvider::ErrorCallback on_error);
     void stop_watching_geolocation_position(Core::GeolocationProvider::WatchId);
 
-    ErrorOr<NonnullRefPtr<WebContentPage>> open_page_for_new_tab(IsPrivate);
+    ErrorOr<NonnullRefPtr<WebContentPage>> open_page_for_new_tab(BrowsingSession&); // Fork hook (Arc profiles): by session
     struct ChildFrameWebContentProcess {
         NonnullRefPtr<WebContentClient> client;
         Web::PageId page_id { 0 };
     };
-    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state);
+    ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(BrowsingSession&, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state);
     Web::PageId allocate_page_id();
     Web::HTML::CrossProcessIdAllocator allocate_cross_process_id_allocator();
     Web::HTML::CrossProcessId allocate_ui_process_cross_process_id();
@@ -436,7 +441,7 @@ protected:
     bool has_spare_web_content_process() const { return m_spare_web_content_process; }
 
 private:
-    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(IsPrivate, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {}, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables = {}, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry = {}, Web::HTML::VisibilityState system_visibility_state = Web::HTML::VisibilityState::Hidden);
+    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(BrowsingSession&, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {}, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables = {}, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry = {}, Web::HTML::VisibilityState system_visibility_state = Web::HTML::VisibilityState::Hidden);
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
     ErrorOr<void> launch_compositor_process();
@@ -641,6 +646,8 @@ private:
     OwnPtr<DownloadStore> m_download_store;
     RefPtr<BrowsingSession> m_default_session;
     WeakPtr<BrowsingSession> m_private_session;
+    RefPtr<BrowsingSession> m_session_for_new_views; // Fork hook (Arc profiles)
+    Vector<WeakPtr<BrowsingSession>> m_profile_sessions; // Fork hook (Arc profiles)
     HashMap<int, WeakPtr<BrowsingSession>> m_request_server_client_sessions;
 
     // The RequestServer clients of the UI process itself, which may use the cookies of any site.

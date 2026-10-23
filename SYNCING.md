@@ -16,6 +16,27 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
 | `UI/Qt/BrowserWindow.h/.cpp` | `on_tab_will_close`, called in `definitely_close_tab()` before the tab is removed (the sidebar picks the next tab from the same space, or leaves an empty page so closing a space's last tab doesn't close the window) |
 
+### Profiles (LibWebView)
+
+Arc profiles keep separate cookies and site data in one window. Upstream picks a tab's browsing session by
+private-or-not; these hooks carry the session itself instead. All are marked `Fork hook (Arc profiles)`.
+
+| File | Hook |
+| --- | --- |
+| `BrowsingSession.h/.cpp` | `create_persistent()` (a profile's own cookie, storage and HSTS database) and `records()` (history, favicons and tab restore stay the default session's) |
+| `Application.h/.cpp` | `set_session_for_new_views()`, `session_for_new_web_view()`, `did_create_profile_session()`, `request_server_client(BrowsingSession&)`; `create_web_content_client()`, `open_page_for_new_tab()` and `launch_child_frame_web_content_process()` take a session (the spare process is only the default session's); `clear_browsing_data()` clears profiles' site data too |
+| `ViewImplementation.cpp` | the session comes from `session_for_new_web_view()`, follows the process showing the view (popups), and records go through `records()`; context-menu downloads pass the session |
+| `WebContentClient.h/.cpp` | constructed with a session (the private-or-not constructor stays, forwarding) |
+| `HelperProcess.h/.cpp` | `launch_web_content_process()` and `launch_web_worker_process()` take a session |
+| `WebWorkerClient.h/.cpp`, `WorkerProcessManager.h/.cpp` | workers take their owner's session; shared-worker keys, per-site worker counts and BroadcastChannel delivery are partitioned by session |
+| `FileDownloader.h/.cpp` | downloads remember the session they started in (`m_download_sessions`) for their requests |
+| `CanonicalNavigable.cpp`, `CanonicalTraversable.cpp` | child-frame processes get the page's session |
+| `WebContentPage.cpp`, `ProcessSnapshot.cpp`, `WebUI/HistoryUI.cpp` | history and favicons through `records()`; downloads and BroadcastChannel by session |
+
+`Tests/UI/Qt/Arc/TestArcProfileSessions.cpp` checks all of this with real processes, headlessly; run it, and
+upstream's `Tests/LibWebView` tests, after a rebase that touches these files.
+
+
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
 contents of upstream's vertical tab column while reusing its sizing, collapsing and window controls.
 
@@ -69,8 +90,9 @@ and sidebar widget styling: centered icons, uniform symbol sizes, drawn window c
 downloads wording). They run headless:
 
 ```sh
-ninja -C Build/release TestArcSpaceStore TestArcWidgets TestArcImportParser
+ninja -C Build/release TestArcSpaceStore TestArcWidgets TestArcImportParser TestArcProfileSessions
 Build/release/bin/TestArcSpaceStore && Build/release/bin/TestArcWidgets && Build/release/bin/TestArcImportParser
+LADYBIRD_SOURCE_DIR=$PWD Build/release/bin/TestArcProfileSessions
 ```
 
 To watch the dock/hide animations without touching the mouse, run with `ARC_DEV_AUTOTOGGLE=1600`
@@ -87,7 +109,8 @@ the same spaces, matched by Arc's space id, and never adds a favorite twice.
 ## Where Arc data is stored
 
 Spaces, folders, pinned tabs and favorites live in `ArcSpaces.json` inside the Ladybird profile's data
-directory, with imported site icons in `ArcIcons/` next to it, never in this repo. A local pre-commit hook (`.git/hooks/pre-commit`, not pushed) refuses
+directory, with imported site icons in `ArcIcons/` and each Arc profile's cookies and site data in
+`ArcProfiles/<profile>/` next to it, never in this repo. A local pre-commit hook (`.git/hooks/pre-commit`, not pushed) refuses
 commits containing browser data files.
 
 ## Building on this Mac

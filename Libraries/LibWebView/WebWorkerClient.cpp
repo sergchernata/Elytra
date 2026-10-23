@@ -17,14 +17,14 @@
 
 namespace WebView {
 
-WebWorkerClient::WebWorkerClient(NonnullOwnPtr<IPC::Transport> transport, IsPrivate is_private, Web::HTML::WorkerAgentId agent_id)
+WebWorkerClient::WebWorkerClient(NonnullOwnPtr<IPC::Transport> transport, BrowsingSession& session, Web::HTML::WorkerAgentId agent_id)
     : IPC::ConnectionToServer<WebWorkerClientEndpoint, WebWorkerServerEndpoint>(*this, move(transport))
-    , m_is_private(is_private)
+    , m_is_private(session.is_private())
     , m_agent_id(agent_id)
     , m_audio_tab_id(allocate_audio_tab_id())
 {
-    if (auto session = Application::existing_session(is_private))
-        m_session = session->make_weak_ptr();
+    // Fork hook (Arc profiles): its owner's session, not just private-or-not.
+    m_session = session.make_weak_ptr();
 }
 
 WebWorkerClient::~WebWorkerClient()
@@ -167,8 +167,11 @@ Messages::WebWorkerClient::RequestMediaServerConnectionResponse WebWorkerClient:
 
 void WebWorkerClient::did_post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage message)
 {
+    auto session = m_session.strong_ref();
+    if (!session)
+        return;
     if (auto settings = hosted_environment(message.environment_id); settings.has_value())
-        WorkerProcessManager::the().post_broadcast_channel_message(move(message), *settings, pid(), m_is_private);
+        WorkerProcessManager::the().post_broadcast_channel_message(move(message), *settings, pid(), *session);
 }
 
 Messages::WebWorkerClient::StartWorkerAgentResponse WebWorkerClient::start_worker_agent(Web::HTML::WorkerAgentStartRequest request)

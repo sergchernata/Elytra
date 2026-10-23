@@ -9,6 +9,8 @@
 #include <UI/Qt/Arc/ArcChrome.h>
 #include <UI/Qt/Arc/ArcImporter.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
+#include <UI/Qt/Arc/ProfileSessions.h>
+#include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/BrowserWindow.h>
@@ -126,6 +128,10 @@ static void add_import_menu_items()
 
 void install()
 {
+    // The first window's tab opens before its sidebar exists: give it the profile of the space it will show.
+    if (auto const* space = SpaceStore::the().space(SpaceStore::the().last_active_space_id()))
+        set_profile_for_new_views(space->profile);
+
     // Development aid: ARC_DEV_IMPORT=1 imports from Arc at startup without dialogs and logs the summary.
     if (qEnvironmentVariableIsSet("ARC_DEV_IMPORT")) {
         QTimer::singleShot(1500, [] {

@@ -153,6 +153,10 @@ private:
     void update_current_highlight();
     QColor space_color() const;
     QString current_profile() const;
+    static QString profile_of_space(QString const& space_id);
+    static QString profile_of_tab(Tab const&);
+    void apply_profile_for_new_views();
+    void place_tabs_in_their_profiles();
     void apply_space_tint();
     QIcon icon_for(QString const& url, Tab const* tab) const;
 

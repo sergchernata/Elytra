@@ -431,7 +431,7 @@ void WebContentPage::maybe_record_history_visit_for_current_load(URL::URL const&
     auto transition = HistoryVisitTransition::Link;
     if (displays_tab())
         transition = view().m_history_visit_transition_for_current_load;
-    client().session().history_store->record_visit(url, move(title), UnixDateTime::now(), transition);
+    client().session().records().history_store->record_visit(url, move(title), UnixDateTime::now(), transition);
     m_history_recorded_url_for_current_load = normalized_url.release_value();
 }
 
@@ -2205,7 +2205,7 @@ Messages::WebContentClient::DidStartDownloadWithoutRequestResponse WebContentPag
         return { Optional<u64> {} };
 
     auto& file_downloader = Application::the().file_downloader();
-    auto download_id = file_downloader.start_download(client().is_private(), url, destination.release_value(), total_size);
+    auto download_id = file_downloader.start_download(client().is_private(), url, destination.release_value(), total_size, FileDownloader::MayReplaceDestination::No, &client().session());
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
 
@@ -2245,7 +2245,7 @@ Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_d
         return { Optional<u64> {} };
 
     auto& file_downloader = Application::the().file_downloader();
-    auto download_id = file_downloader.adopt_download(client().is_private(), url, destination.release_value(), total_size, request_server_client_id, request_server_request_id, initial_data.bytes());
+    auto download_id = file_downloader.adopt_download(client().is_private(), url, destination.release_value(), total_size, request_server_client_id, request_server_request_id, initial_data.bytes(), &client().session());
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
 
@@ -2320,9 +2320,9 @@ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, 
 
         maybe_record_history_visit_for_current_load(committed_url, title, "load finish"sv);
         if (title.has_value())
-            client().session().history_store->update_title(committed_url, *title);
+            client().session().records().history_store->update_title(committed_url, *title);
         if (view().favicon_hash().has_value())
-            client().session().history_store->update_favicon(committed_url, *view().favicon_hash());
+            client().session().records().history_store->update_favicon(committed_url, *view().favicon_hash());
 
         view().did_finish_navigation();
 
@@ -2351,7 +2351,7 @@ void WebContentPage::did_change_title(Utf16String title)
                 view().url(),
                 title_utf8);
 
-            client().session().history_store->update_title(view().url(), title_utf8);
+            client().session().records().history_store->update_title(view().url(), title_utf8);
         }
 
         if (title.is_empty())
@@ -2740,7 +2740,7 @@ Messages::WebContentClient::DidRequestStorageUsageResponse WebContentPage::did_r
 void WebContentPage::did_post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage message)
 {
     if (auto settings = hosted_environment(message.environment_id); settings.has_value())
-        WorkerProcessManager::the().post_broadcast_channel_message(move(message), *settings, client().pid(), client().is_private());
+        WorkerProcessManager::the().post_broadcast_channel_message(move(message), *settings, client().pid(), client().session());
 }
 
 void WebContentPage::close_worker_agent(Web::HTML::WorkerAgentId agent_id, Web::HTML::WorkerAgentOwnerToken owner_token)

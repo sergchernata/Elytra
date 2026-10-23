@@ -46,3 +46,14 @@ else()
 endif()
 set_target_properties(TestArcImportParser PROPERTIES AUTOMOC ON)
 deploy_qt_offscreen_platform_plugin(TestArcImportParser)
+
+# Profiles: real WebContent and RequestServer processes, run headlessly (modeled on upstream's
+# Tests/LibWebView/TestRequestServerClientSessions).
+add_executable(TestArcProfileSessions "${CMAKE_CURRENT_LIST_DIR}/TestArcProfileSessions.cpp")
+add_dependencies(TestArcProfileSessions ladybird_build_resource_files ${ladybird_helper_processes})
+target_link_libraries(TestArcProfileSessions PRIVATE AK LibCore LibFileSystem LibGfx LibHTTP LibIPC LibMain LibURL LibWeb LibWebView)
+if (APPLE)
+    target_compile_definitions(TestArcProfileSessions PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
+endif()
+add_test(NAME TestArcProfileSessions COMMAND $<TARGET_FILE:TestArcProfileSessions>)
+set_tests_properties(TestArcProfileSessions PROPERTIES TIMEOUT 120 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})

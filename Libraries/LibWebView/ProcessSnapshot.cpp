@@ -89,7 +89,7 @@ Optional<ByteBuffer> favicon_png_for_page(ProcessPageSnapshot const& page)
     auto view = ViewImplementation::find_view_by_id(page.view_id);
     if (!view.has_value())
         return {};
-    return view->session().favicon_store->favicon_png(*page.favicon_hash);
+    return view->session().records().favicon_store->favicon_png(*page.favicon_hash);
 }
 
 }

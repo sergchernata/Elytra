@@ -16,6 +16,8 @@
 #include <AK/OwnPtr.h>
 #include <AK/Span.h>
 #include <AK/String.h>
+#include <AK/WeakPtr.h>
+#include <LibWebView/BrowsingSession.h>
 #include <AK/Time.h>
 #include <AK/WeakPtr.h>
 #include <AK/Weakable.h>
@@ -88,9 +90,10 @@ public:
         Yes,
     };
 
-    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No);
-    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data = {});
-    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No);
+    // Fork hook (Arc profiles): the session whose cookies the download uses; private-or-not's when null.
+    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No, BrowsingSession* = nullptr);
+    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data = {}, BrowsingSession* = nullptr);
+    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No, BrowsingSession* = nullptr);
     bool has_active_downloads() const;
     bool has_unresumable_downloads() const;
     void set_cancel_callback(u64 id, Function<void()>);
@@ -170,6 +173,10 @@ private:
     Vector<FileDownloaderObserver&> m_observers;
     DownloadStore* m_download_store { nullptr };
     u64 m_next_download_id { 0 };
+
+    // Fork hook (Arc profiles): the session whose cookies each download uses, when not private-or-not's.
+    HashMap<u64, WeakPtr<BrowsingSession>> m_download_sessions;
+    ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client_for(Download const&) const;
 };
 
 class WEBVIEW_API FileDownloaderObserver {

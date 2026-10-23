@@ -9,6 +9,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/CustomGlyphs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DownloadsFormat.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FloatingPanel.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ProfileSessions.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarTree.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarWidgets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStore.cpp
