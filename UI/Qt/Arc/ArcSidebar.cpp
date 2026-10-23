@@ -1448,6 +1448,7 @@ void ArcSidebar::set_panel_card(bool card)
 void ArcSidebar::dock_panel()
 {
     m_tabs.set_vertical_sidebar_reserved_width({});
+    m_tabs.set_vertical_sidebar_page_width_locked(false);
     m_host_docking = false;
     m_host_lifting_off = false;
     m_retract_timer->stop();
@@ -1564,6 +1565,9 @@ void ArcSidebar::begin_transition(bool expanding)
             m_last_docked_rect = QRect(mapTo(m_window, QPoint(0, 0)), size());
         if (m_last_docked_rect.isEmpty())
             return;
+        // The page slides rather than resizing every frame (which it can't re-render fast enough): it takes its
+        // full width now, under the still-docked sidebar, and moves as the sidebar leaves.
+        m_tabs.set_vertical_sidebar_page_width_locked(true);
         // Hold the page where it is, and lift the sidebar into the host before upstream narrows its column,
         // drawn controls first, then hide the real ones: nothing visibly changes yet.
         m_tabs.set_vertical_sidebar_reserved_width(docked_width);
@@ -1574,7 +1578,9 @@ void ArcSidebar::begin_transition(bool expanding)
         m_pending_transition = Transition::Hide;
         start_transition();
     } else {
-        // Hold the page at its hidden width; the animation widens it as the sidebar slides in.
+        // Hold the page at its hidden position; it keeps its full width and slides over as the sidebar comes in,
+        // then narrows once at the end.
+        m_tabs.set_vertical_sidebar_page_width_locked(true);
         m_tabs.set_vertical_sidebar_reserved_width(hidden_width);
         m_pending_transition = Transition::Show;
         // Docked, the sidebar lands where it last was docked; first time, wait for upstream's layout to know.
@@ -1638,11 +1644,29 @@ void ArcSidebar::step_transition(qreal progress)
     auto lerp = [progress](qreal from, qreal to) { return from + (to - from) * progress; };
     // One clock for both, so the page's edge travels with the sidebar's.
     m_tabs.set_vertical_sidebar_reserved_width(qRound(lerp(m_transition_width_from, m_transition_width_to)));
-    // The page's own layout would only follow on the next event-loop pass, a frame behind the panel; apply
-    // it now so both land in the same frame.
-    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
     m_host->move(qRound(lerp(m_transition_from.x(), m_transition_to.x())), qRound(lerp(m_transition_from.y(), m_transition_to.y())));
+    sync_native_page_views();
     set_transition_opacity(fade_opacity(progress));
+}
+
+// Sliding the page moves its (non-native) column, and Qt only repositions a native child view when that view
+// itself is moved or resized. Move the current page's native views along so the page follows.
+void ArcSidebar::sync_native_page_views()
+{
+    auto* tab = m_window ? m_window->current_tab() : nullptr;
+    if (!tab)
+        return;
+    for (auto* widget : tab->findChildren<QWidget*>()) {
+        if (!widget->internalWinId() || !widget->isVisible())
+            continue;
+        auto* handle = widget->windowHandle();
+        auto* native_parent = widget->nativeParentWidget();
+        if (!handle || !native_parent)
+            continue;
+        auto geometry = QRect(widget->mapTo(native_parent, QPoint(0, 0)), widget->size());
+        if (handle->geometry() != geometry)
+            handle->setGeometry(geometry);
+    }
 }
 
 // The sidebar fades a little faster than it slides: fully there before it lands, gone before it leaves.
@@ -1665,6 +1689,8 @@ void ArcSidebar::finish_transition()
     m_active_transition = Transition::None;
     set_transition_opacity(1.0); // Back to fully opaque for the hover slide-out and the docked sidebar.
     m_tabs.set_vertical_sidebar_reserved_width({});
+    m_tabs.set_vertical_sidebar_page_width_locked(false); // The page takes its final width, once.
+    sync_native_page_views();
     if (finished == Transition::Hide) {
         m_host_lifting_off = false;
         if (m_mode == Mode::Hidden)

@@ -223,6 +223,9 @@ public:
     // temporary width for the space reserved beside the page, which that animation drives.
     Function<void(bool expanded)> on_vertical_sidebar_expanded_will_change;
     void set_vertical_sidebar_reserved_width(Optional<int>);
+    // Fork hook (Arc): while set, the page keeps the full (sidebar-hidden) width and is placed by hand at the
+    // reserved width, so a dock/hide animation slides it instead of re-rendering it at every size.
+    void set_vertical_sidebar_page_width_locked(bool);
 
 signals:
     void current_tab_changed(int index);
@@ -284,6 +287,7 @@ private:
     TabBar* m_tab_bar { nullptr };
     QPointer<QWidget> m_vertical_sidebar_widget; // Fork hook (Arc)
     Optional<int> m_vertical_sidebar_reserved_width; // Fork hook (Arc)
+    bool m_vertical_sidebar_page_width_locked { false }; // Fork hook (Arc)
     void size_hidden_pages_like_the_current_one();
 
     QStackedWidget* m_stacked_widget { nullptr };
