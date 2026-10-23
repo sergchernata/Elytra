@@ -1,0 +1,133 @@
+/*
+ * Arc-style sidebar: favorites, the current space's pinned folders and tabs, Today's tabs,
+ * and a space switcher. Lives inside upstream's vertical tab column (see TabWidget hook).
+ *
+ * Tabs remain owned by upstream's TabWidget. Each Tab carries two dynamic properties:
+ *   arc_space: the space it belongs to (empty for favorites, which show in every space)
+ *   arc_node:  the pinned node id, "fav:<favorite id>", or empty for a Today tab
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <QHash>
+#include <QPointer>
+#include <QWidget>
+#include <UI/Qt/Arc/SidebarTree.h>
+#include <UI/Qt/Arc/SpaceStore.h>
+
+class QGridLayout;
+class QHBoxLayout;
+class QKeyEvent;
+class QLabel;
+class QToolButton;
+
+namespace Ladybird {
+
+class BrowserWindow;
+class Tab;
+class TabWidget;
+
+namespace Arc {
+
+class ArcSidebar final : public QWidget {
+    Q_OBJECT
+
+public:
+    static void attach(BrowserWindow&);
+    static ArcSidebar* for_window(BrowserWindow&);
+
+    ArcSidebar(BrowserWindow&, TabWidget&);
+
+    QString current_space_id() const { return m_space_id; }
+    void switch_to_space(QString const& id);
+    void switch_to_space_at(int index);
+    bool handle_key_press(QKeyEvent const&);
+
+protected:
+    virtual void paintEvent(QPaintEvent*) override;
+    virtual bool eventFilter(QObject*, QEvent*) override;
+
+private:
+    // Tab bookkeeping
+    QList<Tab*> tabs() const;
+    QList<Tab*> today_tabs(QString const& space_id) const;
+    Tab* tab_for_node(QString const& node_id) const;
+    static QString space_of(Tab const&);
+    static QString node_of(Tab const&);
+    static void set_tab_space(Tab&, QString const&);
+    static void set_tab_node(Tab&, QString const&);
+    static QString url_of(Tab const&);
+    static QString title_of(Tab const&);
+    void track_tabs();
+    void restore_session_assignments();
+    void save_session();
+    void watch_tab(Tab&);
+
+    // Actions
+    Tab& open_tab(QString const& url);
+    void activate(Tab&);
+    void close_tab(Tab&);
+    void open_or_activate_node(QString const& node_id);
+    void open_or_activate_favorite(QString const& favorite_id);
+    void pin_tab(Tab&, QString const& parent_id, int index);
+    void unpin_node(QString const& node_id);
+    void add_favorite(Tab&, int index = -1);
+    void move_to_space(QModelIndex const&, QString const& space_id);
+    void new_folder(QString const& parent_id, int index);
+    void rename_node(QString const& node_id);
+    void delete_folder(QString const& node_id);
+    void new_space();
+    void edit_space(QString const& space_id);
+    void delete_space(QString const& space_id);
+
+    // Views
+    void schedule_rebuild();
+    void rebuild();
+    void rebuild_favorites();
+    void rebuild_tree();
+    void rebuild_switcher();
+    void append_nodes(QStandardItem& parent, QList<PinnedNode> const&);
+    void update_tab_rows(Tab&);
+    void update_current_highlight();
+    QColor space_color() const;
+    QIcon icon_for(QString const& url, Tab const* tab) const;
+
+    void on_current_tab_changed(int index);
+    void on_row_clicked(QModelIndex const&);
+    void on_close_clicked(QModelIndex const&);
+    void on_row_dropped(QModelIndex const& source, QModelIndex const& target, SidebarTree::DropPlace);
+    void on_urls_dropped(QList<QUrl> const&, QModelIndex const& target, SidebarTree::DropPlace);
+    void show_tree_menu(QPoint const&);
+    void show_space_menu(QString const& space_id, QPoint const& global_position);
+    void show_favorite_menu(QString const& favorite_id, QPoint const& global_position);
+
+    struct DropTarget {
+        bool pinned { false }; // false: Today section
+        QString parent_id;     // Pinned only
+        int index { -1 };      // Pinned: index within parent. Today: index among Today tabs.
+    };
+    DropTarget resolve_drop(QModelIndex const& target, SidebarTree::DropPlace) const;
+
+    QPointer<BrowserWindow> m_window;
+    TabWidget& m_tabs;
+    QString m_space_id;
+    QHash<QString, QPointer<Tab>> m_last_tab_in_space;
+    QPointer<Tab> m_current_tab;
+
+    QWidget* m_favorites { nullptr };
+    QGridLayout* m_favorites_layout { nullptr };
+    QLabel* m_space_title { nullptr };
+    SidebarTree* m_tree { nullptr };
+    SidebarModel* m_model { nullptr };
+    QWidget* m_switcher { nullptr };
+    QHBoxLayout* m_switcher_layout { nullptr };
+
+    bool m_rebuild_pending { false };
+    bool m_switching_space { false };
+};
+
+}
+
+}

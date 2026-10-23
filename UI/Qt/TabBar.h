@@ -214,9 +214,13 @@ public:
     bool can_expand_vertical_tabs_on_hover() const;
     void update_tab_button_visibility();
 
+    // Fork hook (Arc): show this widget in the vertical sidebar in place of the tab list.
+    void set_vertical_sidebar_widget(QWidget*);
+
 signals:
     void current_tab_changed(int index);
     void tab_close_requested(int index);
+    void tabs_changed(); // Fork hook (Arc)
 
 protected:
     virtual void dragEnterEvent(QDragEnterEvent*) override;
@@ -271,6 +275,7 @@ private:
     void accept_tab_drop(QDropEvent*, int index);
 
     TabBar* m_tab_bar { nullptr };
+    QPointer<QWidget> m_vertical_sidebar_widget; // Fork hook (Arc)
     void size_hidden_pages_like_the_current_one();
 
     QStackedWidget* m_stacked_widget { nullptr };

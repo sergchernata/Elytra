@@ -2056,6 +2056,7 @@ void TabWidget::insert_tab(int index, Tab* widget, QString const& label)
 
     // A tab moved here from another window can already be loading.
     m_tab_bar->update_loading_swirl_animation();
+    emit tabs_changed(); // Fork hook (Arc)
 }
 
 void TabWidget::remove_tab(int index)
@@ -2084,6 +2085,7 @@ Tab* TabWidget::take_tab(int index)
 
     update_tab_layout();
     update_tab_button_visibility();
+    emit tabs_changed(); // Fork hook (Arc)
     return as<Tab>(widget);
 }
 
@@ -2106,6 +2108,15 @@ void TabWidget::set_new_tab_action(QAction* action)
         return;
 
     connect(m_new_tab_button, &QToolButton::clicked, action, &QAction::trigger);
+}
+
+// Fork hook (Arc)
+void TabWidget::set_vertical_sidebar_widget(QWidget* widget)
+{
+    m_vertical_sidebar_widget = widget;
+    if (widget)
+        widget->setParent(m_vertical_tab_bar_column);
+    rebuild_layout();
 }
 
 void TabWidget::set_tab_bar_visible(bool visible)
@@ -2554,6 +2565,12 @@ void TabWidget::rebuild_layout()
 
 void TabWidget::rebuild_layout_for_horizontal_tabs()
 {
+    if (m_vertical_sidebar_widget) { // Fork hook (Arc)
+        m_vertical_sidebar_widget->hide();
+        m_tab_bar->show();
+        m_new_tab_button->show();
+    }
+
     m_tab_bar_row->setMinimumHeight(HORIZONTAL_TAB_STRIP_HEIGHT);
     m_tab_bar_row_layout->setSpacing(0);
     m_tab_bar_row_layout->setContentsMargins(12, 2, 4, 1);
@@ -2594,6 +2611,14 @@ void TabWidget::rebuild_layout_for_vertical_tabs()
     m_vertical_tab_bar_column_layout->setContentsMargins(side_margin, VERTICAL_TABS_TOP_MARGIN, side_margin, 8);
 
     update_vertical_tabs_button_layout();
+
+    if (m_vertical_sidebar_widget) { // Fork hook (Arc)
+        m_tab_bar->hide();
+        m_new_tab_button->hide();
+        m_vertical_tab_bar_column_layout->addWidget(m_vertical_sidebar_widget, 1);
+        m_vertical_sidebar_widget->show();
+        return;
+    }
 
     m_vertical_tab_bar_column_layout->addWidget(m_tab_bar);
     m_vertical_tab_bar_column_layout->addWidget(m_new_tab_button);

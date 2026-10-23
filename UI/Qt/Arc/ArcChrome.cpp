@@ -7,11 +7,19 @@
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
+#include <UI/Qt/Arc/ArcImporter.h>
+#include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/BrowserWindow.h>
 
 #include <QAction>
+#include <QActionEvent>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QMenu>
+#include <QPointer>
 #include <QSettings>
+#include <QTimer>
 
 namespace Ladybird::Arc {
 
@@ -50,10 +58,80 @@ static void route_new_tab_to_command_bar()
     });
 }
 
+// "Import from Arc..." goes right above "Open File..." in every File menu. Menus are
+// rebuilt per window, so watch for that action being added instead of editing upstream.
+static QAction* import_action()
+{
+    static QAction* action = [] {
+        auto* action = new QAction("Import from Arc\u2026", qApp);
+        QObject::connect(action, &QAction::triggered, action, [] {
+            run_import_dialog(Application::the().active_window_if_any());
+        });
+        return action;
+    }();
+    return action;
+}
+
+static void add_import_action_to(QMenu& menu)
+{
+    auto* anchor = Application::the().open_file_action();
+    if (!anchor || !menu.actions().contains(anchor) || menu.actions().contains(import_action()))
+        return;
+    menu.insertAction(anchor, import_action());
+}
+
+// Watches app-wide events: File menus being built, and browser windows being shown.
+class MenuWatcher final : public QObject {
+public:
+    using QObject::QObject;
+
+    virtual bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::KeyPress) {
+            if (auto* widget = qobject_cast<QWidget*>(watched)) {
+                if (auto* window = qobject_cast<BrowserWindow*>(widget->window())) {
+                    if (auto* sidebar = ArcSidebar::for_window(*window); sidebar && sidebar->handle_key_press(*static_cast<QKeyEvent*>(event)))
+                        return true;
+                }
+            }
+            return false;
+        }
+        if (event->type() == QEvent::Show) {
+            if (auto* window = qobject_cast<BrowserWindow*>(watched))
+                ArcSidebar::attach(*window);
+            return false;
+        }
+        if (event->type() != QEvent::ActionAdded)
+            return false;
+        if (static_cast<QActionEvent*>(event)->action() != Application::the().open_file_action())
+            return false;
+        if (auto* menu = qobject_cast<QMenu*>(watched)) {
+            QPointer<QMenu> guarded = menu;
+            QTimer::singleShot(0, menu, [guarded] {
+                if (guarded)
+                    add_import_action_to(*guarded);
+            });
+        }
+        return false;
+    }
+};
+
+static void add_import_menu_items()
+{
+    if (auto* anchor = Application::the().open_file_action()) {
+        for (auto* object : anchor->associatedObjects()) {
+            if (auto* menu = qobject_cast<QMenu*>(object))
+                add_import_action_to(*menu);
+        }
+    }
+    qApp->installEventFilter(new MenuWatcher(qApp));
+}
+
 void install()
 {
     enable_sidebar_on_first_run();
     route_new_tab_to_command_bar();
+    add_import_menu_items();
 }
 
 }

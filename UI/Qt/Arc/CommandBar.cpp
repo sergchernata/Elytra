@@ -73,7 +73,6 @@ void CommandBar::present()
     raise();
     activateWindow();
     m_edit->setFocus(Qt::ShortcutFocusReason);
-    m_edit->show_autocomplete();
     qApp->installEventFilter(this);
 }
 
