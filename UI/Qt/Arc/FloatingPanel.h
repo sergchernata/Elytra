@@ -24,6 +24,9 @@ public:
 
     // Docked, the real window controls show over this spot, so draw nothing and let clicks through.
     void set_drawn(bool);
+    // Size and spacing, taken from the real controls so the two can be swapped without a visible change.
+    void set_metrics(qreal diameter, qreal pitch);
+    qreal diameter() const { return m_diameter; }
 
 protected:
     virtual void paintEvent(QPaintEvent*) override;
@@ -39,6 +42,8 @@ private:
 
     bool m_hovered { false };
     bool m_drawn { true };
+    qreal m_diameter { 12 };
+    qreal m_pitch { 20 };
     int m_pressed { -1 };
 };
 
@@ -55,12 +60,19 @@ public:
 
     QRect card_rect() const { return rect().adjusted(SHADOW, SHADOW, -SHADOW, -SHADOW); }
 
+    // Card: rounded, bordered and shadowed (hover slide-out). Flat: looks exactly like the docked sidebar,
+    // for the hide/show animations, so nothing pops when the panel changes hands.
+    void set_card(bool);
+
 signals:
     void left();
 
 protected:
     virtual void paintEvent(QPaintEvent*) override;
     virtual void leaveEvent(QEvent*) override;
+
+private:
+    bool m_card { true };
 };
 
 }

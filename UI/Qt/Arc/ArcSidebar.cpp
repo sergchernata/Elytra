@@ -65,6 +65,7 @@ static constexpr int FAVORITE_TILE_HEIGHT = 54;
 static constexpr int TOP_STRIP_HEIGHT = 34;
 static constexpr int FLOATING_MARGIN = 6;
 static constexpr int FLOATING_PADDING = 8;
+static constexpr int FLOATING_LIGHTS_INSET = 6;
 static constexpr int SHELF_SLIDE_DISTANCE = 14;
 static constexpr int SHELF_ANIMATION_MS = 190;
 static constexpr int REVEAL_DELAY_MS = 60;
@@ -164,7 +165,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     auto& store = SpaceStore::the();
 
     // Everything lives in a panel, so that when the sidebar is hidden and slides out over the page
-    // the panel can keep its full width and move in from the edge (see dock_panel() and float_panel()).
+    // the panel can keep its full width and move in from the edge (see dock_panel() and prepare_card_panel()).
     m_panel = new QWidget(this);
     auto* layout = new QVBoxLayout(m_panel);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -174,28 +175,24 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_top_strip = new QWidget(this);
     m_top_strip->setFixedHeight(TOP_STRIP_HEIGHT);
     m_top_strip->installEventFilter(this);
-    auto* strip_layout = new QHBoxLayout(m_top_strip);
-    strip_layout->setContentsMargins(6, 4, 0, 0);
     // Drawn window controls for the floating panel (hidden mode); docked, the real ones sit over this strip.
+    // Both are placed by hand (place_window_controls()) so they can line up exactly with the real controls.
     m_traffic_lights = new TrafficLights(m_top_strip);
     m_traffic_lights->setProperty("arcBrowserWindow", QVariant::fromValue<QWidget*>(&window));
     m_traffic_lights->set_drawn(false);
-    strip_layout->addWidget(m_traffic_lights);
-    strip_layout->addSpacing(10);
-    // Sidebar toggle, right of the window controls as in Arc.
+    // Sidebar toggle, right of the window controls as in Arc (floating panel only).
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
     m_sidebar_toggle->set_symbol_point_size(18); // Same size as the toolbar's sidebar button.
     m_sidebar_toggle->setFixedSize(30, 22);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
+    m_sidebar_toggle->hide();
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] {
         auto& settings = WebView::Application::settings();
         auto tab_settings = settings.tab_settings();
         tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
         settings.set_tab_settings(tab_settings);
     });
-    strip_layout->addWidget(m_sidebar_toggle);
-    strip_layout->addStretch(1);
     layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);
@@ -1340,37 +1337,35 @@ void ArcSidebar::update_mode()
     if (!m_window)
         return;
     auto hidden = !WebView::Application::settings().tab_settings().vertical_tabs_expanded;
-    set_window_controls_hidden(*window(), hidden);
-
     auto mode = hidden ? Mode::Hidden : Mode::Docked;
     auto was_set = m_mode_set;
     auto previous = m_mode;
     m_mode_set = true;
     m_mode = mode;
     apply_toolbar_inset();
-    if (was_set && mode == previous)
+
+    if (was_set && mode == previous) {
+        // Re-assert the real window controls' visibility (AppKit/Qt can restore them), unless an animation owns them.
+        if (!m_host_docking && !m_host_lifting_off)
+            set_window_controls_hidden(*window(), hidden);
         return;
+    }
 
     if (mode == Mode::Docked) {
-        // Shown again from hidden: slide the panel into the docked spot, then hand it back to the column.
         if (was_set && previous == Mode::Hidden && m_host && isVisible() && width() > 80) {
-            m_host_docking = true;
-            auto target = QRect(mapTo(m_window, QPoint(0, 0)), size());
-            m_host->resize(target.width() + FloatingSidebarHost::SHADOW * 2, target.height() + FloatingSidebarHost::SHADOW * 2);
-            m_panel->setGeometry(m_host->card_rect());
-            auto from = m_host->isVisible() ? m_host->pos() : hidden_host_position();
-            slide_host(from, target.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW), true);
-            update();
+            animate_dock();
             return;
         }
         dock_panel();
         return;
     }
 
-    float_panel();
-    // Toggled off while docked: lift the sidebar off where it was and slide it away, as Arc does.
-    if (was_set && previous == Mode::Docked && !m_last_docked_rect.isEmpty())
-        slide_host(m_last_docked_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW), hidden_host_position(), false);
+    if (was_set && previous == Mode::Docked && !m_last_docked_rect.isEmpty() && isVisible()) {
+        animate_lift_off();
+        return;
+    }
+    prepare_card_panel();
+    set_window_controls_hidden(*window(), true);
 }
 
 // Hidden, upstream's toolbar keeps its 12px left margin after the thin hover edge, which leaves the
@@ -1390,13 +1385,48 @@ void ArcSidebar::apply_toolbar_inset()
     }
 }
 
+// Places the drawn window controls (and the panel's sidebar toggle beside them). With match_native, they
+// sit exactly where the real controls are when the panel's top-left is at panel_origin (window coords),
+// so swapping one for the other is invisible. Otherwise they sit at the floating card's own inset.
+void ArcSidebar::place_window_controls(QPoint panel_origin, bool match_native)
+{
+    m_panel->layout()->activate();
+    auto strip_origin = m_top_strip->mapTo(m_panel, QPoint(0, 0));
+
+    auto rects = m_window ? native_window_control_rects(*m_window) : QList<QRectF> {};
+    QPointF first_center(FLOATING_LIGHTS_INSET + 7, TOP_STRIP_HEIGHT / 2.0 + 2);
+    if (rects.size() == 3) {
+        auto diameter = qMin(rects[0].width(), rects[0].height());
+        m_traffic_lights->set_metrics(diameter, rects[1].center().x() - rects[0].center().x());
+        if (match_native)
+            first_center = rects[0].center() - QPointF(panel_origin) - QPointF(strip_origin);
+        else
+            first_center = QPointF(FLOATING_LIGHTS_INSET + diameter / 2.0, first_center.y());
+    }
+
+    auto diameter = m_traffic_lights->diameter();
+    m_traffic_lights->move(qRound(first_center.x() - 1 - diameter / 2.0), qRound(first_center.y() - m_traffic_lights->height() / 2.0));
+    m_sidebar_toggle->move(m_traffic_lights->geometry().right() + 12, qRound(first_center.y() - m_sidebar_toggle->height() / 2.0));
+}
+
+void ArcSidebar::set_panel_card(bool card)
+{
+    // Card: inner padding, rounded and shadowed (hover slide-out). Flat: identical to the docked sidebar.
+    m_panel->layout()->setContentsMargins(card ? FLOATING_PADDING : 0, 0, card ? FLOATING_PADDING : 0, card ? FLOATING_PADDING : 0);
+    if (m_host)
+        m_host->set_card(card);
+}
+
 void ArcSidebar::dock_panel()
 {
     m_host_docking = false;
+    m_host_lifting_off = false;
     m_retract_timer->stop();
     m_reveal_timer->stop();
     if (m_host_animation)
         m_host_animation->stop();
+    // Real controls back first, then drop the panel copy, in the same turn: no frame without controls.
+    set_window_controls_hidden(*window(), false);
     if (m_host)
         m_host->hide();
     m_panel->setParent(this);
@@ -1405,8 +1435,6 @@ void ArcSidebar::dock_panel()
     m_panel->show();
     m_traffic_lights->set_drawn(false);
     m_sidebar_toggle->hide(); // Docked, the toolbar's own sidebar button does this.
-    // Docked, the real window controls sit a little higher than our drawn ones; center the toggle on them.
-    m_top_strip->layout()->setContentsMargins(6, 0, 0, 0);
     update();
 }
 
@@ -1430,6 +1458,10 @@ void ArcSidebar::ensure_host()
         if (m_host_retracting) {
             m_host->hide();
             m_host_retracting = false;
+            m_host_lifting_off = false;
+            // Out of sight now: switch to the hover card for next time.
+            if (m_mode == Mode::Hidden)
+                prepare_card_panel();
         }
     });
 }
@@ -1442,20 +1474,71 @@ void ArcSidebar::size_host()
     m_panel->setGeometry(m_host->card_rect());
 }
 
-void ArcSidebar::float_panel()
+// Hidden mode at rest: the panel waits, out of sight, in the floating host as a hover card.
+void ArcSidebar::prepare_card_panel()
 {
     ensure_host();
     if (!m_host)
         return;
     m_panel->setParent(m_host);
-    m_panel->layout()->setContentsMargins(FLOATING_PADDING, 0, FLOATING_PADDING, FLOATING_PADDING);
+    set_panel_card(true);
     size_host();
     m_panel->show();
+    place_window_controls({}, false);
     m_traffic_lights->set_drawn(true);
     m_sidebar_toggle->show();
-    m_top_strip->layout()->setContentsMargins(6, 4, 0, 0);
     m_host->move(hidden_host_position());
     m_host->hide();
+    update();
+}
+
+// Docked -> hidden: the sidebar itself slides away. The panel moves into the host flat, at exactly the
+// docked spot, with drawn controls over the real ones; only then are the real ones hidden.
+void ArcSidebar::animate_lift_off()
+{
+    ensure_host();
+    if (!m_host)
+        return;
+    m_reveal_timer->stop();
+    m_retract_timer->stop();
+    m_panel->setParent(m_host);
+    set_panel_card(false);
+    m_host->resize(m_last_docked_rect.width() + FloatingSidebarHost::SHADOW * 2, m_last_docked_rect.height() + FloatingSidebarHost::SHADOW * 2);
+    m_panel->setGeometry(m_host->card_rect());
+    m_panel->show();
+    place_window_controls(m_last_docked_rect.topLeft(), true);
+    m_traffic_lights->set_drawn(true);
+    m_sidebar_toggle->hide();
+
+    auto from = m_last_docked_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW);
+    m_host_lifting_off = true;
+    slide_host(from, QPoint(-m_host->width() - 4, from.y()), false);
+    set_window_controls_hidden(*window(), true);
+    update();
+}
+
+// Hidden -> docked: the docked sidebar slides into its spot (flat, drawn controls riding along at the real
+// controls' place), and the real controls return the moment it lands.
+void ArcSidebar::animate_dock()
+{
+    ensure_host();
+    auto target = QRect(mapTo(m_window, QPoint(0, 0)), size());
+    auto was_visible = m_host->isVisible();
+    m_reveal_timer->stop();
+    m_retract_timer->stop();
+    m_panel->setParent(m_host);
+    set_panel_card(false);
+    m_host->resize(target.width() + FloatingSidebarHost::SHADOW * 2, target.height() + FloatingSidebarHost::SHADOW * 2);
+    m_panel->setGeometry(m_host->card_rect());
+    m_panel->show();
+    place_window_controls(target.topLeft(), true);
+    m_traffic_lights->set_drawn(true);
+    m_sidebar_toggle->hide();
+
+    auto to = target.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW);
+    auto from = was_visible ? m_host->pos() : QPoint(-m_host->width() - 4, to.y());
+    m_host_docking = true;
+    slide_host(from, to, true);
     update();
 }
 
@@ -1485,7 +1568,7 @@ void ArcSidebar::slide_host(QPoint from, QPoint to, bool revealing)
 
 void ArcSidebar::reveal()
 {
-    if (m_mode != Mode::Hidden || !m_host)
+    if (m_mode != Mode::Hidden || !m_host || m_host_lifting_off)
         return;
     m_retract_timer->stop();
     if (m_host->isVisible() && !m_host_retracting)
@@ -1733,10 +1816,10 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
         return false;
     }
     if (watched == m_window) {
-        if (event->type() == QEvent::Resize && m_mode == Mode::Hidden && m_host)
+        if (event->type() == QEvent::Resize && m_mode == Mode::Hidden && m_host && !m_host_lifting_off && !m_host_docking)
             size_host();
         else if (event->type() == QEvent::WindowActivate && m_mode_set)
-            set_window_controls_hidden(*window(), m_mode == Mode::Hidden); // AppKit can restore them on activation.
+            set_window_controls_hidden(*window(), m_mode == Mode::Hidden || m_host_docking); // AppKit can restore them on activation.
         return false;
     }
 

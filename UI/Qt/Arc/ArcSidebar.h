@@ -115,7 +115,11 @@ private:
     void update_mode();
     void dock_panel();
     void apply_toolbar_inset();
-    void float_panel();
+    void prepare_card_panel();
+    void animate_lift_off();
+    void animate_dock();
+    void set_panel_card(bool);
+    void place_window_controls(QPoint panel_origin, bool match_native);
     void ensure_host();
     void size_host();
     void reveal();
@@ -169,6 +173,7 @@ private:
     QPropertyAnimation* m_host_animation { nullptr };
     bool m_host_retracting { false };
     bool m_host_docking { false };
+    bool m_host_lifting_off { false };
     class SymbolButton* m_sidebar_toggle { nullptr };
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };

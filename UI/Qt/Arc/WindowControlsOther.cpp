@@ -12,4 +12,9 @@ void set_window_controls_hidden(QWidget&, bool)
 {
 }
 
+QList<QRectF> native_window_control_rects(QWidget&)
+{
+    return {};
+}
+
 }

@@ -14,12 +14,12 @@
 #include <QPainterPath>
 #include <QWindow>
 
+#include <cmath>
+
 namespace Ladybird::Arc {
 
 // --- TrafficLights ----------------------------------------------------------------------------
 
-static constexpr qreal LIGHT_DIAMETER = 12;
-static constexpr qreal LIGHT_PITCH = 20;
 
 TrafficLights::TrafficLights(QWidget* parent)
     : QWidget(parent)
@@ -30,7 +30,17 @@ TrafficLights::TrafficLights(QWidget* parent)
 
 QSize TrafficLights::sizeHint() const
 {
-    return { static_cast<int>(LIGHT_PITCH * 2 + LIGHT_DIAMETER) + 2, static_cast<int>(LIGHT_DIAMETER) + 4 };
+    return { static_cast<int>(std::ceil(m_pitch * 2 + m_diameter)) + 2, static_cast<int>(std::ceil(m_diameter)) + 4 };
+}
+
+void TrafficLights::set_metrics(qreal diameter, qreal pitch)
+{
+    if (diameter <= 0 || pitch <= 0)
+        return;
+    m_diameter = diameter;
+    m_pitch = pitch;
+    setFixedSize(sizeHint());
+    update();
 }
 
 void TrafficLights::set_drawn(bool drawn)
@@ -42,7 +52,7 @@ void TrafficLights::set_drawn(bool drawn)
 
 QRectF TrafficLights::button_rect(int index) const
 {
-    return QRectF(1 + index * LIGHT_PITCH, (height() - LIGHT_DIAMETER) / 2.0, LIGHT_DIAMETER, LIGHT_DIAMETER);
+    return QRectF(1 + index * m_pitch, (height() - m_diameter) / 2.0, m_diameter, m_diameter);
 }
 
 int TrafficLights::button_at(QPoint position) const
@@ -176,11 +186,24 @@ FloatingSidebarHost::FloatingSidebarHost(QWidget& browser_window)
         windowHandle()->setParent(parent_handle);
 }
 
+void FloatingSidebarHost::set_card(bool card)
+{
+    if (m_card == card)
+        return;
+    m_card = card;
+    update();
+}
+
 void FloatingSidebarHost::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     auto card = QRectF(card_rect());
+
+    if (!m_card) {
+        painter.fillRect(card, ChromeStyle::chrome_background(palette()));
+        return;
+    }
 
     // Soft shadow under the card.
     painter.setPen(Qt::NoPen);

@@ -86,6 +86,25 @@
 
 namespace Ladybird::Arc {
 
+QList<QRectF> native_window_control_rects(QWidget& window)
+{
+    QList<QRectF> rects;
+    auto* view = reinterpret_cast<NSView*>(window.winId());
+    auto* ns_window = view.window;
+    if (!ns_window)
+        return rects;
+    auto window_height = ns_window.frame.size.height;
+    for (auto type : { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton }) {
+        auto* button = [ns_window standardWindowButton:type];
+        if (!button)
+            return {};
+        // Window coordinates have a bottom-left origin; Qt's (with the content under the title bar) top-left.
+        auto frame = [button convertRect:button.bounds toView:nil];
+        rects.append(QRectF(frame.origin.x, window_height - frame.origin.y - frame.size.height, frame.size.width, frame.size.height));
+    }
+    return rects;
+}
+
 static char s_hider_key;
 
 void set_window_controls_hidden(QWidget& window, bool hidden)
