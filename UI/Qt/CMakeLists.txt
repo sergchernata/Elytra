@@ -63,6 +63,7 @@ target_sources(ladybird PRIVATE
     WindowScreenObserver.cpp
     ladybird.qrc
 )
+include(Arc/Arc.cmake) # Arc chrome (fork-only)
 if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
     target_sources(ladybird PRIVATE
         AccessibilityInterface.cpp

@@ -12,6 +12,7 @@
 #include <LibWebView/URL.h>
 #include <LibWebView/Utilities.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/Arc/ArcChrome.h>
 #include <UI/Qt/BrowserWindow.h>
 #if defined(LADYBIRD_QT_HAVE_POSITIONING)
 #    include <UI/Qt/GeolocationProviderQt.h>
@@ -131,6 +132,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             app->new_window(urls, app->configuration_for_new_window());
         };
 
+        Ladybird::Arc::install(); // Arc chrome (fork-only)
         auto& window = app->new_window(browser_options.urls, app->configuration_for_new_window());
         window.setWindowTitle("Ladybird");
 
