@@ -12,6 +12,7 @@
 #pragma once
 
 #include <QHash>
+#include <QPushButton>
 #include <QSet>
 #include <QPointer>
 #include <QWidget>
@@ -163,6 +164,7 @@ private:
     static QString profile_of_space(QString const& space_id);
     static QString profile_of_tab(Tab const&);
     void apply_profile_for_new_views();
+    void style_update_button();
     void place_tabs_in_their_profiles();
     void apply_space_tint();
     QIcon icon_for(QString const& url, Tab const* tab) const;
@@ -185,6 +187,7 @@ private:
 
     QPointer<BrowserWindow> m_window;
     QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
+    QPushButton* m_update_button { nullptr };
     QString m_tree_space_id;                // The space the list shows.
     QHash<QString, int> m_scroll_positions; // Each space's list scroll position.
     QStringList m_favorite_ids;                       // What the favorite tiles show, in order.

@@ -10,12 +10,17 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/DownloadsFormat.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FloatingPanel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ProfileSessions.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ReleaseInfo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarTree.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SidebarWidgets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SpaceStoreProfile.cpp
     ${CMAKE_CURRENT_LIST_DIR}/SymbolButton.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/UpdateChecker.cpp
 )
+
+# The update notice asks GitHub for the latest release through Ladybird's own network stack.
+target_link_libraries(ladybird PRIVATE LibHTTP LibRequests)
 
 # The importer reads Arc's (Chromium) icon databases.
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 4.3.1)
@@ -29,4 +34,11 @@ if (APPLE)
     target_sources(ladybird PRIVATE ${CMAKE_CURRENT_LIST_DIR}/SymbolIcon.mm ${CMAKE_CURRENT_LIST_DIR}/WindowControls.mm)
 else()
     target_sources(ladybird PRIVATE ${CMAKE_CURRENT_LIST_DIR}/SymbolIconOther.cpp ${CMAKE_CURRENT_LIST_DIR}/WindowControlsOther.cpp)
+endif()
+
+# Release builds (see .github/workflows/arc-release-macos.yml) know their tag and repository, to notice newer releases.
+set(ARC_RELEASE_TAG "" CACHE STRING "Arc fork: this build's release tag (release builds only)")
+set(ARC_RELEASE_REPOSITORY "" CACHE STRING "Arc fork: the GitHub repository releases come from (owner/name)")
+if (ARC_RELEASE_TAG AND ARC_RELEASE_REPOSITORY)
+    target_compile_definitions(ladybird PRIVATE ARC_RELEASE_TAG="${ARC_RELEASE_TAG}" ARC_RELEASE_REPOSITORY="${ARC_RELEASE_REPOSITORY}")
 endif()

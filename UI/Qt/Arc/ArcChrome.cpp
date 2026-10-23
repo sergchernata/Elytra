@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/ArcImporter.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
+#include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/SpaceStore.h>
@@ -128,6 +129,8 @@ static void add_import_menu_items()
 
 void install()
 {
+    UpdateChecker::the().start();
+
     // The first window's tab opens before its sidebar exists: give it the profile of the space it will show.
     if (auto const* space = SpaceStore::the().space(SpaceStore::the().last_active_space_id()))
         set_profile_for_new_views(space->profile);

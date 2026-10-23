@@ -57,3 +57,10 @@ if (APPLE)
 endif()
 add_test(NAME TestArcProfileSessions COMMAND $<TARGET_FILE:TestArcProfileSessions>)
 set_tests_properties(TestArcProfileSessions PROPERTIES TIMEOUT 120 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
+
+ladybird_test("Arc/TestArcReleaseInfo.cpp" UI/Qt
+    CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
+    LIBS Qt::Core Qt::Gui Qt::Widgets
+)
+target_sources(TestArcReleaseInfo PRIVATE "${ARC_SOURCE_DIR}/ReleaseInfo.cpp")
+deploy_qt_offscreen_platform_plugin(TestArcReleaseInfo)

@@ -9,6 +9,7 @@
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
+#include <UI/Qt/Arc/UpdateChecker.h>
 #include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
@@ -65,6 +66,7 @@ namespace Ladybird::Arc {
 
 static constexpr char const* SPACE_PROPERTY = "arc_space";
 static constexpr char const* BLANK_PROPERTY = "arc_blank";
+static constexpr int UPDATE_BUTTON_HEIGHT = 40;
 static constexpr int SPARE_TAB_DELAY_MS = 1200;
 static constexpr char const* NODE_PROPERTY = "arc_node";
 static constexpr auto FAVORITE_PREFIX = "fav:";
@@ -256,6 +258,31 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_tree = new SidebarTree(this);
     m_tree->setModel(m_model);
     layout->addWidget(m_tree, 1);
+
+    // Arc's update notice: a pill above the bottom bar once a newer release is ready (see UpdateChecker).
+    m_update_button = new QPushButton(this);
+    m_update_button->setObjectName("ArcUpdateButton");
+    m_update_button->setCursor(Qt::PointingHandCursor);
+    m_update_button->setFocusPolicy(Qt::NoFocus);
+    m_update_button->setFixedHeight(UPDATE_BUTTON_HEIGHT);
+    m_update_button->hide();
+    layout->addWidget(m_update_button);
+    connect(m_update_button, &QPushButton::clicked, this, [this] {
+        auto& updates = UpdateChecker::the();
+        if (updates.state() == UpdateChecker::State::Ready)
+            updates.restart_into_update();
+        else if (updates.state() == UpdateChecker::State::PageOnly && updates.release().has_value())
+            open_tab(updates.release()->page_url);
+    });
+    auto show_update = [this] {
+        auto state = UpdateChecker::the().state();
+        // Downloading happens quietly; the pill shows once there's something to click.
+        m_update_button->setText(state == UpdateChecker::State::Ready ? "Restart to Update" : "New Version Available");
+        style_update_button();
+        m_update_button->setVisible(state == UpdateChecker::State::Ready || state == UpdateChecker::State::PageOnly);
+    };
+    connect(&UpdateChecker::the(), &UpdateChecker::state_changed, this, show_update);
+    show_update();
 
     m_switcher = new QWidget(this);
     m_switcher_layout = new QHBoxLayout(m_switcher);
@@ -1166,6 +1193,20 @@ void ArcSidebar::on_current_tab_changed(int index)
 }
 
 // --- Views --------------------------------------------------------------------------------------
+
+void ArcSidebar::style_update_button()
+{
+    auto dark = ChromeStyle::is_dark(palette());
+    m_update_button->setStyleSheet(QString(
+        "QPushButton#ArcUpdateButton { background: %1; border: 1px solid %2; border-radius: %3px; color: %4;"
+        " font-size: 13px; font-weight: 500; margin: 0 2px 6px 2px; }"
+        "QPushButton#ArcUpdateButton:hover { background: %5; }")
+            .arg(dark ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.55)",
+                dark ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.10)",
+                QString::number((UPDATE_BUTTON_HEIGHT - 6) / 2),
+                dark ? "rgba(255,255,255,0.92)" : "rgba(0,0,0,0.80)",
+                dark ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.80)"));
+}
 
 QString ArcSidebar::current_profile() const
 {

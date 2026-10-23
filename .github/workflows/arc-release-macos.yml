@@ -53,6 +53,16 @@ jobs:
           ccache_path: ${{ steps.setup.outputs.ccache_path }}
           vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
 
+      - name: Name the release
+        id: release
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="arc-$(date -u +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Configure
         run: |
           CC="$(xcrun --find clang)"
@@ -64,6 +74,8 @@ jobs:
           CC="$CC" CXX="$CXX" cmake --preset Release -B Build \
             -DENABLE_CI_BASELINE_CPU=ON \
             -DBUILD_TESTING=OFF \
+            -DARC_RELEASE_TAG="${{ steps.release.outputs.tag }}" \
+            -DARC_RELEASE_REPOSITORY="${GITHUB_REPOSITORY}" \
             -DPython3_EXECUTABLE=${{ env.pythonLocation }}/bin/python \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX"
@@ -91,11 +103,7 @@ jobs:
           "${{ env.pythonLocation }}/bin/python" Meta/package-macos-app-bundle.py \
             --build-dir Build --install-dir Install --output ladybird-app-bundle.tar.gz
 
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          else
-            TAG="arc-$(date -u +%Y.%m.%d)-$(git rev-parse --short HEAD)"
-          fi
+          TAG="${{ steps.release.outputs.tag }}"
           ZIP="Ladybird-${TAG}-macOS-arm64.zip"
 
           mkdir -p staging
