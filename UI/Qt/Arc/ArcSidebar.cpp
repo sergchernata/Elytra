@@ -46,6 +46,7 @@
 #include <QApplication>
 #include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
+#include <QVariantAnimation>
 #include <QResizeEvent>
 #include <QStyle>
 #include <QTimer>
@@ -69,10 +70,11 @@ static constexpr int FLOATING_LIGHTS_INSET = 6;
 static constexpr int SHELF_SLIDE_DISTANCE = 14;
 static constexpr int SHELF_ANIMATION_MS = 190;
 static constexpr int REVEAL_DELAY_MS = 60;
+static constexpr int TRANSITION_MS = 300;
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = 2;
 static constexpr int RETRACT_DELAY_MS = 280;
-static constexpr int REVEAL_ANIMATION_MS = 220;
-static constexpr int RETRACT_ANIMATION_MS = 180;
+static constexpr int REVEAL_ANIMATION_MS = 260;
+static constexpr int RETRACT_ANIMATION_MS = 220;
 
 #if defined(AK_OS_MACOS)
 static constexpr auto SPACE_SHORTCUT_MODIFIER = Qt::META; // The Control key on macOS, as in Arc.
@@ -184,7 +186,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
     m_sidebar_toggle->set_symbol_point_size(18); // Same size as the toolbar's sidebar button.
-    m_sidebar_toggle->setFixedSize(30, 22);
+    m_sidebar_toggle->setFixedSize(28, 28);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     m_sidebar_toggle->hide();
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] {
@@ -272,10 +274,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_shelf->setGraphicsEffect(m_shelf_opacity);
     m_shelf_position_animation = new QPropertyAnimation(m_shelf, "pos", this);
     m_shelf_position_animation->setDuration(SHELF_ANIMATION_MS);
-    m_shelf_position_animation->setEasingCurve(QEasingCurve::OutCubic);
+    m_shelf_position_animation->setEasingCurve(QEasingCurve::InOutCubic);
     m_shelf_opacity_animation = new QPropertyAnimation(m_shelf_opacity, "opacity", this);
     m_shelf_opacity_animation->setDuration(SHELF_ANIMATION_MS);
-    m_shelf_opacity_animation->setEasingCurve(QEasingCurve::OutCubic);
+    m_shelf_opacity_animation->setEasingCurve(QEasingCurve::InOutCubic);
     m_shelf_animation = new QParallelAnimationGroup(this);
     m_shelf_animation->addAnimation(m_shelf_position_animation);
     m_shelf_animation->addAnimation(m_shelf_opacity_animation);
@@ -349,6 +351,31 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_retract_timer->setInterval(RETRACT_DELAY_MS);
     connect(m_retract_timer, &QTimer::timeout, this, &ArcSidebar::retract_if_left);
     window.installEventFilter(this);
+
+    // Docking and hiding animate the page width together with the sidebar: upstream tells us just before
+    // it changes the layout, so the page can be held in place and then moved by our animation.
+    m_tabs.on_vertical_sidebar_expanded_will_change = [this](bool expanded) { begin_transition(expanded); };
+    m_transition = new QVariantAnimation(this);
+    m_transition->setStartValue(0.0);
+    m_transition->setEndValue(1.0);
+    m_transition->setDuration(TRANSITION_MS);
+    m_transition->setEasingCurve(QEasingCurve::InOutCubic);
+    connect(m_transition, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) { step_transition(value.toReal()); });
+    connect(m_transition, &QAbstractAnimation::finished, this, &ArcSidebar::finish_transition);
+
+    // Development aid: with ARC_DEV_AUTOTOGGLE=<ms> set, the sidebar docks and hides on that interval, so
+    // its animations can be recorded without driving the mouse. Does nothing otherwise.
+    if (auto interval = qEnvironmentVariableIntValue("ARC_DEV_AUTOTOGGLE"); interval > 0) {
+        auto* timer = new QTimer(this);
+        timer->setInterval(interval);
+        connect(timer, &QTimer::timeout, this, [] {
+            auto& settings = WebView::Application::settings();
+            auto tab_settings = settings.tab_settings();
+            tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
+            settings.set_tab_settings(tab_settings);
+        });
+        timer->start();
+    }
 
     rebuild();
 }
@@ -1344,6 +1371,14 @@ void ArcSidebar::update_mode()
     m_mode = mode;
     apply_toolbar_inset();
 
+    if (m_active_transition != Transition::None)
+        return; // The animation finishes the switch (dock_panel / prepare_card_panel).
+    if (m_pending_transition != Transition::None && was_set && mode != previous) {
+        start_transition();
+        return;
+    }
+    m_pending_transition = Transition::None;
+
     if (was_set && mode == previous) {
         // Re-assert the real window controls' visibility (AppKit/Qt can restore them), unless an animation owns them.
         if (!m_host_docking && !m_host_lifting_off)
@@ -1352,16 +1387,7 @@ void ArcSidebar::update_mode()
     }
 
     if (mode == Mode::Docked) {
-        if (was_set && previous == Mode::Hidden && m_host && isVisible() && width() > 80) {
-            animate_dock();
-            return;
-        }
         dock_panel();
-        return;
-    }
-
-    if (was_set && previous == Mode::Docked && !m_last_docked_rect.isEmpty() && isVisible()) {
-        animate_lift_off();
         return;
     }
     prepare_card_panel();
@@ -1419,6 +1445,7 @@ void ArcSidebar::set_panel_card(bool card)
 
 void ArcSidebar::dock_panel()
 {
+    m_tabs.set_vertical_sidebar_reserved_width({});
     m_host_docking = false;
     m_host_lifting_off = false;
     m_retract_timer->stop();
@@ -1443,20 +1470,15 @@ void ArcSidebar::ensure_host()
     if (m_host || !m_window)
         return;
     m_host = new FloatingSidebarHost(*m_window);
+    keep_native_widget_above_page(*m_host);
     m_host->setProperty("arcSidebarRoot", true);
     m_host->installEventFilter(this);
     connect(m_host, &FloatingSidebarHost::left, this, [this] { m_retract_timer->start(); });
 
     m_host_animation = new QPropertyAnimation(m_host, "pos", this);
     connect(m_host_animation, &QAbstractAnimation::finished, this, [this] {
-        if (m_host_docking) {
-            m_host_docking = false;
-            if (m_mode == Mode::Docked)
-                dock_panel();
-            return;
-        }
         if (m_host_retracting) {
-            m_host->hide();
+            park_host();
             m_host_retracting = false;
             m_host_lifting_off = false;
             // Out of sight now: switch to the hover card for next time.
@@ -1487,59 +1509,140 @@ void ArcSidebar::prepare_card_panel()
     place_window_controls({}, false);
     m_traffic_lights->set_drawn(true);
     m_sidebar_toggle->show();
+    // Parked just past the window's left edge rather than hidden: re-showing a native window takes AppKit a
+    // frame or two, which would make the panel lag behind the page when it slides in.
+    park_host();
+    update();
+}
+
+void ArcSidebar::park_host()
+{
     m_host->move(hidden_host_position());
-    m_host->hide();
-    update();
+    if (!m_host->isVisible())
+        m_host->show();
 }
 
-// Docked -> hidden: the sidebar itself slides away. The panel moves into the host flat, at exactly the
-// docked spot, with drawn controls over the real ones; only then are the real ones hidden.
-void ArcSidebar::animate_lift_off()
+// Puts the panel, flat (looking exactly like the docked sidebar), into the floating host with its
+// top-left at panel_rect's, and the drawn window controls exactly over the real ones.
+void ArcSidebar::show_flat_host(QRect panel_rect)
 {
     ensure_host();
-    if (!m_host)
+    m_reveal_timer->stop();
+    m_retract_timer->stop();
+    if (m_host_animation)
+        m_host_animation->stop();
+    m_panel->setParent(m_host);
+    set_panel_card(false);
+    m_host->resize(panel_rect.width() + FloatingSidebarHost::SHADOW * 2, panel_rect.height() + FloatingSidebarHost::SHADOW * 2);
+    m_panel->setGeometry(m_host->card_rect());
+    m_panel->show();
+    place_window_controls(panel_rect.topLeft(), true);
+    m_traffic_lights->set_drawn(true);
+    m_sidebar_toggle->hide();
+    m_host->move(panel_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW));
+}
+
+// Called by upstream right before it docks or hides the sidebar (any route: toolbar, panel, menu). Both
+// animations start right here, in the same turn, so the page and the sidebar move together from frame one.
+void ArcSidebar::begin_transition(bool expanding)
+{
+    if (!m_mode_set || !m_window || !isVisible())
         return;
-    m_reveal_timer->stop();
-    m_retract_timer->stop();
-    m_panel->setParent(m_host);
-    set_panel_card(false);
-    m_host->resize(m_last_docked_rect.width() + FloatingSidebarHost::SHADOW * 2, m_last_docked_rect.height() + FloatingSidebarHost::SHADOW * 2);
-    m_panel->setGeometry(m_host->card_rect());
-    m_panel->show();
-    place_window_controls(m_last_docked_rect.topLeft(), true);
-    m_traffic_lights->set_drawn(true);
-    m_sidebar_toggle->hide();
+    if (m_transition->state() == QAbstractAnimation::Running) {
+        m_transition->stop();
+        finish_transition();
+    }
 
-    auto from = m_last_docked_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW);
-    m_host_lifting_off = true;
-    slide_host(from, QPoint(-m_host->width() - 4, from.y()), false);
-    set_window_controls_hidden(*window(), true);
-    update();
+    auto hidden_width = m_tabs.collapsed_vertical_tabs_width();
+    auto docked_width = m_tabs.vertical_sidebar_expanded_width();
+
+    if (!expanding) {
+        // Measure where the docked sidebar is right now (upstream hasn't narrowed the column yet).
+        if (m_panel->parentWidget() == this && width() > 80)
+            m_last_docked_rect = QRect(mapTo(m_window, QPoint(0, 0)), size());
+        if (m_last_docked_rect.isEmpty())
+            return;
+        // Hold the page where it is, and lift the sidebar into the host before upstream narrows its column,
+        // drawn controls first, then hide the real ones: nothing visibly changes yet.
+        m_tabs.set_vertical_sidebar_reserved_width(docked_width);
+        show_flat_host(m_last_docked_rect);
+        m_host->show();
+        m_host->raise();
+        set_window_controls_hidden(*window(), true);
+        m_pending_transition = Transition::Hide;
+        start_transition();
+    } else {
+        // Hold the page at its hidden width; the animation widens it as the sidebar slides in.
+        m_tabs.set_vertical_sidebar_reserved_width(hidden_width);
+        m_pending_transition = Transition::Show;
+        // Docked, the sidebar lands where it last was docked; first time, wait for upstream's layout to know.
+        if (!m_last_docked_rect.isEmpty())
+            start_transition();
+    }
 }
 
-// Hidden -> docked: the docked sidebar slides into its spot (flat, drawn controls riding along at the real
-// controls' place), and the real controls return the moment it lands.
-void ArcSidebar::animate_dock()
+void ArcSidebar::start_transition()
 {
-    ensure_host();
-    auto target = QRect(mapTo(m_window, QPoint(0, 0)), size());
-    auto was_visible = m_host->isVisible();
-    m_reveal_timer->stop();
-    m_retract_timer->stop();
-    m_panel->setParent(m_host);
-    set_panel_card(false);
-    m_host->resize(target.width() + FloatingSidebarHost::SHADOW * 2, target.height() + FloatingSidebarHost::SHADOW * 2);
-    m_panel->setGeometry(m_host->card_rect());
-    m_panel->show();
-    place_window_controls(target.topLeft(), true);
-    m_traffic_lights->set_drawn(true);
-    m_sidebar_toggle->hide();
+    auto hidden_width = m_tabs.collapsed_vertical_tabs_width();
+    auto docked_width = m_tabs.vertical_sidebar_expanded_width();
 
-    auto to = target.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW);
-    auto from = was_visible ? m_host->pos() : QPoint(-m_host->width() - 4, to.y());
-    m_host_docking = true;
-    slide_host(from, to, true);
-    update();
+    if (m_pending_transition == Transition::Hide) {
+        m_transition_from = m_host->pos();
+        m_transition_to = QPoint(-m_host->width() - 4, m_transition_from.y());
+        m_transition_width_from = docked_width;
+        m_transition_width_to = hidden_width;
+        m_host_lifting_off = true;
+    } else {
+        auto target = m_last_docked_rect;
+        if (target.isEmpty() || width() > 80)
+            target = QRect(mapTo(m_window, QPoint(0, 0)), size()); // After upstream's layout: this widget is the spot.
+        m_last_docked_rect = target;
+        auto was_visible = host_is_out() && !m_host_retracting;
+        auto from = was_visible ? m_host->pos() : QPoint();
+        show_flat_host(target);
+        m_transition_to = m_host->pos();
+        m_transition_from = was_visible ? from : QPoint(-m_host->width() - 4, m_transition_to.y());
+        m_transition_width_from = hidden_width;
+        m_transition_width_to = docked_width;
+        m_host_docking = true;
+    }
+
+    m_active_transition = m_pending_transition;
+    m_pending_transition = Transition::None;
+    step_transition(0);
+    m_host->show();
+    m_host->raise();
+    // The panel just changed size (card -> docked); lay it out and paint it now, so its first frames on
+    // screen aren't blank while Qt gets around to it.
+    m_panel->layout()->activate();
+    m_host->repaint();
+    m_transition->start();
+}
+
+void ArcSidebar::step_transition(qreal progress)
+{
+    if (m_active_transition == Transition::None || !m_host)
+        return;
+    auto lerp = [progress](qreal from, qreal to) { return from + (to - from) * progress; };
+    // One clock for both, so the page's edge travels with the sidebar's.
+    m_tabs.set_vertical_sidebar_reserved_width(qRound(lerp(m_transition_width_from, m_transition_width_to)));
+    m_host->move(qRound(lerp(m_transition_from.x(), m_transition_to.x())), qRound(lerp(m_transition_from.y(), m_transition_to.y())));
+}
+
+void ArcSidebar::finish_transition()
+{
+    auto finished = m_active_transition;
+    m_active_transition = Transition::None;
+    m_tabs.set_vertical_sidebar_reserved_width({});
+    if (finished == Transition::Hide) {
+        m_host_lifting_off = false;
+        if (m_mode == Mode::Hidden)
+            prepare_card_panel();
+    } else if (finished == Transition::Show) {
+        m_host_docking = false;
+        if (m_mode == Mode::Docked)
+            dock_panel();
+    }
 }
 
 QPoint ArcSidebar::rest_host_position() const
@@ -1557,7 +1660,7 @@ void ArcSidebar::slide_host(QPoint from, QPoint to, bool revealing)
     m_host_animation->stop();
     m_host_retracting = !revealing;
     m_host_animation->setDuration(revealing ? REVEAL_ANIMATION_MS : RETRACT_ANIMATION_MS);
-    m_host_animation->setEasingCurve(revealing ? QEasingCurve::OutCubic : QEasingCurve::InCubic);
+    m_host_animation->setEasingCurve(QEasingCurve::InOutCubic);
     m_host_animation->setStartValue(from);
     m_host_animation->setEndValue(to);
     m_host->move(from);
@@ -1568,19 +1671,25 @@ void ArcSidebar::slide_host(QPoint from, QPoint to, bool revealing)
 
 void ArcSidebar::reveal()
 {
-    if (m_mode != Mode::Hidden || !m_host || m_host_lifting_off)
+    if (m_mode != Mode::Hidden || !m_host || m_host_lifting_off || m_active_transition != Transition::None)
         return;
     m_retract_timer->stop();
-    if (m_host->isVisible() && !m_host_retracting)
+    if (host_is_out() && !m_host_retracting)
         return;
     size_host();
-    auto from = m_host->isVisible() ? m_host->pos() : hidden_host_position();
+    auto from = host_is_out() ? m_host->pos() : hidden_host_position();
     slide_host(from, rest_host_position(), true);
+}
+
+bool ArcSidebar::host_is_out() const
+{
+    // Parked hosts sit entirely left of the window.
+    return m_host && m_host->isVisible() && m_host->geometry().right() > 0;
 }
 
 bool ArcSidebar::pointer_is_over_floating_sidebar() const
 {
-    if (!m_host || !m_host->isVisible())
+    if (!host_is_out())
         return false;
     auto in_window = m_window->mapFromGlobal(QCursor::pos());
     return m_host->geometry().adjusted(FloatingSidebarHost::SHADOW, 0, -FloatingSidebarHost::SHADOW, 0).contains(in_window)
@@ -1589,7 +1698,8 @@ bool ArcSidebar::pointer_is_over_floating_sidebar() const
 
 void ArcSidebar::retract_if_left()
 {
-    if (m_mode != Mode::Hidden || !m_host || !m_host->isVisible() || m_host_retracting || m_host_docking)
+    if (m_mode != Mode::Hidden || !host_is_out() || m_host_retracting || m_host_docking
+        || m_active_transition != Transition::None || m_pending_transition != Transition::None)
         return;
     // Stay out while a menu or dialog from the panel is open; check again shortly.
     if (m_host->property("arcKeepOpen").toBool() || QApplication::activePopupWidget() || QApplication::activeModalWidget()) {
@@ -1604,7 +1714,8 @@ void ArcSidebar::retract_if_left()
 void ArcSidebar::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (m_mode != Mode::Hidden || !m_mode_set) {
+    // Only lay the panel out while it lives here; mid-animation it belongs to the floating host.
+    if (m_panel->parentWidget() == this && (m_mode != Mode::Hidden || !m_mode_set)) {
         m_panel->setGeometry(rect());
         // Remembered so hiding can lift the sidebar off from exactly where it was.
         if (width() > 80 && m_window)
@@ -1616,8 +1727,9 @@ void ArcSidebar::resizeEvent(QResizeEvent* event)
 
 void ArcSidebar::paintEvent(QPaintEvent*)
 {
-    if (m_mode == Mode::Hidden && m_mode_set)
-        return; // Only a thin edge remains; the floating host draws the panel.
+    // Hidden or mid-animation the panel is in the floating host; painting here would cover the toolbar.
+    if (m_panel->parentWidget() != this)
+        return;
     // Same (tinted) chrome background as the rest of the window; see apply_space_tint().
     QPainter painter(this);
     painter.fillRect(rect(), ChromeStyle::chrome_background(palette()));

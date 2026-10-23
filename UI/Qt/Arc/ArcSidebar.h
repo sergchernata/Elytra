@@ -28,6 +28,7 @@ class QToolButton;
 class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QParallelAnimationGroup;
+class QVariantAnimation;
 
 namespace Ladybird {
 
@@ -116,8 +117,11 @@ private:
     void dock_panel();
     void apply_toolbar_inset();
     void prepare_card_panel();
-    void animate_lift_off();
-    void animate_dock();
+    void show_flat_host(QRect panel_rect);
+    void begin_transition(bool expanding);
+    void start_transition();
+    void step_transition(qreal progress);
+    void finish_transition();
     void set_panel_card(bool);
     void place_window_controls(QPoint panel_origin, bool match_native);
     void ensure_host();
@@ -128,6 +132,8 @@ private:
     QPoint rest_host_position() const;
     QPoint hidden_host_position() const;
     bool pointer_is_over_floating_sidebar() const;
+    bool host_is_out() const;
+    void park_host();
     void update_space_header_icon();
     void position_shelf();
     void append_nodes(QStandardItem& parent, QList<PinnedNode> const&);
@@ -174,6 +180,18 @@ private:
     bool m_host_retracting { false };
     bool m_host_docking { false };
     bool m_host_lifting_off { false };
+    enum class Transition {
+        None,
+        Hide,
+        Show,
+    };
+    Transition m_pending_transition { Transition::None };
+    Transition m_active_transition { Transition::None };
+    class QVariantAnimation* m_transition { nullptr };
+    QPoint m_transition_from;
+    QPoint m_transition_to;
+    int m_transition_width_from { 0 };
+    int m_transition_width_to { 0 };
     class SymbolButton* m_sidebar_toggle { nullptr };
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };

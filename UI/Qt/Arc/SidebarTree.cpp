@@ -50,6 +50,11 @@ QRect SidebarDelegate::close_button_rect(QRect const& row)
     return QRect(row.right() - 26, row.center().y() - 9, 18, 18);
 }
 
+QRect SidebarDelegate::chevron_rect(QRect const& row)
+{
+    return close_button_rect(row);
+}
+
 QSize SidebarDelegate::sizeHint(QStyleOptionViewItem const& option, QModelIndex const& index) const
 {
     auto height = row_kind(index) == RowKind::NewTab ? NEW_TAB_ROW_HEIGHT : ROW_HEIGHT;
@@ -199,10 +204,17 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
             auto folder_rect = QRectF(icon_rect.center().x() - FOLDER_ICON_SIZE / 2.0, icon_rect.center().y() - FOLDER_ICON_SIZE / 2.0, FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
             draw_folder_glyph(*painter, folder_rect, text_color, expanded);
         }
-        if (!compact) {
-            auto chevron_rect = QRectF(row.right() - 22, row.center().y() - 6, 12, 12);
-            if (hovered)
-                draw_chevron(*painter, chevron_rect, expanded, muted);
+        if (!compact && hovered) {
+            auto button = chevron_rect(option.rect);
+            auto* view = qobject_cast<QAbstractItemView const*>(option.widget);
+            if (view && button.contains(view->viewport()->mapFromGlobal(QCursor::pos()))) {
+                painter->setPen(Qt::NoPen);
+                auto background = muted;
+                background.setAlpha(40);
+                painter->setBrush(background);
+                painter->drawRoundedRect(button, 5, 5);
+            }
+            draw_chevron(*painter, QRectF(button).adjusted(3, 3, -3, -3), expanded, muted);
         }
     } else {
         auto icon = index.data(Qt::DecorationRole).value<QIcon>();
@@ -285,6 +297,27 @@ void SidebarTree::mousePressEvent(QMouseEvent* event)
         }
     }
     QTreeView::mousePressEvent(event);
+}
+
+void SidebarTree::mouseMoveEvent(QMouseEvent* event)
+{
+    QTreeView::mouseMoveEvent(event);
+    // Rows only repaint when the hovered row changes; the close and chevron buttons need a repaint as the
+    // pointer moves within a row so their hover backgrounds track it.
+    auto index = indexAt(event->position().toPoint());
+    if (m_hovered_index.isValid() && m_hovered_index != index)
+        viewport()->update(visualRect(m_hovered_index));
+    if (index.isValid())
+        viewport()->update(visualRect(index));
+    m_hovered_index = index;
+}
+
+void SidebarTree::leaveEvent(QEvent* event)
+{
+    QTreeView::leaveEvent(event);
+    if (m_hovered_index.isValid())
+        viewport()->update(visualRect(m_hovered_index));
+    m_hovered_index = QPersistentModelIndex();
 }
 
 void SidebarTree::mouseReleaseEvent(QMouseEvent* event)

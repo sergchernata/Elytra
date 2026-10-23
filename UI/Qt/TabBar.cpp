@@ -2112,6 +2112,15 @@ void TabWidget::set_new_tab_action(QAction* action)
 }
 
 // Fork hook (Arc)
+void TabWidget::set_vertical_sidebar_reserved_width(Optional<int> width)
+{
+    if (m_vertical_sidebar_reserved_width == width)
+        return;
+    m_vertical_sidebar_reserved_width = width;
+    update_tab_layout();
+}
+
+// Fork hook (Arc)
 void TabWidget::set_vertical_sidebar_widget(QWidget* widget)
 {
     m_vertical_sidebar_widget = widget;
@@ -2160,6 +2169,9 @@ void TabWidget::set_vertical_tabs_expanded(bool expanded)
 {
     if (m_vertical_tabs_expanded == expanded)
         return;
+
+    if (m_vertical_sidebar_widget && on_vertical_sidebar_expanded_will_change) // Fork hook (Arc)
+        on_vertical_sidebar_expanded_will_change(expanded);
 
     m_vertical_tabs_expanded = expanded;
     set_vertical_tabs_hover_expanded(false);
@@ -2478,6 +2490,8 @@ int TabWidget::vertical_tabs_layout_width() const
 {
     if (!m_tab_bar_visible)
         return 0;
+    if (m_vertical_sidebar_reserved_width.has_value()) // Fork hook (Arc): mid-animation
+        return *m_vertical_sidebar_reserved_width;
     return m_vertical_tabs_expanded ? m_vertical_tabs_expanded_width : collapsed_vertical_tabs_width();
 }
 

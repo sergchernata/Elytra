@@ -68,7 +68,11 @@ class SpaceStore final : public QObject {
     Q_OBJECT
 
 public:
+    // The store for the current Ladybird profile (see SpaceStoreProfile.cpp).
     static SpaceStore& the();
+
+    // A store backed by the given file; tests use this directly.
+    explicit SpaceStore(QString file_path);
 
     // True when this Ladybird profile had no Arc data before this launch.
     bool is_new_profile() const { return m_is_new_profile; }
@@ -116,7 +120,6 @@ signals:
     void changed();
 
 private:
-    SpaceStore();
 
     void load();
     void save();

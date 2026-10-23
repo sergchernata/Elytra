@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWebView/Application.h>
-#include <LibWebView/Profile.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,19 +19,10 @@ namespace Ladybird::Arc {
 
 static constexpr int FILE_VERSION = 1;
 
-SpaceStore& SpaceStore::the()
+SpaceStore::SpaceStore(QString file_path)
+    : m_path(std::move(file_path))
 {
-    static SpaceStore* store = new SpaceStore;
-    return *store;
-}
-
-SpaceStore::SpaceStore()
-{
-    // One file per Ladybird profile, next to the profile's other data.
-    auto const& data_directory = WebView::Application::profile().paths().data;
-    auto directory = QString::fromUtf8(data_directory.characters(), static_cast<qsizetype>(data_directory.length()));
-    QDir().mkpath(directory);
-    m_path = directory + "/ArcSpaces.json";
+    QDir().mkpath(QFileInfo(m_path).absolutePath());
     m_is_new_profile = !QFile::exists(m_path);
     load();
     ensure_default_space();

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/Optional.h>
 #include <AK/TypeCasts.h>
 #include <AK/Vector.h>
@@ -218,6 +219,10 @@ public:
     // Fork hook (Arc): show this widget in the vertical sidebar in place of the tab list.
     void set_vertical_sidebar_widget(QWidget*);
     int vertical_sidebar_expanded_width() const { return m_vertical_tabs_expanded_width; } // Fork hook (Arc)
+    // Fork hook (Arc): called just before the sidebar docks or hides, so it can animate the change; and a
+    // temporary width for the space reserved beside the page, which that animation drives.
+    Function<void(bool expanded)> on_vertical_sidebar_expanded_will_change;
+    void set_vertical_sidebar_reserved_width(Optional<int>);
 
 signals:
     void current_tab_changed(int index);
@@ -278,6 +283,7 @@ private:
 
     TabBar* m_tab_bar { nullptr };
     QPointer<QWidget> m_vertical_sidebar_widget; // Fork hook (Arc)
+    Optional<int> m_vertical_sidebar_reserved_width; // Fork hook (Arc)
     void size_hidden_pages_like_the_current_one();
 
     QStackedWidget* m_stacked_widget { nullptr };

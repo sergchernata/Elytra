@@ -51,6 +51,7 @@ public:
     QColor accent;
 
     static QRect close_button_rect(QRect const& row);
+    static QRect chevron_rect(QRect const& row);
 
     virtual void paint(QPainter*, QStyleOptionViewItem const&, QModelIndex const&) const override;
     virtual QSize sizeHint(QStyleOptionViewItem const&, QModelIndex const&) const override;
@@ -82,6 +83,8 @@ signals:
 protected:
     virtual void mousePressEvent(QMouseEvent*) override;
     virtual void mouseReleaseEvent(QMouseEvent*) override;
+    virtual void mouseMoveEvent(QMouseEvent*) override;
+    virtual void leaveEvent(QEvent*) override;
     virtual void dragMoveEvent(QDragMoveEvent*) override;
     virtual void dropEvent(QDropEvent*) override;
     virtual void drawBranches(QPainter*, QRect const&, QModelIndex const&) const override { }
@@ -91,6 +94,7 @@ private:
 
     SidebarDelegate* m_delegate { nullptr };
     QPersistentModelIndex m_pressed_index;
+    QPersistentModelIndex m_hovered_index;
     bool m_pressed_close { false };
 };
 

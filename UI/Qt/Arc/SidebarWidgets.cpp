@@ -31,127 +31,12 @@
 
 namespace Ladybird::Arc {
 
-// --- SymbolButton -----------------------------------------------------------------------------
-
-SymbolButton::SymbolButton(QWidget* parent)
-    : QAbstractButton(parent)
-{
-    setFocusPolicy(Qt::NoFocus);
-    setCursor(Qt::ArrowCursor);
-    setFixedSize(sizeHint());
-}
-
-void SymbolButton::set_icon_text(QString const& icon)
-{
-    if (is_symbol_icon(icon)) {
-        set_symbol(symbol_name(icon));
-        return;
-    }
-    m_symbol.clear();
-    m_text = icon;
-    update();
-}
-
-void SymbolButton::set_symbol(QString const& name)
-{
-    m_symbol = name;
-    m_text.clear();
-    update();
-}
-
-void SymbolButton::set_dimmed(bool dimmed)
-{
-    m_dimmed = dimmed;
-    update();
-}
-
-void SymbolButton::set_symbol_point_size(int size)
-{
-    m_point_size = size;
-    update();
-}
-
-void SymbolButton::enterEvent(QEnterEvent* event)
-{
-    m_hovered = true;
-    update();
-    QAbstractButton::enterEvent(event);
-}
-
-void SymbolButton::leaveEvent(QEvent* event)
-{
-    m_hovered = false;
-    update();
-    QAbstractButton::leaveEvent(event);
-}
-
-void SymbolButton::paintEvent(QPaintEvent*)
-{
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-    auto dark = ChromeStyle::is_dark(palette());
-
-    if (m_hovered || isDown() || isChecked()) {
-        painter.setPen(Qt::NoPen);
-        auto alpha = isDown() ? 40 : (isChecked() ? 34 : 24);
-        painter.setBrush(dark ? QColor(255, 255, 255, alpha) : QColor(0, 0, 0, alpha / 2));
-        painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 8, 8);
-    }
-
-    auto color = ChromeStyle::chrome_text(palette());
-    painter.setOpacity(m_dimmed && !m_hovered ? 0.42 : 0.92);
-
-    if (!m_symbol.isEmpty()) {
-        auto pixmap = fitted_symbol_pixmap(m_symbol, m_point_size, color, devicePixelRatioF());
-        if (!pixmap.isNull()) {
-            auto logical = pixmap.deviceIndependentSize();
-            auto top_left = QPointF((width() - logical.width()) / 2.0, (height() - logical.height()) / 2.0);
-            painter.drawPixmap(top_left, pixmap);
-            return;
-        }
-    }
-
-    // No symbol (or not on macOS): a centered letter or emoji.
-    auto text = m_text.isEmpty() ? m_symbol.left(1).toUpper() : m_text;
-    auto font = painter.font();
-    font.setPixelSize(m_point_size - 1);
-    font.setWeight(QFont::Bold);
-    painter.setFont(font);
-    painter.setPen(color);
-    painter.drawText(rect(), Qt::AlignCenter, text);
-}
-
 // --- DownloadsShelf ---------------------------------------------------------------------------
 
 static constexpr int SHELF_ROW_HEIGHT = 56;
 static constexpr int SHELF_FADE_HEIGHT = 96;
 static constexpr int SHELF_MAX_ITEMS = 6;
 static constexpr int SHELF_ICON_SIZE = 34;
-
-static QString relative_time(QDateTime const& time)
-{
-    auto seconds = time.secsTo(QDateTime::currentDateTime());
-    if (seconds < 60)
-        return "Just now";
-    if (seconds < 3600)
-        return seconds < 120 ? "1 minute ago" : QString("%1 minutes ago").arg(seconds / 60);
-    if (seconds < 86400)
-        return seconds < 7200 ? "1 hour ago" : QString("%1 hours ago").arg(seconds / 3600);
-    auto days = seconds / 86400;
-    if (days < 30)
-        return days == 1 ? "1 day ago" : QString("%1 days ago").arg(days);
-    return time.date().toString("MMM d");
-}
-
-static bool is_partial_download(QString const& name)
-{
-    static QStringList const suffixes { ".download", ".part", ".crdownload", ".partial", ".tmp" };
-    for (auto const& suffix : suffixes) {
-        if (name.endsWith(suffix, Qt::CaseInsensitive))
-            return true;
-    }
-    return name.startsWith('.');
-}
 
 DownloadsShelf::DownloadsShelf(QWidget* parent)
     : QWidget(parent)
@@ -198,7 +83,7 @@ void DownloadsShelf::refresh()
     for (auto const& info : entries) {
         if (items.size() >= SHELF_MAX_ITEMS * 2)
             break;
-        if (is_partial_download(info.fileName()) || seen.contains(info.absoluteFilePath()))
+        if (is_partial_download_name(info.fileName()) || seen.contains(info.absoluteFilePath()))
             continue;
         items.append({ info.absoluteFilePath(), info.fileName(), info.lastModified(), -1, false });
     }
@@ -288,7 +173,7 @@ void DownloadsShelf::paintEvent(QPaintEvent*)
         if (item.in_progress)
             detail = item.percent >= 0 ? QString("Downloading… %1%").arg(item.percent) : QString("Downloading…");
         else
-            detail = relative_time(item.time);
+            detail = downloads_relative_time(item.time, QDateTime::currentDateTime());
         painter.drawText(QRect(text_left, row.top() + 29, text_width, 18), Qt::AlignLeft | Qt::AlignVCenter, detail);
 
         if (item.in_progress && item.percent >= 0) {

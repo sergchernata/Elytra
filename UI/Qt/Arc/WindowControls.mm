@@ -105,6 +105,17 @@ QList<QRectF> native_window_control_rects(QWidget& window)
     return rects;
 }
 
+void keep_native_widget_above_page(QWidget& native_widget)
+{
+    auto* view = reinterpret_cast<NSView*>(native_widget.winId());
+    if (!view)
+        return;
+    view.wantsLayer = YES;
+    // Sibling layers are ordered by zPosition before insertion order, so later re-attachments of the page's
+    // layer can't land on top of this one.
+    view.layer.zPosition = 1000;
+}
+
 static char s_hider_key;
 
 void set_window_controls_hidden(QWidget& window, bool hidden)

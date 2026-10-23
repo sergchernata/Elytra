@@ -20,4 +20,8 @@ void set_window_controls_hidden(QWidget& window, bool hidden);
 // origin). Valid even while hidden. Empty where there are no native controls.
 QList<QRectF> native_window_control_rects(QWidget& window);
 
+// Keeps a native child widget (the floating sidebar) above the page, whose layer the web view re-attaches
+// to the window as it resizes, which would otherwise cover it mid-animation.
+void keep_native_widget_above_page(QWidget& native_widget);
+
 }

@@ -157,6 +157,8 @@ deploy_qt_offscreen_platform_plugin(TestNativeTextEditingLineEdit)
 ladybird_test("TestWebContentViewInputMethod.cpp" UI/Qt LIBS LibWebView LibWeb LibGfx LibIPC LibURL Qt::Core Qt::Gui Qt::Widgets)
 target_sources(TestWebContentViewInputMethod PRIVATE "${LADYBIRD_SOURCE_DIR}/UI/Qt/InputMethodUtils.cpp" "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp")
 
+include(Arc/ArcTests.cmake) # Arc fork tests (fork-only); before the Linux-only section below returns early
+
 if (NOT LINUX)
     return()
 endif()
