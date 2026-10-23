@@ -390,7 +390,7 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
         // clicking it does underneath (Shift: separate instead).
         auto progress = index == pinned_hover_index ? pinned_hover_progress : 0.0;
         if (is_away_from_pinned_url(index) || progress > 0) {
-            static constexpr qreal LINE_GAP = 4;
+            static constexpr qreal LINE_GAP = 1;
             static constexpr int LABEL_PIXEL_SIZE = 11;
             static constexpr qreal SLIDE = 5;
             auto label_font = font;
