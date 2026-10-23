@@ -130,6 +130,9 @@ public:
     bool url_is_hidden() const { return m_location_edit->url_is_hidden(); }
     void set_url_is_hidden(bool url_is_hidden) { m_location_edit->set_url_is_hidden(url_is_hidden); }
 
+    // Fork hook (Arc): edits the address somewhere else (the command bar) instead of the location field; true if so.
+    static inline Function<bool(Tab&)> on_focus_location_editor;
+
 public slots:
     void focus_location_editor();
     void park_location_editing();

@@ -50,16 +50,26 @@ bool CommandBar::tab_matches(QString const& query, QString const& title, QString
     return tab_matches_query(query, title, url);
 }
 
-void CommandBar::toggle_for(BrowserWindow& window)
+void CommandBar::toggle_for(BrowserWindow& window, Mode mode, Tab* tab)
 {
     auto* bar = window.findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
-    if (bar && bar->isVisible()) {
+    if (bar && bar->isVisible() && bar->mode() == mode) {
         bar->dismiss();
         return;
     }
     if (!bar)
         bar = new CommandBar(window);
-    bar->present();
+    bar->present(mode, tab);
+}
+
+QString CommandBar::text() const
+{
+    return m_edit->text();
+}
+
+bool CommandBar::text_is_all_selected() const
+{
+    return !m_edit->text().isEmpty() && m_edit->selectedText() == m_edit->text();
 }
 
 CommandBar::CommandBar(BrowserWindow& window)
@@ -124,7 +134,12 @@ CommandBar::~CommandBar()
     qApp->removeEventFilter(this);
 }
 
-void CommandBar::present()
+static bool is_blank_url(QString const& url)
+{
+    return url.isEmpty() || url.startsWith("about:");
+}
+
+void CommandBar::present(Mode mode, Tab* tab)
 {
     auto dark = ChromeStyle::is_dark(palette());
     auto edit_palette = m_edit->palette();
@@ -134,9 +149,22 @@ void CommandBar::present()
     m_edit->setPalette(edit_palette);
     m_edit->setStyleSheet("QLineEdit { background: transparent; border: none; }");
 
-    m_edit->clear();
+    m_mode = mode;
+    m_target_tab = mode == Mode::EditCurrentTab ? (tab ? tab : m_window->current_tab()) : nullptr;
+    m_initial_text.clear();
+    m_header_icon = {};
+    if (m_target_tab) {
+        // A tab showing a page starts with its full URL, selected (typing replaces it); a blank one starts empty.
+        if (auto url = m_target_tab->view().url(); !is_blank_url(qstring_from_ak_string(url.serialize()))) {
+            m_initial_text = qstring_from_ak_string(url.serialize());
+            m_header_icon = m_target_tab->favicon();
+        }
+    }
+
     m_selection_is_explicit = false;
-    m_omnibox.begin_editing({});
+    m_edit->setText(m_initial_text);
+    m_omnibox.begin_editing(ak_string_from_qstring(m_initial_text));
+    m_edit->selectAll();
     rebuild_rows();
     show();
     raise();
@@ -164,19 +192,25 @@ void CommandBar::commit(String const& input)
     auto destination_kind = m_omnibox.destination_kind_for_last_commit();
     auto append_tld = (QApplication::keyboardModifiers() & Qt::ControlModifier) ? WebView::AppendTLD::Yes : WebView::AppendTLD::No;
     auto url = WebView::sanitize_url(input, WebView::Application::settings().search_engine_settings().engine, append_tld);
-    open_in_new_tab(input, AK::move(url), destination_kind);
+    open(input, AK::move(url), destination_kind);
 }
 
-void CommandBar::open_in_new_tab(String input, Optional<URL::URL> url, WebView::OmniboxDestinationKind destination_kind)
+void CommandBar::open(String input, Optional<URL::URL> url, WebView::OmniboxDestinationKind destination_kind)
 {
+    QPointer<Tab> target = m_mode == Mode::EditCurrentTab ? m_target_tab : nullptr;
+    auto editing = m_mode == Mode::EditCurrentTab;
     dismiss();
     if (!m_window || input.is_empty())
         return;
+    // Editing a tab that has since closed: nothing to load it in.
+    if (editing && (!target || m_window->tab_index(target) < 0))
+        return;
 
-    // Mirrors Tab::location_edit_return_pressed(), which is private upstream. The sidebar provides the tab: its ready
-    // spare when there is one, in the current space's profile.
+    // Mirrors Tab::location_edit_return_pressed(), which is private upstream. A new tab comes from the sidebar: its
+    // ready spare when there is one, in the current space's profile.
     auto* sidebar = ArcSidebar::for_window(*m_window);
-    auto& tab = sidebar ? sidebar->new_tab_for_input() : m_window->create_new_tab(Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    auto& tab = editing ? *target : sidebar ? sidebar->new_tab_for_input()
+                                            : m_window->create_new_tab(Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     auto& view = tab.view();
     view.set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
     if (destination_kind == WebView::OmniboxDestinationKind::Search) {
@@ -205,11 +239,6 @@ static QIcon suggestion_icon(WebView::AutocompleteSuggestion const& suggestion, 
     return QIcon(fitted_symbol_pixmap(symbol, 16, color, device_pixel_ratio));
 }
 
-static bool is_blank_url(QString const& url)
-{
-    return url.isEmpty() || url.startsWith("about:");
-}
-
 void CommandBar::rebuild_rows()
 {
     if (!m_window)
@@ -217,6 +246,21 @@ void CommandBar::rebuild_rows()
     m_rows.clear();
     auto query = m_edit->text().left(m_edit->hasSelectedText() ? m_edit->selectionStart() : m_edit->text().length()).trimmed();
     auto muted = ChromeStyle::is_dark(palette()) ? QColor(255, 255, 255, 170) : QColor(0, 0, 0, 150);
+
+    // Editing a tab's URL, before anything is typed: just that tab, to stay on (as in Arc).
+    if (m_mode == Mode::EditCurrentTab && m_target_tab && !m_initial_text.isEmpty() && m_edit->text() == m_initial_text) {
+        CommandBarRow row;
+        row.kind = CommandBarRow::Kind::CurrentTab;
+        row.title = m_target_tab->title().isEmpty() ? m_initial_text : m_target_tab->title();
+        row.icon = m_target_tab->favicon().isNull() ? ArcIcons::icon_for_url(m_initial_text) : m_target_tab->favicon();
+        row.tab = m_target_tab;
+        m_rows.append(row);
+        m_selected_row = 0;
+        m_selection_is_explicit = false;
+        reposition();
+        update();
+        return;
+    }
 
     // Upstream's suggestions (history, bookmarks, search) while typing.
     if (!query.isEmpty() && m_omnibox.is_popup_visible()) {
@@ -299,6 +343,10 @@ void CommandBar::activate_row(int row)
         return;
     }
     auto const& entry = m_rows[row];
+    if (entry.kind == CommandBarRow::Kind::CurrentTab) {
+        dismiss();
+        return;
+    }
     if (entry.kind == CommandBarRow::Kind::SwitchToTab) {
         QPointer<Tab> tab = entry.tab;
         dismiss();
@@ -505,9 +553,12 @@ void CommandBar::paintEvent(QPaintEvent*)
     auto muted = dark ? QColor(255, 255, 255, 120) : QColor(0, 0, 0, 115);
     auto ratio = devicePixelRatioF();
 
-    // Search glyph.
-    auto glass = fitted_symbol_pixmap("magnifyingglass", 17, text, ratio);
-    if (!glass.isNull()) {
+    // The edited page's favicon, or the search glyph.
+    auto glass = m_header_icon.isNull() ? fitted_symbol_pixmap("magnifyingglass", 17, text, ratio) : QPixmap();
+    if (!m_header_icon.isNull()) {
+        auto box = QRectF(card.left() + 32 - 9, card.top() + HEADER_HEIGHT / 2.0 - 9, 18, 18);
+        m_header_icon.paint(&painter, box.toRect());
+    } else if (!glass.isNull()) {
         auto size = glass.deviceIndependentSize();
         painter.drawPixmap(QPointF(card.left() + 32 - size.width() / 2, card.top() + HEADER_HEIGHT / 2.0 - size.height() / 2), glass);
     } else {

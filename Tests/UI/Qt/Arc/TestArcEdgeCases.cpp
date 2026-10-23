@@ -7,6 +7,7 @@
 #include <AK/Platform.h>
 #include <AK/Vector.h>
 #include <LibTest/TestCase.h>
+#include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ReleaseInfo.h>
 #include <UI/Qt/Arc/SidebarTree.h>
@@ -15,6 +16,7 @@
 #include <UI/Qt/Arc/TabMatching.h>
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QImage>
@@ -284,4 +286,168 @@ TEST_CASE(the_skull_is_drawn_at_the_symbols_optical_size)
     EXPECT(extent <= 20 * 0.85); // Not the whole box: a solid glyph looks bigger than outlined symbols.
     EXPECT(extent >= 20 * 0.7);
     EXPECT(custom_glyph_pixmap("arc.unknown", 20, Qt::black, 2).isNull());
+}
+
+// --- Address bar ---------------------------------------------------------------------------------
+
+TEST_CASE(address_bar_shows_the_host_and_the_rest_of_the_url)
+{
+    auto parts = display_url_parts(QUrl("https://www.youtube.com/watch?v=jdm8qnlnzqc"));
+    EXPECT(parts.host == "youtube.com");
+    EXPECT(parts.rest == "/watch?v=jdm8qnlnzqc");
+
+    parts = display_url_parts(QUrl("https://example.com/"));
+    EXPECT(parts.host == "example.com" && parts.rest.isEmpty()); // A bare "/" isn't shown.
+    parts = display_url_parts(QUrl("https://example.com"));
+    EXPECT(parts.host == "example.com" && parts.rest.isEmpty());
+
+    parts = display_url_parts(QUrl("http://localhost:8080/a#top"));
+    EXPECT(parts.host == "localhost:8080"); // A non-default port stays.
+    EXPECT(parts.rest == "/a#top");
+    parts = display_url_parts(QUrl("https://example.com:443/a"));
+    EXPECT(parts.host == "example.com"); // A default port written out isn't shown.
+    EXPECT(parts.rest == "/a");
+
+    parts = display_url_parts(QUrl("https://wwwexample.com/"));
+    EXPECT(parts.host == "wwwexample.com"); // Only a "www." label is dropped.
+
+    parts = display_url_parts(QUrl("https://example.com/caf%C3%A9?q=a%20b"));
+    EXPECT(parts.rest == QString::fromUtf8("/café?q=a b")); // Readable, not percent-encoded.
+
+    // Without a host: the whole URL.
+    parts = display_url_parts(QUrl("about:blank"));
+    EXPECT(parts.host == "about:blank" && parts.rest.isEmpty());
+    parts = display_url_parts(QUrl("file:///Users/someone/page.html"));
+    EXPECT(parts.host == "file:///Users/someone/page.html");
+
+    parts = display_url_parts(QUrl());
+    EXPECT(parts.host.isEmpty() && parts.rest.isEmpty());
+}
+
+static void send_mouse(QWidget& widget, QEvent::Type type, QPointF position)
+{
+    auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+    auto buttons = type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton;
+    QMouseEvent event(type, position, widget.mapToGlobal(position), button, buttons, Qt::NoModifier);
+    QApplication::sendEvent(&widget, &event);
+}
+
+static void click(QWidget& widget, QPointF position)
+{
+    send_mouse(widget, QEvent::MouseMove, position);
+    send_mouse(widget, QEvent::MouseButtonPress, position);
+    send_mouse(widget, QEvent::MouseButtonRelease, position);
+}
+
+TEST_CASE(address_bar_lays_out_the_url_centered_with_its_icon)
+{
+    AddressBar bar;
+    bar.resize(800, AddressBar::HEIGHT);
+    bar.set_url(QUrl("https://www.youtube.com/watch?v=jdm8qnlnzqc"));
+    EXPECT(bar.shown_host() == "youtube.com");
+    EXPECT(bar.shown_rest() == "/watch?v=jdm8qnlnzqc");
+
+    auto icon = bar.icon_rect();
+    auto text = bar.text_rect();
+    EXPECT(!icon.isEmpty() && !text.isEmpty());
+    EXPECT(icon.right() < text.left()); // Icon first.
+    // Centered (no toolbar here: on the bar itself), icon pill to text pill.
+    auto content_center = (bar.icon_pill_rect().left() + bar.pill_rect().right()) / 2;
+    EXPECT(qAbs(content_center - 400) < 6);
+    // The two hover pills don't touch, and both sit inside the bar.
+    EXPECT(bar.icon_pill_rect().right() < bar.pill_rect().left());
+    EXPECT(bar.icon_pill_rect().left() >= 0 && bar.pill_rect().right() <= bar.width());
+    EXPECT(bar.pill_rect().contains(text));
+    EXPECT(bar.icon_pill_rect().contains(icon));
+}
+
+TEST_CASE(address_bar_drops_the_path_before_the_host_when_narrow)
+{
+    AddressBar bar;
+    bar.show(); // Hidden widgets get their resize events only when shown.
+    bar.set_url(QUrl("https://example.com/a/very/long/path/that/does/not/fit/anywhere/near/here?with=a&long=query"));
+    bar.resize(330, AddressBar::HEIGHT);
+    EXPECT(bar.shown_host() == "example.com");
+    EXPECT(bar.shown_rest().endsWith(QChar(0x2026))); // Elided, still there.
+    EXPECT(bar.pill_rect().right() <= bar.width());
+
+    bar.resize(150, AddressBar::HEIGHT);
+    EXPECT(bar.shown_rest().isEmpty()); // No room for a useful bit of path.
+    EXPECT(bar.shown_host() == "example.com" || bar.shown_host().endsWith(QChar(0x2026)));
+    EXPECT(bar.pill_rect().right() <= bar.width());
+
+    bar.resize(20, AddressBar::HEIGHT); // Less than nothing: no crash, nothing laid out.
+    EXPECT(bar.text_rect().isEmpty() || bar.pill_rect().right() <= bar.width() + 1);
+
+    bar.resize(800, AddressBar::HEIGHT); // Room again: all of it.
+    EXPECT(!bar.shown_rest().endsWith(QChar(0x2026)) && bar.shown_rest().startsWith("/a/very"));
+}
+
+TEST_CASE(address_bar_shows_nothing_without_a_url)
+{
+    AddressBar bar;
+    bar.resize(600, AddressBar::HEIGHT);
+    bar.set_url(QUrl("https://example.com/x"));
+    EXPECT(!bar.text_rect().isEmpty());
+    bar.set_url(QUrl());
+    EXPECT(bar.text_rect().isEmpty() && bar.icon_rect().isEmpty() && bar.pill_rect().isEmpty());
+
+    // Clicking where the URL was does nothing.
+    int edits = 0;
+    QObject::connect(&bar, &AddressBar::edit_requested, [&] { ++edits; });
+    click(bar, QPointF(300, AddressBar::HEIGHT / 2.0));
+    EXPECT(edits == 0);
+}
+
+TEST_CASE(address_bar_hover_pills_follow_the_mouse)
+{
+    AddressBar bar;
+    bar.resize(800, AddressBar::HEIGHT);
+    bar.set_url(QUrl("https://example.com/page"));
+
+    send_mouse(bar, QEvent::MouseMove, bar.text_rect().center());
+    EXPECT(bar.is_text_hovered() && !bar.is_icon_hovered());
+    send_mouse(bar, QEvent::MouseMove, bar.icon_rect().center());
+    EXPECT(bar.is_icon_hovered() && !bar.is_text_hovered());
+    EXPECT(bar.toolTip() == "Copy Link");
+    send_mouse(bar, QEvent::MouseMove, QPointF(5, 5)); // Empty space.
+    EXPECT(!bar.is_icon_hovered() && !bar.is_text_hovered());
+    EXPECT(bar.toolTip().isEmpty());
+
+    send_mouse(bar, QEvent::MouseMove, bar.text_rect().center());
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(&bar, &leave);
+    EXPECT(!bar.is_text_hovered()); // Leaving clears it.
+}
+
+TEST_CASE(address_bar_clicks_edit_or_copy)
+{
+    AddressBar bar;
+    bar.resize(800, AddressBar::HEIGHT);
+    bar.set_url(QUrl("https://example.com/a%20b?q=1"));
+    int edits = 0;
+    int copies = 0;
+    QObject::connect(&bar, &AddressBar::edit_requested, [&] { ++edits; });
+    QObject::connect(&bar, &AddressBar::url_copied, [&] { ++copies; });
+
+    click(bar, bar.text_rect().center());
+    EXPECT(edits == 1 && copies == 0);
+
+    click(bar, bar.icon_rect().center());
+    EXPECT(copies == 1 && edits == 1);
+    EXPECT(bar.shows_copied());
+    // Offscreen, the clipboard is the test's own (never the desktop's): check what was copied.
+    if (QGuiApplication::platformName() == "offscreen")
+        EXPECT(QApplication::clipboard()->text() == "https://example.com/a%20b?q=1");
+
+    // A new page clears the "copied" check.
+    bar.set_url(QUrl("https://example.com/other"));
+    EXPECT(!bar.shows_copied());
+
+    // Pressing on the URL and releasing on the icon (or outside) does neither.
+    send_mouse(bar, QEvent::MouseButtonPress, bar.text_rect().center());
+    send_mouse(bar, QEvent::MouseButtonRelease, bar.icon_rect().center());
+    send_mouse(bar, QEvent::MouseButtonPress, bar.icon_rect().center());
+    send_mouse(bar, QEvent::MouseButtonRelease, QPointF(5, 5));
+    EXPECT(edits == 1 && copies == 1);
 }

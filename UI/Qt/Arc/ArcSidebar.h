@@ -140,6 +140,7 @@ private:
     void update_mode();
     void dock_panel();
     void apply_toolbar_inset();
+    void install_address_bar(QWidget& toolbar);
     void prepare_card_panel();
     void show_flat_host(QRect panel_rect);
     void begin_transition(bool expanding);

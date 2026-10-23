@@ -1,5 +1,6 @@
 # Arc-style chrome. Included from UI/Qt/CMakeLists.txt (the one upstream hook in that file).
 target_sources(ladybird PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/AddressBar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcChrome.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcIcons.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ArcImportParser.cpp

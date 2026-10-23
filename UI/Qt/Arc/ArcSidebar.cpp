@@ -6,6 +6,7 @@
  */
 
 #include <LibWebView/Application.h>
+#include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <LibURL/Parser.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
@@ -1873,6 +1874,32 @@ static void inset_toolbar(QWidget& toolbar)
     }
 }
 
+// Arc's address bar in place of upstream's location field, once per toolbar. Clicking the URL edits it in the
+// command bar (as Cmd+L does; see ArcChrome.cpp).
+void ArcSidebar::install_address_bar(QWidget& toolbar)
+{
+    if (!m_window || toolbar.property("arc_address_bar").toBool())
+        return;
+    auto* edit = toolbar.findChild<LocationEdit*>();
+    // Toolbars live in the tab widget's toolbar stack, not in their tabs.
+    Tab* tab = nullptr;
+    for (auto* candidate : m_window->findChildren<Tab*>()) {
+        if (candidate->toolbar_container() && candidate->toolbar_container()->isAncestorOf(&toolbar))
+            tab = candidate;
+    }
+    if (!edit || !tab)
+        return;
+    auto* bar = AddressBar::replace(*edit);
+    if (!bar)
+        return;
+    toolbar.setProperty("arc_address_bar", true);
+    QPointer<Tab> guarded_tab = tab;
+    connect(bar, &AddressBar::edit_requested, this, [this, guarded_tab] {
+        if (m_window && guarded_tab)
+            CommandBar::toggle_for(*m_window, CommandBar::Mode::EditCurrentTab, guarded_tab);
+    });
+}
+
 void ArcSidebar::apply_toolbar_inset()
 {
     if (!m_window)
@@ -1883,6 +1910,7 @@ void ArcSidebar::apply_toolbar_inset()
             toolbar->installEventFilter(this);
         }
         inset_toolbar(*toolbar);
+        install_address_bar(*toolbar);
     }
 }
 
@@ -2440,6 +2468,8 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
     if ((event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) && watched->property("arc_inset_watched").toBool()) {
         inset_toolbar(*static_cast<QWidget*>(watched));
+        if (event->type() == QEvent::Show)
+            install_address_bar(*static_cast<QWidget*>(watched));
         return false;
     }
     if (watched == m_watched_column && m_mode == Mode::Hidden) {

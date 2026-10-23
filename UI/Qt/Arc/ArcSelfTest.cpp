@@ -7,6 +7,7 @@
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcSelfTest.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
@@ -15,6 +16,7 @@
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/LocationEdit.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
 #include <UI/Qt/TabBar.h>
@@ -23,7 +25,9 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QKeyEvent>
 #include <QLayout>
+#include <QLineEdit>
 #include <QScrollBar>
 #include <QTimer>
 
@@ -159,6 +163,7 @@ private:
     void a_malformed_pinned_url_doesnt_crash();
     void popups_close_themselves();
     void private_windows_write_nothing();
+    void address_bar_edits_the_current_tab();
 
     ArcSidebar& m_sidebar;
     int m_failures { 0 };
@@ -205,6 +210,14 @@ void SelfTest::seed()
 
 void SelfTest::toolbar_stays_aligned()
 {
+    // (Launch first: a window opening on the empty page edits its address in the command bar, where upstream
+    // would focus its location field.)
+    auto* bar = window().findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
+    check(bar && bar->isVisible() && bar->mode() == CommandBar::Mode::EditCurrentTab && bar->text().isEmpty(),
+        "a window opening on the empty page opens the command bar, empty");
+    if (bar)
+        bar->dismiss();
+
     // Regression: a new tab's toolbar showed at upstream's margin for a frame, then jumped left.
     m_misaligned_toolbar_paints = 0;
     m_watch_toolbars = true;
@@ -456,6 +469,8 @@ void SelfTest::list_ends_with_room_to_double_click()
     check(last && s().m_tree->visualRect(last->index()).height() >= 40, "of at least 40 points");
 
     auto* bar = window().findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
+    if (bar)
+        bar->dismiss();
     check(!bar || !bar->isVisible(), "the command bar starts closed");
     emit s().m_tree->background_double_clicked();
     bar = window().findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
@@ -609,6 +624,87 @@ void SelfTest::private_windows_write_nothing()
     settle(300);
 }
 
+void SelfTest::address_bar_edits_the_current_tab()
+{
+    s().switch_to_space(m_alpha);
+    auto* opened = s().open_tab(page("Addressed"));
+    QPointer<Tab> tab = opened;
+    wait_until([&] { return tab && loaded(*tab) && window().current_tab() == tab; });
+    if (!tab) {
+        check(false, "a tab opens for the address bar");
+        return;
+    }
+    auto bar_of = [](Tab& tab) { return tab.toolbar_container() ? tab.toolbar_container()->findChild<AddressBar*>() : nullptr; };
+    auto* bar = bar_of(*tab);
+    auto* edit = tab->toolbar_container() ? tab->toolbar_container()->findChild<LocationEdit*>() : nullptr;
+    check(bar && bar->isVisible(), "each tab's toolbar shows Arc's address bar");
+    check(edit && !edit->isVisible(), "in place of upstream's location field");
+    if (!bar)
+        return;
+    check(wait_until([&] { return QUrl(bar->url()) == QUrl(ArcSidebar::url_of(*tab)); }), "showing the page's URL", bar->url().toString());
+    check(qAbs(bar->mapTo(tab->toolbar_container(), bar->pill_rect().center()).x() - tab->toolbar_container()->width() / 2.0) < 120,
+        "centered in the toolbar");
+
+    // Navigating updates it.
+    tab->navigate(ak_url_from_qurl(QUrl(page("Addressed 2"))));
+    check(wait_until([&] { return at(*tab, page("Addressed 2")) && bar->url() == QUrl(ArcSidebar::url_of(*tab)); }), "it follows navigation");
+
+    // Clicking the URL edits it in the command bar: the full URL, selected, with the tab to stay on.
+    auto tabs_before = tab_count();
+    emit bar->edit_requested();
+    auto* command_bar = window().findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
+    check(wait_until([&] { return command_bar = window().findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly), command_bar && command_bar->isVisible(); }, 2000),
+        "clicking the URL opens the command bar");
+    if (!command_bar)
+        return;
+    check(command_bar->mode() == CommandBar::Mode::EditCurrentTab, "to edit the current tab");
+    check(QUrl(command_bar->text()) == QUrl(ArcSidebar::url_of(*tab)) && command_bar->text_is_all_selected(), "with its whole URL, selected", command_bar->text());
+    check(command_bar->rows().size() == 1 && command_bar->rows()[0].kind == CommandBarRow::Kind::CurrentTab && command_bar->selected_row() == 0,
+        "and the tab itself as the only row, selected");
+
+    // Return on it just closes the bar.
+    auto* field = command_bar->findChild<QLineEdit*>();
+    auto press = [&](int key) {
+        QKeyEvent down(QEvent::KeyPress, key, Qt::NoModifier);
+        QApplication::sendEvent(field, &down);
+    };
+    press(Qt::Key_Return);
+    check(wait_until([&] { return !command_bar->isVisible(); }, 2000), "Return on the tab closes the bar");
+    check(tab_count() == tabs_before && window().current_tab() == tab, "staying on the tab, with no new tab");
+
+    // Cmd+L (and upstream's other routes into the location field) open the same.
+    tab->focus_location_editor();
+    check(wait_until([&] { return command_bar->isVisible() && command_bar->mode() == CommandBar::Mode::EditCurrentTab; }, 2000),
+        "Cmd+L opens the bar to edit the current tab");
+    tab->focus_location_editor(); // Repeated focus requests don't close it.
+    settle(50);
+    check(command_bar->isVisible(), "and asking again keeps it open");
+
+    // Entering something else loads it in this tab, not a new one.
+    auto target = page("Addressed 3");
+    field->setText(target);
+    emit field->textEdited(target);
+    check(command_bar->rows().isEmpty() || command_bar->rows()[0].kind != CommandBarRow::Kind::CurrentTab, "typing replaces the tab row");
+    press(Qt::Key_Return);
+    check(wait_until([&] { return tab && at(*tab, target); }), "entering a URL loads it in the same tab");
+    check(tab_count() == tabs_before, "without opening a new tab", QString("%1 -> %2").arg(tabs_before).arg(tab_count()));
+
+    // Escape closes it without going anywhere.
+    tab->focus_location_editor();
+    wait_until([&] { return command_bar->isVisible(); }, 2000);
+    press(Qt::Key_Escape);
+    check(wait_until([&] { return !command_bar->isVisible(); }, 2000) && at(*tab, target), "Escape closes it and stays put");
+
+    // Cmd+T is still a new tab: empty, with no tab row for the current one.
+    CommandBar::toggle_for(window());
+    check(command_bar->isVisible() && command_bar->mode() == CommandBar::Mode::NewTab && command_bar->text().isEmpty(), "Cmd+T still opens an empty bar for a new tab");
+    command_bar->dismiss();
+
+    if (tab)
+        s().close_tab(*tab);
+    settle(200);
+}
+
 int SelfTest::run()
 {
     seed();
@@ -630,6 +726,7 @@ int SelfTest::run()
     a_malformed_pinned_url_doesnt_crash();
     popups_close_themselves();
     private_windows_write_nothing();
+    address_bar_edits_the_current_tab();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

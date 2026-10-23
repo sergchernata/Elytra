@@ -1309,6 +1309,8 @@ void Tab::park_location_editing()
 
 void Tab::focus_location_editor()
 {
+    if (on_focus_location_editor && on_focus_location_editor(*this)) // Fork hook (Arc)
+        return;
 #if defined(AK_OS_MACOS)
     make_appkit_window_first_responder(*m_location_edit);
 #endif

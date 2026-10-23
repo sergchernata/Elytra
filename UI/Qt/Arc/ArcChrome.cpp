@@ -15,6 +15,7 @@
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/Tab.h>
 
 #include <QAction>
 #include <QActionEvent>
@@ -56,6 +57,22 @@ static void route_new_tab_to_command_bar()
         else
             application.open_new_tab();
     });
+}
+
+// Cmd+L, and upstream's other ways into the location field (a new space's first tab, a new window's new tab page),
+// edit the address in the command bar, as in Arc. Windows without the sidebar (popups) keep upstream's field.
+static void route_location_editing_to_command_bar()
+{
+    Tab::on_focus_location_editor = [](Tab& tab) {
+        auto* window = qobject_cast<BrowserWindow*>(tab.window());
+        if (!window || !ArcSidebar::for_window(*window))
+            return false;
+        auto* bar = window->findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly);
+        if (bar && bar->isVisible() && bar->mode() == CommandBar::Mode::EditCurrentTab)
+            return true; // Already editing: don't close it (focus requests repeat).
+        CommandBar::toggle_for(*window, CommandBar::Mode::EditCurrentTab, &tab);
+        return true;
+    };
 }
 
 // "Import from Arc..." goes right above "Open File..." in every File menu. Menus are
@@ -153,6 +170,7 @@ void install()
 
     enable_sidebar_on_first_run();
     route_new_tab_to_command_bar();
+    route_location_editing_to_command_bar();
     add_import_menu_items();
 }
 

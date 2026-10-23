@@ -29,30 +29,44 @@ namespace Arc {
 struct CommandBarRow {
     enum class Kind {
         SwitchToTab,
+        CurrentTab, // Editing the current tab's URL: the tab itself, to stay on.
         Suggestion,
     };
     Kind kind { Kind::Suggestion };
     QString title;
     QString subtitle;
     QIcon icon;
-    QPointer<Tab> tab;           // SwitchToTab rows.
+    QPointer<Tab> tab;           // SwitchToTab and CurrentTab rows.
     size_t suggestion_index { 0 }; // Suggestion rows: index into the omnibox's suggestions.
 };
 
 // A frameless window centered over its browser window: one card holding the search field and the results,
 // as in Arc. Upstream's Omnibox model drives suggestions, inline completion and URL-or-search resolution;
-// committing opens the result in a new tab, and open tabs can be switched to.
+// open tabs can be switched to.
 class CommandBar final : public QWidget {
     Q_OBJECT
 
 public:
-    static void toggle_for(BrowserWindow&);
+    enum class Mode {
+        NewTab,         // Cmd+T: empty, and what's entered opens in a new tab.
+        EditCurrentTab, // Cmd+L or the address bar: starts with the tab's URL, and what's entered loads in that tab.
+    };
+
+    // Opens the bar (or closes it, if it's already open in that mode). EditCurrentTab edits `tab`, by default the
+    // window's current one.
+    static void toggle_for(BrowserWindow&, Mode = Mode::NewTab, Tab* tab = nullptr);
 
     explicit CommandBar(BrowserWindow&);
     virtual ~CommandBar() override;
 
-    void present();
+    void present(Mode = Mode::NewTab, Tab* tab = nullptr);
     void dismiss();
+
+    Mode mode() const { return m_mode; }
+    QString text() const;
+    bool text_is_all_selected() const;
+    QList<CommandBarRow> const& rows() const { return m_rows; }
+    int selected_row() const { return m_selected_row; }
 
     // Layout, shared with the tests.
     static constexpr int HEADER_HEIGHT = 62;
@@ -75,7 +89,7 @@ protected:
     virtual void mouseReleaseEvent(QMouseEvent*) override;
 
 private:
-    void open_in_new_tab(String input, Optional<URL::URL>, WebView::OmniboxDestinationKind);
+    void open(String input, Optional<URL::URL>, WebView::OmniboxDestinationKind);
     void commit(String const& input);
     void rebuild_rows();
     void activate_row(int row);
@@ -88,6 +102,10 @@ private:
     int row_at(QPointF) const;
 
     QPointer<BrowserWindow> m_window;
+    Mode m_mode { Mode::NewTab };
+    QPointer<Tab> m_target_tab;  // EditCurrentTab: the tab being edited.
+    QString m_initial_text;      // EditCurrentTab: its URL, as the bar opened with it.
+    QIcon m_header_icon;         // EditCurrentTab: its favicon, in place of the search glyph.
     QLineEdit* m_edit { nullptr };
     WebView::Omnibox m_omnibox;
     QList<CommandBarRow> m_rows;
