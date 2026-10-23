@@ -7,6 +7,7 @@
 
 #include <LibWebView/Application.h>
 #include <LibWebView/Profile.h>
+#include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
 namespace Ladybird::Arc {
@@ -17,6 +18,7 @@ SpaceStore& SpaceStore::the()
         // One file per Ladybird profile, next to the profile's other data.
         auto const& data_directory = WebView::Application::profile().paths().data;
         auto directory = QString::fromUtf8(data_directory.characters(), static_cast<qsizetype>(data_directory.length()));
+        ArcIcons::set_directory(directory + "/ArcIcons");
         return new SpaceStore(directory + "/ArcSpaces.json");
     }();
     return *store;

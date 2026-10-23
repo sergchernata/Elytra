@@ -14,7 +14,8 @@
 
 namespace Ladybird::Arc {
 
-// Renders an SF Symbol tinted with one color. point_size is in logical pixels.
+// Renders an SF Symbol tinted with one color. point_size is in logical pixels. Names starting with "arc." are
+// glyphs drawn here for Arc icons that SF Symbols lacks (e.g. "arc.skull"); they work on every platform.
 QPixmap symbol_pixmap(QString const& name, int point_size, QColor const& color, qreal device_pixel_ratio);
 
 // Like symbol_pixmap(), but prefers the filled variant ("<name>.fill") as Arc does, and scales the
@@ -23,6 +24,9 @@ QPixmap fitted_symbol_pixmap(QString const& name, int box, QColor const& color, 
 
 // Symbols offered for spaces, in picker order. Ones the system lacks are skipped at runtime.
 QStringList const& space_symbol_names();
+
+// Draws one of the "arc." glyphs, or returns a null pixmap for an unknown name.
+QPixmap custom_glyph_pixmap(QString const& name, int box, QColor const& color, qreal device_pixel_ratio);
 
 // Space icons are stored as "sf:<symbol name>"; anything else is literal text (older emoji icons).
 inline bool is_symbol_icon(QString const& icon) { return icon.startsWith("sf:"); }

@@ -6,6 +6,7 @@
  */
 
 #include <LibWebView/Application.h>
+#include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
@@ -629,7 +630,7 @@ void ArcSidebar::unpin_node(QString const& node_id)
 
 void ArcSidebar::add_favorite(Tab& tab, int index)
 {
-    auto id = SpaceStore::the().add_favorite(url_of(tab), title_of(tab), index);
+    auto id = SpaceStore::the().add_favorite(url_of(tab), title_of(tab), index, current_profile());
     // A Today tab becomes the favorite's tab; a pinned tab stays pinned.
     if (node_of(tab).isEmpty()) {
         set_tab_node(tab, favorite_node(id));
@@ -974,17 +975,18 @@ void ArcSidebar::on_current_tab_changed(int index)
 
 // --- Views --------------------------------------------------------------------------------------
 
+QString ArcSidebar::current_profile() const
+{
+    auto const* space = SpaceStore::the().space(m_space_id);
+    return space ? space->profile : QString();
+}
+
 QColor ArcSidebar::space_color() const
 {
     auto const* space = SpaceStore::the().space(m_space_id);
     return space ? space->color : QColor();
 }
 
-static QHash<QString, QIcon>& favicon_cache()
-{
-    static QHash<QString, QIcon> cache;
-    return cache;
-}
 
 static QIcon letter_icon(QString const& host)
 {
@@ -1019,15 +1021,15 @@ static QIcon letter_icon(QString const& host)
 
 QIcon ArcSidebar::icon_for(QString const& url, Tab const* tab) const
 {
-    auto host = QUrl(url).host();
+    // A loaded tab's live favicon (remembered for its site, so the site keeps it once unloaded); otherwise the
+    // site's cached icon (from browsing, or imported from Arc); otherwise a letter tile.
     if (tab && !tab->favicon().isNull()) {
-        if (!host.isEmpty())
-            favicon_cache().insert(host, tab->favicon());
+        ArcIcons::store(url, tab->favicon());
         return tab->favicon();
     }
-    if (auto it = favicon_cache().find(host); it != favicon_cache().end())
-        return *it;
-    return letter_icon(host);
+    if (auto cached = ArcIcons::icon_for_url(url); !cached.isNull())
+        return cached;
+    return letter_icon(QUrl(url).host());
 }
 
 void ArcSidebar::schedule_rebuild()
@@ -1052,6 +1054,16 @@ void ArcSidebar::rebuild()
     if (!space) {
         m_space_id = SpaceStore::the().first_space_id();
         space = SpaceStore::the().space(m_space_id);
+    }
+
+    // Tabs whose space went away (deleted, or the starter space an import replaced) join the current one.
+    for (auto* tab : tabs()) {
+        auto tab_space = space_of(*tab);
+        if (!tab_space.isEmpty() && !SpaceStore::the().space(tab_space)) {
+            set_tab_space(*tab, m_space_id);
+            if (!is_favorite_node(node_of(*tab)))
+                set_tab_node(*tab, {});
+        }
     }
 
     auto muted = ChromeStyle::chrome_muted_text(palette());
@@ -1096,7 +1108,7 @@ void ArcSidebar::rebuild_favorites()
         delete item;
     }
 
-    auto const& favorites = SpaceStore::the().favorites();
+    auto favorites = SpaceStore::the().favorites_for_profile(current_profile());
     m_favorites->setVisible(!favorites.isEmpty());
     if (favorites.isEmpty())
         return;
@@ -1122,7 +1134,7 @@ void ArcSidebar::rebuild_favorites()
 
         auto* button = new QToolButton(m_favorites);
         button->setIcon(icon_for(favorite.url, tab));
-        button->setIconSize(QSize(22, 22));
+        button->setIconSize(QSize(18, 18));
         button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
         button->setCheckable(true);
         button->setChecked(tab && tab == current);
@@ -1397,11 +1409,11 @@ void ArcSidebar::update_mode()
     set_window_controls_hidden(*window(), true);
 }
 
-// Hidden, upstream's toolbar keeps its 12px left margin after the thin hover edge, which leaves the
-// sidebar button sitting further in than Arc's. Trim it so the button lines up with the page's edge.
+// Upstream's toolbar has a 12px left margin, which leaves its sidebar button sitting in from the page's
+// left edge. Trim it so the button lines up with the page, docked or hidden.
 void ArcSidebar::apply_toolbar_inset()
 {
-    if (!m_window || m_mode != Mode::Hidden)
+    if (!m_window)
         return;
     for (auto* toolbar : m_window->findChildren<QWidget*>("LadybirdNavigationToolbar")) {
         if (auto* layout = toolbar->layout()) {
@@ -1465,6 +1477,7 @@ void ArcSidebar::dock_panel()
     m_panel->show();
     m_traffic_lights->set_drawn(false);
     m_sidebar_toggle->hide(); // Docked, the toolbar's own sidebar button does this.
+    apply_toolbar_inset();
     update();
 }
 
@@ -2045,7 +2058,7 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
                 auto id = index.data(IdRole).toString();
                 if (auto const* node = SpaceStore::the().node(id)) {
                     auto title = node->title.isEmpty() ? node->saved_title : node->title;
-                    auto favorite_id = SpaceStore::the().add_favorite(node->url, title);
+                    auto favorite_id = SpaceStore::the().add_favorite(node->url, title, -1, current_profile());
                     if (auto* tab = tab_for_node(id)) {
                         set_tab_node(*tab, favorite_node(favorite_id));
                         set_tab_space(*tab, {});
@@ -2056,7 +2069,7 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
             }
         } else if (drop->mimeData()->hasUrls()) {
             for (auto const& url : drop->mimeData()->urls())
-                SpaceStore::the().add_favorite(url.toString(), url.host());
+                SpaceStore::the().add_favorite(url.toString(), url.host(), -1, current_profile());
         }
         drop->setDropAction(Qt::CopyAction);
         drop->accept();
@@ -2142,9 +2155,9 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
                     tab->navigate(ak_url_from_qurl(QUrl(node->url)));
             });
         }
-        menu.addAction("Add to Favorites", [node_id] {
+        menu.addAction("Add to Favorites", [this, node_id] {
             if (auto const* node = SpaceStore::the().node(node_id))
-                SpaceStore::the().add_favorite(node->url, node->title.isEmpty() ? node->saved_title : node->title);
+                SpaceStore::the().add_favorite(node->url, node->title.isEmpty() ? node->saved_title : node->title, -1, current_profile());
         });
         add_move_to_space_menu(menu, m_space_id, move);
         menu.addSeparator();
@@ -2229,18 +2242,18 @@ void ArcSidebar::show_space_menu(QString const& space_id, QPoint const& global_p
 
 void ArcSidebar::show_favorite_menu(QString const& favorite_id, QPoint const& global_position)
 {
-    auto& store = SpaceStore::the();
+    auto favorites = SpaceStore::the().favorites_for_profile(current_profile());
     int index = 0;
-    for (int i = 0; i < store.favorites().size(); ++i) {
-        if (store.favorites()[i].id == favorite_id)
+    for (int i = 0; i < favorites.size(); ++i) {
+        if (favorites[i].id == favorite_id)
             index = i;
     }
 
     QMenu menu(this);
     if (index > 0)
-        menu.addAction("Move Left", [favorite_id, index] { SpaceStore::the().move_favorite(favorite_id, index - 1); });
-    if (index + 1 < store.favorites().size())
-        menu.addAction("Move Right", [favorite_id, index] { SpaceStore::the().move_favorite(favorite_id, index + 1); });
+        menu.addAction("Move Left", [favorite_id] { SpaceStore::the().move_favorite_within_profile(favorite_id, -1); });
+    if (index + 1 < favorites.size())
+        menu.addAction("Move Right", [favorite_id] { SpaceStore::the().move_favorite_within_profile(favorite_id, +1); });
     menu.addSeparator();
     menu.addAction("Remove from Favorites", [this, favorite_id] {
         // Its open tab, if any, becomes a Today tab in the current space.

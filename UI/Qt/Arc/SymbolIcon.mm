@@ -69,6 +69,8 @@ QPixmap symbol_pixmap(QString const& name, int point_size, QColor const& color, 
 
 QPixmap fitted_symbol_pixmap(QString const& name, int box, QColor const& color, qreal device_pixel_ratio)
 {
+    if (name.startsWith("arc."))
+        return custom_glyph_pixmap(name, box, color, device_pixel_ratio);
     // Render large, then scale down to the box, so every symbol ends up the same visual size.
     auto rendered = symbol_pixmap(name + ".fill", box * 2, color, device_pixel_ratio);
     if (rendered.isNull())
@@ -92,7 +94,7 @@ QStringList const& space_symbol_names()
         "camera", "photo", "paintbrush", "pencil", "hammer", "wrench.and.screwdriver", "cpu", "laptopcomputer",
         "chevron.left.forwardslash.chevron.right", "shippingbox", "gift", "lightbulb", "brain", "figure.run", "person", "person.2",
         "envelope", "bubble.left", "bell", "calendar", "doc.text", "folder", "bookmark", "tag",
-        "flag", "pin", "sparkles", "atom", "puzzlepiece", "skull",
+        "flag", "pin", "sparkles", "atom", "puzzlepiece", "arc.skull",
     };
     return names;
 }

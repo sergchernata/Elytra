@@ -142,6 +142,7 @@ private:
     void update_tab_rows(Tab&);
     void update_current_highlight();
     QColor space_color() const;
+    QString current_profile() const;
     void apply_space_tint();
     QIcon icon_for(QString const& url, Tab const* tab) const;
 

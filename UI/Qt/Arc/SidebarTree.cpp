@@ -278,8 +278,14 @@ SidebarTree::SidebarTree(QWidget* parent)
     setDragDropMode(QAbstractItemView::DragDrop);
     setDefaultDropAction(Qt::MoveAction);
 
+    // No scrollbar track; a thin rounded handle, as in Arc.
     setStyleSheet("QTreeView { background: transparent; border: none; outline: none; }"
-                  "QTreeView::item { border: none; }");
+                  "QTreeView::item { border: none; }"
+                  "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px 0 2px 0; border: none; }"
+                  "QScrollBar::handle:vertical { background: rgba(128, 128, 128, 0.45); border-radius: 3px; min-height: 28px; }"
+                  "QScrollBar::handle:vertical:hover { background: rgba(128, 128, 128, 0.7); }"
+                  "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; background: none; }"
+                  "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }");
     viewport()->setAutoFillBackground(false);
 }
 

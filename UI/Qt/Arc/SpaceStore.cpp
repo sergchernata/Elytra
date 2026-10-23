@@ -15,6 +15,8 @@
 #include <QSaveFile>
 #include <QUuid>
 
+#include <algorithm>
+
 namespace Ladybird::Arc {
 
 static constexpr int FILE_VERSION = 1;
@@ -84,11 +86,13 @@ void SpaceStore::load()
         auto object = value.toObject();
         Space space;
         space.id = object["id"].toString(new_id());
+        space.source_id = object["sourceId"].toString();
         space.title = object["title"].toString("Space");
         space.icon = object["icon"].toString();
         if (space.icon == QString::fromUtf8("\xF0\x9F\x8F\xA0"))
             space.icon = "sf:house"; // Earlier builds used a house emoji for the default space.
         space.color = QColor(object["color"].toString());
+        space.profile = object["profile"].toString();
         for (auto const& node : object["pinned"].toArray())
             space.pinned.append(node_from_json(node.toObject()));
         m_spaces.append(std::move(space));
@@ -96,7 +100,7 @@ void SpaceStore::load()
 
     for (auto const& value : root["favorites"].toArray()) {
         auto object = value.toObject();
-        m_favorites.append({ object["id"].toString(new_id()), object["url"].toString(), object["title"].toString() });
+        m_favorites.append({ object["id"].toString(new_id()), object["url"].toString(), object["title"].toString(), object["profile"].toString() });
     }
 
     for (auto const& value : root["session"].toArray()) {
@@ -117,9 +121,13 @@ void SpaceStore::save()
     for (auto const& space : m_spaces) {
         QJsonObject object;
         object["id"] = space.id;
+        if (!space.source_id.isEmpty())
+            object["sourceId"] = space.source_id;
         object["title"] = space.title;
         object["icon"] = space.icon;
         object["color"] = space.color.isValid() ? space.color.name() : QString();
+        if (!space.profile.isEmpty())
+            object["profile"] = space.profile;
         QJsonArray pinned;
         for (auto const& node : space.pinned)
             pinned.append(node_to_json(node));
@@ -129,8 +137,12 @@ void SpaceStore::save()
     root["spaces"] = spaces;
 
     QJsonArray favorites;
-    for (auto const& favorite : m_favorites)
-        favorites.append(QJsonObject { { "id", favorite.id }, { "url", favorite.url }, { "title", favorite.title } });
+    for (auto const& favorite : m_favorites) {
+        QJsonObject object { { "id", favorite.id }, { "url", favorite.url }, { "title", favorite.title } };
+        if (!favorite.profile.isEmpty())
+            object["profile"] = favorite.profile;
+        favorites.append(object);
+    }
     root["favorites"] = favorites;
 
     QJsonArray session;
@@ -155,7 +167,7 @@ void SpaceStore::ensure_default_space()
 {
     if (!m_spaces.isEmpty())
         return;
-    m_spaces.append({ new_id(), "Personal", "sf:house", QColor("#7a9cc6"), {} });
+    m_spaces.append({ new_id(), {}, "Personal", "sf:house", QColor("#7a9cc6"), {}, {} });
     save();
 }
 
@@ -266,7 +278,7 @@ Favorite const* SpaceStore::favorite(QString const& id) const
 QString SpaceStore::add_space(QString title, QString icon, QColor color)
 {
     auto id = new_id();
-    m_spaces.append({ id, std::move(title), std::move(icon), color, {} });
+    m_spaces.append({ id, {}, std::move(title), std::move(icon), color, {}, {} });
     commit();
     return id;
 }
@@ -418,14 +430,29 @@ bool SpaceStore::move_node(QString const& id, QString const& space_id, QString c
 
 // --- Favorites ----------------------------------------------------------------------------------
 
-QString SpaceStore::add_favorite(QString url, QString title, int index)
+QString SpaceStore::add_favorite(QString url, QString title, int index, QString profile)
 {
+    // One favorite per URL in a profile.
+    for (auto const& favorite : m_favorites) {
+        if (favorite.url == url && favorite.profile == profile)
+            return favorite.id;
+    }
     auto id = new_id();
     if (index < 0 || index > m_favorites.size())
         index = m_favorites.size();
-    m_favorites.insert(index, { id, std::move(url), std::move(title) });
+    m_favorites.insert(index, { id, std::move(url), std::move(title), std::move(profile) });
     commit();
     return id;
+}
+
+QList<Favorite> SpaceStore::favorites_for_profile(QString const& profile) const
+{
+    QList<Favorite> result;
+    for (auto const& favorite : m_favorites) {
+        if (favorite.profile == profile)
+            result.append(favorite);
+    }
+    return result;
 }
 
 void SpaceStore::remove_favorite(QString const& id)
@@ -439,6 +466,69 @@ void SpaceStore::move_favorite(QString const& id, int new_index)
     for (int i = 0; i < m_favorites.size(); ++i) {
         if (m_favorites[i].id == id) {
             m_favorites.move(i, qBound(0, new_index, static_cast<int>(m_favorites.size()) - 1));
+            commit();
+            return;
+        }
+    }
+}
+
+SpaceStore::MergeResult SpaceStore::merge_imported(QList<Space> spaces, QList<Favorite> const& favorites)
+{
+    MergeResult result;
+    for (auto& imported : spaces) {
+        Space* existing = nullptr;
+        for (auto& space : m_spaces) {
+            if (!imported.source_id.isEmpty() && space.source_id == imported.source_id)
+                existing = &space;
+        }
+        if (existing) {
+            // Keep our id (open tabs and the remembered active space refer to it); take everything else.
+            imported.id = existing->id;
+            *existing = std::move(imported);
+            ++result.spaces_updated;
+        } else {
+            if (imported.id.isEmpty())
+                imported.id = new_id();
+            m_spaces.append(std::move(imported));
+            ++result.spaces_added;
+        }
+    }
+
+    for (auto const& favorite : favorites) {
+        auto known = std::any_of(m_favorites.begin(), m_favorites.end(), [&](auto const& existing) {
+            return existing.url == favorite.url && existing.profile == favorite.profile;
+        });
+        if (known || favorite.url.isEmpty())
+            continue;
+        m_favorites.append({ new_id(), favorite.url, favorite.title, favorite.profile });
+        ++result.favorites_added;
+    }
+
+    // The untouched starter space would just sit beside the imported ones (often with the same name).
+    if (result.spaces_added > 0) {
+        m_spaces.removeIf([](Space const& space) {
+            return space.source_id.isEmpty() && space.pinned.isEmpty() && space.title == "Personal" && space.icon == "sf:house";
+        });
+        if (!space(m_last_active_space_id))
+            m_last_active_space_id = first_space_id();
+    }
+
+    commit();
+    return result;
+}
+
+void SpaceStore::move_favorite_within_profile(QString const& id, int delta)
+{
+    int from = -1;
+    for (int i = 0; i < m_favorites.size(); ++i) {
+        if (m_favorites[i].id == id)
+            from = i;
+    }
+    if (from < 0)
+        return;
+    for (int i = from + delta; i >= 0 && i < m_favorites.size(); i += delta) {
+        if (m_favorites[i].profile == m_favorites[from].profile) {
+            m_favorites.swapItemsAt(from, i);
             commit();
             return;
         }

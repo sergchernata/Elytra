@@ -38,6 +38,7 @@ struct Favorite {
     QString id;
     QString url;
     QString title;
+    QString profile; // Spaces show the favorites of their own profile, as in Arc. Empty: the default profile.
 };
 
 // Remembers which open tabs belonged to which space, so restored tabs land back in place.
@@ -49,10 +50,12 @@ struct SessionEntry {
 
 struct Space {
     QString id;
+    QString source_id; // Set for spaces imported from Arc: the Arc space's id, so re-importing updates it.
     QString title;
     QString icon; // An emoji or short text.
     QColor color;
     QList<PinnedNode> pinned;
+    QString profile; // Which favorites this space shows (Arc profiles). Empty: the default profile.
 };
 
 // Where a node sits: which space, which parent folder (empty for the space's top level), and index.
@@ -108,11 +111,23 @@ public:
     bool move_node(QString const& id, QString const& space_id, QString const& parent_id, int index);
 
     // Favorites
-    QString add_favorite(QString url, QString title, int index = -1);
+    QString add_favorite(QString url, QString title, int index = -1, QString profile = {});
+    QList<Favorite> favorites_for_profile(QString const& profile) const;
     void remove_favorite(QString const& id);
     void move_favorite(QString const& id, int new_index);
+    // Swaps a favorite with its neighbor among the same profile's favorites (delta -1 or +1).
+    void move_favorite_within_profile(QString const& id, int delta);
 
     void set_session(QList<SessionEntry>);
+
+    // Imported spaces replace earlier imports of the same Arc space (matched by source_id) or are added;
+    // favorites are added unless their URL is already a favorite. Saves once.
+    struct MergeResult {
+        int spaces_added { 0 };
+        int spaces_updated { 0 };
+        int favorites_added { 0 };
+    };
+    MergeResult merge_imported(QList<Space> spaces, QList<Favorite> const& favorites);
 
     static QString new_id();
 

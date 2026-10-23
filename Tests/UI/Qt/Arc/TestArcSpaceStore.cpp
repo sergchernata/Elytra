@@ -211,3 +211,50 @@ TEST_CASE(view_state_changes_do_not_trigger_a_rebuild)
     store.rename_node(folder, "Later");
     EXPECT_EQ(changes, 1);
 }
+
+TEST_CASE(imports_update_the_same_spaces_and_replace_the_starter_space)
+{
+    QTemporaryDir directory;
+    SpaceStore store(store_path(directory));
+    EXPECT(store.spaces().first().title == "Personal"); // The untouched starter space.
+
+    Space imported;
+    imported.source_id = "arc-space-1";
+    imported.title = "Work";
+    imported.pinned.append({ SpaceStore::new_id(), PinnedNode::Kind::Tab, {}, "Example", "https://example.com/", true, {} });
+    auto first = store.merge_imported({ imported }, { { {}, "https://mail.example/", "Mail", {} } });
+    EXPECT_EQ(first.spaces_added, 1);
+    EXPECT_EQ(first.favorites_added, 1);
+    VERIFY(store.spaces().size() == 1); // The starter space made way.
+    auto work_id = store.spaces().first().id;
+
+    // Again, with a change: same space updated in place (same id), favorites not duplicated.
+    imported.title = "Work (renamed)";
+    auto second = store.merge_imported({ imported }, { { {}, "https://mail.example/", "Mail", {} } });
+    EXPECT_EQ(second.spaces_added, 0);
+    EXPECT_EQ(second.spaces_updated, 1);
+    EXPECT_EQ(second.favorites_added, 0);
+    EXPECT_EQ(store.spaces().size(), 1);
+    EXPECT(store.spaces().first().id == work_id);
+    EXPECT(store.spaces().first().title == "Work (renamed)");
+}
+
+TEST_CASE(favorites_belong_to_a_profile)
+{
+    QTemporaryDir directory;
+    SpaceStore store(store_path(directory));
+    auto a = store.add_favorite("https://a.example/", "A");
+    store.add_favorite("https://b.example/", "B", -1, "Profile 1");
+    store.add_favorite("https://c.example/", "C");
+    // Same URL in the same profile: no duplicate.
+    EXPECT(store.add_favorite("https://a.example/", "A again") == a);
+
+    EXPECT_EQ(store.favorites_for_profile({}).size(), 2);
+    EXPECT_EQ(store.favorites_for_profile("Profile 1").size(), 1);
+
+    // Moving stays within the profile: A swaps with C, skipping B.
+    store.move_favorite_within_profile(a, +1);
+    auto defaults = store.favorites_for_profile({});
+    EXPECT(defaults[0].title == "C");
+    EXPECT(defaults[1].title == "A");
+}

@@ -126,6 +126,17 @@ static void add_import_menu_items()
 
 void install()
 {
+    // Development aid: ARC_DEV_IMPORT=1 imports from Arc at startup without dialogs and logs the summary.
+    if (qEnvironmentVariableIsSet("ARC_DEV_IMPORT")) {
+        QTimer::singleShot(1500, [] {
+            auto result = import_from_arc(default_arc_data_directory());
+            if (result.is_error())
+                qWarning("Arc import failed: %s", result.error().string_literal().characters_without_null_termination());
+            else
+                qWarning("Arc import:\n%s", qPrintable(describe(result.value())));
+        });
+    }
+
     enable_sidebar_on_first_run();
     route_new_tab_to_command_bar();
     add_import_menu_items();
