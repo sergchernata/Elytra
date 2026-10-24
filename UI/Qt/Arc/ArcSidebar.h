@@ -42,6 +42,8 @@ class TabWidget;
 
 namespace Arc {
 
+class SymbolButton;
+
 // While alive, keeps the sidebar slid out (when hidden) even though the pointer is over a menu or dialog.
 // Construct it around menu.exec() and modal dialogs opened from the sidebar.
 class KeepSidebarOpen {
@@ -304,6 +306,8 @@ private:
     SidebarModel* m_model { nullptr };
     QWidget* m_switcher { nullptr };
     QHBoxLayout* m_switcher_layout { nullptr };
+    QList<QPointer<SymbolButton>> m_space_buttons;
+    QStringList m_switcher_key;
 
     bool m_rebuild_pending { false };
     qreal m_swipe_distance { 0 };

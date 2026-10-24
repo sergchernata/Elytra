@@ -15,6 +15,7 @@
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SpaceStore.h>
+#include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/BrowserWindow.h>
@@ -32,6 +33,8 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QScrollBar>
+#include <QSet>
+#include <QThread>
 #include <QTimer>
 #include <QWheelEvent>
 
@@ -173,6 +176,13 @@ private:
     void pinned_tabs_rename_in_place();
     void duplicate_and_close_tabs_below();
     void switching_spaces_slides();
+    void the_slide_and_color_fade_run_smoothly();
+    void switching_spaces_keeps_the_switcher_in_place();
+    struct ChromeTiles {
+        QMap<QString, int> unpainted;
+        QMap<QString, int> untinted;
+    };
+    ChromeTiles chrome_tiles_ignoring_the_tint(bool fade_step);
     void every_chrome_surface_takes_the_space_color();
 
     // Sends a key the way Qt does for a shortcut: the override first (claimed if Arc handles the key), then the press.
@@ -956,6 +966,139 @@ void SelfTest::switching_spaces_slides()
     wait_until(settled, 2000);
 }
 
+// The core of switching spaces, step by step: the slide covers the favorites and list and moves steadily one way;
+// the window holds the old color until it ends, then fades through the colors between the two, never darker.
+void SelfTest::the_slide_and_color_fade_run_smoothly()
+{
+    auto* panel = m_sidebar.m_panel;
+    auto fading = [&] { return m_sidebar.m_tint_fade && m_sidebar.m_tint_fade->state() == QAbstractAnimation::Running; };
+    auto settled = [&] { return !SpaceSlide::running_in(*panel) && !m_sidebar.m_holding_tint && !fading(); };
+
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+    auto from = ChromeStyle::chrome_background(window().palette());
+
+    s().switch_to_space(m_beta);
+    QPointer<SpaceSlide> slide = SpaceSlide::running_in(*panel);
+    if (!slide) {
+        check(false, "a slide runs to watch");
+        return;
+    }
+    check(slide->geometry() == s().space_slide_area(), "the slide covers the favorites and the list, edge to edge");
+    auto direction = slide->direction();
+
+    QList<qreal> progress;
+    bool color_held = true;
+    QElapsedTimer timer;
+    timer.start();
+    while (slide && slide->is_running() && timer.elapsed() < 2000) {
+        progress.append(slide->progress());
+        color_held = color_held && ChromeStyle::chrome_background(window().palette()) == from;
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(4);
+    }
+    auto steady = progress.size() > 3;
+    for (int i = 1; i < progress.size(); ++i)
+        steady = steady && progress[i] >= progress[i - 1];
+    QSet<qreal> distinct(progress.begin(), progress.end());
+    check(steady && distinct.size() >= 4, "the slide moves steadily one way, over several frames",
+        QString("%1 samples, %2 distinct").arg(progress.size()).arg(distinct.size()));
+    check(timer.elapsed() >= SpaceSlide::DURATION_MS / 2 && timer.elapsed() < SpaceSlide::DURATION_MS + 1000, "and takes about as long as it should",
+        QString("%1 ms").arg(timer.elapsed()));
+    check(color_held, "the old color holds while it slides");
+    Q_UNUSED(direction);
+
+    // The fade.
+    wait_until([&] { return fading() || settled(); }, 500);
+    QList<QColor> steps;
+    timer.restart();
+    while (fading() && timer.elapsed() < 2000) {
+        auto color = ChromeStyle::chrome_background(window().palette());
+        if (steps.isEmpty() || steps.last() != color)
+            steps.append(color);
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(4);
+    }
+    auto to = ChromeStyle::chrome_background(window().palette());
+    check(from != to, "the two spaces have different colors to fade between");
+    check(steps.size() >= 4, "the window fades through the colors in between", QString("%1 steps").arg(steps.size()));
+
+    auto distance = [](QColor const& a, QColor const& b) {
+        return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
+    };
+    bool toward = true;
+    bool between = true;
+    for (int i = 0; i < steps.size(); ++i) {
+        if (i > 0)
+            toward = toward && distance(steps[i], to) <= distance(steps[i - 1], to) + 3;
+        auto within = [](int value, int a, int b) { return value >= qMin(a, b) - 3 && value <= qMax(a, b) + 3; };
+        between = between && within(steps[i].red(), from.red(), to.red()) && within(steps[i].green(), from.green(), to.green())
+            && within(steps[i].blue(), from.blue(), to.blue());
+    }
+    check(toward, "each step is closer to the new color");
+    check(between, "and every step lies between the two (nothing darker or off)");
+    check(steps.isEmpty() || distance(steps.first(), from) < distance(steps.first(), to), "it starts from the old color");
+    check(to == ChromeStyle::chrome_background(window().palette()) && !fading(), "and ends exactly on the new one");
+
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+}
+
+// Clicking a space's button only changes which one is lit: the buttons aren't rebuilt (rebuilt ones briefly showed
+// at other places, lighting up whichever was under the pointer).
+void SelfTest::switching_spaces_keeps_the_switcher_in_place()
+{
+    auto* panel = m_sidebar.m_panel;
+    auto settled = [&] { return !SpaceSlide::running_in(*panel) && !m_sidebar.m_holding_tint && (!m_sidebar.m_tint_fade || m_sidebar.m_tint_fade->state() != QAbstractAnimation::Running); };
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+
+    auto buttons = [&] {
+        QList<QPair<SymbolButton*, QRect>> list;
+        for (auto const& button : m_sidebar.m_space_buttons)
+            list.append({ button.data(), button ? button->geometry() : QRect() });
+        return list;
+    };
+    auto before = buttons();
+    auto const& spaces = SpaceStore::the().spaces();
+    int beta_at = -1;
+    for (int i = 0; i < spaces.size(); ++i) {
+        if (spaces[i].id == m_beta)
+            beta_at = i;
+    }
+    if (beta_at < 0 || beta_at >= before.size() || !before[beta_at].first) {
+        check(false, "the switcher has a button for each space");
+        return;
+    }
+
+    before[beta_at].first->click();
+    auto right_after = buttons();
+    settle(50);
+    check(s().current_space_id() == m_beta, "clicking a space's button switches to it");
+    check(right_after == before && buttons() == before, "and every button stays where it was, the same button");
+    bool lit = true;
+    for (int i = 0; i < before.size(); ++i)
+        lit = lit && before[i].first && before[i].first->is_dimmed() == (spaces[i].id != m_beta);
+    check(lit, "only the new space's button is lit");
+    check(wait_until(settled, 2000), "the switch settles");
+
+    // Adding a space does rebuild them: each new one shows at once in its place, not later somewhere else.
+    auto id = SpaceStore::the().add_space("Switcher Test", "S", QColor(40, 160, 90));
+    s().rebuild();
+    bool placed = !m_sidebar.m_space_buttons.isEmpty();
+    QRect previous;
+    for (auto const& button : m_sidebar.m_space_buttons) {
+        placed = placed && button && button->isVisible() && m_sidebar.m_switcher->rect().contains(button->geometry())
+            && (previous.isNull() || button->geometry().left() >= previous.right());
+        if (button)
+            previous = button->geometry();
+    }
+    check(placed, "rebuilt buttons show at once, in order, inside the bar");
+    SpaceStore::the().remove_space(id);
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+}
+
 // The window's chrome (everything but the page) as Qt paints it, over a color nothing paints, so what's left of it
 // shows where only the native window background would.
 static QColor const UNPAINTED(255, 0, 255);
@@ -987,17 +1130,21 @@ static Optional<QRgb> solid_color(QImage const& image, QRect tile)
 
 // Mechanically: render the window under two very different tints, and every solid patch of chrome must change
 // between them (else it paints a color of its own, or nothing at all).
-void SelfTest::every_chrome_surface_takes_the_space_color()
+//
+// `fade_step` tints the way each step of the fade between spaces does (restyling only what's on screen), so the
+// whole window fades, not just part of it.
+SelfTest::ChromeTiles SelfTest::chrome_tiles_ignoring_the_tint(bool fade_step)
 {
     auto& win = window();
     settle(300);
-    s().apply_tint(QColor(255, 0, 0), 0.5);
+    s().apply_tint(QColor(255, 0, 0), 0.5, fade_step);
     settle(100);
     auto red = render_window(win);
-    s().apply_tint(QColor(0, 0, 255), 0.5);
+    s().apply_tint(QColor(0, 0, 255), 0.5, fade_step);
     settle(100);
     auto blue = render_window(win);
     s().apply_space_tint();
+    s().apply_tint(s().space_color(), s().space_tint_amount());
     settle(100);
 
     auto dpr = win.devicePixelRatioF();
@@ -1051,14 +1198,24 @@ void SelfTest::every_chrome_surface_takes_the_space_color()
                 ++untinted[name];
         }
     }
+    return { unpainted, untinted };
+}
+
+void SelfTest::every_chrome_surface_takes_the_space_color()
+{
     auto describe = [](QMap<QString, int> const& tiles) {
         QStringList parts;
         for (auto it = tiles.constBegin(); it != tiles.constEnd(); ++it)
             parts.append(QString("%1: %2").arg(it.key()).arg(it.value()));
         return parts.join("; ");
     };
+    auto [unpainted, untinted] = chrome_tiles_ignoring_the_tint(false);
     check(unpainted.isEmpty(), "every part of the chrome is painted (none leaves the untinted window background showing)", describe(unpainted));
     check(untinted.isEmpty(), "and none paints a color that ignores the space's", describe(untinted));
+
+    auto [unpainted_in_fade, untinted_in_fade] = chrome_tiles_ignoring_the_tint(true);
+    check(unpainted_in_fade.isEmpty() && untinted_in_fade.isEmpty(), "each step of the fade between spaces recolors all of it too",
+        describe(unpainted_in_fade) + " " + describe(untinted_in_fade));
 }
 
 void SelfTest::duplicate_and_close_tabs_below()
@@ -1113,6 +1270,8 @@ int SelfTest::run()
     pinned_tabs_rename_in_place();
     duplicate_and_close_tabs_below();
     switching_spaces_slides();
+    the_slide_and_color_fade_run_smoothly();
+    switching_spaces_keeps_the_switcher_in_place();
     every_chrome_surface_takes_the_space_color();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);

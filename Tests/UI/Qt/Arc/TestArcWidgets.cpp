@@ -10,11 +10,15 @@
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
+#include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 
 #include <AK/Vector.h>
 #include <QApplication>
+#include <QPointer>
+#include <QThread>
+#include <UI/Qt/ChromeStyle.h>
 #include <QImage>
 #include <QMouseEvent>
 #include <QElapsedTimer>
@@ -541,4 +545,190 @@ TEST_CASE(downloads_shelf_skips_unfinished_and_hidden_files)
         EXPECT(is_partial_download_name(name));
     for (auto const* name : { "report.pdf", "Photo 2026.jpg", "notes" })
         EXPECT(!is_partial_download_name(name));
+}
+
+// --- The slide between spaces ---------------------------------------------------------------------------------------
+
+namespace {
+
+QColor const OLD_SPACE(200, 40, 40);
+QColor const NEW_SPACE(40, 160, 90);
+QColor const NOTHING(255, 0, 255);
+
+// A window whose content is one solid color: the "new space" the slide pictures once it starts.
+struct SlideWindow {
+    QWidget window;
+    QWidget* content { nullptr };
+
+    SlideWindow()
+    {
+        window.resize(200, 120);
+        content = new QWidget(&window);
+        content->setGeometry(window.rect());
+        content->setStyleSheet(QString("background: %1;").arg(NEW_SPACE.name()));
+        content->setAttribute(Qt::WA_StyledBackground);
+        window.show();
+        QApplication::processEvents();
+    }
+
+    QPixmap old_picture() const
+    {
+        QPixmap pixmap(window.size() * window.devicePixelRatioF());
+        pixmap.setDevicePixelRatio(window.devicePixelRatioF());
+        pixmap.fill(OLD_SPACE);
+        return pixmap;
+    }
+};
+
+QImage frame_of(QWidget& slide)
+{
+    QImage image(slide.size(), QImage::Format_ARGB32);
+    image.fill(NOTHING);
+    slide.render(&image, QPoint(), QRegion(), QWidget::DrawChildren);
+    return image;
+}
+
+bool close_to(QColor a, QColor b)
+{
+    return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue()) <= 6;
+}
+
+// Every frame shows the old space's picture and the new one's side by side, meeting at the slide's position:
+// nothing else, no blend between them (that read as darkening), and no gaps.
+bool frame_is_two_pictures_side_by_side(QImage const& frame, qreal progress, int direction)
+{
+    auto width = frame.width();
+    auto offset = qRound(width * progress);
+    // Moving left (direction 1), the new picture comes in from the right edge.
+    auto boundary = direction > 0 ? width - offset : offset;
+    for (int y = 0; y < frame.height(); y += 7) {
+        for (int x = 0; x < width; ++x) {
+            if (std::abs(x - boundary) <= 1)
+                continue;
+            auto old_side = direction > 0 ? x < boundary : x >= boundary;
+            if (!close_to(frame.pixelColor(x, y), old_side ? OLD_SPACE : NEW_SPACE))
+                return false;
+        }
+    }
+    return true;
+}
+
+// Runs the slide to its end, checking every frame on the way.
+struct SlideRun {
+    int frames { 0 };
+    int bad_frames { 0 };
+    bool steady { true };
+    bool ended { false };
+    int finished_signals { 0 };
+};
+
+SlideRun run_slide(SlideWindow& window, int direction)
+{
+    SlideRun run;
+    QPointer<SpaceSlide> slide = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), direction);
+    QObject::connect(slide, &SpaceSlide::finished, [&run] { ++run.finished_signals; });
+    qreal last = 0;
+    QElapsedTimer timer;
+    timer.start();
+    while (slide && slide->is_running() && timer.elapsed() < 3000) {
+        auto progress = slide->progress();
+        if (progress < last)
+            run.steady = false;
+        last = progress;
+        ++run.frames;
+        if (!frame_is_two_pictures_side_by_side(frame_of(*slide), progress, direction))
+            ++run.bad_frames;
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(5);
+    }
+    QApplication::processEvents();
+    run.ended = !slide || !slide->is_running();
+    return run;
+}
+
+}
+
+TEST_CASE(space_slide_shows_only_the_old_space_until_the_new_one_is_pictured)
+{
+    SlideWindow window;
+    auto* slide = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), 1);
+    // Before its picture of the new space is taken, the old one covers it all: no half-built new space shows.
+    EXPECT(frame_is_two_pictures_side_by_side(frame_of(*slide), 0, 1));
+    EXPECT(slide->progress() == 0);
+    slide->finish();
+}
+
+TEST_CASE(space_slide_moves_left_as_one_strip)
+{
+    SlideWindow window;
+    auto run = run_slide(window, 1);
+    EXPECT(run.ended);
+    EXPECT(run.frames >= 4);
+    EXPECT_EQ(run.bad_frames, 0);
+    EXPECT(run.steady);
+    EXPECT_EQ(run.finished_signals, 1);
+    EXPECT(!SpaceSlide::running_in(window.window));
+}
+
+TEST_CASE(space_slide_moves_right_as_one_strip)
+{
+    SlideWindow window;
+    auto run = run_slide(window, -1);
+    EXPECT(run.ended);
+    EXPECT(run.frames >= 4);
+    EXPECT_EQ(run.bad_frames, 0);
+    EXPECT(run.steady);
+    EXPECT_EQ(run.finished_signals, 1);
+}
+
+TEST_CASE(space_slide_takes_about_its_duration)
+{
+    SlideWindow window;
+    QElapsedTimer timer;
+    timer.start();
+    auto run = run_slide(window, 1);
+    EXPECT(run.ended);
+    EXPECT(timer.elapsed() >= SpaceSlide::DURATION_MS);
+    EXPECT(timer.elapsed() < SpaceSlide::DURATION_MS + 1000);
+}
+
+TEST_CASE(starting_a_space_slide_ends_the_running_one)
+{
+    SlideWindow window;
+    QPointer<SpaceSlide> first = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), 1);
+    int first_finished = 0;
+    QObject::connect(first, &SpaceSlide::finished, [&] { ++first_finished; });
+    auto* second = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), -1);
+    EXPECT_EQ(first_finished, 1);
+    EXPECT(!first || !first->is_running());
+    EXPECT_EQ(SpaceSlide::running_in(window.window), second);
+    second->finish();
+    second->finish(); // Twice is harmless.
+    EXPECT(!SpaceSlide::running_in(window.window));
+}
+
+TEST_CASE(space_slide_pictures_are_opaque_with_the_window_background)
+{
+    // Pictures with see-through parts drew text thinner and dimmer, and showed darker where they overlapped.
+    QWidget window;
+    window.resize(160, 80);
+    auto* transparent = new QWidget(&window);
+    transparent->setGeometry(20, 10, 60, 40);
+    window.show();
+    QApplication::processEvents();
+
+    auto picture = SpaceSlide::picture(window, QRect(10, 5, 120, 60)).toImage();
+    EXPECT_EQ(picture.deviceIndependentSize().toSize(), QSize(120, 60));
+    auto background = Ladybird::ChromeStyle::chrome_background(window.palette());
+    bool opaque = true;
+    bool window_background = true;
+    for (int y = 0; y < picture.height(); ++y) {
+        for (int x = 0; x < picture.width(); ++x) {
+            auto color = picture.pixelColor(x, y);
+            opaque = opaque && color.alpha() == 255;
+            window_background = window_background && (close_to(color, background) || close_to(color, window.palette().color(QPalette::Window)));
+        }
+    }
+    EXPECT(opaque);
+    EXPECT(window_background);
 }

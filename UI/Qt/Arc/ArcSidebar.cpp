@@ -2173,24 +2173,43 @@ void ArcSidebar::position_shelf()
 
 void ArcSidebar::rebuild_switcher()
 {
+    auto const& spaces = SpaceStore::the().spaces();
+
+    // Switching spaces only changes which button is lit: the buttons stay put. Rebuilding them on every switch
+    // briefly showed the new ones at the wrong places, lighting up whichever was under the pointer.
+    QStringList key;
+    for (auto const& space : spaces)
+        key << QString("%1\n%2\n%3").arg(space.id, space.icon, space.title);
+    if (key == m_switcher_key && m_space_buttons.size() == spaces.size()) {
+        for (int i = 0; i < spaces.size(); ++i) {
+            if (m_space_buttons[i])
+                m_space_buttons[i]->set_dimmed(spaces[i].id != m_space_id);
+        }
+        return;
+    }
+    m_switcher_key = key;
+    m_space_buttons.clear();
+
     // Everything but the downloads button is rebuilt.
     while (auto* item = m_switcher_layout->takeAt(0)) {
-        if (auto* widget = item->widget(); widget && widget != m_downloads_button)
+        if (auto* widget = item->widget(); widget && widget != m_downloads_button) {
+            widget->hide();
             widget->deleteLater();
+        }
         delete item;
     }
-
-    auto const& spaces = SpaceStore::the().spaces();
 
     // [downloads]  [space] [space] ...  [+], spread across the bar like Arc's.
     m_switcher_layout->addWidget(m_downloads_button);
     m_switcher_layout->addStretch(1);
 
+    QList<QWidget*> added;
     for (int i = 0; i < spaces.size(); ++i) {
         auto const& space = spaces[i];
         auto active = space.id == m_space_id;
 
         auto* button = new SymbolButton(m_switcher);
+        button->setObjectName("ArcSpaceButton");
         button->set_icon_text(space.icon.isEmpty() ? space.title.left(1).toUpper() : space.icon);
         button->set_dimmed(!active);
         button->setToolTip(i < 9 ? QString("%1  (%2%3)").arg(space.title, SPACE_SHORTCUT_MODIFIER == Qt::META ? "\u2303" : "Alt+").arg(i + 1) : space.title);
@@ -2203,6 +2222,8 @@ void ArcSidebar::rebuild_switcher()
         });
         m_switcher_layout->addWidget(button);
         m_switcher_layout->addStretch(1);
+        m_space_buttons.append(button);
+        added.append(button);
     }
 
     auto* add = new SymbolButton(m_switcher);
@@ -2211,6 +2232,14 @@ void ArcSidebar::rebuild_switcher()
     add->setToolTip("New Space");
     connect(add, &QAbstractButton::clicked, this, &ArcSidebar::new_space);
     m_switcher_layout->addWidget(add);
+    added.append(add);
+
+    // Shown and placed now, rather than on a later turn of the event loop at a default position.
+    if (m_switcher->isVisible()) {
+        for (auto* widget : added)
+            widget->show();
+        m_switcher_layout->activate();
+    }
 }
 
 void ArcSidebar::update_tab_rows(Tab& tab)

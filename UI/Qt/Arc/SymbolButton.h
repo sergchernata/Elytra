@@ -23,6 +23,8 @@ public:
     void set_icon_text(QString const&);
     void set_symbol(QString const& name);
     void set_dimmed(bool);
+    bool is_dimmed() const { return m_dimmed; }
+    bool is_hovered() const { return m_hovered; }
     void set_symbol_point_size(int);
 
     virtual QSize sizeHint() const override { return { 30, 30 }; }
