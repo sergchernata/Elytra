@@ -1381,9 +1381,10 @@ void ArcSidebar::before_tab_closes(Tab& tab)
     if (m_window->current_tab() != &tab)
         return;
     auto space = space_of(tab);
-    Tab* next = nullptr;
+    // As in Arc: back to the tab shown before this one, if it's still open; else a neighbor.
+    Tab* next = most_recent_tab_in_space(space.isEmpty() ? m_space_id : space, &tab);
     auto same_space = today_tabs(space);
-    if (auto i = same_space.indexOf(&tab); i >= 0) {
+    if (auto i = same_space.indexOf(&tab); !next && i >= 0) {
         if (i + 1 < same_space.size())
             next = same_space[i + 1];
         else if (i > 0)
@@ -1926,6 +1927,21 @@ void ArcSidebar::switch_to_space(QString const& id)
     }
 }
 
+// The most recently shown tab still open in `space` (or a favorite's), other than `except`.
+Tab* ArcSidebar::most_recent_tab_in_space(QString const& space, Tab const* except)
+{
+    m_recent_tabs.removeAll(nullptr);
+    for (auto const& recent : m_recent_tabs) {
+        if (!recent || recent == except || m_tabs.index_of(recent) < 0 || is_blank(*recent))
+            continue;
+        auto recent_space = space_of(*recent);
+        // A favorite's tab is in no space: one of this profile's favorites will do.
+        if (recent_space == space || (recent_space.isEmpty() && is_favorite_node(node_of(*recent)) && profile_of_tab(*recent) == current_profile()))
+            return recent;
+    }
+    return nullptr;
+}
+
 void ArcSidebar::on_current_tab_changed(int index)
 {
     auto* tab = m_tabs.tab(index);
@@ -1939,6 +1955,9 @@ void ArcSidebar::on_current_tab_changed(int index)
     QPointer<Tab> previous = m_current_tab;
     m_current_tab = tab;
     auto previous_was_removed = previous && m_tabs.index_of(previous) < 0;
+
+    m_recent_tabs.removeAll(tab);
+    m_recent_tabs.prepend(tab);
 
     auto space = space_of(*tab);
     if (!m_switching_space && !space.isEmpty() && space != m_space_id && SpaceStore::the().space(space)) {

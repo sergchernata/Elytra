@@ -167,6 +167,7 @@ private:
     void a_pinned_tab_that_redirects_isnt_away();
     void opening_a_folder_leaves_the_list_alone_while_it_slides();
     void favorites_never_overlap_when_they_change();
+    void closing_a_tab_returns_to_the_one_before();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -607,6 +608,47 @@ void SelfTest::favorites_never_overlap_when_they_change()
     s().rebuild_favorites();
     check(!tiles_overlap() && tiles_shown() == before, "removing one leaves the rest side by side", QString("%1 shown").arg(tiles_shown()));
     rebuild_now();
+}
+
+// As in Arc: closing the current tab shows the tab shown before it (if it's still open), not its neighbor.
+void SelfTest::closing_a_tab_returns_to_the_one_before()
+{
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> a = s().open_tab(page("Recent A"));
+    QPointer<Tab> b = s().open_tab(page("Recent B"));
+    QPointer<Tab> c = s().open_tab(page("Recent C"));
+    if (!wait_until([&] { return a && b && c && loaded(*a) && loaded(*b) && loaded(*c); })) {
+        check(false, "three tabs open");
+        return;
+    }
+    // Shown in the order B, A, C: closing C goes back to A (its neighbor is B).
+    s().activate(*b);
+    settle(100);
+    s().activate(*a);
+    settle(100);
+    s().activate(*c);
+    settle(100);
+    auto gone = [&](QPointer<Tab> const& tab) { return !tab || s().m_tabs.index_of(tab.data()) < 0; };
+    s().close_tab(*c);
+    check(wait_until([&] { return gone(c) && window().current_tab() == a.data(); }), "closing a tab shows the one shown before it",
+        window().current_tab() ? window().current_tab()->title() : QString());
+
+    s().close_tab(*a);
+    check(wait_until([&] { return gone(a) && window().current_tab() == b.data(); }), "and again, the one before that",
+        window().current_tab() ? window().current_tab()->title() : QString());
+
+    // Closing a tab that isn't shown leaves the current one.
+    QPointer<Tab> d = s().open_tab(page("Recent D"));
+    wait_until([&] { return d && loaded(*d); });
+    s().activate(*b);
+    settle(100);
+    s().close_tab(*d);
+    check(wait_until([&] { return gone(d); }) && window().current_tab() == b.data(), "closing another tab keeps the current one");
+    check(s().current_space_id() == m_alpha, "and the space");
+    if (b)
+        s().close_tab(*b);
+    settle(300);
 }
 
 void SelfTest::pinned_tab_away_back_and_separate()
@@ -1529,6 +1571,7 @@ int SelfTest::run()
     a_pinned_tab_that_redirects_isnt_away();
     opening_a_folder_leaves_the_list_alone_while_it_slides();
     favorites_never_overlap_when_they_change();
+    closing_a_tab_returns_to_the_one_before();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();

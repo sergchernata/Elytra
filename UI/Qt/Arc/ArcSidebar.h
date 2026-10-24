@@ -137,6 +137,7 @@ private:
     void step_space(int delta);
     void copy_current_url(bool as_markdown);
     void fill_from_one_password();
+    Tab* most_recent_tab_in_space(QString const& space, Tab const* except);
     void begin_pinned_landing(Tab&);
     bool pinned_is_away(Tab&, QString const& pinned_url);
     void settle_pinned_landing(Tab&, bool loaded);
@@ -321,6 +322,7 @@ private:
     QList<QPointer<SymbolButton>> m_space_buttons;
     QStringList m_switcher_key;
     OnePassword::Runner* m_one_password { nullptr };
+    QList<QPointer<Tab>> m_recent_tabs; // Most recently shown first.
 
     bool m_rebuild_pending { false };
     qreal m_swipe_distance { 0 };
