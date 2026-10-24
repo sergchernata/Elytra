@@ -1308,6 +1308,20 @@ bool WebContentPage::has_transient_user_activation() const
 //     the activation it consumes. A page whose activation comes only from input it has yet to finish handling consumes
 //     that of the earliest such input. Input queued behind keeps its activation either way, as the renderer gives
 //     activation anew for each press it handles.
+// Fork hook (Arc): see enter_picture_in_picture_for_playing_video() in the header.
+void WebContentPage::enter_picture_in_picture_for_playing_video()
+{
+    m_user_agent_picture_in_picture_grant = MonotonicTime::now();
+    async_enter_picture_in_picture_for_playing_video();
+}
+
+bool WebContentPage::consume_user_agent_picture_in_picture_grant()
+{
+    auto granted = m_user_agent_picture_in_picture_grant.has_value() && MonotonicTime::now() - *m_user_agent_picture_in_picture_grant < AK::Duration::from_seconds(3);
+    m_user_agent_picture_in_picture_grant.clear();
+    return granted;
+}
+
 bool WebContentPage::consume_transient_user_activation()
 {
     if (!has_transient_user_activation())
@@ -2577,7 +2591,7 @@ Messages::WebContentClient::DidRequestNewWebViewResponse WebContentPage::did_req
         // A window needs and consumes the activation of the user's input, which the renderer checks, unless the document
         // asking for it has one open. A compromised renderer skips that check, so whatever the popup setting, the UI
         // process checks the activation of input it delivered, and the window it opened for the navigable's document.
-        if (!PictureInPictureManager::the().document_has_open_window(*picture_in_picture_navigable) && !consume_transient_user_activation())
+        if (!PictureInPictureManager::the().document_has_open_window(*picture_in_picture_navigable) && !consume_user_agent_picture_in_picture_grant() && !consume_transient_user_activation())
             return { {}, {}, {}, {}, {}, {}, Web::HTML::VisibilityState::Hidden, {} };
     } else {
         // The popup blocker runs in the renderer, which a compromised renderer skips. Each popup takes the activation of

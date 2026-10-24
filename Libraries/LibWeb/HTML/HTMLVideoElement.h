@@ -54,7 +54,13 @@ public:
     };
     Representation current_representation() const;
 
-    GC::Ref<WebIDL::Promise> request_picture_in_picture();
+    // Fork hook (Arc): the browser itself may ask (opening Picture-in-Picture as the user leaves a playing video's tab),
+    // which needs no activation of the page's own.
+    enum class PictureInPictureRequester : u8 {
+        Page,
+        UserAgent,
+    };
+    GC::Ref<WebIDL::Promise> request_picture_in_picture(PictureInPictureRequester = PictureInPictureRequester::Page);
     // Whether requestPictureInPicture() would enter Picture-in-Picture if it were given a user activation.
     bool can_enter_picture_in_picture() const;
 

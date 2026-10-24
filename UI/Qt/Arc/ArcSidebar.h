@@ -136,6 +136,8 @@ private:
     void step_space(int delta);
     void copy_current_url(bool as_markdown);
     void fill_from_one_password();
+    bool should_open_picture_in_picture_leaving(Tab&);
+    void update_auto_picture_in_picture(Tab* previous, Tab& current);
     Tab* most_recent_tab_in_space(QString const& space, Tab const* except);
     void begin_pinned_landing(Tab&);
     bool pinned_is_away(Tab&, QString const& pinned_url);

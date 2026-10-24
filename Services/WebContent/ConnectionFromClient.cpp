@@ -3470,6 +3470,19 @@ void ConnectionFromClient::toggle_media_picture_in_picture_state(Web::PageId pag
         page->page().toggle_media_picture_in_picture_state();
 }
 
+// Fork hook (Arc): see Page::enter_picture_in_picture_for_playing_video().
+void ConnectionFromClient::enter_picture_in_picture_for_playing_video(Web::PageId page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().enter_picture_in_picture_for_playing_video();
+}
+
+void ConnectionFromClient::exit_picture_in_picture(Web::PageId page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().exit_picture_in_picture();
+}
+
 void ConnectionFromClient::toggle_media_controls_state(Web::PageId page_id)
 {
     if (auto page = this->page(page_id); page.has_value())

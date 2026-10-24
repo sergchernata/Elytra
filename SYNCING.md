@@ -43,6 +43,20 @@ upstream's `Tests/LibWebView` tests, after a rebase that touches these files. `B
 takes `Persist::No` for SQL-disabled runs (and as the fallback when a profile's database can't be opened).
 
 
+### Picture-in-Picture as a tab is left
+
+Arc shows a playing video in upstream's floating Picture-in-Picture window when its tab is left, and puts it back on
+return (`ArcSidebar::update_auto_picture_in_picture()`). The request is the browser's own, not the page's, so it needs
+no user activation; these hooks carry it. All are marked `Fork hook (Arc)`.
+
+| File | Hook |
+| --- | --- |
+| `LibWeb/HTML/HTMLVideoElement.h/.cpp` | `request_picture_in_picture(PictureInPictureRequester)`: `UserAgent` skips the transient-activation step |
+| `LibWeb/Page/Page.h/.cpp` | `enter_picture_in_picture_for_playing_video()` (the largest playing video) and `exit_picture_in_picture()` |
+| `Services/WebContent/WebContentServer.ipc`, `ConnectionFromClient.h/.cpp` | the two messages above |
+| `LibWebView/WebContentPage.h/.cpp` | `enter_picture_in_picture_for_playing_video()` grants one browser-initiated window (`consume_user_agent_picture_in_picture_grant()`, checked beside `consume_transient_user_activation()` where a window is opened) |
+| `LibWebView/ViewImplementation.h/.cpp` | `enter_picture_in_picture_for_playing_video()`, `exit_picture_in_picture()`, `has_picture_in_picture_window()` |
+
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
 contents of upstream's vertical tab column while reusing its sizing, collapsing and window controls.
 

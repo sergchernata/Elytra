@@ -29,6 +29,7 @@
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLSelectElement.h>
 #include <LibWeb/HTML/HTMLVideoElement.h>
+#include <LibWeb/HTML/VideoTrackList.h>
 #include <LibWeb/HTML/HistoryExecutor.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
@@ -1743,6 +1744,47 @@ void Page::toggle_media_picture_in_picture_state()
 
     // The request is the page's own, so a page that has changed since the menu opened can still reject it.
     WebIDL::mark_promise_as_handled(video_element->request_picture_in_picture());
+}
+
+// Fork hook (Arc): the video the user is watching, if one's playing: the largest playing video on the page.
+void Page::enter_picture_in_picture_for_playing_video()
+{
+    if (!has_local_traversable())
+        return;
+    auto document = local_traversable()->active_document();
+    if (!document || document->picture_in_picture_element())
+        return;
+
+    GC::Ptr<HTML::HTMLVideoElement> best;
+    double best_area = 0;
+    document->for_each_in_inclusive_subtree_of_type<HTML::HTMLVideoElement>([&](auto& video) {
+        if (video.paused() || video.ended() || video.ready_state() < HTML::HTMLMediaElement::ReadyState::HaveCurrentData
+            || video.video_tracks()->length() == 0 || video.has_attribute(HTML::AttributeNames::disablepictureinpicture))
+            return TraversalDecision::Continue;
+        auto rect = video.get_bounding_client_rect();
+        auto area = rect.width().to_double() * rect.height().to_double();
+        if (area > best_area) {
+            best = &video;
+            best_area = area;
+        }
+        return TraversalDecision::Continue;
+    });
+    if (!best)
+        return;
+
+    // AD-HOC: An execution context is required for Promise creation hooks.
+    HTML::TemporaryExecutionContext execution_context { document->relevant_settings_object() };
+    WebIDL::mark_promise_as_handled(best->request_picture_in_picture(HTML::HTMLVideoElement::PictureInPictureRequester::UserAgent));
+}
+
+void Page::exit_picture_in_picture()
+{
+    if (!has_local_traversable())
+        return;
+    auto document = local_traversable()->active_document();
+    if (!document || !document->picture_in_picture_element())
+        return;
+    picture_in_picture_controller().enqueue_exit(*document, nullptr);
 }
 
 void Page::toggle_media_controls_state()

@@ -406,7 +406,7 @@ HTMLVideoElement::Representation HTMLVideoElement::current_representation() cons
 }
 
 // https://w3c.github.io/picture-in-picture/#request-picture-in-picture
-GC::Ref<WebIDL::Promise> HTMLVideoElement::request_picture_in_picture()
+GC::Ref<WebIDL::Promise> HTMLVideoElement::request_picture_in_picture(PictureInPictureRequester requester)
 {
     auto& realm = HTML::relevant_realm(*this);
     auto& controller = document().page().picture_in_picture_controller();
@@ -437,7 +437,8 @@ GC::Ref<WebIDL::Promise> HTMLVideoElement::request_picture_in_picture()
         return WebIDL::create_rejected_promise(realm, WebIDL::InvalidStateError::create("Picture-in-Picture is disabled for the video"_utf16));
 
     // 7. If doc's Picture-in-Picture element is null:
-    if (!document.picture_in_picture_element()) {
+    // Fork hook (Arc): not for the browser's own request (see PictureInPictureRequester).
+    if (!document.picture_in_picture_element() && requester == PictureInPictureRequester::Page) {
         auto& window = relevant_window(*this);
 
         // 1. If this's relevant global object does not have a transient activation, then return a promise rejected

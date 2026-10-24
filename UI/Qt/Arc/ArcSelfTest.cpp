@@ -35,6 +35,7 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QScrollBar>
 #include <QSet>
 #include <QThread>
@@ -170,6 +171,7 @@ private:
     void favorites_never_overlap_when_they_change();
     void closing_a_tab_returns_to_the_one_before();
     void downloads_shelf_rows_rise_in();
+    void leaving_a_playing_video_shows_it_in_picture_in_picture();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -669,6 +671,71 @@ void SelfTest::downloads_shelf_rows_rise_in()
         "and rise into them");
     s().hide_shelf();
     check(wait_until([&] { return !shelf->isVisible(); }, 2000), "it closes");
+}
+
+// As in Arc: leaving a tab while its video plays (for another tab or space) shows the video in a floating player that
+// keeps playing, and coming back puts it back in the page. Not for a muted tab.
+void SelfTest::leaving_a_playing_video_shows_it_in_picture_in_picture()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty()) {
+        check(false, "the test pages are served (run-arc-self-test.sh sets ARC_SELF_TEST_HTTP_PORT)");
+        return;
+    }
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> video = s().open_tab(QString("http://localhost:%1/video.html").arg(port));
+    QPointer<Tab> other = s().open_tab(page("Not the video"));
+    if (!wait_until([&] { return video && other && !video->is_loading() && video->title() == "Video" && loaded(*other); }, 5000)) {
+        check(false, "the video page loads");
+        return;
+    }
+    s().activate(*video);
+    settle(300);
+    // A click on the page starts it (sound needs one).
+    {
+        auto& view = video->view();
+        QPointF point(40, 40);
+        QMouseEvent press(QEvent::MouseButtonPress, point, view.mapToGlobal(point), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease, point, view.mapToGlobal(point), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&view, &press);
+        QApplication::sendEvent(&view, &release);
+    }
+    if (!wait_until([&] { return video && video->title() == "Playing" && video->view().audio_play_state() == Web::HTML::AudioPlayState::Playing; }, 5000)) {
+        check(false, "the video plays", video ? video->title() : QString());
+        return;
+    }
+
+    s().activate(*other);
+    check(wait_until([&] { return video && video->title() == "In PiP: video" && video->view().has_picture_in_picture_window(); }, 5000),
+        "leaving its tab shows the playing video (the big one) in Picture-in-Picture", video ? video->title() : QString());
+
+    s().activate(*video);
+    check(wait_until([&] { return video && video->title() == "Playing" && !video->view().has_picture_in_picture_window(); }, 5000),
+        "coming back puts it back in the page, still playing", video ? video->title() : QString());
+
+    // Leaving for another space does it too.
+    s().switch_to_space(m_beta);
+    check(wait_until([&] { return video && video->title() == "In PiP: video"; }, 5000), "so does switching to another space",
+        video ? video->title() : QString());
+    s().switch_to_space(m_alpha);
+    if (video)
+        s().activate(*video);
+    wait_until([&] { return video && video->title() == "Playing"; }, 5000);
+
+    // A muted tab's video stays put.
+    video->view().toggle_page_mute_state();
+    settle(200);
+    s().activate(*other);
+    settle(1000);
+    check(video && video->title() == "Playing" && !video->view().has_picture_in_picture_window(), "a muted tab's video doesn't",
+        video ? video->title() : QString());
+
+    if (video)
+        s().close_tab(*video);
+    if (other)
+        s().close_tab(*other);
+    settle(300);
 }
 
 void SelfTest::pinned_tab_away_back_and_separate()
@@ -1593,6 +1660,7 @@ int SelfTest::run()
     favorites_never_overlap_when_they_change();
     closing_a_tab_returns_to_the_one_before();
     downloads_shelf_rows_rise_in();
+    leaving_a_playing_video_shows_it_in_picture_in_picture();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();

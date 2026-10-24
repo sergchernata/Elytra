@@ -39,6 +39,7 @@
 #include <LibWebView/TabPerformanceMonitor.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/UserAgent.h>
+#include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebContentClient.h>
 #include <math.h>
@@ -2385,6 +2386,24 @@ void ViewImplementation::debug_request(ByteString const& request, ByteString con
     }
 
     page().async_debug_request(request, argument);
+}
+
+// Fork hook (Arc): see the header.
+void ViewImplementation::enter_picture_in_picture_for_playing_video()
+{
+    if (has_traversable())
+        page().enter_picture_in_picture_for_playing_video();
+}
+
+void ViewImplementation::exit_picture_in_picture()
+{
+    if (has_traversable())
+        page().async_exit_picture_in_picture();
+}
+
+bool ViewImplementation::has_picture_in_picture_window() const
+{
+    return has_traversable() && PictureInPictureManager::the().document_has_open_window(traversable());
 }
 
 void ViewImplementation::run_javascript(String const& js_source)

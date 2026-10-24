@@ -401,6 +401,9 @@ public:
     void toggle_media_loop_state();
     void toggle_media_fullscreen_state();
     void toggle_media_picture_in_picture_state();
+    // Fork hook (Arc): Picture-in-Picture for the page's playing video as the user leaves its tab, and out again.
+    void enter_picture_in_picture_for_playing_video();
+    void exit_picture_in_picture();
     void toggle_media_controls_state();
     void set_picture_in_picture_window_controls_in_use(bool);
 

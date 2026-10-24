@@ -1,0 +1,15 @@
+<!doctype html>
+<title>Video</title>
+<!-- A playing video with sound, for Picture-in-Picture as its tab is left. -->
+<video id="video" src="clip.webm" loop playsinline style="width: 480px; height: 270px"></video>
+<video id="small" src="clip.webm" loop muted style="width: 80px; height: 45px"></video>
+<script>
+  // Sets the title to whether the big video is in Picture-in-Picture, so the self-test can follow it.
+  const show = () => document.title = document.pictureInPictureElement ? `In PiP: ${document.pictureInPictureElement.id}` : (video.paused ? "Video" : "Playing");
+  video.addEventListener("enterpictureinpicture", show);
+  video.addEventListener("leavepictureinpicture", show);
+  video.addEventListener("playing", show);
+  video.addEventListener("pause", show);
+  // Sound needs the user's click to start.
+  document.addEventListener("click", () => video.play());
+</script>

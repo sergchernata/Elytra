@@ -115,6 +115,11 @@ public:
     // top-level traversable. Returns false, consuming nothing, when the page has no transient activation.
     bool consume_transient_user_activation();
 
+    // Fork hook (Arc): the browser opens Picture-in-Picture for the playing video as the user leaves its tab. That
+    // request is the browser's own, so it stands in for the activation the page's window would otherwise need, once.
+    void enter_picture_in_picture_for_playing_video();
+    bool consume_user_agent_picture_in_picture_grant();
+
     bool needs_beforeunload_check() const { return m_needs_beforeunload_check; }
     bool detached_close_pending() const { return m_detached_close_pending; }
     void set_detached_close_pending(bool pending) { m_detached_close_pending = pending; }
@@ -379,6 +384,7 @@ private:
     HashTable<u64> m_renderer_owned_downloads;
     HashTable<OwedReply> m_owed_replies;
     Optional<MonotonicTime> m_last_user_activation;
+    Optional<MonotonicTime> m_user_agent_picture_in_picture_grant; // Fork hook (Arc)
 };
 
 }

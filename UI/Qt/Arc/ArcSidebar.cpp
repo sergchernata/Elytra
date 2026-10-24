@@ -415,6 +415,9 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         auto space = space_of(*current);
         if (!space.isEmpty() && store.space(space))
             m_space_id = space;
+        // The tab shown from the start is the one left by the first switch (for the recent tabs, and Picture-in-Picture).
+        m_current_tab = current;
+        m_recent_tabs.append(current);
     }
 
     // Hidden-mode plumbing: edge hover reveals the floating panel, leaving it retracts it.
@@ -1373,8 +1376,35 @@ bool ArcSidebar::is_blank(Tab const& tab)
 
 // Every close (sidebar, Cmd+W, Clear) comes through here. Like Arc: the next tab comes from the same space,
 // and closing a space's last tab leaves an empty page rather than another space's tab or a closed window.
+// As in Arc: leaving a tab (for another tab or space) while its video plays shows the video in a floating player, which
+// keeps playing; coming back to the tab puts it back in the page. Not for a muted tab, or one that's closing.
+static constexpr char const* AUTO_PICTURE_IN_PICTURE_PROPERTY = "arc_auto_picture_in_picture";
+static constexpr char const* CLOSING_PROPERTY = "arc_closing";
+
+bool ArcSidebar::should_open_picture_in_picture_leaving(Tab& tab)
+{
+    auto& view = tab.view();
+    return !tab.property(CLOSING_PROPERTY).toBool() && m_tabs.index_of(&tab) >= 0
+        && view.audio_play_state() == Web::HTML::AudioPlayState::Playing
+        && view.page_mute_state() == Web::HTML::MuteState::Unmuted
+        && !view.has_picture_in_picture_window();
+}
+
+void ArcSidebar::update_auto_picture_in_picture(Tab* previous, Tab& current)
+{
+    if (previous && previous != &current && should_open_picture_in_picture_leaving(*previous)) {
+        previous->setProperty(AUTO_PICTURE_IN_PICTURE_PROPERTY, true);
+        previous->view().enter_picture_in_picture_for_playing_video();
+    }
+    if (current.property(AUTO_PICTURE_IN_PICTURE_PROPERTY).toBool()) {
+        current.setProperty(AUTO_PICTURE_IN_PICTURE_PROPERTY, false);
+        current.view().exit_picture_in_picture();
+    }
+}
+
 void ArcSidebar::before_tab_closes(Tab& tab)
 {
+    tab.setProperty(CLOSING_PROPERTY, true);
     if (m_window->current_tab() != &tab)
         return;
     auto space = space_of(tab);
@@ -1955,6 +1985,7 @@ void ArcSidebar::on_current_tab_changed(int index)
 
     m_recent_tabs.removeAll(tab);
     m_recent_tabs.prepend(tab);
+    update_auto_picture_in_picture(previous, *tab);
 
     auto space = space_of(*tab);
     if (!m_switching_space && !space.isEmpty() && space != m_space_id && SpaceStore::the().space(space)) {

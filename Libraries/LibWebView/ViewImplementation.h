@@ -221,6 +221,11 @@ public:
     void update_screen_rects();
     void set_scales_frames_to_fit(bool scales_frames_to_fit) { m_scales_frames_to_fit = scales_frames_to_fit; }
     void enable_picture_in_picture_controls();
+    // Fork hook (Arc): Picture-in-Picture for the page's playing video as the user leaves its tab, and out again on
+    // the way back.
+    void enter_picture_in_picture_for_playing_video();
+    void exit_picture_in_picture();
+    bool has_picture_in_picture_window() const;
     void enqueue_input_event(Web::InputEvent);
     // The page reporting on an event must be the one handling it.
     void did_finish_handling_input_event(Badge<WebContentPage>, WebContentPage const& reporting_page, u64 event_id, Web::EventResult event_result);
