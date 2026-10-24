@@ -187,7 +187,7 @@ jobs:
           ZIP: ${{ needs.build.outputs.zip }}
         run: |
           cat > notes.md <<'EOF'
-          Ladybird with the Arc-style interface, built for Apple Silicon Macs (arm64, macOS 14.4 or later).
+          Elytra: Ladybird with an Arc-style interface, built for Apple Silicon Macs (arm64, macOS 14.4 or later).
 
           The app is signed ad hoc, not notarized, so macOS blocks it the first time. After unzipping, either
           right-click Ladybird.app and choose Open, or run:
@@ -197,7 +197,7 @@ jobs:
           Once installed, it updates itself from here. Updates are signed; the .sig file is the download's signature.
           EOF
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "Ladybird (Arc) $TAG" \
+            --title "Elytra $TAG" \
             --notes-file notes.md \
             --target "$GITHUB_SHA" \
             "$ZIP" "$ZIP.sha256" "$ZIP.sig"

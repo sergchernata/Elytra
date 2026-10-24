@@ -1,3 +1,45 @@
+# Elytra
+
+**Elytra is an Arc theme for the [Ladybird](https://ladybird.org) browser.** It gives Ladybird the interface of
+[Arc](https://arc.net): a sidebar of spaces, pinned tabs and favorites, and the rest of Arc's way of browsing, on
+top of Ladybird's own independent engine.
+
+It's a fork that tracks upstream Ladybird closely. The Arc interface lives in its own directory (`UI/Qt/Arc`), and
+the few changes it needs in Ladybird itself are small, marked `Fork hook (Arc)`, and listed in
+[SYNCING.md](SYNCING.md), so it stays easy to bring in Ladybird's latest work.
+
+> [!NOTE]
+> Elytra isn't affiliated with The Browser Company (the makers of Arc) or with the Ladybird project. Like Ladybird, it's
+> pre-alpha software.
+
+## What's in it
+
+- **Spaces**: each with its own color, icon, pinned tabs and folders, and optionally its own profile. Switch with a
+  swipe, the switcher at the bottom of the sidebar, or ⌘⌥← / ⌘⌥→.
+- **Pinned tabs and favorites** that remember their page, with "Back to Pinned URL" when you wander off.
+- **Today's tabs**, which tidy themselves away, as in Arc.
+- **A sidebar that hides**: toggle it with ⌘S or the button beside the window controls, and it slides out when you
+  point at the window's edge.
+- **The command bar** (⌘T, ⌘L) for searching, opening and switching tabs.
+- **Little Arc** (⌘⌥N, from any app): a small window for a quick look, which you can move into a space.
+- **Picture-in-Picture as in Arc**: leave a playing video's tab and it floats over everything, with Back to Tab,
+  Minimize and Close. Minimized, it plays on with a player at the bottom of the sidebar.
+- **Fill from 1Password** (⌘\), through 1Password's command-line tool.
+- **Import from Arc**: your spaces, pinned tabs, folders and favorites.
+- **Updates itself** from this repository's signed releases.
+
+## Install
+
+Download the latest build for Apple Silicon Macs from [Releases](../../releases). It's signed ad hoc, not notarized,
+so the first time, right-click the app and choose Open (or run `xattr -dr com.apple.quarantine` on it).
+
+## Build
+
+Elytra builds just like Ladybird; see [the build instructions](Documentation/BuildInstructionsLadybird.md). The Arc
+interface is part of the Qt UI, which Ladybird uses on desktop platforms.
+
+---
+
 # Ladybird
 
 [Ladybird](https://ladybird.org) is a truly independent web browser, using a novel engine based on web standards.

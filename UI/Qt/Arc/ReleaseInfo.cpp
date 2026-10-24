@@ -100,7 +100,8 @@ Optional<QString> redirect_target(QString const& from, int status, QString const
         return {};
     auto target = QUrl(from).resolved(QUrl(location));
     auto host = target.host().toLower();
-    auto is_github = host == "github.com" || host.endsWith(".githubusercontent.com");
+    // api.github.com: a renamed repository's API address redirects to its new one.
+    auto is_github = host == "github.com" || host == "api.github.com" || host.endsWith(".githubusercontent.com");
     if (target.scheme() != "https" || !is_github)
         return {};
     return target.toString(QUrl::FullyEncoded);

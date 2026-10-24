@@ -211,6 +211,9 @@ TEST_CASE(follows_githubs_download_redirects_and_nothing_else)
     for (auto status : { 301, 303, 307, 308 })
         EXPECT(redirect_target(from, status, "https://objects.githubusercontent.com/x").has_value());
 
+    // A renamed repository's API address moves to its new one.
+    EXPECT(redirect_target("https://api.github.com/repos/someone/old-name/releases/latest", 301, "https://api.github.com/repositories/123/releases/latest")
+        == "https://api.github.com/repositories/123/releases/latest");
     // Not a redirect, nowhere to go, or somewhere else: not followed.
     EXPECT(!redirect_target(from, 200, "https://objects.githubusercontent.com/x").has_value());
     EXPECT(!redirect_target(from, 302, "").has_value());
