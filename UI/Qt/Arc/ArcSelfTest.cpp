@@ -13,10 +13,12 @@
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
+#include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
@@ -170,6 +172,8 @@ private:
     void swiping_the_sidebar_switches_spaces();
     void pinned_tabs_rename_in_place();
     void duplicate_and_close_tabs_below();
+    void switching_spaces_slides();
+    void every_chrome_surface_takes_the_space_color();
 
     // Sends a key the way Qt does for a shortcut: the override first (claimed if Arc handles the key), then the press.
     // Returns whether the override was claimed, i.e. upstream's action for the same key didn't fire.
@@ -905,6 +909,158 @@ void SelfTest::pinned_tabs_rename_in_place()
     rebuild_now();
 }
 
+void SelfTest::switching_spaces_slides()
+{
+    auto* panel = m_sidebar.m_panel;
+    auto running = [&] { return SpaceSlide::running_in(*panel); };
+    auto settled = [&] { return !running() && !m_sidebar.m_holding_tint && (!m_sidebar.m_tint_fade || m_sidebar.m_tint_fade->state() != QAbstractAnimation::Running); };
+    auto index_of = [](QString const& id) {
+        auto const& spaces = SpaceStore::the().spaces();
+        for (int i = 0; i < spaces.size(); ++i) {
+            if (spaces[i].id == id)
+                return i;
+        }
+        return -1;
+    };
+
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+    auto alpha_background = ChromeStyle::chrome_background(window().palette());
+
+    s().switch_to_space(m_beta);
+    auto* slide = running();
+    check(slide, "switching spaces slides the sidebar across");
+    check(slide && slide->direction() == (index_of(m_beta) > index_of(m_alpha) ? 1 : -1), "in from the side the new space is on");
+    check(ChromeStyle::chrome_background(window().palette()) == alpha_background, "the window keeps the old space's color while it slides");
+    check(m_sidebar.m_scrollbar_opacity == 0, "and the list's scroll bar hides");
+    auto area = s().space_slide_area();
+    auto picture = SpaceSlide::picture(*panel, area).toImage();
+    check(!picture.isNull() && picture.pixelColor(2, picture.height() - 2).alpha() == 255 && picture.pixelColor(picture.width() - 2, 2).alpha() == 255,
+        "its pictures are opaque, with the window's background in them");
+
+    check(wait_until([&] { return !running(); }, 2000), "the slide ends");
+    check(wait_until(settled, 2000), "then the window's color fades");
+    check(ChromeStyle::chrome_background(window().palette()) != alpha_background, "to the new space's");
+    check(wait_until([&] { return m_sidebar.m_scrollbar_opacity > 0; }, 1000), "and the scroll bar flashes in");
+
+    // Quick switches: one slide at a time, ending where the last one went.
+    s().switch_to_space(m_alpha);
+    s().switch_to_space(m_beta);
+    int slides = 0;
+    for (auto* child : panel->findChildren<SpaceSlide*>(QString(), Qt::FindDirectChildrenOnly))
+        slides += child->is_running() ? 1 : 0;
+    check(slides == 1, "switching again mid-slide ends the first slide", QString::number(slides));
+    check(wait_until(settled, 3000) && s().current_space_id() == m_beta, "and lands in the last space");
+
+    s().switch_to_space(m_alpha);
+    wait_until(settled, 2000);
+}
+
+// The window's chrome (everything but the page) as Qt paints it, over a color nothing paints, so what's left of it
+// shows where only the native window background would.
+static QColor const UNPAINTED(255, 0, 255);
+
+static QImage render_window(BrowserWindow& window)
+{
+    auto dpr = window.devicePixelRatioF();
+    QPixmap pixmap(window.size() * dpr);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(UNPAINTED);
+    window.render(&pixmap, QPoint(), QRegion(window.rect()), QWidget::DrawWindowBackground | QWidget::DrawChildren);
+    return pixmap.toImage();
+}
+
+// A tile's color, if it's (nearly) all one color: that's background, not a glyph or an edge.
+static Optional<QRgb> solid_color(QImage const& image, QRect tile)
+{
+    QHash<QRgb, int> counts;
+    for (int y = tile.top(); y <= tile.bottom(); ++y) {
+        for (int x = tile.left(); x <= tile.right(); ++x)
+            ++counts[image.pixel(x, y)];
+    }
+    for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+        if (it.value() * 100 >= tile.width() * tile.height() * 97)
+            return it.key();
+    }
+    return {};
+}
+
+// Mechanically: render the window under two very different tints, and every solid patch of chrome must change
+// between them (else it paints a color of its own, or nothing at all).
+void SelfTest::every_chrome_surface_takes_the_space_color()
+{
+    auto& win = window();
+    settle(300);
+    s().apply_tint(QColor(255, 0, 0), 0.5);
+    settle(100);
+    auto red = render_window(win);
+    s().apply_tint(QColor(0, 0, 255), 0.5);
+    settle(100);
+    auto blue = render_window(win);
+    s().apply_space_tint();
+    settle(100);
+
+    auto dpr = win.devicePixelRatioF();
+    QRect page;
+    if (auto* tab = win.current_tab())
+        page = QRect(tab->view().mapTo(&win, QPoint(0, 0)) * dpr, tab->view().size() * dpr);
+
+    // Background is what's solid over more than an icon's size: a tile counts when its neighbors are the same color.
+    static constexpr int TILE = 8; // Device pixels.
+    int columns = red.width() / TILE;
+    int rows = red.height() / TILE;
+    auto solid_map = [&](QImage const& image) {
+        QVector<Optional<QRgb>> map(columns * rows);
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                QRect tile(column * TILE, row * TILE, TILE, TILE);
+                if (!page.intersects(tile))
+                    map[row * columns + column] = solid_color(image, tile);
+            }
+        }
+        return map;
+    };
+    auto red_tiles = solid_map(red);
+    auto blue_tiles = solid_map(blue);
+    auto in_a_patch = [&](QVector<Optional<QRgb>> const& map, int row, int column) {
+        auto color = map[row * columns + column];
+        if (!color.has_value() || row == 0 || column == 0 || row == rows - 1 || column == columns - 1)
+            return false;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (map[(row + dy) * columns + column + dx] != color)
+                    return false;
+            }
+        }
+        return true;
+    };
+
+    QMap<QString, int> unpainted;
+    QMap<QString, int> untinted;
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            if (!in_a_patch(red_tiles, row, column) || !in_a_patch(blue_tiles, row, column))
+                continue;
+            auto a = *red_tiles[row * columns + column];
+            auto b = *blue_tiles[row * columns + column];
+            auto* widget = win.childAt(QPoint(column * TILE + TILE / 2, row * TILE + TILE / 2) / dpr);
+            auto name = widget ? QString("%1 %2").arg(widget->metaObject()->className(), widget->objectName()) : QString("(window)");
+            if (QColor(a) == UNPAINTED || QColor(b) == UNPAINTED)
+                ++unpainted[name];
+            else if (a == b)
+                ++untinted[name];
+        }
+    }
+    auto describe = [](QMap<QString, int> const& tiles) {
+        QStringList parts;
+        for (auto it = tiles.constBegin(); it != tiles.constEnd(); ++it)
+            parts.append(QString("%1: %2").arg(it.key()).arg(it.value()));
+        return parts.join("; ");
+    };
+    check(unpainted.isEmpty(), "every part of the chrome is painted (none leaves the untinted window background showing)", describe(unpainted));
+    check(untinted.isEmpty(), "and none paints a color that ignores the space's", describe(untinted));
+}
+
 void SelfTest::duplicate_and_close_tabs_below()
 {
     s().switch_to_space(m_alpha);
@@ -956,6 +1112,8 @@ int SelfTest::run()
     swiping_the_sidebar_switches_spaces();
     pinned_tabs_rename_in_place();
     duplicate_and_close_tabs_below();
+    switching_spaces_slides();
+    every_chrome_surface_takes_the_space_color();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

@@ -67,6 +67,11 @@ public:
 
     QString current_space_id() const { return m_space_id; }
     void switch_to_space(QString const& id);
+    QRect space_slide_area() const;
+    void hide_scrollbar_for_slide();
+    void show_scrollbar_briefly();
+    void fade_scrollbar_to(qreal opacity, int duration_ms);
+    void set_scrollbar_opacity(qreal);
     void switch_to_space_at(int index);
     bool handle_key_press(QKeyEvent const&);
     static bool is_space_shortcut(QKeyEvent const&);
@@ -206,6 +211,9 @@ private:
     void style_update_button();
     void place_tabs_in_their_profiles();
     void apply_space_tint();
+    void apply_tint(QColor const&, double amount, bool visible_only = false);
+    void fade_to_space_tint();
+    double space_tint_amount() const;
     QIcon icon_for(QString const& url, Tab const* tab) const;
 
     void on_current_tab_changed(int index);
@@ -272,6 +280,11 @@ private:
     QRect m_last_docked_rect;
     class TrafficLights* m_traffic_lights { nullptr };
     QWidget* m_header { nullptr };
+    bool m_holding_tint { false }; // While a slide between spaces runs, the old space's tint stays.
+    class QVariantAnimation* m_tint_fade { nullptr };
+    class QVariantAnimation* m_scrollbar_fade { nullptr };
+    QTimer* m_scrollbar_linger { nullptr };
+    qreal m_scrollbar_opacity { 0 };
     class SymbolButton* m_space_icon { nullptr };
     class SymbolButton* m_space_menu_button { nullptr };
     bool m_header_hovered { false };

@@ -16,6 +16,7 @@
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
+#include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/WindowControls.h>
@@ -370,6 +371,12 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         begin_inline_rename(index.data(IdRole).toString());
     });
     m_tree->viewport()->installEventFilter(this); // Swipes between spaces.
+    set_scrollbar_opacity(0);
+    m_tree->verticalScrollBar()->installEventFilter(this);
+    connect(m_tree->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (!m_tree->is_rebuilding())
+            show_scrollbar_briefly();
+    });
     m_panel->installEventFilter(this);
     connect(m_tree, &SidebarTree::background_double_clicked, this, [this] {
         if (m_window)
@@ -439,6 +446,24 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
             auto tab_settings = settings.tab_settings();
             tab_settings.vertical_tabs_expanded = !tab_settings.vertical_tabs_expanded;
             settings.set_tab_settings(tab_settings);
+        });
+        timer->start();
+    }
+    // Likewise, ARC_DEV_CYCLE_SPACES=<ms> steps through the spaces on that interval, to the last and back.
+    if (auto interval = qEnvironmentVariableIntValue("ARC_DEV_CYCLE_SPACES"); interval > 0) {
+        auto* timer = new QTimer(this);
+        timer->setInterval(interval);
+        connect(timer, &QTimer::timeout, this, [this, step = 1]() mutable {
+            auto const& spaces = SpaceStore::the().spaces();
+            for (int i = 0; i < spaces.size(); ++i) {
+                if (spaces[i].id != m_space_id)
+                    continue;
+                if (i + step < 0 || i + step >= spaces.size())
+                    step = -step;
+                if (i + step >= 0 && i + step < spaces.size())
+                    switch_to_space(spaces[i + step].id);
+                return;
+            }
         });
         timer->start();
     }
@@ -1531,11 +1556,115 @@ void ArcSidebar::switch_to_space_at(int index)
         switch_to_space(spaces[index].id);
 }
 
+// The tint the windows show, set by apply_tint().
+static QColor s_applied_tint;
+static double s_applied_tint_amount = 0;
+static bool s_tint_initialized = false;
+
+// Where the slide between two spaces happens: the favorites and the list, which move as one page.
+QRect ArcSidebar::space_slide_area() const
+{
+    auto* top_widget = m_favorites->isVisible() ? m_favorites : m_header;
+    auto top = top_widget->y();
+    return QRect(0, top, m_panel->width(), m_tree->geometry().bottom() + 1 - top);
+}
+
+// The list's scroll bar shows only while it's in use, as macOS's overlay scroll bars (and Arc's) do: scrolling or
+// pointing at it brings it in, and it fades a moment after.
+static constexpr int SCROLLBAR_FADE_IN_MS = 120;
+static constexpr int SCROLLBAR_FADE_OUT_MS = 300;
+static constexpr int SCROLLBAR_LINGER_MS = 900;
+
+// Its handle's color carries the fade (an opacity effect would darken the see-through sidebar around it on macOS).
+void ArcSidebar::set_scrollbar_opacity(qreal opacity)
+{
+    m_scrollbar_opacity = opacity;
+    auto alpha = [opacity](qreal full) { return QString::number(full * opacity, 'f', 3); };
+    m_tree->verticalScrollBar()->setStyleSheet(QString("QScrollBar::handle:vertical { background: rgba(128, 128, 128, %1); border-radius: 3px; min-height: 28px; }"
+                                                       "QScrollBar::handle:vertical:hover { background: rgba(128, 128, 128, %2); }")
+            .arg(alpha(0.45), alpha(0.7)));
+}
+
+void ArcSidebar::fade_scrollbar_to(qreal opacity, int duration_ms)
+{
+    if (!m_scrollbar_fade) {
+        m_scrollbar_fade = new QVariantAnimation(this);
+        connect(m_scrollbar_fade, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) {
+            set_scrollbar_opacity(value.toReal());
+        });
+    }
+    m_scrollbar_fade->stop();
+    m_scrollbar_fade->setDuration(duration_ms);
+    m_scrollbar_fade->setStartValue(m_scrollbar_opacity);
+    m_scrollbar_fade->setEndValue(opacity);
+    m_scrollbar_fade->start();
+}
+
+void ArcSidebar::show_scrollbar_briefly()
+{
+    if (SpaceSlide::running_in(*m_panel))
+        return; // It comes in once the slide is over.
+    if (!m_scrollbar_linger) {
+        m_scrollbar_linger = new QTimer(this);
+        m_scrollbar_linger->setSingleShot(true);
+        m_scrollbar_linger->setInterval(SCROLLBAR_LINGER_MS);
+        connect(m_scrollbar_linger, &QTimer::timeout, this, [this] {
+            if (m_tree->verticalScrollBar()->underMouse())
+                return; // Leave restarts it.
+            fade_scrollbar_to(0, SCROLLBAR_FADE_OUT_MS);
+        });
+    }
+    if (m_scrollbar_opacity < 1 && (!m_scrollbar_fade || m_scrollbar_fade->state() != QAbstractAnimation::Running || m_scrollbar_fade->endValue().toReal() < 1))
+        fade_scrollbar_to(1, SCROLLBAR_FADE_IN_MS);
+    m_scrollbar_linger->start();
+}
+
+void ArcSidebar::hide_scrollbar_for_slide()
+{
+    if (m_scrollbar_fade)
+        m_scrollbar_fade->stop();
+    if (m_scrollbar_linger)
+        m_scrollbar_linger->stop();
+    set_scrollbar_opacity(0);
+}
+
 void ArcSidebar::switch_to_space(QString const& id)
 {
     auto& store = SpaceStore::the();
     if (!store.space(id))
         return;
+
+    // Slide from the old space to the new one, when there's a sidebar to see it in.
+    if (auto* running = SpaceSlide::running_in(*m_panel))
+        running->finish();
+    QPixmap before;
+    QRect slide_area;
+    auto slide = id != m_space_id && m_window && m_window->isVisible() && m_panel->isVisible() && m_panel->width() > 0;
+    if (slide) {
+        slide_area = space_slide_area();
+        slide = slide_area.isValid();
+        if (slide) {
+            hide_scrollbar_for_slide();
+            before = SpaceSlide::picture(*m_panel, slide_area);
+        }
+    }
+    int direction = 1;
+    for (auto const& space : store.spaces()) {
+        if (space.id == m_space_id)
+            break; // The old space comes first: the new one is to its right.
+        if (space.id == id) {
+            direction = -1;
+            break;
+        }
+    }
+
+    // The window keeps the old space's tint while the slide runs, matching the pictures' backgrounds; the new one's
+    // comes in when it ends.
+    if (slide) {
+        m_holding_tint = true;
+        if (m_tint_fade)
+            m_tint_fade->stop(); // The window stays at whatever tint it got to; the next fade starts from there.
+    }
 
     m_space_id = id;
     store.set_last_active_space_id(id);
@@ -1571,6 +1700,15 @@ void ArcSidebar::switch_to_space(QString const& id)
     m_switching_space = false;
 
     rebuild();
+
+    if (slide) {
+        auto* running = SpaceSlide::start(*m_panel, slide_area, before, direction);
+        connect(running, &SpaceSlide::finished, this, [this] {
+            m_holding_tint = false;
+            fade_to_space_tint();
+            QTimer::singleShot(0, this, [this] { show_scrollbar_briefly(); }); // As in Arc, a new space's scroll bar flashes in, then fades.
+        });
+    }
 }
 
 void ArcSidebar::on_current_tab_changed(int index)
@@ -2611,17 +2749,77 @@ void ArcSidebar::paintEvent(QPaintEvent*)
 
 // Arc paints the space color across the whole window frame. Upstream derives every chrome surface from
 // chrome_background(), so tint that and ask the app to restyle.
+double ArcSidebar::space_tint_amount() const
+{
+    return ChromeStyle::is_dark(palette()) ? 0.26 : 0.38;
+}
+
 void ArcSidebar::apply_space_tint()
 {
-    static QColor applied;
-    static bool initialized = false;
-    auto color = space_color();
-    if (initialized && color == applied)
+    // A slide between spaces keeps the old tint until it's over, then fades to the new one.
+    if (m_holding_tint || (m_tint_fade && m_tint_fade->state() == QAbstractAnimation::Running))
         return;
-    initialized = true;
-    applied = color;
+    apply_tint(space_color(), space_tint_amount());
+}
 
-    ChromeStyle::set_chrome_background_tint(color, ChromeStyle::is_dark(palette()) ? 0.26 : 0.38);
+// The tint partway from one color to another: a space without a color has none to fade from or to.
+static std::pair<QColor, double> blend_tints(QColor from, double from_amount, QColor to, double to_amount, qreal progress)
+{
+    if (!from.isValid()) {
+        from = to;
+        from_amount = 0;
+    }
+    if (!to.isValid()) {
+        to = from;
+        to_amount = 0;
+    }
+    if (!from.isValid())
+        return { QColor(), 0 };
+    auto mix = [progress](qreal a, qreal b) { return a + (b - a) * progress; };
+    return { QColor::fromRgbF(mix(from.redF(), to.redF()), mix(from.greenF(), to.greenF()), mix(from.blueF(), to.blueF())), mix(from_amount, to_amount) };
+}
+
+// After a slide between spaces, the whole window fades from the old space's color to the new one's. (Not during:
+// each step restyles the window, and would make the slide stutter.)
+void ArcSidebar::fade_to_space_tint()
+{
+    static constexpr int TINT_FADE_MS = 240;
+    auto to_color = space_color();
+    auto to_amount = space_tint_amount();
+    auto from_color = s_applied_tint;
+    auto from_amount = s_applied_tint_amount;
+    if (!m_tint_fade) {
+        m_tint_fade = new QVariantAnimation(this);
+        m_tint_fade->setDuration(TINT_FADE_MS);
+        m_tint_fade->setStartValue(0.0);
+        m_tint_fade->setEndValue(1.0);
+        m_tint_fade->setEasingCurve(QEasingCurve::InOutQuad);
+    }
+    m_tint_fade->stop();
+    m_tint_fade->disconnect(this);
+    connect(m_tint_fade, &QVariantAnimation::valueChanged, this, [this, from_color, from_amount, to_color, to_amount](QVariant const& value) {
+        auto [color, amount] = blend_tints(from_color, from_amount, to_color, to_amount, value.toReal());
+        apply_tint(color, amount, true);
+    });
+    connect(m_tint_fade, &QAbstractAnimation::finished, this, [this] {
+        apply_tint(space_color(), space_tint_amount());
+    });
+    m_tint_fade->start();
+}
+
+// `visible_only` restyles just what's on screen (the window, its tab bar and current tab), for the steps of a fade:
+// restyling every tab takes too long for that. A full apply ends the fade.
+void ArcSidebar::apply_tint(QColor const& color, double amount, bool visible_only)
+{
+    static bool s_partial = false;
+    if (s_tint_initialized && color == s_applied_tint && amount == s_applied_tint_amount && (visible_only || !s_partial))
+        return;
+    s_tint_initialized = true;
+    s_applied_tint = color;
+    s_applied_tint_amount = amount;
+    s_partial = visible_only;
+
+    ChromeStyle::set_chrome_background_tint(color, amount);
     // Upstream's chrome widgets restyle themselves on PaletteChange (the path a system theme change takes).
     // Notify only those; Qt's own widgets would reset their style sheets on a synthetic event.
     auto notify = [](QWidget* widget) {
@@ -2636,6 +2834,15 @@ void ArcSidebar::apply_space_tint()
         notify(browser_window);
         for (auto* tabs : browser_window->findChildren<TabWidget*>())
             notify(tabs);
+        if (visible_only) {
+            if (auto* tab = browser_window->current_tab()) {
+                notify(tab);
+                for (auto* edit : tab->findChildren<LocationEdit*>())
+                    notify(edit);
+            }
+            browser_window->update();
+            continue;
+        }
         for (auto* tab : browser_window->findChildren<Tab*>())
             notify(tab);
         for (auto* edit : browser_window->findChildren<LocationEdit*>())
@@ -2645,8 +2852,9 @@ void ArcSidebar::apply_space_tint()
     }
 
     // Arc has no line between the sidebar and the page; upstream's column style draws one.
-    if (auto* column = parentWidget())
-        column->setStyleSheet("QWidget#LadybirdVerticalTabBar { border: none; background: transparent; }");
+    static auto const column_style = QStringLiteral("QWidget#LadybirdVerticalTabBar { border: none; background: transparent; }");
+    if (auto* column = parentWidget(); column && column->styleSheet() != column_style)
+        column->setStyleSheet(column_style);
 }
 
 // --- Interaction --------------------------------------------------------------------------------
@@ -2797,6 +3005,13 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
     if (event->type() == QEvent::Wheel && m_tree && (watched == m_tree->viewport() || watched == m_panel))
         return handle_wheel(*static_cast<QWheelEvent*>(event));
+    if (m_tree && watched == m_tree->verticalScrollBar()) {
+        if (event->type() == QEvent::Enter)
+            show_scrollbar_briefly();
+        else if (event->type() == QEvent::Leave && m_scrollbar_linger)
+            m_scrollbar_linger->start();
+        return false;
+    }
     if (watched == m_rename_editor && event->type() == QEvent::KeyPress && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
         finish_inline_rename(false);
         return true;
@@ -2820,6 +3035,13 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
         return false;
     }
     if (watched == m_window) {
+        if (event->type() == QEvent::Paint) {
+            // The window's background, under everything: the (tinted) chrome color, painted by Qt rather than left to
+            // the native window, so no part of the chrome shows an untinted color.
+            QPainter painter(m_window);
+            painter.fillRect(static_cast<QPaintEvent*>(event)->rect(), ChromeStyle::chrome_background(m_window->palette()));
+            return false;
+        }
         if (event->type() == QEvent::Resize && m_mode == Mode::Hidden && m_host && !m_host_lifting_off && !m_host_docking)
             size_host();
         else if (event->type() == QEvent::WindowActivate && m_mode_set)

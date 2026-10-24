@@ -517,6 +517,7 @@ void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuil
 {
     auto* bar = verticalScrollBar();
     auto scroll = bar->value();
+    m_rebuilding = true;
     setUpdatesEnabled(false);
     setAnimated(false);
     {
@@ -538,6 +539,7 @@ void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuil
 
     setAnimated(true);
     setUpdatesEnabled(true);
+    m_rebuilding = false;
 }
 
 // Starts the icon-hover animation of the row under the pointer, or reverses the one showing.

@@ -15,6 +15,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
 | `UI/Qt/Tab.h/.cpp` | `Tab::on_focus_location_editor`, checked at the top of `focus_location_editor()` (Cmd+L and upstream's other routes into the location field open the command bar instead; the field itself stays, hidden behind Arc's address bar) |
+| `UI/Qt/Icon.cpp` | `create_chrome_icon()` caches what it draws (`draw_chrome_icon()` is upstream's body): every new tab builds a bookmarks-bar menu with an icon per bookmark, which took seconds with a large imported library and froze the first visit to each space |
 | `UI/Qt/BrowserWindow.h/.cpp` | `on_tab_will_close`, called in `definitely_close_tab()` before the tab is removed (the sidebar picks the next tab from the same space, or leaves an empty page so closing a space's last tab doesn't close the window), with the early returns around it for a tab already gone; `is_popup_window()` (popups get no sidebar) |
 
 ### Profiles (LibWebView)
@@ -87,6 +88,10 @@ The sidebar also relies on upstream behavior that could change silently:
   `LadybirdNavigationToolbar` by object name.
 - The web view gives pages first claim on most key presses, so Arc's space shortcuts are caught in an
   app-wide event filter (`ArcChrome.cpp`).
+- Upstream leaves the window's background to the native window. The sidebar paints the (tinted) chrome color
+  under the whole window from its event filter on the window's `Paint` events, so nothing shows the untinted native
+  color; the self-test `every_chrome_surface_takes_the_space_color` renders the window under two tints and fails on
+  any patch that doesn't change. Run it after a rebase that touches chrome styling.
 - Arc's other shortcuts (`ArcShortcuts.h`) take some keys upstream binds: Cmd+D (bookmark), Cmd+Shift+C (dev
   tools, still on Cmd+Shift+I and F12), and next/previous tab (which upstream steps through in tab order, across
   spaces). The same filter claims the `ShortcutOverride` for those keys, so Qt hands them over as plain key presses

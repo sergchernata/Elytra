@@ -9,6 +9,7 @@
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/StringUtils.h>
 
+#include <QHash>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPainterPathStroker>
@@ -387,7 +388,7 @@ QPixmap create_chrome_icon_pixmap(ChromeIcon icon, QColor color, qreal device_pi
     return pixmap;
 }
 
-QIcon create_chrome_icon(ChromeIcon icon, QPalette const& palette)
+static QIcon draw_chrome_icon(ChromeIcon icon, QPalette const& palette)
 {
     auto normal = ChromeStyle::chrome_button_text(palette);
     auto normal_alpha = 216;
@@ -417,6 +418,19 @@ QIcon create_chrome_icon(ChromeIcon icon, QPalette const& palette)
         qicon.addPixmap(create_chrome_icon_pixmap(icon, active, device_pixel_ratio), QIcon::Selected);
     }
 
+    return qicon;
+}
+
+// Fork hook (Arc): drawing an icon takes a while, and some are wanted thousands of times (the globe of every bookmark without a
+// favicon, in every tab's bookmarks bar): each is drawn once per icon and palette.
+QIcon create_chrome_icon(ChromeIcon icon, QPalette const& palette)
+{
+    static QHash<QString, QIcon> cache;
+    auto key = QString("%1:%2:%3").arg(static_cast<int>(icon)).arg(ChromeStyle::chrome_button_text(palette).rgba()).arg(ChromeStyle::chrome_muted_text(palette).rgba());
+    if (auto it = cache.constFind(key); it != cache.constEnd())
+        return *it;
+    auto qicon = draw_chrome_icon(icon, palette);
+    cache.insert(key, qicon);
     return qicon;
 }
 

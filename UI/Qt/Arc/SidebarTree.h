@@ -112,6 +112,7 @@ public:
     // Replaces the rows (via `rebuild`) without moving the list: same scroll position, no expand animations, no
     // repaint midway.
     void rebuild_keeping_scroll_position(Function<void()> const& rebuild);
+    bool is_rebuilding() const { return m_rebuilding; } // Its scroll position moves then, not by the user's hand.
 
     enum class DropPlace {
         Above,
@@ -144,6 +145,7 @@ protected:
     virtual void drawBranches(QPainter*, QRect const&, QModelIndex const&) const override { }
 
 private:
+    bool m_rebuilding { false };
     DropPlace drop_place_for(QModelIndex const& target) const;
 
     SidebarDelegate* m_delegate { nullptr };
