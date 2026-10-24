@@ -196,7 +196,7 @@ private:
         QMap<QString, int> unpainted;
         QMap<QString, int> untinted;
     };
-    ChromeTiles chrome_tiles_ignoring_the_tint(bool fade_step);
+    ChromeTiles chrome_tiles_ignoring_the_tint(bool fade_step, Function<void()> after_tint = {});
     void every_chrome_surface_takes_the_space_color();
     void fills_from_one_password();
 
@@ -1574,14 +1574,18 @@ static Optional<QRgb> solid_color(QImage const& image, QRect tile)
 //
 // `fade_step` tints the way each step of the fade between spaces does (restyling only what's on screen), so the
 // whole window fades, not just part of it.
-SelfTest::ChromeTiles SelfTest::chrome_tiles_ignoring_the_tint(bool fade_step)
+SelfTest::ChromeTiles SelfTest::chrome_tiles_ignoring_the_tint(bool fade_step, Function<void()> after_tint)
 {
     auto& win = window();
     settle(300);
     s().apply_tint(QColor(255, 0, 0), 0.5, fade_step);
+    if (after_tint)
+        after_tint();
     settle(100);
     auto red = render_window(win);
     s().apply_tint(QColor(0, 0, 255), 0.5, fade_step);
+    if (after_tint)
+        after_tint();
     settle(100);
     auto blue = render_window(win);
     s().apply_space_tint();
@@ -1657,6 +1661,24 @@ void SelfTest::every_chrome_surface_takes_the_space_color()
     auto [unpainted_in_fade, untinted_in_fade] = chrome_tiles_ignoring_the_tint(true);
     check(unpainted_in_fade.isEmpty() && untinted_in_fade.isEmpty(), "each step of the fade between spaces recolors all of it too",
         describe(unpainted_in_fade) + " " + describe(untinted_in_fade));
+
+    // Only the tab shown restyles when the color changes; another takes the color as it's shown.
+    QPointer<Tab> first = s().open_tab(page("Tint first"));
+    QPointer<Tab> second = s().open_tab(page("Tint second"));
+    wait_until([&] { return first && second && loaded(*first) && loaded(*second); });
+    auto [unpainted_after_switch, untinted_after_switch] = chrome_tiles_ignoring_the_tint(false, [&] {
+        if (first && second) {
+            s().activate(*first);
+            s().activate(*second);
+        }
+    });
+    check(unpainted_after_switch.isEmpty() && untinted_after_switch.isEmpty(), "a tab shown after the color changes takes it",
+        describe(unpainted_after_switch) + " " + describe(untinted_after_switch));
+    for (auto const& tab : { first, second }) {
+        if (tab)
+            s().close_tab(*tab);
+    }
+    settle(200);
 }
 
 void SelfTest::duplicate_and_close_tabs_below()

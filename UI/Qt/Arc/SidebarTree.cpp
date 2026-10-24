@@ -21,6 +21,7 @@
 #include <QEasingCurve>
 #include <QPainterPath>
 #include <QScrollBar>
+#include <QStyleOptionSlider>
 #include <QSignalBlocker>
 #include <QVariantAnimation>
 
@@ -484,6 +485,7 @@ SidebarTree::SidebarTree(QWidget* parent)
     setHeaderHidden(true);
     setRootIsDecorated(false);
     setIndentation(16);
+    setVerticalScrollBar(new SidebarScrollBar(this));
     setFrameShape(QFrame::NoFrame);
     setFocusPolicy(Qt::NoFocus);
     setMouseTracking(true);
@@ -506,8 +508,8 @@ SidebarTree::SidebarTree(QWidget* parent)
     setStyleSheet("QTreeView { background: transparent; border: none; outline: none; }"
                   "QTreeView::item { border: none; }"
                   "QScrollBar:vertical { background: transparent; width: 6px; margin: 2px 0 2px 0; border: none; }"
-                  "QScrollBar::handle:vertical { background: rgba(128, 128, 128, 0.45); border-radius: 3px; min-height: 28px; }"
-                  "QScrollBar::handle:vertical:hover { background: rgba(128, 128, 128, 0.7); }"
+                  // The handle's place only: SidebarScrollBar paints it, at its opacity.
+                  "QScrollBar::handle:vertical { background: transparent; border: none; min-height: 28px; }"
                   "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; background: none; }"
                   "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }");
     viewport()->setAutoFillBackground(false);
@@ -612,6 +614,63 @@ int SidebarTree::height_of_contents(QModelIndex const& folder) const
         last = index;
     }
     return visualRect(last).bottom() + 1 - folder_bottom;
+}
+
+SidebarScrollBar::SidebarScrollBar(QWidget* parent)
+    : QScrollBar(Qt::Vertical, parent)
+{
+    setMouseTracking(true);
+}
+
+void SidebarScrollBar::set_opacity(qreal opacity)
+{
+    if (qFuzzyCompare(m_opacity + 1, opacity + 1))
+        return;
+    m_opacity = opacity;
+    update();
+}
+
+QRect SidebarScrollBar::handle_rect() const
+{
+    QStyleOptionSlider option;
+    initStyleOption(&option);
+    return style()->subControlRect(QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarSlider, this);
+}
+
+void SidebarScrollBar::paintEvent(QPaintEvent* event)
+{
+    QScrollBar::paintEvent(event);
+    if (m_opacity <= 0 || maximum() <= minimum())
+        return;
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(128, 128, 128, qRound(255 * m_opacity * (m_handle_hovered || isSliderDown() ? 0.7 : 0.45))));
+    painter.drawRoundedRect(QRectF(handle_rect()), 3, 3);
+}
+
+void SidebarScrollBar::enterEvent(QEnterEvent* event)
+{
+    QScrollBar::enterEvent(event);
+    m_handle_hovered = handle_rect().contains(event->position().toPoint());
+    update();
+}
+
+void SidebarScrollBar::leaveEvent(QEvent* event)
+{
+    QScrollBar::leaveEvent(event);
+    m_handle_hovered = false;
+    update();
+}
+
+void SidebarScrollBar::mouseMoveEvent(QMouseEvent* event)
+{
+    QScrollBar::mouseMoveEvent(event);
+    auto hovered = handle_rect().contains(event->position().toPoint());
+    if (hovered != m_handle_hovered) {
+        m_handle_hovered = hovered;
+        update();
+    }
 }
 
 void SidebarTree::toggle_folder(QModelIndex const& index)

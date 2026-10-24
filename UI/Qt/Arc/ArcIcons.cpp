@@ -9,6 +9,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QSet>
 #include <QHash>
 #include <QPixmap>
 #include <QUrl>
@@ -83,10 +84,19 @@ void store(QString const& url, QIcon const& icon)
     auto site = site_of(url);
     if (site.isEmpty() || icon.isNull() || directory().isEmpty())
         return;
-    memory().insert(site, icon);
-    if (QFile::exists(file_for_site(site)))
+    // Called for every row on every refresh: the same icon again changes nothing, and each site's file is looked for
+    // once (hashing its name and checking the disk each time added up).
+    if (auto known = memory().constFind(site); known != memory().constEnd() && known->cacheKey() == icon.cacheKey())
         return;
-    icon.pixmap(QSize(32, 32)).save(file_for_site(site), "PNG");
+    memory().insert(site, icon);
+    static QSet<QString> checked;
+    auto file = file_for_site(site);
+    if (checked.contains(file))
+        return;
+    checked.insert(file);
+    if (QFile::exists(file))
+        return;
+    icon.pixmap(QSize(32, 32)).save(file, "PNG");
 }
 
 }

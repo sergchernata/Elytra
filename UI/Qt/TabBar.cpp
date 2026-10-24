@@ -1412,6 +1412,9 @@ void TabBar::play_load_sheen(Tab& tab)
         return true;
     });
 
+    if (!isVisible()) // Fork hook (Arc): the Arc sidebar hides the tab bar; nothing would show the sheen.
+        return;
+
     auto* animation = new QVariantAnimation(this);
     animation->setDuration(LOAD_SHEEN_DURATION_MS);
     animation->setEasingCurve(QEasingCurve::InOutSine);

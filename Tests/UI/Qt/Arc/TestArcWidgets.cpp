@@ -903,3 +903,39 @@ TEST_CASE(closing_a_folder_covers_its_rows_in_place)
 {
     check_folder_animation(false);
 }
+
+// The list's scroll bar fades by painting its handle at its opacity, never by restyling (which re-polished it each frame).
+TEST_CASE(sidebar_scroll_bar_fades_by_painting_its_handle)
+{
+    QStandardItemModel model;
+    for (int i = 0; i < 100; ++i) {
+        auto* item = new QStandardItem(QString("Tab %1").arg(i));
+        item->setData(static_cast<int>(RowKind::TodayTab), KindRole);
+        model.appendRow(item);
+    }
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    QApplication::processEvents();
+
+    auto* bar = qobject_cast<SidebarScrollBar*>(tree.verticalScrollBar());
+    VERIFY(bar);
+    auto style_sheets = tree.styleSheet() + bar->styleSheet();
+    auto handle_alpha = [&] {
+        QImage image(bar->size(), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        bar->render(&image, QPoint(), QRegion(), QWidget::DrawChildren);
+        auto center = bar->handle_rect().center();
+        return qAlpha(image.pixel(center));
+    };
+
+    bar->set_opacity(1);
+    auto full = handle_alpha();
+    EXPECT(std::abs(full - qRound(255 * 0.45)) <= 2);
+    bar->set_opacity(0.5);
+    EXPECT(std::abs(handle_alpha() - full / 2) <= 2);
+    bar->set_opacity(0);
+    EXPECT_EQ(handle_alpha(), 0);
+    EXPECT(tree.styleSheet() + bar->styleSheet() == style_sheets);
+}

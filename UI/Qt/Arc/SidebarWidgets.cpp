@@ -133,10 +133,19 @@ void DownloadsShelf::refresh()
     if (items.size() > SHELF_MAX_ITEMS)
         items.resize(SHELF_MAX_ITEMS);
 
-    if (m_items.size() != items.size() || !std::equal(m_items.begin(), m_items.end(), items.begin(), [](Item const& a, Item const& b) { return a.path == b.path; }))
+    // Refreshed every second while open: most times nothing changed, and then nothing repaints (or loses its hover).
+    auto same_files = m_items.size() == items.size()
+        && std::equal(m_items.begin(), m_items.end(), items.begin(), [](Item const& a, Item const& b) { return a.path == b.path; });
+    auto same = same_files && std::equal(m_items.begin(), m_items.end(), items.begin(), [](Item const& a, Item const& b) {
+        return a.percent == b.percent && a.in_progress == b.in_progress && a.time == b.time && a.name == b.name;
+    });
+    if (same)
+        return;
+    if (!same_files) {
         m_pressed_row = -1; // The row pressed may be another file now (or gone).
+        m_hovered_row = -1;
+    }
     m_items = items;
-    m_hovered_row = -1;
     update();
 }
 

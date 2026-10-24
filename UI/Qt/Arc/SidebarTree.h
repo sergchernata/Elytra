@@ -8,6 +8,7 @@
 
 #include <QStandardItemModel>
 #include <QStyledItemDelegate>
+#include <QScrollBar>
 #include <QTreeView>
 #include <QVariantAnimation>
 #include <AK/Function.h>
@@ -100,6 +101,29 @@ public:
 
     virtual void paint(QPainter*, QStyleOptionViewItem const&, QModelIndex const&) const override;
     virtual QSize sizeHint(QStyleOptionViewItem const&, QModelIndex const&) const override;
+};
+
+// The list's scroll bar: a thin rounded handle, as in Arc, that fades in and out. It paints the handle itself at its
+// opacity, so each step of a fade is just a repaint (a style sheet per step re-polished the bar every frame).
+class SidebarScrollBar final : public QScrollBar {
+    Q_OBJECT
+
+public:
+    explicit SidebarScrollBar(QWidget* parent);
+
+    qreal opacity() const { return m_opacity; }
+    void set_opacity(qreal);
+    QRect handle_rect() const;
+
+protected:
+    virtual void paintEvent(QPaintEvent*) override;
+    virtual void enterEvent(QEnterEvent*) override;
+    virtual void leaveEvent(QEvent*) override;
+    virtual void mouseMoveEvent(QMouseEvent*) override;
+
+private:
+    qreal m_opacity { 1 };
+    bool m_handle_hovered { false };
 };
 
 class SidebarTree final : public QTreeView {

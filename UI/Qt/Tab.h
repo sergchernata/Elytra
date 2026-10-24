@@ -132,6 +132,8 @@ public:
 
     // Fork hook (Arc): edits the address somewhere else (the command bar) instead of the location field; true if so.
     static inline Function<bool(Tab&)> on_focus_location_editor;
+    // Fork hook (Arc): the sidebar shows no loading spinner, so the tab doesn't animate one (it ticked every 80 ms).
+    static inline bool animates_loading_spinner = true;
 
 public slots:
     void focus_location_editor();

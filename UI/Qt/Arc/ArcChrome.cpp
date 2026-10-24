@@ -238,6 +238,7 @@ void install()
     route_new_tab_to_command_bar();
     route_location_editing_to_command_bar();
     route_links_from_other_apps_to_little_arc();
+    Tab::animates_loading_spinner = false;
     // Not for the self-test, which runs beside the real browser.
     if (!qEnvironmentVariableIsSet("ARC_SELF_TEST"))
         register_little_arc_hot_key();

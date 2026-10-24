@@ -1826,10 +1826,8 @@ static constexpr int SCROLLBAR_LINGER_MS = 900;
 void ArcSidebar::set_scrollbar_opacity(qreal opacity)
 {
     m_scrollbar_opacity = opacity;
-    auto alpha = [opacity](qreal full) { return QString::number(full * opacity, 'f', 3); };
-    m_tree->verticalScrollBar()->setStyleSheet(QString("QScrollBar::handle:vertical { background: rgba(128, 128, 128, %1); border-radius: 3px; min-height: 28px; }"
-                                                       "QScrollBar::handle:vertical:hover { background: rgba(128, 128, 128, %2); }")
-            .arg(alpha(0.45), alpha(0.7)));
+    if (auto* bar = qobject_cast<SidebarScrollBar*>(m_tree->verticalScrollBar()))
+        bar->set_opacity(opacity);
 }
 
 void ArcSidebar::fade_scrollbar_to(qreal opacity, int duration_ms)
@@ -2008,6 +2006,7 @@ void ArcSidebar::on_current_tab_changed(int index)
 
     m_recent_tabs.removeAll(tab);
     m_recent_tabs.prepend(tab);
+    restyle_if_tint_changed(*tab);
     update_auto_picture_in_picture(previous, *tab);
 
     auto space = space_of(*tab);
@@ -2226,11 +2225,16 @@ void ArcSidebar::rebuild()
 
     auto muted = ChromeStyle::chrome_muted_text(palette());
     m_space_title->setText(space ? space->title : QString());
-    m_space_title->setStyleSheet(QString("QLabel { color: %1; font-weight: 600; font-size: 13px; }").arg(muted.name()));
+    // Only when they change: setting a style sheet re-polishes the header, and this runs on every rebuild.
+    auto title_style = QString("QLabel { color: %1; font-weight: 600; font-size: 13px; }").arg(muted.name());
+    if (m_space_title->styleSheet() != title_style)
+        m_space_title->setStyleSheet(title_style);
     auto hover = ChromeStyle::is_dark(palette()) ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.05)";
-    m_header->setStyleSheet(QString("QWidget#ArcSpaceHeader { border-radius: 9px; background: transparent; }"
-                                    "QWidget#ArcSpaceHeader[hovered=\"true\"] { background: %1; }")
-                                .arg(hover));
+    auto header_style = QString("QWidget#ArcSpaceHeader { border-radius: 9px; background: transparent; }"
+                                "QWidget#ArcSpaceHeader[hovered=\"true\"] { background: %1; }")
+                            .arg(hover);
+    if (m_header->styleSheet() != header_style)
+        m_header->setStyleSheet(header_style);
     update_space_header_icon();
     m_tree->delegate().accent = space_color();
 
@@ -2330,9 +2334,16 @@ void ArcSidebar::rebuild_favorites()
         if (!button)
             continue;
         auto* tab = tab_for_node(favorite_node(favorite.id));
-        button->setIcon(icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr));
-        button->setToolTip(favorite.title.isEmpty() ? favorite.url : favorite.title);
-        button->setChecked(tab && tab == current);
+        // Only what changed: this runs on every tab switch, and a new icon relays out the tiles.
+        auto icon = icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr);
+        if (button->icon().cacheKey() != icon.cacheKey())
+            button->setIcon(icon);
+        auto tooltip = favorite.title.isEmpty() ? favorite.url : favorite.title;
+        if (button->toolTip() != tooltip)
+            button->setToolTip(tooltip);
+        auto checked = tab && tab == current;
+        if (button->isChecked() != checked)
+            button->setChecked(checked);
     }
 }
 
@@ -2554,6 +2565,15 @@ void ArcSidebar::update_tab_rows(Tab& tab)
 
     auto title = title_of(tab);
     auto icon = icon_for(url_of(tab), &tab);
+    // Only what changed: each change repaints the row, and this runs on every title, icon and load change.
+    auto set_text = [](QStandardItem& item, QString const& text) {
+        if (item.text() != text)
+            item.setText(text);
+    };
+    auto set_icon = [](QStandardItem& item, QIcon const& icon) {
+        if (item.icon().cacheKey() != icon.cacheKey())
+            item.setIcon(icon);
+    };
     for_each_item(*m_model->invisibleRootItem(), [&](QStandardItem& item) {
         if (tab_in_row(item.index()) != &tab)
             return;
@@ -2561,9 +2581,9 @@ void ArcSidebar::update_tab_rows(Tab& tab)
             auto const* pinned = SpaceStore::the().node(node);
             if (pinned) {
                 auto tab_url = url_of(tab);
-                item.setText(pinned_row_title(pinned->title, pinned->saved_title, live_title(tab), pinned->url, tab_url));
+                set_text(item, pinned_row_title(pinned->title, pinned->saved_title, live_title(tab), pinned->url, tab_url));
                 if (!tab_shows_a_page(tab_url)) {
-                    item.setIcon(icon_for(pinned->url, nullptr));
+                    set_icon(item, icon_for(pinned->url, nullptr));
                     item.setData(false, NavigatedAwayRole);
                     return;
                 }
@@ -2572,9 +2592,9 @@ void ArcSidebar::update_tab_rows(Tab& tab)
             if (item.data(NavigatedAwayRole).toBool() != away)
                 item.setData(away, NavigatedAwayRole);
         } else {
-            item.setText(title);
+            set_text(item, title);
         }
-        item.setIcon(icon);
+        set_icon(item, icon);
     });
 
     // Not the address shown while it loads: that isn't the page's title.
@@ -3138,46 +3158,56 @@ void ArcSidebar::fade_to_space_tint()
 
 // `visible_only` restyles just what's on screen (the window, its tab bar and current tab), for the steps of a fade:
 // restyling every tab takes too long for that. A full apply ends the fade.
+// Tabs not shown when the tint changed restyle as they're shown (see restyle_if_tint_changed()): restyling every tab of
+// every window took long enough to hitch the end of each switch between spaces.
+static int s_tint_generation = 0;
+static constexpr char const* TINT_GENERATION_PROPERTY = "arc_tint_generation";
+
+static void notify_palette_change(QWidget* widget)
+{
+    QEvent palette_change(QEvent::PaletteChange);
+    QApplication::sendEvent(widget, &palette_change);
+    widget->update();
+}
+
+static void restyle_tab(Tab& tab)
+{
+    notify_palette_change(&tab);
+    for (auto* edit : tab.findChildren<LocationEdit*>())
+        notify_palette_change(edit);
+    tab.setProperty(TINT_GENERATION_PROPERTY, s_tint_generation);
+}
+
+void ArcSidebar::restyle_if_tint_changed(Tab& tab)
+{
+    if (tab.property(TINT_GENERATION_PROPERTY).toInt() != s_tint_generation)
+        restyle_tab(tab);
+}
+
 void ArcSidebar::apply_tint(QColor const& color, double amount, bool visible_only)
 {
-    static bool s_partial = false;
-    if (s_tint_initialized && color == s_applied_tint && amount == s_applied_tint_amount && (visible_only || !s_partial))
+    if (s_tint_initialized && color == s_applied_tint && amount == s_applied_tint_amount)
         return;
     s_tint_initialized = true;
     s_applied_tint = color;
     s_applied_tint_amount = amount;
-    s_partial = visible_only;
+    (void)visible_only; // Each step of a fade and its end restyle the same: what's shown.
 
     ChromeStyle::set_chrome_background_tint(color, amount);
+    ++s_tint_generation;
     // Upstream's chrome widgets restyle themselves on PaletteChange (the path a system theme change takes).
-    // Notify only those; Qt's own widgets would reset their style sheets on a synthetic event.
-    auto notify = [](QWidget* widget) {
-        QEvent palette_change(QEvent::PaletteChange);
-        QApplication::sendEvent(widget, &palette_change);
-        widget->update();
-    };
+    // Notify only those; Qt's own widgets would reset their style sheets on a synthetic event. Only what's shown: each
+    // window, its tab strip and its current tab; other tabs restyle as they're shown.
     for (auto* top_level : QApplication::topLevelWidgets()) {
         auto* browser_window = qobject_cast<BrowserWindow*>(top_level);
         if (!browser_window)
             continue;
-        notify(browser_window);
+        notify_palette_change(browser_window);
         for (auto* tabs : browser_window->findChildren<TabWidget*>())
-            notify(tabs);
-        if (visible_only) {
-            if (auto* tab = browser_window->current_tab()) {
-                notify(tab);
-                for (auto* edit : tab->findChildren<LocationEdit*>())
-                    notify(edit);
-            }
-            browser_window->update();
-            continue;
-        }
-        for (auto* tab : browser_window->findChildren<Tab*>())
-            notify(tab);
-        for (auto* edit : browser_window->findChildren<LocationEdit*>())
-            notify(edit);
-        for (auto* widget : browser_window->findChildren<QWidget*>())
-            widget->update();
+            notify_palette_change(tabs);
+        if (auto* tab = browser_window->current_tab())
+            restyle_tab(*tab);
+        browser_window->update();
     }
 
     // Arc has no line between the sidebar and the page; upstream's column style draws one.

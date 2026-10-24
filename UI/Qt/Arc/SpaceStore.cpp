@@ -20,6 +20,9 @@
 
 namespace Ladybird::Arc {
 
+static constexpr int SAVE_DELAY_MS = 400;
+static constexpr int BOOKKEEPING_SAVE_DELAY_MS = 10'000;
+
 static constexpr int FILE_VERSION = 1;
 
 SpaceStore::SpaceStore(QString file_path)
@@ -32,7 +35,7 @@ SpaceStore::SpaceStore(QString file_path)
     // change many times a second.
     m_save_timer = new QTimer(this);
     m_save_timer->setSingleShot(true);
-    m_save_timer->setInterval(400);
+    m_save_timer->setInterval(SAVE_DELAY_MS);
     connect(m_save_timer, &QTimer::timeout, this, &SpaceStore::write_now);
 
     load();
@@ -136,6 +139,17 @@ void SpaceStore::flush()
 
 void SpaceStore::save()
 {
+    m_save_timer->setInterval(SAVE_DELAY_MS);
+    m_save_timer->start();
+}
+
+// Bookkeeping (saved titles, the session) changes all the time, e.g. a pinned tab whose title counts unread mail: it's
+// written within a while (or at quit), not shortly after each change.
+void SpaceStore::save_later()
+{
+    if (m_save_timer->isActive())
+        return;
+    m_save_timer->setInterval(BOOKKEEPING_SAVE_DELAY_MS);
     m_save_timer->start();
 }
 
@@ -400,7 +414,7 @@ void SpaceStore::set_saved_title(QString const& id, QString title)
 {
     if (auto* node = mutable_node(id); node && !node->is_folder() && node->saved_title != title) {
         node->saved_title = std::move(title);
-        save(); // The sidebar shows live titles for loaded tabs already.
+        save_later(); // The sidebar shows live titles for loaded tabs already.
     }
 }
 
@@ -570,8 +584,15 @@ void SpaceStore::move_favorite_within_profile(QString const& id, int delta)
 
 void SpaceStore::set_session(QList<SessionEntry> session)
 {
+    // Saved after every page load: most loads leave it as it was.
+    auto same = session.size() == m_session.size()
+        && std::equal(session.begin(), session.end(), m_session.begin(), [](SessionEntry const& a, SessionEntry const& b) {
+               return a.url == b.url && a.space_id == b.space_id && a.node_id == b.node_id && a.home == b.home;
+           });
+    if (same)
+        return;
     m_session = std::move(session);
-    save(); // Bookkeeping only.
+    save_later();
 }
 
 }

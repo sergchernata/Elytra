@@ -139,6 +139,7 @@ private:
     void step_space(int delta);
     void copy_current_url(bool as_markdown);
     void fill_from_one_password();
+    static void restyle_if_tint_changed(Tab&);
     bool should_open_picture_in_picture_leaving(Tab&);
     void update_auto_picture_in_picture(Tab* previous, Tab& current);
     Tab* most_recent_tab_in_space(QString const& space, Tab const* except);

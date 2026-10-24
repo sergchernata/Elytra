@@ -1561,7 +1561,7 @@ void Tab::set_loading(bool is_loading)
     m_loading_animation_frame = 0;
     emit loading_changed();
 
-    if (m_is_loading)
+    if (m_is_loading && animates_loading_spinner) // Fork hook (Arc)
         m_loading_animation_timer->start();
     else
         m_loading_animation_timer->stop();

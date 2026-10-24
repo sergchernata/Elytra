@@ -144,6 +144,7 @@ signals:
 
 private:
     void write_now();
+    void save_later();
     QTimer* m_save_timer { nullptr };
     int m_write_count { 0 };
 
