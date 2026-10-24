@@ -78,6 +78,7 @@ static constexpr char const* BLANK_PROPERTY = "arc_blank";
 static constexpr int UPDATE_BUTTON_HEIGHT = 40;
 static constexpr int SPARE_TAB_DELAY_MS = 1200;
 static constexpr char const* NODE_PROPERTY = "arc_node";
+static constexpr char const* LAST_TITLE_PROPERTY = "arc_last_title"; // See live_title().
 static constexpr char const* PINNED_HOME_PROPERTY = "arc_pinned_home";       // See begin_pinned_landing().
 static constexpr char const* PINNED_LANDING_PROPERTY = "arc_pinned_landing"; // Still landing: its home isn't settled.
 static constexpr char const* LANDING_FROM_STEP_PROPERTY = "arc_landing_from_step";
@@ -1022,9 +1023,32 @@ QString ArcSidebar::url_of(Tab const& tab)
     return qstring_from_ak_string(url.serialize());
 }
 
-QString ArcSidebar::title_of(Tab const& tab)
+// As a page starts loading, its tab's title is its address until the page's own title arrives. Rows keep the title
+// they had through that (and a pinned row its saved title) instead of flashing the address.
+static bool title_is_placeholder(QString const& title, QString const& url)
+{
+    if (title.trimmed().isEmpty())
+        return true;
+    return title == url || (title.contains("://") && pinned_urls_match(title, url));
+}
+
+QString ArcSidebar::live_title(Tab const& tab)
 {
     auto title = tab.title();
+    if (tab.is_loading() && title_is_placeholder(title, url_of(tab)))
+        return tab.property(LAST_TITLE_PROPERTY).toString();
+    return title;
+}
+
+void ArcSidebar::remember_title(Tab& tab)
+{
+    if (auto title = tab.title(); !title_is_placeholder(title, url_of(tab)))
+        tab.setProperty(LAST_TITLE_PROPERTY, title);
+}
+
+QString ArcSidebar::title_of(Tab const& tab)
+{
+    auto title = live_title(tab);
     return title.isEmpty() ? "New Tab" : title;
 }
 
@@ -1048,8 +1072,10 @@ void ArcSidebar::watch_tab(Tab& tab)
 
     QPointer<Tab> guarded = &tab;
     auto refresh = [this, guarded] {
-        if (guarded)
-            update_tab_rows(*guarded);
+        if (!guarded)
+            return;
+        remember_title(*guarded);
+        update_tab_rows(*guarded);
     };
     connect(&tab, &Tab::title_changed, this, refresh);
     connect(&tab, &Tab::favicon_changed, this, refresh);
@@ -2232,7 +2258,7 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
             auto* tab = tab_for_node(node.id);
             auto tab_url = tab ? url_of(*tab) : QString();
             // Until a loading tab shows its page, keep what the row showed unloaded (no "New Tab" flash).
-            item->setText(pinned_row_title(node.title, node.saved_title, tab ? tab->title() : QString(), node.url, tab_url));
+            item->setText(pinned_row_title(node.title, node.saved_title, tab ? live_title(*tab) : QString(), node.url, tab_url));
             item->setIcon(icon_for(tab_shows_a_page(tab_url) ? tab_url : node.url, tab_shows_a_page(tab_url) ? tab : nullptr));
             item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
             item->setData(tab != nullptr, IsLoadedRole);
@@ -2438,7 +2464,7 @@ void ArcSidebar::update_tab_rows(Tab& tab)
             auto const* pinned = SpaceStore::the().node(node);
             if (pinned) {
                 auto tab_url = url_of(tab);
-                item.setText(pinned_row_title(pinned->title, pinned->saved_title, tab.title(), pinned->url, tab_url));
+                item.setText(pinned_row_title(pinned->title, pinned->saved_title, live_title(tab), pinned->url, tab_url));
                 if (!tab_shows_a_page(tab_url)) {
                     item.setIcon(icon_for(pinned->url, nullptr));
                     item.setData(false, NavigatedAwayRole);
@@ -2454,7 +2480,8 @@ void ArcSidebar::update_tab_rows(Tab& tab)
         item.setIcon(icon);
     });
 
-    if (!node.isEmpty() && !tab.title().isEmpty() && tab_shows_a_page(url_of(tab)) && !is_private())
+    // Not the address shown while it loads: that isn't the page's title.
+    if (!node.isEmpty() && !title_is_placeholder(tab.title(), url_of(tab)) && tab_shows_a_page(url_of(tab)) && !is_private())
         SpaceStore::the().set_saved_title(node, tab.title());
 }
 

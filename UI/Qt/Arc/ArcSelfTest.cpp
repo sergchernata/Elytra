@@ -324,9 +324,33 @@ void SelfTest::loading_pinned_row_keeps_its_saved_title()
         return title == "New Tab" || title.startsWith("about:") || title.isEmpty();
     });
     check(bad == titles_seen.end(), "a loading pinned row never shows a blank page's title", bad == titles_seen.end() ? QString() : *bad);
+    // While a page loads, its tab's title is its address until the page's own arrives.
+    auto address = std::find_if(titles_seen.begin(), titles_seen.end(), [](auto const& title) { return title.startsWith("data:"); });
+    check(address == titles_seen.end(), "nor its address while the page's title is on its way", address == titles_seen.end() ? QString() : *address);
     check(!ever_away, "nor a \"|\" while it loads its own URL");
     auto row = row_for_node(node);
     check(row.isValid() && row.data(Qt::DisplayRole).toString() == "P1", "then shows the page's title", row.data(Qt::DisplayRole).toString());
+    check(SpaceStore::the().node(node) && !SpaceStore::the().node(node)->saved_title.startsWith("data:"), "and never saves the address as its title");
+
+    // A Today tab going to another page shows its old title until the new one's arrives.
+    QPointer<Tab> today = s().open_tab(page("Before"));
+    wait_until([&] { return today && loaded(*today) && today->title() == "Before"; });
+    QStringList today_titles;
+    connection = connect(s().m_model, &QAbstractItemModel::dataChanged, this, [&] {
+        for (auto const& index : s().m_model->match(s().m_model->index(0, 0), TabRole, QVariant::fromValue(reinterpret_cast<quintptr>(today.data())), 1, Qt::MatchRecursive))
+            today_titles.append(index.data(Qt::DisplayRole).toString());
+    });
+    if (today)
+        today->navigate(ak_url_from_qurl(QUrl(page("After"))));
+    wait_until([&] { return today && loaded(*today) && today->title() == "After"; });
+    settle(200);
+    disconnect(connection);
+    auto today_address = std::find_if(today_titles.begin(), today_titles.end(), [](auto const& title) { return title.startsWith("data:"); });
+    check(today_address == today_titles.end() && today_titles.contains("After"), "a Today row never flashes its page's address either",
+        today_titles.join(" / "));
+    if (today)
+        s().close_tab(*today);
+    settle(200);
 }
 
 void SelfTest::closing_a_spaces_last_tab_keeps_the_window()

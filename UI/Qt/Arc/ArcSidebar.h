@@ -116,6 +116,8 @@ private:
     static void set_tab_node(Tab&, QString const&);
     static QString url_of(Tab const&);
     static QString title_of(Tab const&);
+    static QString live_title(Tab const&);
+    static void remember_title(Tab&);
     void track_tabs();
     void restore_session_assignments();
     void save_session();

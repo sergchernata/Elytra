@@ -17,7 +17,7 @@ open(sys.argv[2], "w").write(str(server.server_address[1]))
 server.serve_forever()
 ' "$HERE/fixtures" "$PROFILE/port" &
 SERVER=$!
-trap 'kill $SERVER 2>/dev/null; rm -rf "$PROFILE"' EXIT
+trap 'kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; rm -rf "$PROFILE"' EXIT
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$PROFILE/port" ] && break; sleep 0.2; done
 
 # --allow-popups: scenarios open popups from script, with no user click behind them.
