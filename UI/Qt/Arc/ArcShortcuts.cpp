@@ -34,6 +34,8 @@ Optional<ArcShortcut> arc_shortcut_for(int key, Qt::KeyboardModifiers modifiers)
             return ArcShortcut { ArcCommand::PreviousTab };
         case Qt::Key_Backslash:
             return ArcShortcut { ArcCommand::FillFromOnePassword };
+        case Qt::Key_O:
+            return ArcShortcut { ArcCommand::OpenInSpace };
         default:
             break;
         }
@@ -65,6 +67,10 @@ Optional<ArcShortcut> arc_shortcut_for(int key, Qt::KeyboardModifiers modifiers)
         switch (key) {
         case Qt::Key_V:
             return ArcShortcut { ArcCommand::NewTabFromClipboard };
+        case Qt::Key_N:
+            return ArcShortcut { ArcCommand::NewLittleArc };
+        case Qt::Key_O:
+            return ArcShortcut { ArcCommand::ChooseSpace };
         case Qt::Key_Down:
             return ArcShortcut { ArcCommand::NextTab };
         case Qt::Key_Up:

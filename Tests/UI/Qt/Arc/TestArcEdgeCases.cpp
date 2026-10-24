@@ -474,6 +474,9 @@ TEST_CASE(arc_shortcuts_map_to_their_commands)
     EXPECT(command_for(Qt::Key_S, Qt::ControlModifier) == ArcCommand::ToggleSidebar);
     EXPECT(command_for(Qt::Key_D, Qt::ControlModifier) == ArcCommand::TogglePin);
     EXPECT(command_for(Qt::Key_Backslash, Qt::ControlModifier) == ArcCommand::FillFromOnePassword);
+    EXPECT(command_for(Qt::Key_N, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::NewLittleArc);
+    EXPECT(command_for(Qt::Key_O, Qt::ControlModifier) == ArcCommand::OpenInSpace);
+    EXPECT(command_for(Qt::Key_O, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::ChooseSpace);
     EXPECT(command_for(Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier) == ArcCommand::CopyUrl);
     EXPECT(command_for(Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier) == ArcCommand::CopyUrlAsMarkdown);
     EXPECT(command_for(Qt::Key_V, Qt::ControlModifier | Qt::AltModifier) == ArcCommand::NewTabFromClipboard);

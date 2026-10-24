@@ -559,6 +559,10 @@ bool ArcSidebar::run_shortcut(ArcShortcut const& shortcut)
     case ArcCommand::FillFromOnePassword:
         fill_from_one_password();
         return true;
+    case ArcCommand::NewLittleArc:
+    case ArcCommand::OpenInSpace:
+    case ArcCommand::ChooseSpace:
+        return false; // ArcChrome.cpp handles Little Arc's.
     case ArcCommand::SidebarItem: {
         auto items = sidebar_items();
         if (items.isEmpty())
@@ -1952,6 +1956,25 @@ void ArcSidebar::switch_to_space(QString const& id)
             QTimer::singleShot(0, this, [this] { show_scrollbar_briefly(); }); // As in Arc, a new space's scroll bar flashes in, then fades.
         });
     }
+}
+
+void ArcSidebar::adopt_tab(BrowserWindow& from, Tab& tab, QString const& space_id)
+{
+    auto index = from.tab_index(&tab);
+    if (index < 0 || !m_window)
+        return;
+    QPointer<Tab> guarded = &tab;
+    from.move_tab_to_window(index, *m_window, m_tabs.count());
+    if (!guarded)
+        return;
+    set_tab_node(*guarded, {});
+    set_tab_space(*guarded, space_id);
+    // Shown first: the sidebar follows it into its space (and, for another profile's space, reopens it there, shown).
+    activate(*guarded);
+    m_window->show();
+    m_window->raise();
+    m_window->activateWindow();
+    schedule_rebuild();
 }
 
 // The most recently shown tab still open in `space` (or a favorite's), other than `except`.

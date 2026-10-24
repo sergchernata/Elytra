@@ -217,6 +217,8 @@ public:
     void update_tab_button_visibility();
 
     // Fork hook (Arc): show this widget in the vertical sidebar in place of the tab list.
+    // Fork hook (Arc): Little Arc shows only this bar above the page (no tabs, toolbar or bookmarks).
+    void set_minimal_chrome_bar(QWidget*);
     void set_vertical_sidebar_widget(QWidget*);
     int vertical_sidebar_expanded_width() const { return m_vertical_tabs_expanded_width; } // Fork hook (Arc)
     // Fork hook (Arc): called just before the sidebar docks or hides, so it can animate the change; and a
@@ -283,6 +285,7 @@ private:
 
     TabBar* m_tab_bar { nullptr };
     QPointer<QWidget> m_vertical_sidebar_widget; // Fork hook (Arc)
+    QPointer<QWidget> m_minimal_chrome_bar; // Fork hook (Arc): Little Arc
     Optional<int> m_vertical_sidebar_reserved_width; // Fork hook (Arc)
     void size_hidden_pages_like_the_current_one();
 

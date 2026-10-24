@@ -12,6 +12,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/CustomGlyphs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DownloadsFormat.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FloatingPanel.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/LittleArc.cpp
     ${CMAKE_CURRENT_LIST_DIR}/OnePassword.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ProfileSessions.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ReleaseInfo.cpp
@@ -38,7 +39,8 @@ endif()
 
 # Monochrome space icons come from SF Symbols on macOS; other platforms fall back to letters.
 if (APPLE)
-    target_sources(ladybird PRIVATE ${CMAKE_CURRENT_LIST_DIR}/SymbolIcon.mm ${CMAKE_CURRENT_LIST_DIR}/WindowControls.mm)
+    target_sources(ladybird PRIVATE ${CMAKE_CURRENT_LIST_DIR}/SymbolIcon.mm ${CMAKE_CURRENT_LIST_DIR}/WindowControls.mm ${CMAKE_CURRENT_LIST_DIR}/LittleArcHotKey.mm)
+    target_link_libraries(ladybird PRIVATE "-framework Carbon")
 else()
     target_sources(ladybird PRIVATE ${CMAKE_CURRENT_LIST_DIR}/SymbolIconOther.cpp ${CMAKE_CURRENT_LIST_DIR}/WindowControlsOther.cpp)
 endif()

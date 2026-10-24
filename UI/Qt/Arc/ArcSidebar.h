@@ -71,6 +71,9 @@ public:
     ArcSidebar(BrowserWindow&, TabWidget&);
 
     QString current_space_id() const { return m_space_id; }
+    static QString profile_of_space(QString const& space_id);
+    // Takes `tab` from another window (a Little Arc) into Today of `space_id`, shows it, and brings this window forward.
+    void adopt_tab(BrowserWindow& from, Tab&, QString const& space_id);
     void switch_to_space(QString const& id);
     QRect space_slide_area() const;
     void hide_scrollbar_for_slide();
@@ -221,7 +224,6 @@ private:
     void update_current_highlight();
     QColor space_color() const;
     QString current_profile() const;
-    static QString profile_of_space(QString const& space_id);
     static QString profile_of_tab(Tab const&);
     void apply_profile_for_new_views();
     void style_update_button();

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibURL/Parser.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
@@ -15,6 +16,7 @@
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/LittleArc.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/Tab.h>
 
@@ -76,6 +78,21 @@ static void route_location_editing_to_command_bar()
     };
 }
 
+// As in Arc, links opened from other apps (Slack, Mail, ...) open in a Little Arc, to look at and close, or keep with
+// Cmd+O. Files keep upstream's handling (a tab in the browser window).
+static void route_links_from_other_apps_to_little_arc()
+{
+    auto& application = Application::the();
+    application.on_open_file = [upstream = AK::move(application.on_open_file)](URL::URL url) mutable {
+        if (url.scheme().is_one_of("http"sv, "https"sv)) {
+            open_little_arc(url);
+            return;
+        }
+        if (upstream)
+            upstream(AK::move(url));
+    };
+}
+
 // "Import from Arc..." goes right above "Open File..." in every File menu. Menus are
 // rebuilt per window, so watch for that action being added instead of editing upstream.
 static QAction* import_action()
@@ -112,6 +129,24 @@ public:
             if (auto shortcut = arc_shortcut_for(key_event.key(), key_event.modifiers()); shortcut.has_value()) {
                 auto* widget = qobject_cast<QWidget*>(watched);
                 auto* window = widget ? qobject_cast<BrowserWindow*>(widget->window()) : nullptr;
+                // Little Arc: a new one from anywhere; its own two only in one (elsewhere Cmd+O is Open File).
+                auto in_little_arc = window && is_little_arc(*window);
+                auto little_arc_command = shortcut->command == ArcCommand::NewLittleArc
+                    || (in_little_arc && (shortcut->command == ArcCommand::OpenInSpace || shortcut->command == ArcCommand::ChooseSpace));
+                if (little_arc_command) {
+                    event->accept();
+                    if (event->type() == QEvent::KeyPress) {
+                        if (shortcut->command == ArcCommand::NewLittleArc)
+                            open_little_arc();
+                        else if (shortcut->command == ArcCommand::OpenInSpace)
+                            move_little_arc_to_space(*window);
+                        else
+                            choose_space_for_little_arc(*window);
+                    }
+                    return true;
+                }
+                if (shortcut->command == ArcCommand::OpenInSpace || shortcut->command == ArcCommand::ChooseSpace)
+                    return false;
                 auto* sidebar = window ? ArcSidebar::for_window(*window) : nullptr;
                 if (!sidebar)
                     return false;
@@ -188,9 +223,24 @@ void install()
         });
     }
 
+    // Development aid: ARC_DEV_LITTLE_ARC=<url> (or empty) opens a Little Arc at startup.
+    if (qEnvironmentVariableIsSet("ARC_DEV_LITTLE_ARC")) {
+        QTimer::singleShot(3000, [] {
+            auto text = qEnvironmentVariable("ARC_DEV_LITTLE_ARC");
+            Optional<URL::URL> url;
+            if (!text.isEmpty())
+                url = URL::Parser::basic_parse(StringView(text.toUtf8().constData(), static_cast<size_t>(text.toUtf8().size())));
+            open_little_arc(url);
+        });
+    }
+
     enable_sidebar_on_first_run();
     route_new_tab_to_command_bar();
     route_location_editing_to_command_bar();
+    route_links_from_other_apps_to_little_arc();
+    // Not for the self-test, which runs beside the real browser.
+    if (!qEnvironmentVariableIsSet("ARC_SELF_TEST"))
+        register_little_arc_hot_key();
     add_import_menu_items();
 }
 

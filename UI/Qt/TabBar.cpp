@@ -2121,6 +2121,15 @@ void TabWidget::set_vertical_sidebar_reserved_width(Optional<int> width)
 }
 
 // Fork hook (Arc)
+// Fork hook (Arc): see the header.
+void TabWidget::set_minimal_chrome_bar(QWidget* bar)
+{
+    m_minimal_chrome_bar = bar;
+    if (bar)
+        bar->setParent(this);
+    rebuild_layout();
+}
+
 void TabWidget::set_vertical_sidebar_widget(QWidget* widget)
 {
     m_vertical_sidebar_widget = widget;
@@ -2559,6 +2568,18 @@ void TabWidget::rebuild_layout()
     m_tab_bar->set_tab_layout(current_tab_layout());
     update_toolbar_placement();
 
+    if (m_minimal_chrome_bar) { // Fork hook (Arc): Little Arc's bar above the page, and nothing else.
+        m_main_layout->addWidget(m_minimal_chrome_bar);
+        m_main_layout->addWidget(m_stacked_widget, 1);
+        for (auto* widget : { m_tab_bar_row, static_cast<QWidget*>(m_toolbar_container), m_page_column, m_vertical_tab_bar_column, m_vertical_tabs_content, m_vertical_tabs_reserved_space, m_vertical_tabs_resize_handle, m_vertical_tabs_content_separator, static_cast<QWidget*>(m_tab_bar), static_cast<QWidget*>(m_new_tab_button), m_window_controls }) {
+            if (widget)
+                widget->hide();
+        }
+        m_minimal_chrome_bar->show();
+        m_stacked_widget->show();
+        return;
+    }
+
     if (m_tab_bar->tab_layout() != TabLayout::Horizontal && m_vertical_sidebar_widget) {
         // Fork hook (Arc): the sidebar runs the full window height and the toolbar sits above the page.
         rebuild_layout_for_vertical_tabs();
@@ -2706,7 +2727,7 @@ void TabWidget::set_resize_handle_property(char const* property, bool enabled)
 void TabWidget::update_vertical_tabs_resize_handle()
 {
     auto is_vertical = m_tab_bar->tab_layout() != TabLayout::Horizontal;
-    auto show_resize_handle = m_tab_bar_visible && is_vertical && m_vertical_tabs_expanded;
+    auto show_resize_handle = m_tab_bar_visible && is_vertical && m_vertical_tabs_expanded && !m_minimal_chrome_bar; // Fork hook (Arc): Little Arc
     m_vertical_tabs_resize_handle->setVisible(show_resize_handle);
     if (!show_resize_handle) {
         m_vertical_tabs_resize_handle->releaseMouse();
@@ -2735,7 +2756,7 @@ void TabWidget::update_vertical_tabs_content_separator()
 {
     auto* current = as_if<Tab>(m_stacked_widget->currentWidget());
     auto has_page_bookmarks_bar = current && current->has_bookmarks_bar_in_page();
-    auto show_content_separator = m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal && !has_page_bookmarks_bar;
+    auto show_content_separator = m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal && !has_page_bookmarks_bar && !m_minimal_chrome_bar;
     m_vertical_tabs_content_separator->setVisible(show_content_separator);
     if (!show_content_separator)
         return;
@@ -2881,6 +2902,10 @@ void TabWidget::update_tab_chrome_visibility()
 void TabWidget::update_web_view_frame(Tab& tab)
 {
     Optional<WebView::VerticalTabsPosition> sidebar_position;
+    if (m_minimal_chrome_bar) { // Fork hook (Arc): Little Arc's page has no tabs beside it.
+        tab.update_web_view_frame(false, {});
+        return;
+    }
     if (m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal)
         sidebar_position = m_vertical_tabs_position;
     tab.update_web_view_frame(m_tab_bar_visible, sidebar_position);
@@ -2911,7 +2936,7 @@ void TabWidget::update_chrome_style()
 
 void TabWidget::update_vertical_tabs_overlay_geometry()
 {
-    if (!m_tab_bar_visible || m_tab_bar->tab_layout() == TabLayout::Horizontal) {
+    if (m_minimal_chrome_bar || !m_tab_bar_visible || m_tab_bar->tab_layout() == TabLayout::Horizontal) { // Fork hook (Arc): Little Arc
         m_vertical_tab_bar_column->hide();
         return;
     }

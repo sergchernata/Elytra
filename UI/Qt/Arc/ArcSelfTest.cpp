@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Application.h>
@@ -11,6 +12,7 @@
 #include <UI/Qt/Arc/ArcSelfTest.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/LittleArc.h>
 #include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
@@ -172,6 +174,7 @@ private:
     void closing_a_tab_returns_to_the_one_before();
     void downloads_shelf_rows_rise_in();
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
+    void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -735,6 +738,135 @@ void SelfTest::leaving_a_playing_video_shows_it_in_picture_in_picture()
         s().close_tab(*video);
     if (other)
         s().close_tab(*other);
+    settle(300);
+}
+
+static QList<BrowserWindow*> little_arcs()
+{
+    QList<BrowserWindow*> windows;
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = qobject_cast<BrowserWindow*>(widget); window && window->isVisible() && is_little_arc(*window))
+            windows.append(window);
+    }
+    return windows;
+}
+
+// Little Arc: a small window for one page, with no sidebar; "Open in" (Cmd+O) moves the page, as it is, into a space.
+void SelfTest::little_arc_opens_a_page_and_moves_it_into_a_space()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty()) {
+        check(false, "the test pages are served (run-arc-self-test.sh sets ARC_SELF_TEST_HTTP_PORT)");
+        return;
+    }
+    s().switch_to_space(m_alpha);
+    settle(200);
+    auto url = QString("http://localhost:%1/landed.html").arg(port);
+    QPointer<BrowserWindow> little = &open_little_arc(URL::Parser::basic_parse(StringView(url.toUtf8().constData(), static_cast<size_t>(url.toUtf8().size()))));
+    QPointer<Tab> tab = little ? little->current_tab() : nullptr;
+    check(wait_until([&] { return tab && tab->title() == "Landed" && !tab->is_loading(); }, 5000), "a Little Arc opens the page");
+    check(little && !ArcSidebar::for_window(*little) && little->width() < window().width(), "in a small window with no sidebar");
+
+    // Only its bar and the page: the page fills the window's width, with nothing of the tab column over it.
+    if (little && tab) {
+        auto& view = tab->view();
+        auto left = view.mapTo(little.data(), QPoint(0, 0)).x();
+        check(left <= 4 && view.width() >= little->width() - 8, "its page fills the window (inside its frame)",
+            QString("page at x %1, %2 wide in %3").arg(left).arg(view.width()).arg(little->width()));
+        bool covered = false;
+        for (auto* widget : little->findChildren<QWidget*>()) {
+            if (!widget->isVisible() || widget == &view || view.isAncestorOf(widget) || widget->isAncestorOf(&view) || widget->objectName() == "ArcLittleArcBar"
+                || widget->parentWidget() == nullptr || widget->window() != little.data())
+                continue;
+            auto bar = little->findChild<QWidget*>("ArcLittleArcBar");
+            if (bar && bar->isAncestorOf(widget))
+                continue;
+            auto rect = QRect(widget->mapTo(little.data(), QPoint(0, 0)), widget->size());
+            auto page = QRect(view.mapTo(little.data(), QPoint(0, 0)), view.size());
+            if (rect.intersects(page) && rect.width() < page.width()) {
+                covered = true;
+                check(false, "nothing covers the page", QString("%1 %2").arg(widget->metaObject()->className(), widget->objectName()));
+                break;
+            }
+        }
+        if (!covered)
+            check(true, "nothing covers the page");
+    }
+
+    // Open in (Cmd+O): the page moves into the most recent space as it is (not loaded again), and the Little Arc closes.
+    if (little)
+        move_little_arc_to_space(*little);
+    check(wait_until([&] { return !little || !little->isVisible(); }, 3000), "Open in closes the Little Arc");
+    check(tab && s().m_tabs.index_of(tab.data()) >= 0 && s().today_tabs(m_alpha).contains(tab.data()), "and moves its page into the most recent space's Today");
+    check(tab && s().current_space_id() == m_alpha && window().current_tab() == tab.data() && tab->title() == "Landed", "showing it, as it was");
+    if (tab)
+        s().close_tab(*tab);
+    settle(200);
+
+    // Into another space (with another profile, where it opens again in that profile's session).
+    little = &open_little_arc(URL::Parser::basic_parse(StringView(url.toUtf8().constData(), static_cast<size_t>(url.toUtf8().size()))));
+    tab = little ? little->current_tab() : nullptr;
+    wait_until([&] { return tab && tab->title() == "Landed" && !tab->is_loading(); }, 5000);
+    if (little)
+        move_little_arc_to_space(*little, m_beta);
+    auto landed_in_beta = [&] {
+        for (auto* today : s().today_tabs(m_beta)) {
+            if (ArcSidebar::url_of(*today).endsWith("/landed.html"))
+                return today;
+        }
+        return static_cast<Tab*>(nullptr);
+    };
+    check(wait_until([&] { return (!little || !little->isVisible()) && landed_in_beta() && s().current_space_id() == m_beta && window().current_tab() == landed_in_beta(); }, 5000),
+        "or into a chosen space, shown there", [&] {
+            QStringList parts;
+            parts << QString("little visible %1").arg(little && little->isVisible());
+            parts << QString("space %1 (beta %2)").arg(s().current_space_id() == m_beta).arg(m_beta);
+            for (auto* today : s().today_tabs(m_beta))
+                parts << ArcSidebar::url_of(*today);
+            parts << QString("current %1").arg(window().current_tab() ? ArcSidebar::url_of(*window().current_tab()) : QString());
+            for (auto* any : s().tabs())
+                parts << QString("tab %1 space %2").arg(ArcSidebar::url_of(*any), ArcSidebar::space_of(*any));
+            return parts.join(" | ");
+        }());
+    tab = landed_in_beta();
+
+    // With nothing to open, it asks what to look up.
+    QPointer<BrowserWindow> empty = &open_little_arc();
+    check(wait_until([&] {
+        auto* bar = empty ? empty->findChild<CommandBar*>(QString(), Qt::FindDirectChildrenOnly) : nullptr;
+        return bar && bar->isVisible();
+    }, 2000), "an empty Little Arc opens the command bar");
+    if (empty)
+        empty->close();
+
+    // A link opened from another app opens in one too.
+    auto before = little_arcs().size();
+    Application::the().on_open_file(URL::Parser::basic_parse(StringView(url.toUtf8().constData(), static_cast<size_t>(url.toUtf8().size()))).value());
+    check(wait_until([&] {
+        for (auto* little_arc : little_arcs()) {
+            if (little_arc->current_tab() && little_arc->current_tab()->title() == "Landed")
+                return true;
+        }
+        return false;
+    }, 5000), "a link from another app opens in a Little Arc", QString("%1 Little Arcs").arg(little_arcs().size()));
+    for (auto* window : little_arcs())
+        window->close();
+    wait_until([&] { return little_arcs().size() == 0; }, 2000);
+    before = little_arcs().size();
+
+    // Cmd+Option+N opens one from the browser window.
+    auto* target = window().current_tab() ? static_cast<QWidget*>(&window().current_tab()->view()) : &window();
+    QKeyEvent override_event(QEvent::ShortcutOverride, Qt::Key_N, Qt::ControlModifier | Qt::AltModifier);
+    QApplication::sendEvent(target, &override_event);
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier | Qt::AltModifier);
+    QApplication::sendEvent(target, &press);
+    check(wait_until([&] { return little_arcs().size() == before + 1; }, 2000), "Cmd+Option+N opens a Little Arc");
+    for (auto* window : little_arcs())
+        window->close();
+
+    if (tab)
+        s().close_tab(*tab);
+    s().switch_to_space(m_alpha);
     settle(300);
 }
 
@@ -1661,6 +1793,7 @@ int SelfTest::run()
     closing_a_tab_returns_to_the_one_before();
     downloads_shelf_rows_rise_in();
     leaving_a_playing_video_shows_it_in_picture_in_picture();
+    little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
