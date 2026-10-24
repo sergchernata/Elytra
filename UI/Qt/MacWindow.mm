@@ -394,6 +394,25 @@ void make_appkit_window_resizable(QWidget& widget)
     view.window.styleMask |= NSWindowStyleMaskResizable;
 }
 
+// Fork hook (Arc): see the header.
+void make_appkit_window_clear_with_shadow(QWidget& widget)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (!view || !view.window)
+        return;
+    view.window.opaque = NO;
+    view.window.backgroundColor = NSColor.clearColor;
+    view.window.hasShadow = YES;
+    [view.window invalidateShadow];
+}
+
+void invalidate_appkit_window_shadow(QWidget& widget)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (view && view.window)
+        [view.window invalidateShadow];
+}
+
 void keep_appkit_window_visible_while_inactive(QWidget& widget)
 {
     auto* view = reinterpret_cast<NSView*>(widget.winId());

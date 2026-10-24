@@ -19,6 +19,7 @@
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
+#include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/Arc/Toast.h>
@@ -216,13 +217,12 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_traffic_lights = new TrafficLights(m_top_strip);
     m_traffic_lights->setProperty("arcBrowserWindow", QVariant::fromValue<QWidget*>(&window));
     m_traffic_lights->set_drawn(false);
-    // Sidebar toggle, right of the window controls as in Arc (floating panel only).
+    // Sidebar toggle, right of the window controls as in Arc.
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
     m_sidebar_toggle->set_symbol_point_size(18); // Same size as the toolbar's sidebar button.
     m_sidebar_toggle->setFixedSize(28, 28);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
-    m_sidebar_toggle->hide();
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     layout->addWidget(m_top_strip);
 
@@ -275,6 +275,40 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_tree = new SidebarTree(this);
     m_tree->setModel(m_model);
     layout->addWidget(m_tree, 1);
+
+    // The media player rests in this slot, and grows up over the list from it (see MiniPlayer.h).
+    m_mini_player_slot = new QWidget(this);
+    m_mini_player_slot->setFixedHeight(MiniPlayer::CONTROLS_HEIGHT);
+    m_mini_player_slot->hide();
+    m_mini_player_slot->installEventFilter(this);
+    layout->addWidget(m_mini_player_slot);
+    m_mini_player = new MiniPlayer(m_panel);
+    m_mini_player->hide();
+    connect(m_mini_player, &MiniPlayer::go_to_tab, this, [this] {
+        if (m_player_tab)
+            activate(*m_player_tab);
+    });
+    connect(m_mini_player, &MiniPlayer::toggle_playback, this, [this] {
+        if (!m_player_tab)
+            return;
+        m_player_tab->view().toggle_playing_media();
+        // A muted tab's sound can't tell whether it's playing, so the player goes by what it was asked to do.
+        if (m_player_tab->view().page_mute_state() == Web::HTML::MuteState::Muted) {
+            m_player_playing = !m_player_playing;
+            m_mini_player->set_playing(m_player_playing);
+        }
+    });
+    connect(m_mini_player, &MiniPlayer::toggle_mute, this, [this] {
+        if (!m_player_tab)
+            return;
+        m_player_tab->view().toggle_page_mute_state();
+        schedule_mini_player_update();
+    });
+    connect(m_mini_player, &MiniPlayer::picture_in_picture, this, [this] {
+        if (m_player_tab)
+            m_player_tab->view().enter_picture_in_picture_for_playing_video();
+    });
+    connect(m_mini_player, &MiniPlayer::dismiss, this, [this] { dismiss_mini_player(); });
 
     // Arc's update notice: a pill above the bottom bar once a newer release is ready (see UpdateChecker).
     m_update_button = new QPushButton(this);
@@ -1102,6 +1136,15 @@ void ArcSidebar::watch_tab(Tab& tab)
     };
     connect(&tab, &Tab::title_changed, this, refresh);
     connect(&tab, &Tab::favicon_changed, this, refresh);
+    connect(&tab, &Tab::audio_play_state_changed, this, [this] { schedule_mini_player_update(); });
+    connect(&tab, &Tab::title_changed, this, [this, guarded] {
+        if (guarded && guarded == m_player_tab)
+            schedule_mini_player_update();
+    });
+    connect(&tab, &Tab::favicon_changed, this, [this, guarded] {
+        if (guarded && guarded == m_player_tab)
+            schedule_mini_player_update();
+    });
     connect(&tab, &Tab::loading_changed, this, [this, guarded, refresh] {
         // The empty page (shown when a space empties) navigated somewhere is a tab like any other now.
         if (guarded && guarded != m_spare_tab && guarded->property(BLANK_PROPERTY).toBool() && tab_shows_a_page(url_of(*guarded))) {
@@ -1410,9 +1453,112 @@ void ArcSidebar::update_auto_picture_in_picture(Tab* previous, Tab& current)
     }
 }
 
+// As in Arc: a tab playing sound out of sight gets a player at the bottom of the sidebar, unless its video is showing
+// in Picture-in-Picture. It stays (paused or not) until it's closed, or the tab is shown again or closed.
+void ArcSidebar::schedule_mini_player_update()
+{
+    if (m_mini_player_update_scheduled)
+        return;
+    m_mini_player_update_scheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        m_mini_player_update_scheduled = false;
+        update_mini_player();
+    });
+}
+
+void ArcSidebar::picture_in_picture_windows_changed()
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = qobject_cast<BrowserWindow*>(widget)) {
+            if (auto* sidebar = for_window(*window))
+                sidebar->schedule_mini_player_update();
+        }
+    }
+}
+
+static bool is_playing_sound(Tab& tab)
+{
+    return tab.view().audio_play_state() == Web::HTML::AudioPlayState::Playing;
+}
+
+void ArcSidebar::update_mini_player()
+{
+    auto* current = m_window ? m_window->current_tab() : nullptr;
+    if (m_player_tab && (m_player_tab == current || m_tabs.index_of(m_player_tab) < 0 || m_player_tab->property(CLOSING_PROPERTY).toBool()))
+        m_player_tab = nullptr;
+    if (!m_player_tab) {
+        for (auto* tab : tabs()) {
+            if (tab != current && !tab->property(CLOSING_PROPERTY).toBool() && is_playing_sound(*tab)) {
+                m_player_tab = tab;
+                m_player_playing = true;
+                break;
+            }
+        }
+    }
+
+    // Leaving Picture-in-Picture with Close stops the video, and with Minimize (or from the page) it plays on: which
+    // one is known once the page has had a moment to stop. Only a video still playing then gets the player.
+    if (m_player_tab) {
+        auto has_window = m_player_tab->view().has_picture_in_picture_window();
+        if (m_player_tab_had_window && !has_window && !m_player_waits_for_window_close) {
+            m_player_waits_for_window_close = true;
+            QTimer::singleShot(350, this, [this, tab = m_player_tab] {
+                m_player_waits_for_window_close = false;
+                if (tab && tab == m_player_tab && !is_playing_sound(*tab))
+                    m_player_tab = nullptr;
+                update_mini_player();
+            });
+        }
+        m_player_tab_had_window = has_window;
+    } else {
+        m_player_tab_had_window = false;
+    }
+
+    auto shows = m_player_tab && !m_player_waits_for_window_close && !m_player_tab->view().has_picture_in_picture_window();
+    if (shows) {
+        m_mini_player->set_title(m_player_tab->title());
+        m_mini_player->set_icon(m_player_tab->favicon());
+        auto muted = m_player_tab->view().page_mute_state() == Web::HTML::MuteState::Muted;
+        if (!muted)
+            m_player_playing = is_playing_sound(*m_player_tab);
+        m_mini_player->set_playing(m_player_playing);
+        m_mini_player->set_muted(muted);
+    }
+    if (m_mini_player_slot->isVisible() != shows) {
+        m_mini_player_slot->setVisible(shows);
+        m_panel->layout()->activate();
+    }
+    if (m_mini_player->isVisible() != shows) {
+        if (shows) {
+            place_mini_player();
+            m_mini_player->show();
+            m_mini_player->raise();
+        } else {
+            m_mini_player->hide();
+        }
+    }
+}
+
+void ArcSidebar::place_mini_player()
+{
+    m_mini_player->set_slot(m_mini_player_slot->geometry());
+}
+
+// Its close button stops the sound, as in Arc.
+void ArcSidebar::dismiss_mini_player()
+{
+    if (m_player_tab && m_player_playing)
+        m_player_tab->view().toggle_playing_media();
+    m_player_tab = nullptr;
+    m_mini_player->hide();
+    m_mini_player_slot->hide();
+}
+
 void ArcSidebar::before_tab_closes(Tab& tab)
 {
     tab.setProperty(CLOSING_PROPERTY, true);
+    if (&tab == m_player_tab)
+        schedule_mini_player_update();
     if (m_window->current_tab() != &tab)
         return;
     auto space = space_of(tab);
@@ -2012,6 +2158,7 @@ void ArcSidebar::on_current_tab_changed(int index)
     m_recent_tabs.prepend(tab);
     restyle_if_tint_changed(*tab);
     update_auto_picture_in_picture(previous, *tab);
+    schedule_mini_player_update();
 
     auto space = space_of(*tab);
     if (!m_switching_space && !space.isEmpty() && space != m_space_id && SpaceStore::the().space(space)) {
@@ -2800,7 +2947,9 @@ void ArcSidebar::dock_panel()
     m_panel->setGeometry(rect());
     m_panel->show();
     m_traffic_lights->set_drawn(false);
-    m_sidebar_toggle->hide(); // Docked, the toolbar's own sidebar button does this.
+    // Beside the real window controls.
+    place_window_controls(mapTo(window(), QPoint(0, 0)), true);
+    m_sidebar_toggle->show();
     apply_toolbar_inset();
     update();
 }
@@ -2878,7 +3027,7 @@ void ArcSidebar::show_flat_host(QRect panel_rect)
     m_panel->show();
     place_window_controls(panel_rect.topLeft(), true);
     m_traffic_lights->set_drawn(true);
-    m_sidebar_toggle->hide();
+    m_sidebar_toggle->show();
     m_host->move(panel_rect.topLeft() - QPoint(FloatingSidebarHost::SHADOW, FloatingSidebarHost::SHADOW));
 }
 
@@ -3102,6 +3251,8 @@ void ArcSidebar::resizeEvent(QResizeEvent* event)
         // Remembered so hiding can lift the sidebar off from exactly where it was.
         if (width() > 80 && m_window)
             m_last_docked_rect = QRect(mapTo(m_window, QPoint(0, 0)), size());
+        if (m_mode_set && m_mode == Mode::Docked && m_window)
+            place_window_controls(mapTo(m_window, QPoint(0, 0)), true);
     }
     if (m_shelf && m_shelf->isVisible())
         position_shelf();
@@ -3382,6 +3533,10 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_mini_player_slot && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
+        place_mini_player();
+        return false;
+    }
     if (event->type() == QEvent::Wheel && m_tree && (watched == m_tree->viewport() || watched == m_panel))
         return handle_wheel(*static_cast<QWheelEvent*>(event));
     if (m_tree && watched == m_tree->verticalScrollBar()) {

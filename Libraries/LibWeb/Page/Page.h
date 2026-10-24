@@ -404,6 +404,8 @@ public:
     // Fork hook (Arc): Picture-in-Picture for the page's playing video as the user leaves its tab, and out again.
     void enter_picture_in_picture_for_playing_video();
     void exit_picture_in_picture();
+    // Fork hook (Arc): pauses the page's playing media, or plays what that paused, for the sidebar's player.
+    void toggle_playing_media();
     void toggle_media_controls_state();
     void set_picture_in_picture_window_controls_in_use(bool);
 
@@ -574,6 +576,7 @@ private:
     u64 m_next_emulated_position_data_observer_id { 0 };
 
     Vector<UniqueNodeID> m_media_elements;
+    Vector<UniqueNodeID> m_media_paused_by_user_agent; // Fork hook (Arc): see toggle_playing_media().
     Vector<UniqueNodeID> m_canvas_elements;
     Vector<GC::Ref<HTML::OffscreenCanvas>> m_offscreen_canvases_pending_placeholder_commit;
     Optional<UniqueNodeID> m_media_context_menu_element_id;

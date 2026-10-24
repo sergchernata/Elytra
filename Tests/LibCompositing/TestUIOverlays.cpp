@@ -40,6 +40,8 @@ TEST_CASE(overlays_survive_ipc)
     overlays.picture_in_picture_controls = PictureInPictureControlsState {
         .shown = true,
         .hovered_control = PictureInPictureControl::BackToTab,
+        .font_family = "Inter"_string,
+        .caption = "www.youtube.com"_string,
     };
 
     auto decoded = MUST(decode_overlays([&](IPC::Encoder& encoder) { return encoder.encode(overlays); }));

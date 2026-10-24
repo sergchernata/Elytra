@@ -1942,6 +1942,13 @@ void Tab::update_vertical_tabs_toolbar_button_placement()
 {
     auto show_left_button = m_vertical_tabs_enabled && m_vertical_tabs_position == WebView::VerticalTabsPosition::Left;
     auto show_right_button = m_vertical_tabs_enabled && m_vertical_tabs_position == WebView::VerticalTabsPosition::Right;
+    // Fork hook (Arc): the sidebar has its own toggle beside the window buttons while it shows.
+    if (hides_sidebar_toggle_while_expanded && WebView::Application::settings().tab_settings().vertical_tabs_expanded) {
+        show_left_button = false;
+        show_right_button = false;
+        if (m_sidebar_toggle_navigation_spacer)
+            m_sidebar_toggle_navigation_spacer->changeSize(0, 0, QSizePolicy::Fixed, QSizePolicy::Minimum);
+    }
 
     if (m_left_toggle_vertical_tabs_expanded_button)
         m_left_toggle_vertical_tabs_expanded_button->setVisible(show_left_button);

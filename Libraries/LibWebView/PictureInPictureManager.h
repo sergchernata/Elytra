@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
@@ -38,6 +39,9 @@ public:
 
     bool document_has_open_window(CanonicalNavigable const&) const;
     void active_documents_did_change();
+
+    // Fork hook (Arc): a window opened or closed (the sidebar's player shows while none is open for its tab).
+    static inline void (*on_windows_changed)() = nullptr;
 
 private:
     struct Window {

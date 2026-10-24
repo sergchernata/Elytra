@@ -1777,6 +1777,41 @@ void Page::enter_picture_in_picture_for_playing_video()
     WebIDL::mark_promise_as_handled(best->request_picture_in_picture(HTML::HTMLVideoElement::PictureInPictureRequester::UserAgent));
 }
 
+// Fork hook (Arc): the sidebar's player pauses whatever the page is playing, and plays the same media again.
+void Page::toggle_playing_media()
+{
+    Vector<GC::Ref<HTML::HTMLMediaElement>> playing;
+    for_each_media_element([&](auto& media_element) {
+        if (media_element.potentially_playing())
+            playing.append(media_element);
+    });
+    if (!playing.is_empty()) {
+        m_media_paused_by_user_agent.clear();
+        for (auto& media_element : playing) {
+            media_element->pause();
+            m_media_paused_by_user_agent.append(media_element->unique_id());
+        }
+        return;
+    }
+
+    // Otherwise what it paused, or else whatever was playing most of the way: the paused media that's furthest in.
+    bool resumed = false;
+    GC::Ptr<HTML::HTMLMediaElement> furthest;
+    for_each_media_element([&](auto& media_element) {
+        if (!media_element.paused() || media_element.ended())
+            return;
+        if (m_media_paused_by_user_agent.contains_slow(media_element.unique_id())) {
+            media_element.play_from_user_interaction();
+            resumed = true;
+        } else if (media_element.current_time() > 0 && (!furthest || media_element.current_time() > furthest->current_time())) {
+            furthest = &media_element;
+        }
+    });
+    m_media_paused_by_user_agent.clear();
+    if (!resumed && furthest)
+        furthest->play_from_user_interaction();
+}
+
 void Page::exit_picture_in_picture()
 {
     if (!has_local_traversable())

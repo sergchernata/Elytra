@@ -8,6 +8,7 @@
 #include <AK/Platform.h>
 #include <LibTest/TestCase.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
+#include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
@@ -938,4 +939,80 @@ TEST_CASE(sidebar_scroll_bar_fades_by_painting_its_handle)
     bar->set_opacity(0);
     EXPECT_EQ(handle_alpha(), 0);
     EXPECT(tree.styleSheet() + bar->styleSheet() == style_sheets);
+}
+
+// Arc's sidebar media player: it rests in its slot, folded to its controls, and hovering slides it up over the list
+// above, its bottom edge staying put.
+static void wait_ms(int ms)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(5);
+    }
+}
+
+TEST_CASE(mini_player_rests_folded_in_its_slot)
+{
+    QWidget parent;
+    parent.resize(240, 400);
+    MiniPlayer player(&parent);
+    player.set_slot(QRect(8, 300, 224, MiniPlayer::CONTROLS_HEIGHT));
+    parent.show();
+    player.show();
+    EXPECT_EQ(player.geometry(), QRect(8, 300, 224, MiniPlayer::CONTROLS_HEIGHT));
+    EXPECT(!player.close_button()->isVisible());
+    EXPECT(!player.picture_in_picture_button()->isVisible());
+    // The five controls are spread across it, in one row.
+    auto first = player.icon_button()->geometry();
+    auto last = player.mute_button()->geometry();
+    EXPECT(first.left() < 20 && last.right() > 204);
+    EXPECT_EQ(first.top(), last.top());
+    EXPECT(qAbs(player.play_button()->geometry().center().x() - player.width() / 2) <= 1);
+}
+
+TEST_CASE(mini_player_slides_up_on_hover_and_back)
+{
+    QWidget parent;
+    parent.resize(240, 400);
+    MiniPlayer player(&parent);
+    player.set_slot(QRect(8, 300, 224, MiniPlayer::CONTROLS_HEIGHT));
+    parent.show();
+    player.show();
+    auto bottom = player.geometry().bottom();
+
+    player.set_revealed(true);
+    wait_ms(MiniPlayer::REVEAL_MS / 2);
+    EXPECT(player.height() > MiniPlayer::CONTROLS_HEIGHT && player.height() < MiniPlayer::CONTROLS_HEIGHT + MiniPlayer::TITLE_HEIGHT);
+    EXPECT_EQ(player.geometry().bottom(), bottom);
+    wait_ms(MiniPlayer::REVEAL_MS);
+    EXPECT_EQ(player.height(), MiniPlayer::CONTROLS_HEIGHT + MiniPlayer::TITLE_HEIGHT);
+    EXPECT_EQ(player.geometry().bottom(), bottom);
+    EXPECT(player.close_button()->isVisible());
+    // The title row sits right above the controls.
+    EXPECT(player.close_button()->geometry().bottom() < player.mute_button()->geometry().top());
+
+    player.set_revealed(false);
+    wait_ms(MiniPlayer::REVEAL_MS + 100);
+    EXPECT_EQ(player.height(), MiniPlayer::CONTROLS_HEIGHT);
+    EXPECT_EQ(player.geometry().bottom(), bottom);
+    EXPECT(!player.close_button()->isVisible());
+}
+
+TEST_CASE(mini_player_shows_play_state_and_mute)
+{
+    QWidget parent;
+    MiniPlayer player(&parent);
+    player.set_playing(true);
+    EXPECT_EQ(player.play_button()->symbol(), "pause.fill");
+    player.set_playing(false);
+    EXPECT_EQ(player.play_button()->symbol(), "play.fill");
+    player.set_muted(true);
+    EXPECT_EQ(player.mute_button()->symbol(), "speaker.slash.fill");
+    player.set_muted(false);
+    EXPECT_EQ(player.mute_button()->symbol(), "speaker.fill");
+    // A page without an icon shows a globe.
+    player.set_icon({});
+    EXPECT_EQ(player.icon_button()->symbol(), "globe");
 }

@@ -15,6 +15,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/TabBar.h/.cpp` (Little Arc) | `set_minimal_chrome_bar()` and `m_minimal_chrome_bar`: the branch at the top of `rebuild_layout()` (only that bar above the page), and checks in `update_web_view_frame()`, `update_vertical_tabs_overlay_geometry()`, `update_vertical_tabs_resize_handle()` and the content separator's visibility |
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
+| `UI/Qt/Tab.h/.cpp` (sidebar button) | `Tab::hides_sidebar_toggle_while_expanded`, checked in `update_vertical_tabs_toolbar_button_placement()`: the docked Arc sidebar has its own toggle beside the window buttons |
 | `UI/Qt/Tab.h/.cpp` (spinner) | `Tab::animates_loading_spinner`, checked in `set_loading()`: the Arc sidebar shows no spinner, so the 80 ms timer stays off |
 | `UI/Qt/TabBar.cpp` (sheen) | `play_load_sheen()` returns early while the tab bar is hidden |
 | `UI/Qt/Tab.h/.cpp` | `Tab::on_focus_location_editor`, checked at the top of `focus_location_editor()` (Cmd+L and upstream's other routes into the location field open the command bar instead; the field itself stays, hidden behind Arc's address bar) |
@@ -58,7 +59,30 @@ no user activation; these hooks carry it. All are marked `Fork hook (Arc)`.
 | `LibWeb/Page/Page.h/.cpp` | `enter_picture_in_picture_for_playing_video()` (the largest playing video) and `exit_picture_in_picture()` |
 | `Services/WebContent/WebContentServer.ipc`, `ConnectionFromClient.h/.cpp` | the two messages above |
 | `LibWebView/WebContentPage.h/.cpp` | `enter_picture_in_picture_for_playing_video()` grants one browser-initiated window (`consume_user_agent_picture_in_picture_grant()`, checked beside `consume_transient_user_activation()` where a window is opened) |
-| `LibWebView/ViewImplementation.h/.cpp` | `enter_picture_in_picture_for_playing_video()`, `exit_picture_in_picture()`, `has_picture_in_picture_window()` |
+| `LibWebView/ViewImplementation.h/.cpp` | `enter_picture_in_picture_for_playing_video()`, `exit_picture_in_picture()`, `has_picture_in_picture_window()`, `toggle_playing_media()`, `set_picture_in_picture_controls_caption()` |
+
+### Arc's Picture-in-Picture window and sidebar player
+
+The window looks like Arc's, and its Minimize leaves the video playing with a player in the sidebar (`MiniPlayer`).
+
+| File | Hook |
+| --- | --- |
+| `LibCompositing/PictureInPictureControls.h` | Arc's bar of controls: `PictureInPictureControl::Minimize`, and labelled buttons along the top (icons only in a narrow window) |
+| `LibCompositing/UIOverlays.h/.cpp` | `PictureInPictureControlsState::font_family` and `caption` (the site's name), and their IPC |
+| `Services/Compositor/PictureInPictureControls.cpp` | rewritten to paint Arc's frosted buttons, labels and caption |
+| `LibWebView/ViewImplementation.cpp` | Minimize's tooltip; the caption and font in `update_ui_overlays()` |
+| `UI/Qt/PictureInPictureWindow.cpp` | Minimize (`on_close(VideoKeepsPlaying::Yes)`), the caption, and on macOS a clear, shadowed window with a rounded page |
+| `UI/Qt/MacWindow.h/.mm` | `make_appkit_window_clear_with_shadow()`, `invalidate_appkit_window_shadow()` |
+| `LibWeb/HTML/MediaControls.html/.css/.cpp` | the player's skip buttons (`data-option="picture-in-picture-player"`), a rounded pause icon, and the `picture-in-picture-player` layout |
+| `LibWeb/Page/Page.h/.cpp`, `WebContentServer.ipc`, `ConnectionFromClient.h/.cpp` | `toggle_playing_media()` (pauses what plays, plays what it paused) |
+| `LibWebView/PictureInPictureManager.h/.cpp` | `on_windows_changed`, called as a window opens or closes |
+| `Tests/LibCompositing/TestPictureInPictureControls.cpp`, `TestUIOverlays.cpp`, `Tests/LibWebView/TestPictureInPictureWindowControls.cpp` | updated for the new controls |
+
+### Other
+
+| File | Hook |
+| --- | --- |
+| `README.md` | Elytra's introduction above upstream's README |
 
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
 contents of upstream's vertical tab column while reusing its sizing, collapsing and window controls.

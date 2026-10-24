@@ -44,6 +44,8 @@ ErrorOr<void> encode(Encoder& encoder, Compositing::PictureInPictureControlsStat
 {
     TRY(encoder.encode(state.shown));
     TRY(encoder.encode(state.hovered_control));
+    TRY(encoder.encode(state.font_family));
+    TRY(encoder.encode(state.caption));
     return {};
 }
 
@@ -53,6 +55,8 @@ ErrorOr<Compositing::PictureInPictureControlsState> decode(Decoder& decoder)
     return Compositing::PictureInPictureControlsState {
         .shown = TRY(decoder.decode<bool>()),
         .hovered_control = TRY(decode_overlay_action<Compositing::PictureInPictureControl>(decoder, Compositing::picture_in_picture_control_from_underlying)),
+        .font_family = TRY(decoder.decode<Optional<String>>()),
+        .caption = TRY(decoder.decode<String>()),
     };
 }
 

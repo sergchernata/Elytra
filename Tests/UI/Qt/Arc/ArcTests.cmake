@@ -19,6 +19,7 @@ target_sources(TestArcWidgets PRIVATE
     "${ARC_SOURCE_DIR}/CustomGlyphs.cpp"
     "${ARC_SOURCE_DIR}/DownloadsFormat.cpp"
     "${ARC_SOURCE_DIR}/FloatingPanel.cpp"
+    "${ARC_SOURCE_DIR}/MiniPlayer.cpp"
     "${ARC_SOURCE_DIR}/SidebarTree.cpp"
     "${ARC_SOURCE_DIR}/SpaceSlide.cpp"
     "${ARC_SOURCE_DIR}/SymbolButton.cpp"

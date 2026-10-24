@@ -1975,6 +1975,8 @@ static StringView picture_in_picture_control_tooltip(Compositing::PictureInPictu
         return "Back to tab"sv;
     case Compositing::PictureInPictureControl::Close:
         return "Close"sv;
+    case Compositing::PictureInPictureControl::Minimize:
+        return "Minimize"sv;
     }
     VERIFY_NOT_REACHED();
 }
@@ -2067,6 +2069,16 @@ bool ViewImplementation::handle_picture_in_picture_controls_mouse_event(Web::Mou
     return was_pressing || pointer_state.is_pressing();
 }
 
+// Fork hook (Arc): see the header.
+void ViewImplementation::set_picture_in_picture_controls_caption(String caption)
+{
+    if (m_picture_in_picture_controls_caption == caption)
+        return;
+    m_picture_in_picture_controls_caption = move(caption);
+    if (m_has_picture_in_picture_controls)
+        update_ui_overlays();
+}
+
 void ViewImplementation::set_picture_in_picture_controls_shown(bool shown)
 {
     if (m_picture_in_picture_controls_shown == shown)
@@ -2136,6 +2148,8 @@ void ViewImplementation::update_ui_overlays()
         overlays.picture_in_picture_controls = Compositing::PictureInPictureControlsState {
             .shown = picture_in_picture_controls_are_shown(),
             .hovered_control = m_picture_in_picture_controls_pointer_state.hovered_action(),
+            .font_family = Application::the().ui_font_family(),
+            .caption = m_picture_in_picture_controls_caption,
         };
     }
     Application::the().update_compositor_ui_overlays(page().compositor_context_id(), overlays);
@@ -2399,6 +2413,12 @@ void ViewImplementation::exit_picture_in_picture()
 {
     if (has_traversable())
         page().async_exit_picture_in_picture();
+}
+
+void ViewImplementation::toggle_playing_media()
+{
+    if (has_traversable())
+        page().async_toggle_playing_media();
 }
 
 bool ViewImplementation::has_picture_in_picture_window() const

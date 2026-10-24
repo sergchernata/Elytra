@@ -221,11 +221,15 @@ public:
     void update_screen_rects();
     void set_scales_frames_to_fit(bool scales_frames_to_fit) { m_scales_frames_to_fit = scales_frames_to_fit; }
     void enable_picture_in_picture_controls();
+    // Fork hook (Arc): the site the video is from, shown between the controls.
+    void set_picture_in_picture_controls_caption(String);
     // Fork hook (Arc): Picture-in-Picture for the page's playing video as the user leaves its tab, and out again on
     // the way back.
     void enter_picture_in_picture_for_playing_video();
     void exit_picture_in_picture();
     bool has_picture_in_picture_window() const;
+    // Fork hook (Arc): pauses the page's playing media, or plays what that paused (the sidebar's player).
+    void toggle_playing_media();
     void enqueue_input_event(Web::InputEvent);
     // The page reporting on an event must be the one handling it.
     void did_finish_handling_input_event(Badge<WebContentPage>, WebContentPage const& reporting_page, u64 event_id, Web::EventResult event_result);
@@ -917,6 +921,7 @@ protected:
     Compositing::OverlayPointerState<Compositing::PausedDebuggerOverlayAction> m_debugger_overlay_pointer_state;
     bool m_has_picture_in_picture_controls { false };
     bool m_picture_in_picture_controls_shown { false };
+    String m_picture_in_picture_controls_caption;
     bool m_picture_in_picture_player_controls_shown { false };
     Compositing::OverlayPointerState<Compositing::PictureInPictureControl> m_picture_in_picture_controls_pointer_state;
     RefPtr<Core::Timer> m_picture_in_picture_controls_hide_timer;

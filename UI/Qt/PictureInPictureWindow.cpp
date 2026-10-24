@@ -12,6 +12,8 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QTimer>
 #include <QNativeGestureEvent>
 #include <QResizeEvent>
 #include <QScreen>
@@ -36,6 +38,8 @@ namespace Ladybird {
 
 static constexpr int screen_edge_margin = 16;
 static constexpr int resize_margin = 6;
+// Fork hook (Arc): the same radius as the page's rounded layer.
+[[maybe_unused]] static constexpr int corner_radius = 10;
 
 static Qt::WindowFlags window_flags()
 {
@@ -110,8 +114,23 @@ public:
                 if (on_close)
                     on_close(VideoKeepsPlaying::No);
                 break;
+            case Compositing::PictureInPictureControl::Minimize:
+                // Fork hook (Arc): the video keeps playing in its tab, which stays where it is.
+                if (on_close)
+                    on_close(VideoKeepsPlaying::Yes);
+                break;
             }
         };
+        // Fork hook (Arc): the site the video is from, between the controls.
+        if (auto host = owner_view.url().host(); host.has_value())
+            m_view->set_picture_in_picture_controls_caption(host->serialize());
+
+#if defined(AK_OS_MACOS)
+        // Fork hook (Arc): rounded corners and a shadow. The window itself is clear, the page's layer is rounded, and
+        // a rounded shape painted under it gives AppKit the outline to cast the shadow from.
+        setAttribute(Qt::WA_TranslucentBackground);
+        m_view->set_has_rounded_corners(true);
+#endif
 
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
@@ -125,6 +144,7 @@ public:
 #if defined(AK_OS_MACOS)
         // A frameless window cannot be resized from its edges on macOS unless AppKit is told it is resizable.
         make_appkit_window_resizable(*this);
+        make_appkit_window_clear_with_shadow(*this);
 #endif
         set_size_limits(video_size);
         lock_aspect_ratio();
@@ -313,6 +333,19 @@ private:
 
         *result = TRUE;
         return true;
+    }
+#endif
+
+#if defined(AK_OS_MACOS)
+    virtual void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::black);
+        painter.drawRoundedRect(rect(), corner_radius, corner_radius);
+        // The shadow follows the shape, once it's drawn.
+        QTimer::singleShot(0, this, [this] { invalidate_appkit_window_shadow(*this); });
     }
 #endif
 

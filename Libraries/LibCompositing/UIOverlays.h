@@ -27,6 +27,9 @@ struct PausedDebuggerOverlayState {
 struct PictureInPictureControlsState {
     bool shown { false };
     Optional<PictureInPictureControl> hovered_control;
+    // Fork hook (Arc): the labels' font, and the site the video is from, shown between the controls.
+    Optional<String> font_family;
+    String caption;
 
     bool operator==(PictureInPictureControlsState const&) const = default;
 };

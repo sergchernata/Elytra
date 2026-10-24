@@ -41,6 +41,7 @@ class TabWidget;
 
 namespace Arc {
 
+class MiniPlayer;
 class SymbolButton;
 namespace OnePassword {
 class Runner;
@@ -67,6 +68,8 @@ class ArcSidebar final
 public:
     static void attach(BrowserWindow&);
     static ArcSidebar* for_window(BrowserWindow&);
+    // Picture-in-Picture windows opened or closed: each window's player shows only while its tab has none.
+    static void picture_in_picture_windows_changed();
 
     ArcSidebar(BrowserWindow&, TabWidget&);
 
@@ -142,6 +145,11 @@ private:
     static void restyle_if_tint_changed(Tab&);
     bool should_open_picture_in_picture_leaving(Tab&);
     void update_auto_picture_in_picture(Tab* previous, Tab& current);
+    // Arc's media player at the bottom of the sidebar, for a tab playing out of sight.
+    void update_mini_player();
+    void schedule_mini_player_update();
+    void place_mini_player();
+    void dismiss_mini_player();
     Tab* most_recent_tab_in_space(QString const& space, Tab const* except);
     void begin_pinned_landing(Tab&);
     bool pinned_is_away(Tab&, QString const& pinned_url);
@@ -264,6 +272,13 @@ private:
     QString m_space_id;
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;
     QPointer<Tab> m_current_tab;
+    MiniPlayer* m_mini_player { nullptr };
+    QWidget* m_mini_player_slot { nullptr };
+    QPointer<Tab> m_player_tab;
+    bool m_mini_player_update_scheduled { false };
+    bool m_player_tab_had_window { false };
+    bool m_player_playing { false }; // Known from its sound, except while it's muted.
+    bool m_player_waits_for_window_close { false };
 
     QWidget* m_top_strip { nullptr };
     QWidget* m_favorites { nullptr };

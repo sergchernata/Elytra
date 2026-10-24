@@ -21,6 +21,7 @@
 #include <LibGfx/SystemTheme.h>
 #include <LibMain/Main.h>
 #include <LibWebCommon/Page/InputEvent.h>
+#include <LibCompositing/PictureInPictureControls.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/HeadlessWebView.h>
 #include <LibWebView/PictureInPictureWindow.h>
@@ -268,7 +269,8 @@ addEventListener("pointermove", event => { if (event.buttons) log("drag", event)
     auto window_size = app->picture_in_picture_window_size;
     Web::DevicePixelPoint player_control_bar { window_size.width() / 2, window_size.height() - 10 };
     Web::DevicePixelPoint window_close_button { window_size.width() - 22, 22 };
-    Web::DevicePixelPoint middle_of_window { window_size.width() / 2, window_size.height() / 2 };
+    // Fork (Arc): the player's play button is in the middle, so the pointer rests off to the left, clear of its buttons.
+    Web::DevicePixelPoint middle_of_window { window_size.width() / 8, window_size.height() / 2 };
 
     // The player's control bar shows on the first move and is hovered from the next.
     move_mouse_to(window_view, player_control_bar);
@@ -324,8 +326,20 @@ addEventListener("pointermove", event => { if (event.buttons) log("drag", event)
     // ratio replaces it. (W - 18, 18) is inside Close at 1x but outside it at 2x, and (W - 44, 44) is the reverse.
     Vector<Compositing::PictureInPictureControl> window_activated_controls;
     window_view.on_picture_in_picture_control_activated = [&](auto control) { window_activated_controls.append(control); };
-    Web::DevicePixelPoint close_button_at_1x { window_size.width() - 18, 18 };
-    Web::DevicePixelPoint close_button_at_2x { window_size.width() - 44, 44 };
+    // Fork (Arc): the controls are a bar of buttons whose size depends on the ratio, so the two points are found from
+    // their geometry: one inside Close at 1x only, and one inside it at 2x only.
+    auto close_at = [&](double ratio) { return Compositing::picture_in_picture_controls_geometry(window_size, ratio).close_button; };
+    auto point_inside_only = [&](Gfx::IntRect inside, Gfx::IntRect outside) {
+        for (int y = inside.top(); y < inside.bottom(); ++y) {
+            for (int x = inside.left(); x < inside.right(); ++x) {
+                if (!outside.contains(x, y))
+                    return Web::DevicePixelPoint { x, y };
+            }
+        }
+        VERIFY_NOT_REACHED();
+    };
+    auto close_button_at_1x = point_inside_only(close_at(1.0), close_at(2.0));
+    auto close_button_at_2x = point_inside_only(close_at(2.0), close_at(1.0));
 
     signal_renderers(SIGSTOP);
     window_view.set_device_pixel_ratio_for_testing(window_view.page(), 2.0);

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibCompositing/PictureInPictureControls.h>
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
@@ -12,7 +13,9 @@
 #include <UI/Qt/Arc/ArcSelfTest.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/LittleArc.h>
+#include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
@@ -174,6 +177,8 @@ private:
     void closing_a_tab_returns_to_the_one_before();
     void downloads_shelf_rows_rise_in();
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
+    void minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
+    void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
@@ -739,6 +744,180 @@ void SelfTest::leaving_a_playing_video_shows_it_in_picture_in_picture()
     if (other)
         s().close_tab(*other);
     settle(300);
+}
+
+static WebContentView* picture_in_picture_view()
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (widget->windowTitle() == "Picture-in-Picture" && widget->isVisible())
+            return widget->findChild<WebContentView*>();
+    }
+    return nullptr;
+}
+
+static void click_view_at(QWidget& view, QPointF point)
+{
+    QMouseEvent move(QEvent::MouseMove, point, view.mapToGlobal(point), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QMouseEvent press(QEvent::MouseButtonPress, point, view.mapToGlobal(point), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, point, view.mapToGlobal(point), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&view, &move);
+    QApplication::sendEvent(&view, &press);
+    QApplication::sendEvent(&view, &release);
+}
+
+// Clicks one of the Picture-in-Picture window's own controls (drawn by the compositor, where its geometry puts them).
+static bool click_picture_in_picture_control(Compositing::PictureInPictureControl control)
+{
+    auto* view = picture_in_picture_view();
+    if (!view)
+        return false;
+    auto dpr = view->devicePixelRatioF();
+    auto geometry = Compositing::picture_in_picture_controls_geometry({ qRound(view->width() * dpr), qRound(view->height() * dpr) }, dpr);
+    Gfx::IntRect bounds;
+    for (auto const& button : geometry.buttons()) {
+        if (button.action == control)
+            bounds = button.bounds;
+    }
+    auto center = QPointF(bounds.center().x() / dpr, bounds.center().y() / dpr);
+    // The pointer arriving shows the controls, which take presses only while they show.
+    QMouseEvent move(QEvent::MouseMove, center, view->mapToGlobal(center), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(view, &move);
+    QEventLoop loop;
+    QTimer::singleShot(300, &loop, &QEventLoop::quit);
+    loop.exec();
+    click_view_at(*view, center);
+    return true;
+}
+
+// As in Arc: Minimize closes the Picture-in-Picture window and leaves the video playing, with a player for it at the
+// bottom of the sidebar (play or pause, mute, back to the tab, back into Picture-in-Picture, and close).
+void SelfTest::minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty())
+        return; // Reported by the scenario before.
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> video = s().open_tab(QString("http://localhost:%1/video.html").arg(port));
+    QPointer<Tab> other = s().open_tab(page("Not the video either"));
+    if (!wait_until([&] { return video && other && !video->is_loading() && video->title() == "Video" && loaded(*other); }, 5000)) {
+        check(false, "the video page loads (player)");
+        return;
+    }
+    s().activate(*video);
+    settle(300);
+    click_view_at(video->view(), QPointF(40, 40));
+    if (!wait_until([&] { return video && video->title() == "Playing"; }, 5000)) {
+        check(false, "the video plays (player)", video ? video->title() : QString());
+        return;
+    }
+    auto& player = *s().m_mini_player;
+    check(!player.isVisible(), "no player while the playing tab is shown");
+
+    auto leave_into_picture_in_picture = [&] {
+        s().activate(*other);
+        return wait_until([&] { return video && video->view().has_picture_in_picture_window() && picture_in_picture_view(); }, 5000);
+    };
+    if (!leave_into_picture_in_picture()) {
+        check(false, "leaving the tab opens Picture-in-Picture (player)", video ? video->title() : QString());
+        return;
+    }
+    check(!player.isVisible(), "no player while the video shows in Picture-in-Picture");
+
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::Minimize);
+    check(wait_until([&] { return video && !video->view().has_picture_in_picture_window() && player.isVisible(); }, 5000),
+        "Minimize closes the window and shows the player in the sidebar");
+    check(video && video->title() == "Playing" && player.is_playing(), "the video plays on", video ? video->title() : QString());
+    check(player.title() == "Playing" && player.height() == MiniPlayer::CONTROLS_HEIGHT, "the player shows the tab's title, folded",
+        QString("%1 %2").arg(player.title()).arg(player.height()));
+    auto bottom = player.geometry().bottom();
+    player.set_revealed(true);
+    settle(MiniPlayer::REVEAL_MS + 150);
+    check(player.height() == MiniPlayer::CONTROLS_HEIGHT + MiniPlayer::TITLE_HEIGHT && player.geometry().bottom() == bottom
+            && player.close_button()->isVisible(),
+        "hovering it slides it up from where it rests, showing its title row", QString::number(player.height()));
+    player.set_revealed(false);
+    settle(MiniPlayer::REVEAL_MS + 150);
+    check(player.height() == MiniPlayer::CONTROLS_HEIGHT && !player.close_button()->isVisible(), "and back down");
+
+    player.play_button()->click();
+    check(wait_until([&] { return video && video->title() == "Video" && !player.is_playing(); }, 5000), "its pause button pauses the video",
+        video ? video->title() : QString());
+    player.play_button()->click();
+    check(wait_until([&] { return video && video->title() == "Playing" && player.is_playing(); }, 5000), "and its play button plays it again",
+        video ? video->title() : QString());
+
+    player.mute_button()->click();
+    check(wait_until([&] { return video && video->view().page_mute_state() == Web::HTML::MuteState::Muted && player.is_muted(); }, 3000),
+        "its mute button mutes the tab");
+    settle(300);
+    check(player.isVisible() && player.is_playing(), "and the muted video still shows as playing");
+    player.mute_button()->click();
+    check(wait_until([&] { return video && video->view().page_mute_state() == Web::HTML::MuteState::Unmuted && !player.is_muted(); }, 3000),
+        "and unmutes it");
+
+    player.picture_in_picture_button()->click();
+    check(wait_until([&] { return video && video->view().has_picture_in_picture_window() && !player.isVisible(); }, 5000),
+        "its Picture-in-Picture button shows the video there again, in place of the player");
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::Close);
+    check(wait_until([&] { return video && video->title() == "Video"; }, 5000), "Close in Picture-in-Picture stops the video",
+        video ? video->title() : QString());
+    settle(600);
+    check(!player.isVisible(), "and leaves no player");
+
+    // Back to the tab from the player's icon.
+    if (video)
+        s().activate(*video);
+    settle(300);
+    click_view_at(video->view(), QPointF(40, 40));
+    wait_until([&] { return video && video->title() == "Playing"; }, 5000);
+    if (!leave_into_picture_in_picture()) {
+        check(false, "leaving the tab again opens Picture-in-Picture", video ? video->title() : QString());
+        return;
+    }
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::Minimize);
+    wait_until([&] { return player.isVisible(); }, 5000);
+    player.icon_button()->click();
+    check(wait_until([&] { return video && window().current_tab() == video && !player.isVisible(); }, 3000),
+        "the player's icon goes back to the tab, and the player goes");
+
+    // Its close button stops the video.
+    if (!leave_into_picture_in_picture()) {
+        check(false, "leaving the tab a third time opens Picture-in-Picture", video ? video->title() : QString());
+        return;
+    }
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::Minimize);
+    wait_until([&] { return player.isVisible(); }, 5000);
+    player.close_button()->click();
+    check(wait_until([&] { return video && video->title() == "Video" && !player.isVisible(); }, 5000),
+        "the player's close button stops the video and closes the player", video ? video->title() : QString());
+
+    if (video)
+        s().close_tab(*video);
+    if (other)
+        s().close_tab(*other);
+    settle(300);
+}
+
+// As in Arc: the docked sidebar has its own toggle beside the window buttons, in place of the toolbar's.
+void SelfTest::the_docked_sidebar_has_its_toggle_beside_the_window_buttons()
+{
+    if (s().m_mode != ArcSidebar::Mode::Docked) {
+        check(false, "the sidebar is docked for the toggle check");
+        return;
+    }
+    auto* toggle = s().m_sidebar_toggle;
+    auto lights = s().m_traffic_lights->geometry();
+    check(toggle->isVisible() && toggle->geometry().left() > lights.right() && qAbs(toggle->geometry().center().y() - lights.center().y()) <= 2,
+        "the docked sidebar's toggle sits right of the window buttons");
+    auto toolbar_toggles = 0;
+    if (auto* tab = window().current_tab(); tab && tab->toolbar_container()) {
+        for (auto* button : tab->toolbar_container()->findChildren<QToolButton*>()) {
+            if (button->isVisible() && button->defaultAction() && button->defaultAction()->text() == "Toggle Vertical Tabs Expanded")
+                ++toolbar_toggles;
+        }
+    }
+    check(toolbar_toggles == 0, "and the toolbar doesn't show one too", QString::number(toolbar_toggles));
 }
 
 static QList<BrowserWindow*> little_arcs()
@@ -1815,6 +1994,8 @@ int SelfTest::run()
     closing_a_tab_returns_to_the_one_before();
     downloads_shelf_rows_rise_in();
     leaving_a_playing_video_shows_it_in_picture_in_picture();
+    minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
+    the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();

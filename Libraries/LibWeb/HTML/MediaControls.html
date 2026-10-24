@@ -20,10 +20,26 @@
             </div>
         </div>
         <div class="button-bar">
+            <!-- Fork hook (Arc): the Picture-in-Picture player's skip buttons, either side of play. -->
+            <button data-name="skip-back-button" data-option="picture-in-picture-player" class="control-button skip-button">
+                <svg class="icon skip-icon" viewBox="0 0 48 48">
+                    <path class="skip-arc" d="M24 9a15 15 0 1 1-14.2 10.2"/>
+                    <path class="skip-head" d="M24 3v12l-8-6z"/>
+                    <text class="skip-label" x="24" y="30">15</text>
+                </svg>
+            </button>
             <button data-name="play-button" class="control-button play-pause-button">
                 <svg data-name="play-pause-icon" class="icon play-pause-icon" viewBox="0 0 24 24">
                     <path class="play-path" d="m6 5 13 7-13 7Z"/>
                     <path class="pause-path" d="M14 5h4v14h-4Zm-4 0H6v14h4z"/>
+                    <path class="rounded-pause-path" d="M8 3a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1-3 0v-15A1.5 1.5 0 0 1 8 3Zm8 0a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1-3 0v-15A1.5 1.5 0 0 1 16 3Z"/>
+                </svg>
+            </button>
+            <button data-name="skip-forward-button" data-option="picture-in-picture-player" class="control-button skip-button">
+                <svg class="icon skip-icon" viewBox="0 0 48 48">
+                    <path class="skip-arc" d="M24 9a15 15 0 1 0 14.2 10.2"/>
+                    <path class="skip-head" d="M24 3v12l8-6z"/>
+                    <text class="skip-label" x="24" y="30">15</text>
                 </svg>
             </button>
             <span data-name="timestamp-element" class="timestamp"></span>

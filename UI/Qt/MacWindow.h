@@ -24,6 +24,9 @@ namespace Ladybird {
 Optional<u64> appkit_display_id_for_window(QWidget&);
 void hide_appkit_window_title(QWidget&);
 void make_appkit_window_resizable(QWidget&);
+// Fork hook (Arc): a borderless window with a clear background and a shadow cast from what's drawn in it.
+void make_appkit_window_clear_with_shadow(QWidget&);
+void invalidate_appkit_window_shadow(QWidget&);
 void keep_appkit_window_visible_while_inactive(QWidget&);
 void ensure_appkit_window_is_exposed(QWidget&);
 void set_appkit_window_content_aspect_ratio(QWidget&, Gfx::IntSize);

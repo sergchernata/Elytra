@@ -56,6 +56,8 @@ String PictureInPictureManager::open_window(WebContentPage& requesting_page, Can
     auto& opened_window = *window;
     m_windows.append({ requesting_page, requesting_navigable, requesting_navigable.active_document(), window.release_nonnull() });
     requesting_page.async_did_open_picture_in_picture_window(opened_window.size());
+    if (on_windows_changed)
+        on_windows_changed();
     return opened_window.handle();
 }
 
@@ -128,6 +130,8 @@ void PictureInPictureManager::retire_window(size_t index)
     auto window = m_windows.take(index).window;
     window->hide();
     m_retired_windows.append(move(window));
+    if (on_windows_changed)
+        on_windows_changed();
 }
 
 // The window is gone as soon as the user closes it, and its page only learns of that after, so a page that is busy or

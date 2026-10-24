@@ -134,6 +134,8 @@ public:
     static inline Function<bool(Tab&)> on_focus_location_editor;
     // Fork hook (Arc): the sidebar shows no loading spinner, so the tab doesn't animate one (it ticked every 80 ms).
     static inline bool animates_loading_spinner = true;
+    // Fork hook (Arc): no toolbar sidebar button while the sidebar shows, as the sidebar has its own.
+    static inline bool hides_sidebar_toggle_while_expanded = false;
 
 public slots:
     void focus_location_editor();

@@ -286,6 +286,7 @@ private:
     virtual void toggle_media_picture_in_picture_state(Web::PageId page_id) override;
     virtual void enter_picture_in_picture_for_playing_video(Web::PageId page_id) override;
     virtual void exit_picture_in_picture(Web::PageId page_id) override;
+    virtual void toggle_playing_media(Web::PageId page_id) override;
     virtual void toggle_media_controls_state(Web::PageId page_id) override;
 
     virtual void set_page_mute_state(Web::PageId page_id, Web::HTML::MuteState mute_state) override;

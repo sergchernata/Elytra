@@ -83,6 +83,8 @@ void MediaControls::create_shadow_tree()
         // the player of a Picture-in-Picture window.
         if (&host == m_media_element.ptr().ptr())
             options |= MediaControlsDOM::Options::Fullscreen;
+        else
+            options |= MediaControlsDOM::Options::PictureInPicturePlayer;
     }
     m_dom = MediaControlsDOM(document, *shadow_root, options);
 
@@ -90,6 +92,9 @@ void MediaControls::create_shadow_tree()
         MUST(m_dom->container->class_list()->add("video"_utf16));
     else
         MUST(m_dom->container->class_list()->add("audio"_utf16));
+    // Fork hook (Arc): the Picture-in-Picture player is laid out as Arc's (see MediaControls.css).
+    if (is_video && &host != m_media_element.ptr().ptr())
+        MUST(m_dom->container->class_list()->add("picture-in-picture-player"_utf16));
 
     // Initialize state
     update_play_pause_icon();
@@ -252,6 +257,24 @@ void MediaControls::set_up_event_listeners()
         toggle_playback();
         return true;
     });
+
+    // Fork hook (Arc): the Picture-in-Picture player's skip buttons.
+    static constexpr double skip_seconds = 15;
+    if (m_dom->skip_back_button) {
+        add_event_listener(realm, *m_dom->skip_back_button, UIEvents::EventNames::click, [this] {
+            set_current_time(max(0.0, m_media_element->current_time() - skip_seconds));
+            return true;
+        });
+    }
+    if (m_dom->skip_forward_button) {
+        add_event_listener(realm, *m_dom->skip_forward_button, UIEvents::EventNames::click, [this] {
+            auto time = m_media_element->current_time() + skip_seconds;
+            if (auto range = timeline_range(); range.has_value())
+                time = min(time, range->end);
+            set_current_time(time);
+            return true;
+        });
+    }
 
     // Video overlay click — toggle playback when clicking outside the controls
     if (m_dom->video_overlay) {

@@ -3483,6 +3483,12 @@ void ConnectionFromClient::exit_picture_in_picture(Web::PageId page_id)
         page->page().exit_picture_in_picture();
 }
 
+void ConnectionFromClient::toggle_playing_media(Web::PageId page_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().toggle_playing_media();
+}
+
 void ConnectionFromClient::toggle_media_controls_state(Web::PageId page_id)
 {
     if (auto page = this->page(page_id); page.has_value())

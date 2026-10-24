@@ -5,6 +5,7 @@
  */
 
 #include <LibURL/Parser.h>
+#include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
@@ -17,14 +18,17 @@
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/LittleArc.h>
+#include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/Tab.h>
+#include <UI/Qt/WebContentView.h>
 
 #include <QAction>
 #include <QActionEvent>
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPointer>
 #include <QTimer>
 
@@ -202,6 +206,81 @@ static void add_import_menu_items()
     qApp->installEventFilter(new MenuWatcher(qApp));
 }
 
+static QPointF dev_point(char const* name)
+{
+    auto parts = qEnvironmentVariable(name).split(',');
+    return parts.size() == 2 ? QPointF(parts[0].toDouble(), parts[1].toDouble()) : QPointF(-1, -1);
+}
+
+static void send_dev_mouse(QWidget& view, QEvent::Type type, QPointF point)
+{
+    auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+    auto buttons = type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton;
+    QMouseEvent event(type, point, view.mapToGlobal(point), button, buttons, Qt::NoModifier);
+    QApplication::sendEvent(&view, &event);
+}
+
+static WebContentView* dev_picture_in_picture_view()
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (widget->windowTitle() == "Picture-in-Picture" && widget->isVisible())
+            return widget->findChild<WebContentView*>();
+    }
+    return nullptr;
+}
+
+static void run_picture_in_picture_dev_aid()
+{
+    auto text = qEnvironmentVariable("ARC_DEV_PIP").toUtf8();
+    auto url = URL::Parser::basic_parse(StringView(text.constData(), static_cast<size_t>(text.size())));
+    auto* window = Application::the().active_window_if_any();
+    auto* tab = window ? window->current_tab() : nullptr;
+    if (!url.has_value() || !tab)
+        return;
+    tab->navigate(*url);
+    QPointer<BrowserWindow> guarded_window = window;
+    QPointer<Tab> guarded_tab = tab;
+    QTimer::singleShot(4000, [guarded_window, guarded_tab] {
+        if (!guarded_window || !guarded_tab)
+            return;
+        auto& view = guarded_tab->view();
+        auto center = QPointF(view.width() / 2.0, view.height() / 2.0);
+        send_dev_mouse(view, QEvent::MouseMove, center);
+        send_dev_mouse(view, QEvent::MouseButtonPress, center);
+        send_dev_mouse(view, QEvent::MouseButtonRelease, center);
+        QTimer::singleShot(1500, [guarded_window] {
+            if (guarded_window)
+                guarded_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+        });
+    });
+
+    if (auto hover = dev_point("ARC_DEV_PIP_HOVER"); hover.x() >= 0) {
+        auto* timer = new QTimer(qApp);
+        QObject::connect(timer, &QTimer::timeout, [hover] {
+            if (auto* view = dev_picture_in_picture_view())
+                send_dev_mouse(*view, QEvent::MouseMove, hover);
+        });
+        timer->start(400);
+    }
+    if (auto click = dev_point("ARC_DEV_PIP_CLICK"); click.x() >= 0) {
+        QTimer::singleShot(9000, [click] {
+            if (auto* view = dev_picture_in_picture_view()) {
+                send_dev_mouse(*view, QEvent::MouseMove, click);
+                send_dev_mouse(*view, QEvent::MouseButtonPress, click);
+                send_dev_mouse(*view, QEvent::MouseButtonRelease, click);
+            }
+        });
+    }
+    if (qEnvironmentVariableIsSet("ARC_DEV_MINI_PLAYER_REVEAL")) {
+        QTimer::singleShot(11000, [guarded_window] {
+            if (!guarded_window)
+                return;
+            for (auto* player : guarded_window->findChildren<MiniPlayer*>())
+                player->set_revealed(true);
+        });
+    }
+}
+
 void install()
 {
     UpdateChecker::the().start();
@@ -234,11 +313,20 @@ void install()
         });
     }
 
+    // Development aid: ARC_DEV_PIP=<url> loads a page with a video in the current tab, clicks it (pages that play with
+    // sound on a click start), then leaves it for a new tab, so its video goes into Picture-in-Picture. Options:
+    // ARC_DEV_PIP_HOVER=<x>,<y> keeps the window's controls up as a resting pointer would, ARC_DEV_PIP_CLICK=<x>,<y>
+    // clicks the window there (a control), and ARC_DEV_MINI_PLAYER_REVEAL=1 slides the sidebar's player open.
+    if (qEnvironmentVariableIsSet("ARC_DEV_PIP"))
+        QTimer::singleShot(3000, [] { run_picture_in_picture_dev_aid(); });
+
     enable_sidebar_on_first_run();
     route_new_tab_to_command_bar();
     route_location_editing_to_command_bar();
     route_links_from_other_apps_to_little_arc();
     Tab::animates_loading_spinner = false;
+    Tab::hides_sidebar_toggle_while_expanded = true;
+    WebView::PictureInPictureManager::on_windows_changed = &ArcSidebar::picture_in_picture_windows_changed;
     // Not for the self-test, which runs beside the real browser.
     if (!qEnvironmentVariableIsSet("ARC_SELF_TEST"))
         register_little_arc_hot_key();
