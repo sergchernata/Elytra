@@ -1014,6 +1014,9 @@ bool BrowserWindow::start_window_move()
 void BrowserWindow::tab_audio_play_state_changed(int index, Web::HTML::AudioPlayState play_state)
 {
     auto* tab = m_tabs_container->tab(index);
+    // Fork hook (Arc): a tab closed while it plays reports its sound stopping once it's gone (its index is then -1).
+    if (!tab)
+        return;
 
     switch (play_state) {
     case Web::HTML::AudioPlayState::Paused:

@@ -35,7 +35,7 @@ inline Optional<PictureInPictureControl> picture_in_picture_control_from_underly
     }
 }
 
-// Fork hook (Arc): Arc's controls, a bar across the top: "Back to Tab" on the left, then the site's name, then
+// Fork hook (Arc): Arc's controls, a bar across the top: Back to Tab (an icon) on the left, then the site's name, then
 // "Minimize" and "Close" on the right. A window too narrow for their labels shows just their icons.
 struct PictureInPictureControlsGeometry {
     Gfx::IntRect back_to_tab_button;
@@ -72,7 +72,8 @@ inline PictureInPictureControlsGeometry picture_in_picture_controls_geometry(Gfx
     Gfx::IntRect close_button { viewport_size.width() - inset - close_width, inset, close_width, height };
     Gfx::IntRect minimize_button { close_button.x() - gap - minimize_width, inset, minimize_width, height };
     return {
-        .back_to_tab_button = { inset, inset, width_of(112), height },
+        // Back to Tab is an icon alone, whatever the width.
+        .back_to_tab_button = { inset, inset, height, height },
         .minimize_button = minimize_button,
         .close_button = close_button,
         .has_labels = has_labels,

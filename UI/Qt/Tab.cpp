@@ -601,7 +601,9 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
 
     auto* toolbar_layout = new QHBoxLayout(m_toolbar);
     toolbar_layout->setSpacing(6);
-    toolbar_layout->setContentsMargins(TOOLBAR_HORIZONTAL_MARGIN, TOOLBAR_VERTICAL_MARGIN, TOOLBAR_HORIZONTAL_MARGIN, TOOLBAR_VERTICAL_MARGIN);
+    // Fork hook (Arc): see toolbar_left_margin.
+    auto toolbar_left = toolbar_left_margin ? toolbar_left_margin(*m_window).value_or(TOOLBAR_HORIZONTAL_MARGIN) : TOOLBAR_HORIZONTAL_MARGIN;
+    toolbar_layout->setContentsMargins(toolbar_left, TOOLBAR_VERTICAL_MARGIN, TOOLBAR_HORIZONTAL_MARGIN, TOOLBAR_VERTICAL_MARGIN);
 
     m_location_edit = new LocationEdit(this, m_window->is_private());
     m_loading_animation_timer = new QTimer(this);
@@ -1410,7 +1412,9 @@ void Tab::set_toolbar_window_controls_visible(bool visible)
     top_margin += window_outline_width;
     m_toolbar->setFixedHeight(browser_chrome_layout_policy().toolbar_height + window_outline_width);
 #endif
-    m_toolbar->layout()->setContentsMargins(TOOLBAR_HORIZONTAL_MARGIN, top_margin, has_custom_window_controls ? TOOLBAR_WINDOW_CONTROLS_RIGHT_MARGIN : TOOLBAR_HORIZONTAL_MARGIN, TOOLBAR_VERTICAL_MARGIN);
+    // Fork hook (Arc): see toolbar_left_margin.
+    auto left_margin = toolbar_left_margin ? toolbar_left_margin(*m_window).value_or(TOOLBAR_HORIZONTAL_MARGIN) : TOOLBAR_HORIZONTAL_MARGIN;
+    m_toolbar->layout()->setContentsMargins(left_margin, top_margin, has_custom_window_controls ? TOOLBAR_WINDOW_CONTROLS_RIGHT_MARGIN : TOOLBAR_HORIZONTAL_MARGIN, TOOLBAR_VERTICAL_MARGIN);
     m_toolbar->layout()->invalidate();
 }
 

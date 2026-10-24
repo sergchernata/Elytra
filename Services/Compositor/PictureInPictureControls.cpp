@@ -127,7 +127,7 @@ void paint_picture_in_picture_controls(Gfx::PaintingSurface& surface, Gfx::IntSi
         auto icon_size = 16 * dpr;
         auto label = label_for(control);
         float label_width = 0;
-        if (geometry.has_labels && font.has_value())
+        if (geometry.has_labels && font.has_value() && control != Compositing::PictureInPictureControl::BackToTab)
             label_width = font->measureText(label.characters_without_null_termination(), label.length(), SkTextEncoding::kUTF8);
         auto gap = label_width > 0 ? 7 * dpr : 0;
         auto content_width = icon_size + gap + label_width;

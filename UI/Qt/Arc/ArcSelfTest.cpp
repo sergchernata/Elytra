@@ -73,6 +73,14 @@ protected:
             auto* layout = static_cast<QWidget*>(watched)->layout();
             if (layout && layout->contentsMargins().left() != TOOLBAR_LEFT_MARGIN)
                 ++m_misaligned_toolbar_paints;
+            // Where the back button paints, in the window: it should never move while the sidebar stays put.
+            for (auto* button : static_cast<QWidget*>(watched)->findChildren<QToolButton*>()) {
+                if (button->isVisible() && button->defaultAction() && button->defaultAction()->text() == "Go Back")
+                {
+                    auto x = button->mapTo(button->window(), QPoint(0, 0)).x();
+                    m_back_button_positions.insert(x);
+                }
+            }
         }
         return false;
     }
@@ -178,6 +186,7 @@ private:
     void downloads_shelf_rows_rise_in();
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
     void minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
+    void back_to_tab_returns_to_the_tabs_space_and_profile();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
@@ -225,6 +234,7 @@ private:
     int m_failures { 0 };
     bool m_watch_toolbars { false };
     int m_misaligned_toolbar_paints { 0 };
+    QSet<int> m_back_button_positions;
 
     QString m_alpha;
     QString m_beta;
@@ -292,10 +302,27 @@ void SelfTest::toolbar_stays_aligned()
     s().close_tab(first);
     settle(300);
 
+    // Regression: the back, forward and reload buttons jumped right and back at times.
+    auto& third = *s().open_tab(page("Toolbar 3"));
+    wait_until([&] { return loaded(third); });
+    s().switch_to_space(m_beta);
+    settle(600);
+    s().switch_to_space(m_alpha);
+    settle(600);
+    third.navigate(ak_url_from_qurl(QUrl(page("Toolbar 4"))));
+    wait_until([&] { return loaded(third); });
+    s().close_tab(third);
+    settle(300);
+
     m_watch_toolbars = false;
     qApp->removeEventFilter(this);
     check(m_misaligned_toolbar_paints == 0, "toolbars never paint at upstream's margin while tabs open, switch and close",
         QString("%1 misaligned paints").arg(m_misaligned_toolbar_paints));
+    QStringList positions;
+    for (auto x : m_back_button_positions)
+        positions.append(QString::number(x));
+    check(m_back_button_positions.size() == 1, "the back button never moves while tabs open, load, switch and close, or spaces switch",
+        positions.join(", "));
 }
 
 void SelfTest::unloaded_pinned_tab_opens_in_the_spare()
@@ -896,6 +923,89 @@ void SelfTest::minimizing_picture_in_picture_moves_the_video_to_the_sidebar_play
         s().close_tab(*video);
     if (other)
         s().close_tab(*other);
+    settle(300);
+}
+
+// Back to Tab, from another profile's space: the tab's space shows again, in its profile (new tabs open there, and
+// its favorites show).
+void SelfTest::back_to_tab_returns_to_the_tabs_space_and_profile()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty())
+        return;
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> video = s().open_tab(QString("http://localhost:%1/video.html").arg(port));
+    if (!wait_until([&] { return video && !video->is_loading() && video->title() == "Video"; }, 5000)) {
+        check(false, "the video page loads (back to tab)");
+        return;
+    }
+    settle(300);
+    click_view_at(video->view(), QPointF(40, 40));
+    wait_until([&] { return video && video->title() == "Playing"; }, 5000);
+    s().switch_to_space(m_beta);
+    if (!wait_until([&] { return video && video->view().has_picture_in_picture_window() && picture_in_picture_view(); }, 5000)) {
+        check(false, "switching to another profile's space opens Picture-in-Picture", video ? video->title() : QString());
+        return;
+    }
+    settle(300);
+    check(s().current_profile() == ArcSidebar::profile_of_space(m_beta) && s().current_profile() != ArcSidebar::profile_of_space(m_alpha),
+        "the other space is in another profile");
+
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::BackToTab);
+    check(wait_until([&] { return video && window().current_tab() == video && !video->view().has_picture_in_picture_window(); }, 5000),
+        "Back to Tab shows the tab again");
+    settle(500);
+    auto alpha_profile = ArcSidebar::profile_of_space(m_alpha);
+    check(s().current_space_id() == m_alpha && s().current_profile() == alpha_profile, "in its own space and profile",
+        QString("space %1 profile '%2'").arg(s().current_space_id() == m_alpha).arg(s().current_profile()));
+    check(session_for_new_views() == session_for_profile(alpha_profile), "and new tabs open in that profile");
+    QStringList expected_favorites;
+    for (auto const& favorite : SpaceStore::the().favorites_for_profile(alpha_profile))
+        expected_favorites.append(favorite.id);
+    check(s().m_favorite_ids == expected_favorites, "and its favorites show", s().m_favorite_ids.join(","));
+
+    if (video)
+        s().close_tab(*video);
+    settle(300);
+
+    // The same for a favorite, which is in no space: the sidebar goes back to its profile's space.
+    auto favorite = SpaceStore::the().add_favorite(QString("http://localhost:%1/video.html").arg(port), "Video favorite", -1, alpha_profile);
+    settle(300);
+    s().open_or_activate_favorite(favorite);
+    QPointer<Tab> favorite_tab;
+    if (!wait_until([&] {
+            if (!favorite_tab && window().current_tab() && ArcSidebar::profile_of_tab(*window().current_tab()) == alpha_profile
+                && ArcSidebar::space_of(*window().current_tab()).isEmpty())
+                favorite_tab = window().current_tab();
+            return favorite_tab && !favorite_tab->is_loading() && favorite_tab->title() == "Video";
+        },
+            5000)) {
+        check(false, "the favorite's video page loads", favorite_tab ? favorite_tab->title() : QString("no tab"));
+        SpaceStore::the().remove_favorite(favorite);
+        return;
+    }
+    settle(300);
+    click_view_at(favorite_tab->view(), QPointF(40, 40));
+    wait_until([&] { return favorite_tab && favorite_tab->title() == "Playing"; }, 5000);
+    s().switch_to_space(m_beta);
+    if (!wait_until([&] { return favorite_tab && favorite_tab->view().has_picture_in_picture_window() && picture_in_picture_view(); }, 5000)) {
+        check(false, "a favorite's playing video goes into Picture-in-Picture too", favorite_tab ? favorite_tab->title() : QString());
+        SpaceStore::the().remove_favorite(favorite);
+        return;
+    }
+    settle(300);
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::BackToTab);
+    check(wait_until([&] { return favorite_tab && window().current_tab() == favorite_tab; }, 5000), "Back to Tab shows the favorite again");
+    settle(500);
+    check(s().current_space_id() == m_alpha && s().current_profile() == alpha_profile && session_for_new_views() == session_for_profile(alpha_profile),
+        "in a space of its profile, the one used last", QString("space %1 profile '%2'").arg(s().current_space_id() == m_alpha).arg(s().current_profile()));
+    check(s().m_favorite_ids.contains(favorite), "with it among the favorites shown", s().m_favorite_ids.join(","));
+
+    if (favorite_tab)
+        s().close_tab(*favorite_tab);
+    settle(300);
+    SpaceStore::the().remove_favorite(favorite);
     settle(300);
 }
 
@@ -1995,6 +2105,7 @@ int SelfTest::run()
     downloads_shelf_rows_rise_in();
     leaving_a_playing_video_shows_it_in_picture_in_picture();
     minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
+    back_to_tab_returns_to_the_tabs_space_and_profile();
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();

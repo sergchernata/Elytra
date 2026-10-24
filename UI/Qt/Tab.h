@@ -136,6 +136,8 @@ public:
     static inline bool animates_loading_spinner = true;
     // Fork hook (Arc): no toolbar sidebar button while the sidebar shows, as the sidebar has its own.
     static inline bool hides_sidebar_toggle_while_expanded = false;
+    // Fork hook (Arc): the toolbar's left margin, if not upstream's (the Arc sidebar lines its buttons up with the page).
+    static inline Function<Optional<int>(BrowserWindow&)> toolbar_left_margin;
 
 public slots:
     void focus_location_editor();

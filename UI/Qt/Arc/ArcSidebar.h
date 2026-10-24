@@ -67,6 +67,8 @@ class ArcSidebar final
 
 public:
     static void attach(BrowserWindow&);
+    // The toolbar's left margin in a window with a sidebar: its buttons line up with the page.
+    static constexpr int TOOLBAR_LEFT_MARGIN = 2;
     static ArcSidebar* for_window(BrowserWindow&);
     // Picture-in-Picture windows opened or closed: each window's player shows only while its tab has none.
     static void picture_in_picture_windows_changed();
@@ -146,6 +148,7 @@ private:
     bool should_open_picture_in_picture_leaving(Tab&);
     void update_auto_picture_in_picture(Tab* previous, Tab& current);
     // Arc's media player at the bottom of the sidebar, for a tab playing out of sight.
+    QString recent_space_of_profile(QString const& profile, Tab const* except) const;
     void update_mini_player();
     void schedule_mini_player_update();
     void place_mini_player();

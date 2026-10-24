@@ -326,6 +326,13 @@ void install()
     route_links_from_other_apps_to_little_arc();
     Tab::animates_loading_spinner = false;
     Tab::hides_sidebar_toggle_while_expanded = true;
+    // The sidebar's windows line the toolbar's buttons up with the page from the start, rather than correcting
+    // upstream's margin once it's laid out (a frame could show at upstream's, making the buttons jump).
+    Tab::toolbar_left_margin = [](BrowserWindow& window) -> Optional<int> {
+        if (window.is_popup_window())
+            return {};
+        return ArcSidebar::TOOLBAR_LEFT_MARGIN;
+    };
     WebView::PictureInPictureManager::on_windows_changed = &ArcSidebar::picture_in_picture_windows_changed;
     // Not for the self-test, which runs beside the real browser.
     if (!qEnvironmentVariableIsSet("ARC_SELF_TEST"))

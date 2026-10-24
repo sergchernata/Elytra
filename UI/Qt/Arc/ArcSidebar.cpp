@@ -98,7 +98,7 @@ static constexpr int TRANSITION_MS = 300;
 static constexpr int SHOW_SETTLE_MS = 34;
 static constexpr int HANDOFF_MS = 34; // Two frames, for the window server to show one before the other goes.
 static constexpr qreal FADE_SPEEDUP = 1.6;
-static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = 2;
+static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = ArcSidebar::TOOLBAR_LEFT_MARGIN;
 static constexpr int RETRACT_DELAY_MS = 280;
 static constexpr int REVEAL_ANIMATION_MS = 260;
 static constexpr int RETRACT_ANIMATION_MS = 220;
@@ -2171,6 +2171,16 @@ void ArcSidebar::on_current_tab_changed(int index)
         m_space_id = space;
         SpaceStore::the().set_last_active_space_id(space);
         schedule_rebuild();
+    } else if (!m_switching_space && space.isEmpty() && !previous_was_removed) {
+        // A favorite belongs to a profile, not a space: shown from another profile's space (Back to Tab from
+        // Picture-in-Picture, say), the sidebar moves to a space of the favorite's profile, the one used last.
+        if (auto profile = profile_of_tab(*tab); profile != current_profile()) {
+            if (auto target = recent_space_of_profile(profile, tab); !target.isEmpty()) {
+                m_space_id = target;
+                SpaceStore::the().set_last_active_space_id(target);
+                schedule_rebuild();
+            }
+        }
     }
     if (!space.isEmpty())
         m_last_tab_in_space[space] = tab;
@@ -2197,6 +2207,23 @@ void ArcSidebar::style_update_button()
                 QString::number((UPDATE_BUTTON_HEIGHT - 6) / 2),
                 dark ? "rgba(255,255,255,0.92)" : "rgba(0,0,0,0.80)",
                 dark ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.80)"));
+}
+
+// The space of `profile` used last: that of its most recently shown tab, else its first.
+QString ArcSidebar::recent_space_of_profile(QString const& profile, Tab const* except) const
+{
+    for (auto const& recent : m_recent_tabs) {
+        if (!recent || recent == except)
+            continue;
+        auto space = space_of(*recent);
+        if (!space.isEmpty() && profile_of_space(space) == profile && SpaceStore::the().space(space))
+            return space;
+    }
+    for (auto const& space : SpaceStore::the().spaces()) {
+        if (space.profile == profile)
+            return space.id;
+    }
+    return {};
 }
 
 QString ArcSidebar::current_profile() const

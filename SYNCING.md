@@ -15,6 +15,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/TabBar.h/.cpp` (Little Arc) | `set_minimal_chrome_bar()` and `m_minimal_chrome_bar`: the branch at the top of `rebuild_layout()` (only that bar above the page), and checks in `update_web_view_frame()`, `update_vertical_tabs_overlay_geometry()`, `update_vertical_tabs_resize_handle()` and the content separator's visibility |
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
+| `UI/Qt/Tab.h/.cpp` (toolbar margin) | `Tab::toolbar_left_margin`, used where the toolbar's margins are set (constructor, `set_toolbar_window_controls_visible()`): the Arc toolbar's left margin from the start, so its buttons never jump |
 | `UI/Qt/Tab.h/.cpp` (sidebar button) | `Tab::hides_sidebar_toggle_while_expanded`, checked in `update_vertical_tabs_toolbar_button_placement()`: the docked Arc sidebar has its own toggle beside the window buttons |
 | `UI/Qt/Tab.h/.cpp` (spinner) | `Tab::animates_loading_spinner`, checked in `set_loading()`: the Arc sidebar shows no spinner, so the 80 ms timer stays off |
 | `UI/Qt/TabBar.cpp` (sheen) | `play_load_sheen()` returns early while the tab bar is hidden |
@@ -83,6 +84,7 @@ The window looks like Arc's, and its Minimize leaves the video playing with a pl
 | File | Hook |
 | --- | --- |
 | `README.md` | Elytra's introduction above upstream's README |
+| `UI/Qt/BrowserWindow.cpp` | `tab_audio_play_state_changed()` returns for a tab that's gone (closed while playing), which crashed |
 
 The TabBar hooks let the Arc sidebar (spaces, folders, pinned tabs, favorites) replace the
 contents of upstream's vertical tab column while reusing its sizing, collapsing and window controls.

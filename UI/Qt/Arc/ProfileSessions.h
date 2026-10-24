@@ -38,5 +38,6 @@ void open_all_profile_sessions();
 
 // The profile new views use outside a ScopedProfileForNewViews: the current space's, in the active window.
 void set_profile_for_new_views(QString const& profile);
+RefPtr<WebView::BrowsingSession> session_for_new_views();
 
 }

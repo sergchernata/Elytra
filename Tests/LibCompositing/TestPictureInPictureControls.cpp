@@ -15,7 +15,7 @@ TEST_CASE(buttons_sit_along_the_top)
     auto geometry = picture_in_picture_controls_geometry({ 800, 600 }, 1.0);
 
     EXPECT(geometry.has_labels);
-    EXPECT_EQ(geometry.back_to_tab_button, (Gfx::IntRect { 14, 14, 112, 28 }));
+    EXPECT_EQ(geometry.back_to_tab_button, (Gfx::IntRect { 14, 14, 28, 28 }));
     EXPECT_EQ(geometry.close_button, (Gfx::IntRect { 710, 14, 76, 28 }));
     EXPECT_EQ(geometry.minimize_button, (Gfx::IntRect { 604, 14, 98, 28 }));
 }
@@ -25,7 +25,7 @@ TEST_CASE(geometry_scales_with_device_pixel_ratio)
     auto geometry = picture_in_picture_controls_geometry({ 1600, 1200 }, 2.0);
 
     EXPECT(geometry.has_labels);
-    EXPECT_EQ(geometry.back_to_tab_button, (Gfx::IntRect { 28, 28, 224, 56 }));
+    EXPECT_EQ(geometry.back_to_tab_button, (Gfx::IntRect { 28, 28, 56, 56 }));
     EXPECT_EQ(geometry.close_button, (Gfx::IntRect { 1420, 28, 152, 56 }));
 }
 

@@ -100,6 +100,11 @@ void set_profile_for_new_views(QString const& profile)
     WebView::Application::set_session_for_new_views(s_session_for_new_views);
 }
 
+RefPtr<WebView::BrowsingSession> session_for_new_views()
+{
+    return s_session_for_new_views;
+}
+
 ScopedProfileForNewViews::ScopedProfileForNewViews(QString const& profile)
     : m_previous(s_session_for_new_views)
 {
