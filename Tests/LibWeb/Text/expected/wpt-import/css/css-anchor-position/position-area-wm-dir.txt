@@ -1,0 +1,49 @@
+Harness status: OK
+
+Found 44 tests
+
+44 Pass
+Pass	Offsets for: start start with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: inline-start block-end with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: self-inline-start self-block-end with writing-mode / direction: containing-block: horizontal-tb / rtl
+Pass	Offsets for: start start with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: self-start self-start with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: x-start y-start with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: inline-start block-end with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: self-inline-start self-block-end with writing-mode / direction: containing-block: vertical-lr / ltr
+Pass	Offsets for: start start with writing-mode / direction: containing-block: vertical-lr / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: containing-block: vertical-lr / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: containing-block: vertical-lr / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: containing-block: vertical-lr / rtl
+Pass	Offsets for: start start with writing-mode / direction: containing-block: vertical-rl / ltr
+Pass	Offsets for: self-start self-start with writing-mode / direction: containing-block: vertical-rl / ltr
+Pass	Offsets for: x-start y-start with writing-mode / direction: containing-block: vertical-rl / ltr
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: containing-block: vertical-rl / ltr
+Pass	Offsets for: start start with writing-mode / direction: containing-block: vertical-rl / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: containing-block: vertical-rl / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: containing-block: vertical-rl / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: containing-block: vertical-rl / rtl
+Pass	Offsets for: start start with writing-mode / direction: self: horizontal-tb / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: self: horizontal-tb / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: self: horizontal-tb / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: self: horizontal-tb / rtl
+Pass	Offsets for: start start with writing-mode / direction: self: vertical-lr / ltr
+Pass	Offsets for: self-start self-start with writing-mode / direction: self: vertical-lr / ltr
+Pass	Offsets for: x-start y-start with writing-mode / direction: self: vertical-lr / ltr
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: self: vertical-lr / ltr
+Pass	Offsets for: start start with writing-mode / direction: self: vertical-lr / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: self: vertical-lr / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: self: vertical-lr / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: self: vertical-lr / rtl
+Pass	Offsets for: start start with writing-mode / direction: self: vertical-rl / ltr
+Pass	Offsets for: self-start self-start with writing-mode / direction: self: vertical-rl / ltr
+Pass	Offsets for: x-start y-start with writing-mode / direction: self: vertical-rl / ltr
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: self: vertical-rl / ltr
+Pass	Offsets for: start start with writing-mode / direction: self: vertical-rl / rtl
+Pass	Offsets for: self-start self-start with writing-mode / direction: self: vertical-rl / rtl
+Pass	Offsets for: x-start y-start with writing-mode / direction: self: vertical-rl / rtl
+Pass	Offsets for: self-x-start self-y-start with writing-mode / direction: self: vertical-rl / rtl

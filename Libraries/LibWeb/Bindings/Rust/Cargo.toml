@@ -22,11 +22,13 @@ ak = { path = "../../../../AK/Rust" }
 encoding_rs = "0.8.42"
 ladybird_allocator = { path = "../../../RustAllocator", optional = true }
 libcompositing_rust = { path = "../../../LibCompositing/Rust" }
+libcompress_rust = { path = "../../../LibCompress/Rust" }
 libgfx_rust = { path = "../../../LibGfx/Rust", default-features = false }
 libjs_rust = { path = "../../../LibJS/Rust", default-features = false }
 libtextcodec_rust = { path = "../../../LibTextCodec/Rust" }
 liburl_rust = { path = "../../../LibURL/Rust", default-features = false }
 libweb_rust = { path = "../../Rust" }
+libwebcommon_rust = { path = "../../../LibWebCommon/Rust" }
 rustc-demangle = "0.1"
 
 [build-dependencies]

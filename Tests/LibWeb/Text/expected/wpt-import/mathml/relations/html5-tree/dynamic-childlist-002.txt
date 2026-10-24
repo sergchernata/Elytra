@@ -1,0 +1,31 @@
+Harness status: OK
+
+Found 26 tests
+
+26 Pass
+Pass	Appending and removing children to a
+Pass	Appending and removing children to maction
+Pass	Appending and removing children to menclose
+Pass	Appending and removing children to merror
+Pass	Appending and removing children to mfrac
+Pass	Appending and removing children to mi
+Pass	Appending and removing children to mmultiscripts
+Pass	Appending and removing children to mn
+Pass	Appending and removing children to mo
+Pass	Appending and removing children to mover
+Pass	Appending and removing children to mpadded
+Pass	Appending and removing children to mphantom
+Pass	Appending and removing children to mroot
+Pass	Appending and removing children to mrow
+Pass	Appending and removing children to ms
+Pass	Appending and removing children to mspace
+Pass	Appending and removing children to msqrt
+Pass	Appending and removing children to mstyle
+Pass	Appending and removing children to msub
+Pass	Appending and removing children to msubsup
+Pass	Appending and removing children to msup
+Pass	Appending and removing children to mtable
+Pass	Appending and removing children to mtext
+Pass	Appending and removing children to munder
+Pass	Appending and removing children to munderover
+Pass	Appending and removing children to semantics

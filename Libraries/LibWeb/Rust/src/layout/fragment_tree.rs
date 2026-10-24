@@ -34,6 +34,7 @@ pub(crate) struct Fragment {
     pub(crate) line_data: Option<std::sync::Arc<inline_content::InlineContent>>,
     pub(crate) grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
     pub(crate) flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
+    pub(crate) multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
     pub(crate) used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
     /// Boxed, as only SVG boxes have any and the facts are larger than the rest of the fragment's box.
     pub(crate) svg: Option<Box<CommittedSvgFacts>>,
@@ -91,6 +92,7 @@ impl Fragment {
             && self.collapsed_table_borders.is_none()
             && self.grid_layout_data.is_none()
             && self.flex_layout_data.is_none()
+            && self.multicol_layout_data.is_none()
             && self.used_grid_tracks.is_none()
             && self.svg.is_none()
             && self.computed_svg_path.is_none()
@@ -131,6 +133,7 @@ impl Fragment {
             )
             && same_allocation(self.grid_layout_data.as_ref(), previous.grid_layout_data.as_ref())
             && same_allocation(self.flex_layout_data.as_ref(), previous.flex_layout_data.as_ref())
+            && self.multicol_layout_data == previous.multicol_layout_data
             && same_allocation(self.used_grid_tracks.as_ref(), previous.used_grid_tracks.as_ref())
             && self.svg == previous.svg
             && same_allocation(self.computed_svg_path.as_ref(), previous.computed_svg_path.as_ref())
@@ -236,6 +239,7 @@ impl FragmentLink {
                 line_data: None,
                 grid_layout_data: None,
                 flex_layout_data: None,
+                multicol_layout_data: None,
                 used_grid_tracks: None,
                 svg: None,
                 computed_svg_path: None,
@@ -405,6 +409,7 @@ struct CommittedRarePayloads {
     collapsed_table_borders: Option<std::sync::Arc<table_formatting_context::OwnedCollapsedTableBorders>>,
     grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
     flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
+    multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
     used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
     svg: CommittedSvgFacts,
     computed_svg_path: Option<std::sync::Arc<libgfx_rust::path::OwnedPath>>,
@@ -428,6 +433,7 @@ fn snapshot_fragment(
                 collapsed_table_borders: rare.collapsed_table_borders.take(),
                 grid_layout_data: rare.grid_layout_data.take(),
                 flex_layout_data: rare.flex_layout_data.take(),
+                multicol_layout_data: rare.multicol_layout_data.take(),
                 used_grid_tracks: rare.used_grid_tracks.take(),
                 svg: rare.svg,
                 computed_svg_path: rare.computed_svg_path.take(),
@@ -439,6 +445,7 @@ fn snapshot_fragment(
         collapsed_table_borders,
         grid_layout_data,
         flex_layout_data,
+        multicol_layout_data,
         used_grid_tracks,
         svg,
         computed_svg_path,
@@ -470,6 +477,7 @@ fn snapshot_fragment(
         line_data,
         grid_layout_data,
         flex_layout_data,
+        multicol_layout_data,
         used_grid_tracks,
         svg: (svg != CommittedSvgFacts::default()).then(|| Box::new(svg)),
         computed_svg_path,
@@ -743,6 +751,13 @@ struct RunFragmentBuilderInner {
     /// The reused subtree roots whose runs this run took from the cache, whose records hold their committed fragments
     /// until placement.
     reused_subtree_roots_holding_fragments: Vec<crate::layout::node_data::NodeSlotId>,
+}
+
+impl RunFragmentBuilderInner {
+    fn receive_abspos_containing_block_info(&mut self, contributions: Vec<AbsposContainingBlockInfoContribution>) {
+        self.abspos_containing_block_info_contributions_received += contributions.len() as u64;
+        self.abspos_containing_block_info_contributions.extend(contributions);
+    }
 }
 
 /// The committed fragment a run holds in the record of a box it sized from it, for the box's placement to attach as it
@@ -1044,6 +1059,42 @@ impl RunFragmentBuilder {
         );
     }
 
+    pub(crate) fn adopt_fragmentainer_root(
+        &self,
+        root: UnplacedRootFragment,
+        offset: FfiCssPixelPoint,
+        root_line_index_offset: usize,
+    ) {
+        debug_assert!(
+            root.node == self.root_node,
+            "a fragmentainer run's root is the box of the run that adopts it"
+        );
+        let mut inner = self.inner.borrow_mut();
+        inner.reused_subtree_roots.extend(root.reused_subtree_roots);
+        for mut link in root.scoped_descendants {
+            link.committed_offset = formatting_context::point_add(link.committed_offset, offset);
+            if link.containing_block == self.root_node
+                && let Some(line_index) = link.containing_line_box_index.as_mut()
+            {
+                *line_index += root_line_index_offset;
+            }
+            inner.top_scope_links.push(link);
+        }
+        for mut entry in root.propagated_pending_abspos {
+            entry.translate_by(offset);
+            inner.pending_abspos_at_root.push(entry);
+        }
+        for mut candidate in root.propagated_anchor_candidates {
+            candidate.translate_by(offset);
+            inner.anchor_candidates_at_root.push(candidate);
+        }
+        for mut payload in root.propagated_inline_containing_block_rects {
+            payload.translate_by(offset);
+            inner.inline_containing_block_rects_at_root.push(payload);
+        }
+        inner.receive_abspos_containing_block_info(root.propagated_abspos_containing_block_info);
+    }
+
     pub(crate) fn note_reused_subtree_root(&self, node: crate::layout::node_data::NodeSlotId) {
         self.inner.borrow_mut().reused_subtree_roots.insert(node.slot_index());
     }
@@ -1144,11 +1195,7 @@ impl RunFragmentBuilder {
         pending_fragment
             .inline_containing_block_rects
             .extend(root.propagated_inline_containing_block_rects);
-        inner.abspos_containing_block_info_contributions_received +=
-            root.propagated_abspos_containing_block_info.len() as u64;
-        inner
-            .abspos_containing_block_info_contributions
-            .extend(root.propagated_abspos_containing_block_info);
+        inner.receive_abspos_containing_block_info(root.propagated_abspos_containing_block_info);
     }
 
     #[allow(clippy::too_many_arguments)]

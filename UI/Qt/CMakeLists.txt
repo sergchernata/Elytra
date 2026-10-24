@@ -94,6 +94,7 @@ if (APPLE)
         MacWindowFocus.mm
         NativeTextEditingBindings.mm
         Menu.mm
+        ScrollbarPreferencesMac.mm
         SpellCheckerMac.mm
         WebContentViewAccessibility.mm
         WebContentViewMac.mm

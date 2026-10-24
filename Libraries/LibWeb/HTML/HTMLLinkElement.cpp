@@ -13,6 +13,8 @@
 #include <LibGC/Heap.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/DecodedImageFrame.h>
+#include <LibHTTP/Header.h>
+#include <LibHTTP/HeaderList.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/URL.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -32,11 +34,13 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventNames.h>
+#include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
+#include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
@@ -361,8 +365,9 @@ GC::Ref<HTMLLinkElement::LinkProcessingOptions> HTMLLinkElement::create_link_opt
         //     the state of el's referrerpolicy content attribute
         ReferrerPolicy::from_string(referrerpolicy_value).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString),
 
-        // FIXME: source set
+        // source set
         //     el's source set
+        m_source_set,
 
         // base URL
         //     document's document base URL
@@ -462,6 +467,7 @@ void HTMLLinkElement::fetch_and_process_linked_resource()
 
     if (m_fetch_controller) {
         m_fetch_controller->stop_fetch();
+        m_fetch_controller = nullptr;
         document().remove_from_script_blocking_style_sheet_set(*this);
     }
 
@@ -551,6 +557,16 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_genera
     };
 
     m_fetch_controller = Fetch::Fetching::fetch(HTML::relevant_realm(*this), *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
+
+    // AD-HOC: A stopped fetch, such as one of a document that was stopped, never processes its response. Stop blocking
+    //         scripts, rendering and the load event on it then, as if the user agent had given up on loading it.
+    m_fetch_controller->set_stop_steps(GC::create_function(GC::Heap::the(), [weak_this = GC::Weak { *this }, fetch_generation] {
+        auto link_element = weak_this.ptr();
+        if (!link_element || fetch_generation != link_element->m_current_fetch_generation)
+            return;
+        link_element->m_fetch_controller = nullptr;
+        link_element->stop_blocking_on_style_sheet();
+    }));
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#link-type-dns-prefetch:fetch-and-process-the-linked-resource-2
@@ -588,7 +604,8 @@ void HTMLLinkElement::fetch_and_process_linked_preconnect_resource()
 // https://html.spec.whatwg.org/multipage/links.html#link-type-preload:fetch-and-process-the-linked-resource-2
 void HTMLLinkElement::fetch_and_process_linked_preload_resource()
 {
-    // FIXME: 1. Update the source set for el.
+    // 1. Update the source set for el.
+    update_the_source_set(*this);
 
     // 2. Let options be the result of creating link options from el.
     auto options = create_link_options();
@@ -604,6 +621,8 @@ void HTMLLinkElement::fetch_and_process_linked_preload_resource()
     options->destination = destination.get<Optional<Fetch::Infrastructure::Request::Destination>>();
 
     // 6. Preload options, with the following steps given a response response:
+    // NB: The preload's fetch is not stopped when el is fetched again, since other fetches may be waiting on it as a
+    //     consumer of the preloaded resource.
     GC::Weak weak_this { *this };
     auto fetch_generation = m_current_fetch_generation;
     preload(options, [weak_this, fetch_generation](Fetch::Infrastructure::Response& response) {
@@ -611,7 +630,6 @@ void HTMLLinkElement::fetch_and_process_linked_preload_resource()
         if (auto link_element = weak_this.ptr()) {
             if (fetch_generation != link_element->m_current_fetch_generation)
                 return;
-            link_element->m_fetch_controller = nullptr;
             if (response.is_network_error())
                 link_element->dispatch_event(create_event_for_element(*link_element, HTML::EventNames::error));
             else
@@ -935,13 +953,20 @@ static bool type_matches_destination(Utf16View type, Optional<Fetch::Infrastruct
 // https://html.spec.whatwg.org/multipage/links.html#preload
 void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetch::Infrastructure::Response&)> process_response)
 {
-    auto& realm = HTML::relevant_realm(*this);
+    auto& realm = options.environment->realm();
     // 1. If options's type doesn't match options's destination, then return.
     if (!type_matches_destination(options.type, options.destination))
         return;
 
-    // FIXME: 2. If options's destination is "image" and options's source set is not null, then set options's href to the
-    //           result of selecting an image source from options's source set.
+    // 2. If options's destination is "image" and options's source set is not null, then set options's href to the
+    //    result of selecting an image source from options's source set.
+    // NB: A link with neither an href nor an imagesrcset has an empty source set, with no image source to select.
+    if (options.destination == Fetch::Infrastructure::Request::Destination::Image && options.source_set.has_value() && !options.source_set->is_empty()) {
+        auto device_pixel_ratio = 1.0;
+        if (auto const* window = window_from_global_object(options.environment->global_object()))
+            device_pixel_ratio = window->device_pixel_ratio();
+        options.href = options.source_set->select_an_image_source(device_pixel_ratio).source.url;
+    }
     if (options.href.is_empty())
         return;
 
@@ -964,6 +989,11 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetc
     // 8. If options's document is null, then set request's initiator type to "early hint".
     if (!options.document)
         request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::EarlyHint);
+    // AD-HOC: Otherwise, set request's initiator type to "link", as the default fetch and process the linked resource
+    //         steps do. Without an initiator type, the preload is never reported to Resource Timing, but other engines
+    //         report it with an initiatorType of "link". Fetch then reports the timing itself once the body is read.
+    else
+        request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Link);
 
     // 9. Let controller be null.
     auto controller_holder = Fetch::Infrastructure::FetchControllerHolder::create();
@@ -991,7 +1021,10 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetc
         // FIXME: 3. Set unsafeEndTime to the unsafe shared current time.
 
         // 4. If options's document is not null, then call reportTiming given options's document.
-        if (options->document)
+        // AD-HOC: Only when reading the body failed. A preload with a document has the "link" initiator type (see
+        //         above), so fetch has already reported its timing once the body was read, and reporting it again would
+        //         add a second entry. Fetch does not report a failed body read.
+        if (options->document && body_bytes.has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>())
             report_timing->function()(*options->document);
 
         // 5. If entry's on response available is null, then set entry's response to response; otherwise call entry's
@@ -1006,9 +1039,9 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetc
             process_response(response);
     };
 
-    m_fetch_controller = Fetch::Fetching::fetch(realm, *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
-    controller_holder->set_controller(*m_fetch_controller);
-    entry->controller = m_fetch_controller;
+    auto controller = Fetch::Fetching::fetch(realm, *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
+    controller_holder->set_controller(controller);
+    entry->controller = controller;
 
     // 12. Let commit be the following steps given a Document document:
     auto commit = GC::Function<void(DOM::Document&)>::create(GC::Heap::the(), [entry, report_timing, key = move(key)](DOM::Document& document) {
@@ -1026,6 +1059,250 @@ void HTMLLinkElement::preload(LinkProcessingOptions& options, Function<void(Fetc
         options.on_document_ready = commit;
     else
         commit->function()(*options.document);
+}
+
+void HTMLLinkElement::modulepreload(LinkProcessingOptions const& options)
+{
+    if (options.href.is_empty())
+        return;
+
+    auto url = DOMURL::parse(options.href.utf16_view(), options.base_url);
+    if (!url.has_value())
+        return;
+
+    auto& settings_object = *options.environment;
+
+    auto integrity_metadata = options.integrity;
+    if (integrity_metadata.is_empty())
+        integrity_metadata = resolve_a_module_integrity_metadata(*url, settings_object);
+
+    ScriptFetchOptions script_fetch_options {
+        .cryptographic_nonce = options.cryptographic_nonce_metadata,
+        .integrity_metadata = move(integrity_metadata),
+        .parser_metadata = Fetch::Infrastructure::Request::ParserMetadata::NotParserInserted,
+        .credentials_mode = cors_settings_attribute_credentials_mode(options.crossorigin),
+        .referrer_policy = options.referrer_policy,
+        .fetch_priority = options.fetch_priority,
+    };
+
+    auto on_complete = create_on_fetch_script_complete(GC::Heap::the(), [](auto) { });
+    fetch_modulepreload_module_script_graph(settings_object.realm(), *url, *options.destination, settings_object, script_fetch_options, on_complete);
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#extract-links-from-headers
+static Vector<HTTP::Link> extract_links_from_headers(HTTP::HeaderList const& headers, URL::URL const& response_url)
+{
+    // 1. Let links be a new list.
+    Vector<HTTP::Link> links;
+
+    // 2. Let rawLinkHeaders be the result of getting, decoding, and splitting `Link` from headers.
+    // AD-HOC: Keep a URL that contains a comma in one piece, matching other engines. See:
+    //         https://github.com/whatwg/html/issues/11468
+    auto value = headers.get("Link"sv);
+    if (!value.has_value())
+        return links;
+    auto raw_link_headers = HTTP::get_decode_and_split_link_header_value(*value);
+
+    // NB: The URL of the representation has no fragment, since a request target never has one.
+    auto representation_url = response_url;
+    representation_url.set_fragment({});
+
+    // 3. For each linkHeader of rawLinkHeaders:
+    for (auto const& link_header : raw_link_headers) {
+        // 1. Let linkObject be the result of parsing linkHeader. [WEBLINK]
+        // NB: Parsing yields one link object for each relation type, and none if linkHeader is not a link.
+        for (auto& link_object : HTTP::parse_link_field_value(link_header, representation_url)) {
+            // 2. If linkObject["target_uri"] does not exist, then continue.
+            if (!link_object.target_uri.has_value())
+                continue;
+
+            // AD-HOC: Skip a link whose anchor makes it about another resource. RFC 8288 forbids processing a link
+            //         without applying its anchor. See: https://www.rfc-editor.org/rfc/rfc8288#section-3.2
+            if (link_object.context_uri != representation_url)
+                continue;
+
+            // 3. Append linkObject to links.
+            links.append(move(link_object));
+        }
+    }
+
+    // 4. Return links.
+    return links;
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#process-link-headers
+void HTMLLinkElement::process_link_headers(DOM::Document& document, HTTP::HeaderList const& response_header_list, URL::URL const& response_url, LinkHeaderPhase phase)
+{
+    // 1. Let links be the result of extracting links from response's header list.
+    auto links = extract_links_from_headers(response_header_list, response_url);
+
+    // 2. For each linkObject in links:
+    for (auto const& link_object : links) {
+        // 1. Let rel be linkObject["relation_type"].
+        auto const& rel = link_object.relation_type;
+
+        // OPTIMIZATION: Step 9 does nothing for any other relation type.
+        if (!rel.is_one_of("preconnect"sv, "preload"sv, "modulepreload"sv))
+            continue;
+
+        // 2. Let attribs be linkObject["target_attributes"].
+        auto media = link_object.target_attribute("media"sv);
+
+        // 3. Let expectedPhase be "media" if either "srcset", "imagesrcset", or "media" exist in attribs; otherwise
+        //    "pre-media".
+        auto expected_phase = LinkHeaderPhase::PreMedia;
+        if (link_object.target_attribute("srcset"sv).has_value() || link_object.target_attribute("imagesrcset"sv).has_value() || media.has_value())
+            expected_phase = LinkHeaderPhase::Media;
+
+        // 4. If expectedPhase is not phase, then continue.
+        if (expected_phase != phase)
+            continue;
+
+        // 5. If attribs["media"] exists and attribs["media"] does not match the environment, then continue.
+        if (media.has_value()) {
+            auto media_query = Utf16String::from_utf8(*media);
+            if (!media_attribute_matches_environment(document, media_query))
+                continue;
+        }
+
+        // 6. Let options be a new link processing options with
+        auto options = GC::Heap::the().allocate<LinkProcessingOptions>(
+            CORSSettingAttribute::NoCORS,
+            ReferrerPolicy::ReferrerPolicy::EmptyString,
+            Optional<SourceSet> {},
+
+            // base URL
+            //     doc's document base URL
+            // AD-HOC: Use the response's URL instead, so that a base element parsed before the "media" phase does not
+            //         apply to the URLs of a source set, matching other engines. See:
+            //         https://github.com/whatwg/html/issues/8330
+            response_url,
+
+            // origin
+            //     doc's origin
+            document.origin(),
+
+            // environment
+            //     doc's relevant settings object
+            document.relevant_settings_object(),
+
+            // policy container
+            //     doc's policy container
+            document.policy_container(),
+
+            // document
+            //     doc
+            document,
+
+            Utf16String {},
+            Fetch::Infrastructure::Request::Priority::Auto);
+
+        // href
+        //     linkObject["target_uri"]
+        options->href = Utf16String::from_utf8(link_object.target_uri->serialize());
+
+        // 7. Apply link options from parsed header attributes to options given attribs and rel. If that returned
+        //    false, then return.
+        // AD-HOC: Skip only this link, matching other engines.
+        if (!apply_link_options_from_parsed_header_attributes(options, link_object))
+            continue;
+
+        // 8. If attribs["imagesrcset"] exists and attribs["imagesizes"] exists, then set options's source set to the
+        //    result of creating a source set given linkObject["target_uri"], attribs["imagesrcset"],
+        //    attribs["imagesizes"], and null.
+        // AD-HOC: Create the source set when attribs["imagesizes"] does not exist as well, as for the element and
+        //         matching other engines.
+        if (auto image_srcset = link_object.target_attribute("imagesrcset"sv); image_srcset.has_value()) {
+            auto default_source = Utf16String::from_utf8(link_object.target_uri->serialize());
+            auto srcset = Utf16String::from_utf8(*image_srcset);
+            auto image_sizes = link_object.target_attribute("imagesizes"sv);
+            auto sizes = image_sizes.has_value() ? Utf16String::from_utf8(*image_sizes) : Utf16String {};
+            options->source_set = SourceSet::create(document, default_source, srcset, sizes);
+        }
+
+        // 9. Run the process a link header steps for rel given options.
+        if (rel == "preconnect"sv) {
+            preconnect(options);
+        } else if (rel == "preload"sv) {
+            preload(options);
+        }
+        // AD-HOC: The process a link header steps for modulepreload are to do nothing. Fetch the module script graph
+        //         as the element does instead, matching other engines. See: https://github.com/whatwg/html/pull/7862
+        else if (rel == "modulepreload"sv) {
+            modulepreload(options);
+        }
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/semantics.html#apply-link-options-from-parsed-header-attributes
+bool HTMLLinkElement::apply_link_options_from_parsed_header_attributes(LinkProcessingOptions& options, HTTP::Link const& link_object)
+{
+    // 1. If rel is "preload":
+    if (link_object.relation_type == "preload"sv) {
+        // 1. If attribs["as"] does not exist, then return false.
+        auto as = link_object.target_attribute("as"sv);
+        if (!as.has_value())
+            return false;
+
+        // 2. Let destination be the result of translating attribs["as"].
+        auto as_value = Utf16String::from_utf8(*as);
+        auto destination = translate_a_preload_destination(as_value);
+
+        // 3. If destination is null, then return false.
+        if (destination.has<Empty>())
+            return false;
+
+        // 4. Set options's destination to destination.
+        options.destination = destination.get<Optional<Fetch::Infrastructure::Request::Destination>>();
+    }
+    // AD-HOC: Set options's destination for modulepreload as well, from attribs["as"] as the element does.
+    else if (link_object.relation_type == "modulepreload"sv) {
+        auto as = link_object.target_attribute("as"sv);
+        auto as_value = as.has_value() ? Utf16String::from_utf8(*as) : Utf16String {};
+        auto destination = module_preload_destination_from_as_attribute(as_value);
+        if (!destination.has_value())
+            return false;
+        options.destination = destination;
+    }
+
+    // 2. If attribs["crossorigin"] exists and is an ASCII case-insensitive match for one of the CORS settings attribute
+    //    keywords, then set options's crossorigin to the CORS settings attribute state corresponding to that keyword.
+    if (auto crossorigin = link_object.target_attribute("crossorigin"sv); crossorigin.has_value()) {
+        if (crossorigin->is_empty() || crossorigin->equals_ignoring_ascii_case("anonymous"sv)) {
+            options.crossorigin = CORSSettingAttribute::Anonymous;
+        } else if (crossorigin->equals_ignoring_ascii_case("use-credentials"sv)) {
+            options.crossorigin = CORSSettingAttribute::UseCredentials;
+        }
+    }
+
+    // 3. If attribs["integrity"] exists, then set options's integrity to attribs["integrity"].
+    if (auto integrity = link_object.target_attribute("integrity"sv); integrity.has_value())
+        options.integrity = Utf16String::from_utf8(*integrity);
+
+    // 4. If attribs["referrerpolicy"] exists and is an ASCII case-insensitive match for some referrer policy, then set
+    //    options's referrer policy to that referrer policy.
+    if (auto referrer_policy = link_object.target_attribute("referrerpolicy"sv); referrer_policy.has_value()) {
+        if (auto policy = ReferrerPolicy::from_string(referrer_policy->bytes_as_string_view()); policy.has_value())
+            options.referrer_policy = *policy;
+    }
+
+    // 5. If attribs["nonce"] exists, then set options's nonce to attribs["nonce"].
+    if (auto nonce = link_object.target_attribute("nonce"sv); nonce.has_value())
+        options.cryptographic_nonce_metadata = Utf16String::from_utf8(*nonce);
+
+    // 6. If attribs["type"] exists, then set options's type to attribs["type"].
+    if (auto type = link_object.target_attribute("type"sv); type.has_value())
+        options.type = Utf16String::from_utf8(*type);
+
+    // 7. If attribs["fetchpriority"] exists and is an ASCII case-insensitive match for a fetch priority attribute
+    //    keyword, then set options's fetch priority to that fetch priority attribute keyword.
+    if (auto fetch_priority = link_object.target_attribute("fetchpriority"sv); fetch_priority.has_value()) {
+        if (auto priority = Fetch::Infrastructure::request_priority_from_string(Utf16String::from_utf8(*fetch_priority)); priority.has_value())
+            options.fetch_priority = *priority;
+    }
+
+    // 8. Return true.
+    return true;
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#process-the-linked-resource
@@ -1269,6 +1546,11 @@ void HTMLLinkElement::cancel_pending_stylesheet_processing()
     if (!m_stylesheet_processing_pending)
         return;
     m_stylesheet_processing_pending = false;
+    stop_blocking_on_style_sheet();
+}
+
+void HTMLLinkElement::stop_blocking_on_style_sheet()
+{
     document().remove_from_script_blocking_style_sheet_set(*this);
     unblock_rendering();
     m_document_load_event_delayer.clear();
@@ -1400,6 +1682,7 @@ bool HTMLLinkElement::should_fetch_and_process_resource_type() const
 HTMLLinkElement::LinkProcessingOptions::LinkProcessingOptions(
     CORSSettingAttribute crossorigin,
     ReferrerPolicy::ReferrerPolicy referrer_policy,
+    Optional<SourceSet> source_set,
     URL::URL base_url,
     URL::Origin origin,
     GC::Ref<HTML::EnvironmentSettingsObject> environment,
@@ -1410,6 +1693,7 @@ HTMLLinkElement::LinkProcessingOptions::LinkProcessingOptions(
     : cryptographic_nonce_metadata(move(cryptographic_nonce_metadata))
     , crossorigin(crossorigin)
     , referrer_policy(referrer_policy)
+    , source_set(move(source_set))
     , base_url(move(base_url))
     , origin(move(origin))
     , environment(environment)

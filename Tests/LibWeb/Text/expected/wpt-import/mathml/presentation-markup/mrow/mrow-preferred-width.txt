@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	Preferred width of mrow with mspace children
+Pass	Preferred width of mrow with mn and mo children
+Pass	Preferred width of mrow with mn and embellished op children

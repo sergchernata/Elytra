@@ -1,0 +1,19 @@
+Harness status: OK
+
+Found 14 tests
+
+14 Pass
+Pass	mtext is space-like
+Pass	mspace is space-like
+Pass	space-like mrow
+Pass	non-space-like mrow
+Pass	space-like mstyle
+Pass	non-space-like mstyle
+Pass	space-like mphantom
+Pass	non-space-like mphantom
+Pass	space-like mpadded
+Pass	non-space-like mpadded
+Pass	space-like merror
+Pass	non-space-like merror
+Pass	space-like menclose
+Pass	non-space-like menclose

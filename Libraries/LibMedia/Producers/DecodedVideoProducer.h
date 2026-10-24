@@ -80,7 +80,7 @@ private:
         DecoderErrorOr<void> receive_into_decoder(CodedFrame const&, DecodeIntent);
         DecoderErrorOr<void> create_decoder_for_frame(CodedFrame const&);
         DecoderErrorOr<void> receive_coded_frame(CodedFrame const&, DecodeIntent);
-        DecoderErrorOr<bool> replace_drained_decoder(u32 seek_id);
+        DecoderErrorOr<bool> replace_drained_decoder();
         bool check_if_seek_is_needed_or_allow_demuxer_reads(u32 seek_id);
         void release_decoder();
         void exit();
@@ -103,7 +103,7 @@ private:
         void invoke_on_main_thread_while_locked(Invokee);
         void queue_frame(NonnullRefPtr<VideoFrame> const&);
         void dispatch_error(DecoderError&&);
-        bool handle_seek();
+        void handle_seek();
         void resolve_seek(u32 seek_id);
         bool seek_to_resubmit_if_decoder_lost_its_state(DecoderError const&);
         bool seek_to_replace_decoder_if_it_cannot_decode_the_stream(DecoderError const&);
@@ -127,7 +127,11 @@ private:
         };
 
         void note_consumer_activity_while_locked() const;
-        void wait_to_decode_or_auto_suspend_while_locked();
+        enum class WaitResult : u8 {
+            ContinueDecoding,
+            ExitDecodeLoop,
+        };
+        WaitResult wait_for_frame_storage_while_locked();
         void dispatch_read_blocked_change(ReadBlocked blocked);
 
         Core::EventLoop& m_main_thread_event_loop;
@@ -155,7 +159,6 @@ private:
         OwnPtr<VideoDecoder> m_decoder;
         NonReferenceFrameDetector m_non_reference_frame_detector;
         bool m_decoder_needs_keyframe_next_seek { false };
-        bool m_decoder_needs_codec_configuration_next_seek { true };
 
         FrameQueue m_queue;
         RefPtr<VideoFrame> m_last_queued_frame;
@@ -165,18 +168,22 @@ private:
         ReadBlockedChangeHandler m_read_blocked_change_handler;
         PipelineStatus m_current_halting_status { PipelineStatus::Pending };
 
+        enum class SeekReason : u8 {
+            Normal,
+            DecoderResetNeeded,
+            DataInvalidated,
+        };
+
         Atomic<u32> m_last_processed_seek_id { 0 };
         Atomic<u32> m_seek_id { 0 };
         AK::Duration m_seek_timestamp;
-        // Stays set until a seek discards the queue, so that a later seek cannot resolve from the stale frames.
-        bool m_held_frames_are_invalid { false };
+        Atomic<SeekReason> m_seek_reason { SeekReason::Normal };
 
         SynchronizedWakeHandler m_wake_handler;
         mutable bool m_downstream_needs_wake { true };
 
         AK::Duration const m_auto_suspend_idle_timeout;
         mutable MonotonicTime m_last_consumer_activity { MonotonicTime::now() };
-        bool m_auto_suspended { false };
         mutable bool m_auto_suspend_requested { false };
     };
 

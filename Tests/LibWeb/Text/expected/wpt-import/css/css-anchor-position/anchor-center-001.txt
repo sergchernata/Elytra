@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	e.style['align-self'] = "anchor-center" should set the property value
+Pass	e.style['justify-self'] = "anchor-center" should set the property value
+Pass	Property align-self value 'anchor-center'
+Pass	Property justify-self value 'anchor-center'

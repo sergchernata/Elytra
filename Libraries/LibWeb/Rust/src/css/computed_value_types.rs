@@ -15,6 +15,7 @@ pub enum ComputedSizeKind {
     MinContent,
     MaxContent,
     FitContent,
+    Stretch,
     None,
 }
 
@@ -179,6 +180,7 @@ pub struct BoxValues {
     pub overflow_x: u8,
     pub overflow_y: u8,
     pub box_sizing: u8,
+    pub field_sizing: u8,
     pub resize: u8,
     pub text_overflow: u8,
     pub unicode_bidi: u8,
@@ -733,6 +735,13 @@ pub struct TransformValues {
     pub perspective_px: i32,
     pub perspective_origin_x: ComputedStyleValueHandle,
     pub perspective_origin_y: ComputedStyleValueHandle,
+    /// Whether offset-path is not none, which is all elements without an offset path pay for.
+    pub has_offset_path: bool,
+    pub offset_path: ComputedStyleValueHandle,
+    pub offset_distance: ComputedStyleValueHandle,
+    pub offset_position: ComputedStyleValueHandle,
+    pub offset_anchor: ComputedStyleValueHandle,
+    pub offset_rotate: ComputedStyleValueHandle,
 }
 
 /// One paint-ready CSS filter operation.
@@ -824,7 +833,7 @@ pub struct RetainedPositionAreaList {
 #[repr(C)]
 pub struct ComputedPositionTryFallback {
     pub name: crate::css::retained_fly_string::RetainedUtf16FlyString,
-    pub tactics: [u8; 3],
+    pub tactics: [u8; 5],
     pub tactic_count: usize,
     pub has_position_area: bool,
     pub position_area: RetainedPositionAreaList,
@@ -894,6 +903,8 @@ pub struct InheritedUIValues {
     pub accent_color: ComputedColorOrAuto,
     pub cursor: RetainedComputedCursorList,
     pub pointer_events: u8,
+    pub forced_color_adjust: u8,
+    pub interpolate_size: u8,
     pub scrollbar_color: ComputedScrollbarColor,
     pub color_scheme: u8,
     pub color_schemes: crate::css::retained_fly_string::RetainedUtf16FlyStringList,

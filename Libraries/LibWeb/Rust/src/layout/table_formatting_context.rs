@@ -1432,8 +1432,15 @@ impl<'pass> TableFormattingContext<'pass> {
         // those values, or if the computed value of the table-layout property is auto, then the table-root is said to be laid out in auto mode.
         let style = self.style(self.run.box_);
         let width = style.width();
+        // NB: A calc-size() width counts as well, whatever its basis.
+        //     https://drafts.csswg.org/css-values-5/#calc-size
+        // NB: So does a stretch width, as resolved in https://github.com/w3c/csswg-drafts/issues/10937.
         style.table_layout() == TABLE_LAYOUT_FIXED
-            && (width.is_length() || width.is_percentage() || width.is_min_content() || width.is_fit_content())
+            && (width.is_length_percentage()
+                || width.is_min_content()
+                || width.is_fit_content()
+                || width.is_stretch()
+                || width.calc_size().is_some())
     }
 
     /// Whether a cell takes part in measuring the tracks of an axis. https://www.w3.org/TR/css-tables-3/#computing-column-measures:
@@ -2117,6 +2124,34 @@ impl<'pass> TableFormattingContext<'pass> {
         capmin
     }
 
+    /// The content inline size a calc-size() with a sizing keyword basis resolves to, given the content size of that
+    /// keyword, or that size for a plain keyword. As for other boxes, the size is that of the box the box-sizing
+    /// property names.
+    /// https://drafts.csswg.org/css-values-5/#resolving-calc-size
+    fn resolve_calc_size_of_keyword(
+        &self,
+        size: &ComputedSize,
+        keyword_size: CssPixels,
+        basis: CssPixels,
+    ) -> CssPixels {
+        let Some(calc_size) = size.calc_size() else {
+            return keyword_size;
+        };
+        let edges = if self.style(self.run.box_).box_sizing() == box_sizing::BORDER_BOX {
+            let used = self.used_values(self.run.box_);
+            let collapsed = used.uses_collapsing_borders_model.get();
+            used.border_box_left(collapsed) + used.border_box_right(collapsed)
+        } else {
+            CssPixels::default()
+        };
+        let resolved = crate::css::calc_size::resolve_calc_size(calc_size, Some(basis.to_double()), &|_| {
+            (keyword_size + edges).to_double()
+        });
+        resolved.map_or(keyword_size, |resolved| {
+            (CssPixels::nearest_value_for(resolved) - edges).max(CssPixels::default())
+        })
+    }
+
     fn resolve_inline_constraint(
         &mut self,
         constraint: &ComputedSize,
@@ -2125,10 +2160,10 @@ impl<'pass> TableFormattingContext<'pass> {
         basis: CssPixels,
     ) -> CssPixels {
         if constraint.is_min_content() {
-            return grid_min;
+            return self.resolve_calc_size_of_keyword(constraint, grid_min, basis);
         }
         if constraint.is_max_content() {
-            return grid_max;
+            return self.resolve_calc_size_of_keyword(constraint, grid_max, basis);
         }
         if constraint.is_fit_content() {
             let limit = if constraint.fit_content_available_space().is_some() {
@@ -2136,7 +2171,16 @@ impl<'pass> TableFormattingContext<'pass> {
             } else {
                 basis
             };
-            return grid_max.min(grid_min.max(limit));
+            return self.resolve_calc_size_of_keyword(constraint, grid_max.min(grid_min.max(limit)), basis);
+        }
+        // https://drafts.csswg.org/css-sizing-3/#stretch-fit-sizing
+        // NB: The table wrapper box carries the margins, so a stretch size fills the basis with the table's border box.
+        if constraint.is_stretch() {
+            let used = self.used_values(self.run.box_);
+            let collapsed = used.uses_collapsing_borders_model.get();
+            let stretch_fit_size =
+                (basis - used.border_box_left(collapsed) - used.border_box_right(collapsed)).max(CssPixels::default());
+            return self.resolve_calc_size_of_keyword(constraint, stretch_fit_size, basis);
         }
         // CSS Sizing says box-sizing:border-box applies length/percentage width/min-width/max-width constraints to
         // the border box. The table inline-size algorithm compares content inline sizes, so convert them before comparing.
@@ -2181,7 +2225,7 @@ impl<'pass> TableFormattingContext<'pass> {
         let capmin = self.compute_capmin();
         // The used minimum inline size of a table is the greater of the resolved min-width, CAPMIN, and GRIDMIN.
         let mut used_min = grid_min.max(capmin);
-        if !table_style.min_width().is_auto() {
+        if !crate::layout::sizing_context::is_plain_auto(table_style.min_width()) {
             used_min = used_min.max(self.resolve_inline_constraint(table_style.min_width(), grid_min, grid_max, basis));
         }
         let width_is_auto_or_indefinite_percentage = table_style.width().is_auto()
@@ -2227,7 +2271,7 @@ impl<'pass> TableFormattingContext<'pass> {
             }
             value
         } else if table_style.width().is_max_content() {
-            grid_max
+            self.resolve_calc_size_of_keyword(table_style.width(), grid_max, basis)
         } else {
             // If the table-root’s width property has a computed value (resolving to the table inline size) other than auto,
             // the used inline size is the greater of the resolved table inline size and the used minimum inline size.
@@ -2253,7 +2297,10 @@ impl<'pass> TableFormattingContext<'pass> {
                 return false;
             }
             let style = self.style(self.rows[row_index].box_);
-            if !style.height().is_auto() || !style.min_height().is_auto() || !style.max_height().is_none() {
+            if !style.height().is_auto()
+                || !crate::layout::sizing_context::is_plain_auto(style.min_height())
+                || !style.max_height().is_none()
+            {
                 return false;
             }
         }
@@ -2263,7 +2310,10 @@ impl<'pass> TableFormattingContext<'pass> {
                 return false;
             }
             let style = self.style(cell.box_);
-            if !style.height().is_auto() || !style.min_height().is_auto() || !style.max_height().is_none() {
+            if !style.height().is_auto()
+                || !crate::layout::sizing_context::is_plain_auto(style.min_height())
+                || !style.max_height().is_none()
+            {
                 return false;
             }
         }

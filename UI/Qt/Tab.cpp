@@ -34,6 +34,7 @@
 #include <UI/Qt/WindowControlButton.h>
 
 #include <LibWebView/TabPerformanceMonitor.h>
+#include <QApplication>
 #include <QColorDialog>
 #include <QCursor>
 #include <QDynamicPropertyChangeEvent>
@@ -102,6 +103,98 @@ protected:
             QToolButton::mouseReleaseEvent(event);
         }
     }
+};
+
+// The reload button becomes a stop button while the page loads. So that one click does not do what the user did not aim
+// at, the button does not change at the wrong moment while under the pointer: a stop button stays until the pointer
+// leaves or a short delay passes, and a reload click does not become a stop button until the double-click interval
+// passes, so a double-click does not stop the reload it started. The reload action stays attached to the button while
+// it shows stop, so its shortcuts still work during a load.
+class ReloadButton final : public ToolbarButton {
+public:
+    AK_ALLOC_WITH_KMALLOC;
+
+    explicit ReloadButton(QWidget* parent)
+        : ToolbarButton(parent)
+    {
+        m_double_click_timer.setSingleShot(true);
+        m_double_click_timer.setInterval(QApplication::doubleClickInterval());
+        QObject::connect(&m_double_click_timer, &QTimer::timeout, this, [this] {
+            change_mode(m_intended_mode, ForceChange::No);
+        });
+
+        m_stop_to_reload_timer.setSingleShot(true);
+        m_stop_to_reload_timer.setInterval(STOP_TO_RELOAD_DELAY_MS);
+        QObject::connect(&m_stop_to_reload_timer, &QTimer::timeout, this, [this] {
+            change_mode(m_intended_mode, ForceChange::Yes);
+        });
+
+        QObject::connect(this, &QToolButton::pressed, this, [this] {
+            if (m_visible_mode == Mode::Reload)
+                m_double_click_timer.start();
+        });
+
+        // NB: A stop click that arrives after the load ended has nothing to stop, so show the reload button right away.
+        QObject::connect(this, &QToolButton::clicked, this, [this] {
+            if (m_visible_mode == Mode::Stop)
+                change_mode(m_intended_mode, ForceChange::Yes);
+        });
+    }
+
+    void set_actions(QAction& reload_action, QAction& stop_action)
+    {
+        m_reload_action = &reload_action;
+        m_stop_action = &stop_action;
+    }
+
+    void set_loading(bool is_loading)
+    {
+        change_mode(is_loading ? Mode::Stop : Mode::Reload, ForceChange::No);
+    }
+
+protected:
+    virtual void leaveEvent(QEvent* event) override
+    {
+        ToolbarButton::leaveEvent(event);
+        change_mode(m_intended_mode, ForceChange::Yes);
+    }
+
+private:
+    static constexpr int STOP_TO_RELOAD_DELAY_MS = 1000;
+
+    enum class Mode {
+        Reload,
+        Stop,
+    };
+
+    enum class ForceChange {
+        No,
+        Yes,
+    };
+
+    void change_mode(Mode mode, ForceChange force_change)
+    {
+        m_intended_mode = mode;
+
+        auto change_is_safe = mode == Mode::Stop ? !m_double_click_timer.isActive() : m_visible_mode != Mode::Stop;
+        if (force_change == ForceChange::Yes || !underMouse() || change_is_safe) {
+            m_double_click_timer.stop();
+            m_stop_to_reload_timer.stop();
+            m_visible_mode = mode;
+            setDefaultAction(mode == Mode::Stop ? m_stop_action : m_reload_action);
+            return;
+        }
+
+        if (m_visible_mode == Mode::Stop && !m_stop_to_reload_timer.isActive())
+            m_stop_to_reload_timer.start();
+    }
+
+    QAction* m_reload_action { nullptr };
+    QAction* m_stop_action { nullptr };
+    Mode m_visible_mode { Mode::Reload };
+    Mode m_intended_mode { Mode::Reload };
+    QTimer m_double_click_timer;
+    QTimer m_stop_to_reload_timer;
 };
 
 class HamburgerButton final : public ToolbarButton {
@@ -214,9 +307,10 @@ private:
 
 static constexpr int TOOLBAR_BUTTON_SIZE = 34;
 
-static ToolbarButton* create_toolbar_button(QWidget& parent, QAction& action)
+template<typename ButtonType = ToolbarButton>
+static ButtonType* create_toolbar_button(QWidget& parent, QAction& action)
 {
-    auto* button = new ToolbarButton(&parent);
+    auto* button = new ButtonType(&parent);
     button->setDefaultAction(&action);
     button->setAutoRaise(true);
     button->setFocusPolicy(Qt::NoFocus);
@@ -564,31 +658,56 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     : QWidget(window)
     , m_window(window)
 {
-    auto& application = WebView::Application::the();
+    create_tab_shell();
+    initialize(traversable);
+}
 
+Tab::Tab(BrowserWindow* window, DeferredTab deferred_tab)
+    : QWidget(window)
+    , m_window(window)
+    , m_title(deferred_tab.title)
+    , m_favicon(deferred_tab.favicon)
+    , m_session_tab_id(deferred_tab.session_tab_id)
+    , m_deferred_tab(AK::move(deferred_tab))
+{
+    create_tab_shell();
+}
+
+void Tab::create_tab_shell()
+{
     auto* tab_layout = new QBoxLayout(QBoxLayout::Direction::TopToBottom, this);
     tab_layout->setSpacing(0);
     tab_layout->setContentsMargins(0, 0, 0, 0);
 
+    // TabWidget keeps every tab's toolbar container in a stack beside its pages, so even a tab that hasn't loaded needs
+    // one. initialize() fills it.
+    m_toolbar_container = new QWidget(this);
+    m_toolbar_container->setObjectName("LadybirdToolbarContainer");
+    m_toolbar_container->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+
+    create_tab_context_menu();
+}
+
+void Tab::initialize(Optional<WebView::CanonicalTraversable&> traversable)
+{
+    auto& application = WebView::Application::the();
+    auto* tab_layout = static_cast<QBoxLayout*>(layout());
+
     auto view_initial_state = WebContentViewInitialState {
-        .is_private = window->is_private(),
-        .maximum_frames_per_second = window->refresh_rate(),
-        .display_id = window->display_id(),
+        .is_private = m_window->is_private(),
+        .maximum_frames_per_second = m_window->refresh_rate(),
+        .display_id = m_window->display_id(),
         .owner_view = nullptr,
     };
 
     m_view = new WebContentView(this, traversable, AK::move(view_initial_state));
     // The window reports its geometry to its tabs as it is moved and resized, so a tab opened later has to be told
     // where the window stands now.
-    m_view->set_window_position({ window->x(), window->y() });
-    m_view->set_window_size({ window->width(), window->height() });
+    m_view->set_window_position({ m_window->x(), m_window->y() });
+    m_view->set_window_size({ m_window->width(), m_window->height() });
     m_javascript_dialog = new JavaScriptDialog(m_view);
     m_find_in_page = new FindInPageWidget(this, m_view);
     m_find_in_page->setVisible(false);
-
-    m_toolbar_container = new QWidget(this);
-    m_toolbar_container->setObjectName("LadybirdToolbarContainer");
-    m_toolbar_container->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     m_toolbar = new QWidget(this);
     m_toolbar->setObjectName("LadybirdNavigationToolbar");
@@ -670,7 +789,7 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
 #ifdef AK_OS_MACOS
     m_view_layout = new QHBoxLayout;
     m_view_layout->addWidget(m_view);
-    update_web_view_frame(true, {});
+    update_web_view_frame(m_web_view_chrome_visible, m_web_view_sidebar_position);
     tab_layout->addLayout(m_view_layout);
 #else
     tab_layout->addWidget(m_view);
@@ -681,6 +800,11 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     m_navigate_back_action = create_application_action(*this, view().navigate_back_action());
     m_navigate_forward_action = create_application_action(*this, view().navigate_forward_action());
     m_reload_action = create_application_action(*this, application.reload_action());
+    m_stop_action = new QAction("Stop", this);
+    m_stop_action->setToolTip("Stop loading this page");
+    QObject::connect(m_stop_action, &QAction::triggered, this, [this] {
+        view().stop_loading();
+    });
     m_toggle_vertical_tabs_expanded_action = create_application_action(*this, application.toggle_vertical_tabs_expanded_action());
     m_open_downloads_page_action = create_application_action(*this, application.open_downloads_page_action());
 
@@ -776,7 +900,9 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     navigation_button_layout->addItem(m_sidebar_toggle_navigation_spacer);
     navigation_button_layout->addWidget(create_navigation_history_toolbar_button(*navigation_button_cluster, *m_navigate_back_action, -1));
     navigation_button_layout->addWidget(create_navigation_history_toolbar_button(*navigation_button_cluster, *m_navigate_forward_action, 1));
-    navigation_button_layout->addWidget(create_toolbar_button(*navigation_button_cluster, *m_reload_action));
+    m_reload_button = create_toolbar_button<ReloadButton>(*navigation_button_cluster, *m_reload_action);
+    m_reload_button->set_actions(*m_reload_action, *m_stop_action);
+    navigation_button_layout->addWidget(m_reload_button);
 
     auto* location_edit_container = new QWidget(m_toolbar);
     location_edit_container->setProperty(WINDOW_DRAG_REGION_PROPERTY, true);
@@ -1242,10 +1368,23 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     view().on_screen_wake_lock_state_changed = [this](auto wake_lock_state) {
         set_screen_wake_lock_state(wake_lock_state);
     };
+}
+
+void Tab::create_tab_context_menu()
+{
+    auto& application = WebView::Application::the();
 
     auto* duplicate_tab_action = new QAction("&Duplicate Tab", this);
     QObject::connect(duplicate_tab_action, &QAction::triggered, this, [this]() {
         m_window->duplicate_tab(*this);
+    });
+
+    m_pin_tab_action = new QAction("&Pin Tab", this);
+    QObject::connect(m_pin_tab_action, &QAction::triggered, this, [this]() {
+        if (m_is_pinned)
+            m_window->unpin_tab(*this);
+        else
+            m_window->pin_tab(*this);
     });
 
     auto* move_to_start_action = new QAction("Move to &Start", this);
@@ -1266,21 +1405,30 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     auto* close_tabs_to_left_action = new QAction("C&lose Tabs to Left", this);
     QObject::connect(close_tabs_to_left_action, &QAction::triggered, this, [this]() {
         for (auto i = tab_index() - 1; i >= 0; i--) {
-            m_window->request_to_close_tab(i);
+            if (!m_window->tab_at(i)->is_pinned())
+                m_window->request_to_close_tab(i);
         }
     });
 
     auto* close_tabs_to_right_action = new QAction("Close Tabs to R&ight", this);
     QObject::connect(close_tabs_to_right_action, &QAction::triggered, this, [this]() {
+        // Closing the current tab selects a neighbor, which may be a tab about to close too, and selecting a tab that
+        // hasn't loaded loads it. So, this tab, which stays open, becomes the current tab first.
+        if (auto* current = m_window->current_tab(); current && m_window->tab_index(current) > tab_index() && !current->is_pinned())
+            m_window->activate_tab(tab_index());
         for (auto i = m_window->tab_count() - 1; i > tab_index(); i--) {
-            m_window->request_to_close_tab(i);
+            if (!m_window->tab_at(i)->is_pinned())
+                m_window->request_to_close_tab(i);
         }
     });
 
     auto* close_other_tabs_action = new QAction("Cl&ose Other Tabs", this);
     QObject::connect(close_other_tabs_action, &QAction::triggered, this, [this]() {
+        // As in Close Tabs to Right, this tab becomes the current tab first if the current tab is among those closing.
+        if (auto* current = m_window->current_tab(); current && current != this && !current->is_pinned())
+            m_window->activate_tab(tab_index());
         for (auto i = m_window->tab_count() - 1; i >= 0; i--) {
-            if (i == tab_index())
+            if (i == tab_index() || m_window->tab_at(i)->is_pinned())
                 continue;
 
             m_window->request_to_close_tab(i);
@@ -1290,6 +1438,7 @@ Tab::Tab(BrowserWindow* window, Optional<WebView::CanonicalTraversable&> travers
     m_context_menu = new QMenu("Context menu", this);
     m_context_menu->addAction(create_application_action(*this, application.reload_action(), IncludeActionIcon::No));
     m_context_menu->addAction(duplicate_tab_action);
+    m_context_menu->addAction(m_pin_tab_action);
     m_context_menu->addSeparator();
     auto* move_tab_menu = m_context_menu->addMenu("Mo&ve Tab");
     move_tab_menu->addAction(move_to_start_action);
@@ -1306,13 +1455,77 @@ Tab::~Tab() = default;
 
 void Tab::park_location_editing()
 {
+    // A tab that hasn't loaded has no omnibox yet, so it has no editing session to park.
+    if (!is_loaded())
+        return;
     m_location_edit->park_editing_session();
+}
+
+void Tab::ensure_loaded()
+{
+    if (is_loaded())
+        return;
+
+    // Until initialize() has built the view, url() reads the deferred tab's URL, so the deferred tab stays until then.
+    auto deferred_url = m_deferred_tab->url;
+    // initialize() hides the toolbar's window controls, which overwrites the visibility TabWidget last asked for.
+    auto toolbar_window_controls_visible = m_toolbar_window_controls_visible;
+    initialize({});
+    m_deferred_tab.clear();
+
+    // TabWidget pushed these while the tab had no toolbar to apply them to.
+    set_vertical_tabs_enabled(m_vertical_tabs_enabled);
+    recreate_toolbar_icons();
+    update_vertical_tabs_toolbar_button_placement();
+    set_toolbar_window_controls_visible(toolbar_window_controls_visible);
+
+    if (m_session_tab_id.has_value())
+        view().set_session_tab_id(*m_session_tab_id);
+    emit loaded();
+
+    Optional<WebView::SessionHistorySnapshot> history;
+    if (m_session_tab_id.has_value())
+        history = m_window->session().session_store->load_tab_history(*m_session_tab_id);
+    if (!history.has_value() || view().restore_session_history_from_snapshot(history.release_value()).is_error())
+        navigate(deferred_url);
+}
+
+URL::URL Tab::url() const
+{
+    if (!is_loaded())
+        return m_deferred_tab->url;
+    return view().url();
+}
+
+Optional<WebView::SessionTabId> Tab::session_tab_id() const
+{
+    // A loaded tab's view holds the ID it reports its state under.
+    if (is_loaded())
+        return view().session_tab_id();
+    return m_session_tab_id;
+}
+
+void Tab::set_session_tab_id(WebView::SessionTabId session_tab_id)
+{
+    m_session_tab_id = session_tab_id;
+    if (is_loaded())
+        view().set_session_tab_id(session_tab_id);
+}
+
+void Tab::clear_session_tab_id()
+{
+    m_session_tab_id.clear();
+    if (is_loaded())
+        view().clear_session_tab_id();
 }
 
 void Tab::focus_location_editor()
 {
+    if (!is_loaded())
+        return;
     if (on_focus_location_editor && on_focus_location_editor(*this)) // Fork hook (Arc)
         return;
+
 #if defined(AK_OS_MACOS)
     make_appkit_window_first_responder(*m_location_edit);
 #endif
@@ -1326,6 +1539,11 @@ void Tab::set_window(BrowserWindow& window)
     if (&window == m_window)
         return;
 
+    if (!is_loaded()) {
+        m_window = &window;
+        return;
+    }
+
     QObject::disconnect(&m_window->hamburger_menu(), nullptr, m_hamburger_button, nullptr);
 
     m_window = &window;
@@ -1338,9 +1556,18 @@ void Tab::set_window(BrowserWindow& window)
     m_view->set_window_size({ window.width(), window.height() });
 }
 
+void Tab::set_pinned(bool pinned)
+{
+    m_is_pinned = pinned;
+    m_pin_tab_action->setText(pinned ? "Un&pin Tab" : "&Pin Tab");
+}
+
 void Tab::set_vertical_tabs_enabled(bool enabled)
 {
     m_vertical_tabs_enabled = enabled;
+    if (!is_loaded())
+        return;
+
     m_toolbar->setProperty(WINDOW_DRAG_REGION_PROPERTY, true);
     if (m_sidebar_toggle_navigation_spacer)
         m_sidebar_toggle_navigation_spacer->changeSize(enabled ? TOOLBAR_SIDEBAR_TOGGLE_NAVIGATION_GAP : 0, 0, QSizePolicy::Fixed, QSizePolicy::Minimum);
@@ -1355,6 +1582,9 @@ void Tab::set_vertical_tabs_position(WebView::VerticalTabsPosition position)
         return;
 
     m_vertical_tabs_position = position;
+    if (!is_loaded())
+        return;
+
     recreate_toolbar_icons();
     update_vertical_tabs_toolbar_button_placement();
     m_toolbar->layout()->invalidate();
@@ -1363,6 +1593,11 @@ void Tab::set_vertical_tabs_position(WebView::VerticalTabsPosition position)
 #ifdef AK_OS_MACOS
 void Tab::update_web_view_frame(bool chrome_visible, Optional<WebView::VerticalTabsPosition> sidebar_position)
 {
+    m_web_view_chrome_visible = chrome_visible;
+    m_web_view_sidebar_position = sidebar_position;
+    if (!is_loaded())
+        return;
+
     // With the browser chrome hidden, the page fills the window edge to edge.
     if (!chrome_visible) {
         m_view_layout->setContentsMargins(0, 0, 0, 0);
@@ -1400,6 +1635,10 @@ void Tab::set_toolbar_container_in_tab_layout(bool in_tab_layout)
 
 void Tab::set_toolbar_window_controls_visible(bool visible)
 {
+    m_toolbar_window_controls_visible = visible;
+    if (!is_loaded())
+        return;
+
     auto const has_native_window_controls = use_native_macos_window_controls() && visible;
     auto const has_custom_window_controls = !use_native_macos_window_controls() && visible;
 
@@ -1483,7 +1722,7 @@ QIcon Tab::tab_icon() const
 QString Tab::title() const
 {
     auto title = m_fixed_title.value_or(m_title);
-    if (!WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle))
+    if (!is_loaded() || !WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle))
         return title;
 
     return QString("%1 [%2]").arg(title).arg(view().web_content_pid());
@@ -1532,6 +1771,9 @@ void Tab::update_tab_title()
 
 void Tab::tab_settings_changed()
 {
+    if (!is_loaded())
+        return;
+
     auto const& tab_settings = WebView::Application::settings().tab_settings();
     m_vertical_tabs_enabled = tab_settings.vertical_tabs_enabled;
     m_vertical_tabs_position = tab_settings.vertical_tabs_position;
@@ -1545,6 +1787,9 @@ void Tab::tab_settings_changed()
 
 void Tab::config_variable_changed(WebView::ConfigVariableID variable)
 {
+    if (!is_loaded())
+        return;
+
     if (variable == WebView::ConfigVariableID::ShowTabPerformanceMonitor)
         m_performance_monitor->setVisible(WebView::Application::settings().config_variable_as_bool(variable));
     if (variable == WebView::ConfigVariableID::ShowWebContentProcessIDInTabTitle)
@@ -1553,6 +1798,9 @@ void Tab::config_variable_changed(WebView::ConfigVariableID variable)
 
 void Tab::content_blocker_count_visibility_changed()
 {
+    if (!is_loaded())
+        return;
+
     m_content_blocking_button->set_show_count_badge(WebView::Application::settings().show_content_blocker_count());
 }
 
@@ -1571,6 +1819,8 @@ void Tab::set_loading(bool is_loading)
         m_loading_animation_timer->stop();
 
     update_tab_icon();
+
+    m_reload_button->set_loading(m_is_loading);
 
     // Only mark the end of loads that finished, rather than being stopped. The browser's own about: pages are not
     // marked.
@@ -1626,6 +1876,11 @@ void Tab::paintEvent(QPaintEvent*)
 void Tab::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
+    if (isVisible())
+        did_get_real_size();
+    if (!is_loaded())
+        return;
+
     if (m_hover_label->isVisible())
         update_hover_label();
 }
@@ -1633,6 +1888,8 @@ void Tab::resizeEvent(QResizeEvent* event)
 void Tab::hideEvent(QHideEvent* event)
 {
     QWidget::hideEvent(event);
+    if (!is_loaded())
+        return;
 
     set_bookmarks_bar_hover_expanded(false);
     m_hover_label->hide();
@@ -1666,7 +1923,7 @@ void Tab::hide_hover_label()
 
 bool Tab::event(QEvent* event)
 {
-    if (event->type() == QEvent::PaletteChange) {
+    if (event->type() == QEvent::PaletteChange && is_loaded()) {
         update_chrome_style();
         recreate_toolbar_icons();
         if (m_is_loading)
@@ -1732,6 +1989,7 @@ void Tab::recreate_toolbar_icons()
     m_navigate_back_action->setIcon(create_chrome_icon(ChromeIcon::Back, palette()));
     m_navigate_forward_action->setIcon(create_chrome_icon(ChromeIcon::Forward, palette()));
     m_reload_action->setIcon(create_chrome_icon(ChromeIcon::Reload, palette()));
+    m_stop_action->setIcon(create_chrome_icon(ChromeIcon::Stop, palette()));
     m_downloads_button_icon = {};
     update_downloads_button();
     m_hamburger_button->setIcon(create_chrome_icon(ChromeIcon::Menu, palette()));
@@ -1845,6 +2103,9 @@ void Tab::position_downloads_popover()
 
 void Tab::download_added(WebView::FileDownloader::Download const& download)
 {
+    if (!is_loaded())
+        return;
+
     // NB: A window lists the downloads of its own browsing session only.
     if (download.is_private != m_window->is_private())
         return;
@@ -1858,6 +2119,9 @@ void Tab::download_added(WebView::FileDownloader::Download const& download)
 
 void Tab::download_updated(WebView::FileDownloader::Download const& download)
 {
+    if (!is_loaded())
+        return;
+
     if (download.is_private != m_window->is_private())
         return;
     update_downloads_button();
@@ -1866,6 +2130,9 @@ void Tab::download_updated(WebView::FileDownloader::Download const& download)
 
 void Tab::download_removed(u64, WebView::IsPrivate is_private)
 {
+    if (!is_loaded())
+        return;
+
     if (is_private != m_window->is_private())
         return;
     update_downloads_button();
@@ -2029,6 +2296,9 @@ void Tab::update_bookmarks_bar_visibility()
 
 bool Tab::has_bookmarks_bar_in_page() const
 {
+    // A tab that hasn't loaded has no bookmarks bar yet.
+    if (!is_loaded())
+        return false;
     return m_bookmarks_bar_container->parentWidget() == this && !m_bookmarks_bar_container->isHidden();
 }
 
@@ -2137,6 +2407,13 @@ void Tab::update_bookmarks_bar_geometry()
 void Tab::request_close()
 {
     m_window->cancel_window_close_preflight();
+
+    // A tab that hasn't loaded has no page to ask, so it closes at once.
+    if (!is_loaded()) {
+        m_window->definitely_close_tab(tab_index());
+        return;
+    }
+
     m_suppress_javascript_dialogs_until_navigation = true;
     m_preserve_close_retry_state_on_dialog_dismissal = m_already_requested_close;
     m_javascript_dialog->dismiss();
@@ -2164,6 +2441,11 @@ void Tab::request_close()
 
 void Tab::request_window_close_preflight(Function<void(bool)> on_complete)
 {
+    if (!is_loaded()) {
+        on_complete(true);
+        return;
+    }
+
     m_suppress_javascript_dialogs_until_navigation = true;
 
     if (m_javascript_dialog->type() != JavaScriptDialog::Type::BeforeUnload)
@@ -2186,6 +2468,9 @@ void Tab::request_window_close_preflight(Function<void(bool)> on_complete)
 
 void Tab::cancel_window_close_preflight()
 {
+    if (!is_loaded())
+        return;
+
     if (m_javascript_dialog->type() == JavaScriptDialog::Type::BeforeUnload)
         m_javascript_dialog->dismiss();
     m_already_requested_close = false;
@@ -2194,6 +2479,9 @@ void Tab::cancel_window_close_preflight()
 
 Function<void()> Tab::prepare_for_window_close()
 {
+    if (!is_loaded())
+        return [] { };
+
     m_window_is_closing = true;
     m_suppress_javascript_dialogs_until_navigation = true;
     m_javascript_dialog->dismiss();

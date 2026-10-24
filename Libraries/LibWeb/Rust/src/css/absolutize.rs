@@ -41,6 +41,7 @@ mod grid_tests {
             random_base_values: &[],
             document_base_url: &[],
             style_sheet_resource_context: None,
+            current_color: None,
         };
         match absolutize(value, &context).unwrap() {
             Absolutized::Unchanged => unsafe {
@@ -210,14 +211,15 @@ mod grid_tests {
 
 use crate::css::color_resolution::{
     ColorResolutionInput, EMPTY_INPUT, PREFERRED_COLOR_SCHEME_DARK, RECTANGULAR_COLOR_SPACE_OKLAB,
-    descriptor_for_color_type, normalize_percentage_pair, percentage_from_style_value, resolve_alpha,
-    resolve_color_for_interpolation, resolve_hue, resolve_relative_form, resolve_with_reference_value, to_color,
+    calculate_a_color_mix, descriptor_for_color_type, percentage_from_style_value, resolve_alpha, resolve_hue,
+    resolve_relative_form, resolve_with_reference_value, to_color,
 };
 use crate::css::css_enums::keyword;
+use crate::css::serialize::color_function_has_missing_component;
 use crate::css::style_compute::{FfiLengthResolutionContext, absolutize_length, keyword_is_color};
 use crate::css::style_value::{
     BasicShapeData, ColorBase, CssString, OwnedBasicShapeData, RetainedGridTrackEntryList, RetainedStyleValueData,
-    RetainedStyleValueDataList, StyleValueData,
+    RetainedStyleValueDataList, StyleValueData, is_none_keyword, value_depends_on_current_color,
 };
 use crate::css::value_codes::*;
 
@@ -237,6 +239,10 @@ pub(crate) struct AbsolutizationContext<'a> {
     pub(crate) document_base_url: &'a [u8],
     /// The stylesheet resource context for the selected cascade source, if any.
     pub(crate) style_sheet_resource_context: Option<StyleSheetResourceContext<'a>>,
+    /// The computed value `currentcolor` names while the value computes, which only the `color` property knows: its
+    /// inherited value. Elsewhere `currentcolor` names the element's own color, which the computed value keeps
+    /// unresolved until it is used.
+    pub(crate) current_color: Option<&'a StyleValueData>,
 }
 
 #[derive(Clone, Copy)]
@@ -378,15 +384,20 @@ fn absolutize_image(value: &StyleValueData, context: &AbsolutizationContext) -> 
 }
 
 /// The color-resolution input the C++ absolutizers build from a computation context: the
-/// context's color scheme and calculation inputs, no currentcolor and no channels.
+/// context's color scheme and calculation inputs, the currentcolor it knows of, and no channels.
 fn color_resolution_input<'a>(context: &'a AbsolutizationContext) -> ColorResolutionInput<'a> {
-    ColorResolutionInput {
+    let mut input = ColorResolutionInput {
         scheme: context.scheme,
         current_color: None,
         current_color_value: None,
         length: Some(context.length),
         channels: None,
+    };
+    if let Some(current_color) = context.current_color {
+        input.current_color = to_color(current_color, &input);
+        input.current_color_value = Some(current_color);
     }
+    input
 }
 
 /// The rgb() function form ColorFunctionStyleValue::create builds for an already-resolved
@@ -463,8 +474,13 @@ fn hwb_to_absolutized_rgb(
     blackness_0_100: f64,
     alpha_0_1: f64,
 ) -> StyleValueData {
-    let whiteness = (whiteness_0_100 / 100.0).clamp(0.0, 1.0) as f32;
-    let blackness = (blackness_0_100 / 100.0).clamp(0.0, 1.0) as f32;
+    // https://drafts.csswg.org/css-color-4/#the-hwb-notation
+    // Values outside of these ranges are not invalid; hue angles outside the range [0,360) will be normalized to
+    // that range and values of white and black which sum to 100% or greater will produce achromatic colors as
+    // described below.
+    // NB: The handling of negative white or black is unspecified, so they are clamped to 0%.
+    let whiteness = (whiteness_0_100 / 100.0).max(0.0) as f32;
+    let blackness = (blackness_0_100 / 100.0).max(0.0) as f32;
 
     if whiteness + blackness >= 1.0 {
         // The gray channel value is shared across the three slots, like the C++ code.
@@ -513,6 +529,106 @@ fn hwb_to_absolutized_rgb(
     )
 }
 
+/// The computed form of an absolute rgb(), hsl() or hwb() function that keeps its color function: the same
+/// function with every present component resolved to a number (hues in degrees, other hsl() and hwb()
+/// components in percent, rgb() components from 0 to 255) and alpha clamped to [0, 1].
+fn resolved_srgb_function_components(value: &StyleValueData) -> Option<StyleValueData> {
+    let StyleValueData::ColorFunction {
+        color_base,
+        channel_0,
+        channel_1,
+        channel_2,
+        alpha,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    let descriptor = descriptor_for_color_type(color_base.color_type);
+    let resolve_channel = |channel: &RetainedStyleValueData, index: usize| -> Option<RetainedStyleValueData> {
+        let value = channel.data();
+        if is_none_keyword(value) {
+            return Some(channel.clone_retained());
+        }
+        let channel_descriptor = &descriptor.channels[index];
+        let mut resolved = if channel_descriptor.is_hue {
+            resolve_hue(value, &EMPTY_INPUT)?
+        } else {
+            resolve_with_reference_value(value, f64::from(channel_descriptor.percent_reference), &EMPTY_INPUT)?
+        };
+        if color_base.color_type == crate::css::color_conversion::RGB {
+            resolved = resolved.clamp(0.0, 255.0);
+        }
+        // https://drafts.csswg.org/css-color-4/#the-hsl-notation
+        // For historical reasons, if the saturation is less than 0% it is clamped to 0% at parsed-value time,
+        // before being converted to an sRGB color.
+        if color_base.color_type == crate::css::color_conversion::HSL && index == 1 {
+            resolved = resolved.max(0.0);
+        }
+        Some(retain_new(StyleValueData::Number { value: resolved }))
+    };
+    let alpha = match alpha.optional_data() {
+        None => retained_null(),
+        Some(value) if is_none_keyword(value) => alpha.clone_retained(),
+        Some(value) => retain_new(StyleValueData::Number {
+            value: resolve_alpha(value, &EMPTY_INPUT)?,
+        }),
+    };
+    Some(StyleValueData::ColorFunction {
+        color_base: ColorBase {
+            color_syntax: COLOR_SYNTAX_MODERN,
+            ..*color_base
+        },
+        channel_0: resolve_channel(channel_0, 0)?,
+        channel_1: resolve_channel(channel_1, 1)?,
+        channel_2: resolve_channel(channel_2, 2)?,
+        alpha,
+        has_name: false,
+        name: CssString::none(),
+        origin_color: retained_null(),
+    })
+}
+
+/// Whether a value is an rgb(), hsl() or hwb() function that is not a relative color.
+fn is_absolute_srgb_function(value: &StyleValueData) -> bool {
+    matches!(value, StyleValueData::ColorFunction { color_base, origin_color, .. }
+        if color_base.has_color_type
+            && matches!(
+                color_base.color_type,
+                crate::css::color_conversion::RGB | crate::css::color_conversion::HSL | crate::css::color_conversion::HWB
+            )
+            && origin_color.optional_data().is_none())
+}
+
+/// Absolutizes an absolute rgb(), hsl() or hwb() function into the same function with resolved components.
+fn absolutize_srgb_function_keeping_form(
+    value: &StyleValueData,
+    context: &AbsolutizationContext,
+) -> Option<StyleValueData> {
+    let StyleValueData::ColorFunction {
+        color_base,
+        channel_0,
+        channel_1,
+        channel_2,
+        alpha,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    let mut changed = false;
+    resolved_srgb_function_components(&StyleValueData::ColorFunction {
+        color_base: *color_base,
+        channel_0: absolutize_child(channel_0, context, &mut changed)?,
+        channel_1: absolutize_child(channel_1, context, &mut changed)?,
+        channel_2: absolutize_child(channel_2, context, &mut changed)?,
+        alpha: absolutize_child(alpha, context, &mut changed)?,
+        has_name: false,
+        name: CssString::none(),
+        origin_color: retained_null(),
+    })
+}
+
 /// Port of ColorFunctionStyleValue::absolutized: relative forms recurse their channels, alpha
 /// and origin; HSL and HWB resolve and convert to a legacy rgb() form; every other color
 /// function recurses its channels and alpha.
@@ -541,8 +657,15 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
     let absolutized_alpha = absolutize_child(alpha, context, &mut changed)?;
 
     // https://drafts.csswg.org/css-color-5/#relative-color
-    if origin_color.optional_data().is_some() {
-        let absolutized_origin = absolutize_child(origin_color, context, &mut changed)?;
+    if let Some(origin) = origin_color.optional_data() {
+        // NB: An rgb(), hsl() or hwb() origin color keeps its color function and full precision, rather than
+        //     computing to an 8-bit rgb() value, so that the relative color sees its exact components.
+        let absolutized_origin = if is_absolute_srgb_function(origin) {
+            changed = true;
+            retain_new(absolutize_srgb_function_keeping_form(origin, context)?)
+        } else {
+            absolutize_child(origin_color, context, &mut changed)?
+        };
         if !changed {
             return Some(Absolutized::Unchanged);
         }
@@ -559,6 +682,40 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
     }
 
     let descriptor = descriptor_for_color_type(color_base.color_type);
+    let rebuilt = StyleValueData::ColorFunction {
+        color_base: *color_base,
+        channel_0: absolutized_c1,
+        channel_1: absolutized_c2,
+        channel_2: absolutized_c3,
+        alpha: absolutized_alpha,
+        has_name: *has_name,
+        name: name.clone(),
+        origin_color: retained_null(),
+    };
+
+    // https://drafts.csswg.org/css-color-4/#css-serialization-of-srgb
+    // An sRGB value with missing components keeps its color function, so that those components serialize as
+    // the none keyword.
+    if matches!(
+        color_base.color_type,
+        crate::css::color_conversion::RGB | crate::css::color_conversion::HSL | crate::css::color_conversion::HWB
+    ) && color_function_has_missing_component(&rebuilt)
+    {
+        return Some(Absolutized::Changed(retain_new(resolved_srgb_function_components(
+            &rebuilt,
+        )?)));
+    }
+    let StyleValueData::ColorFunction {
+        channel_0: absolutized_c1,
+        channel_1: absolutized_c2,
+        channel_2: absolutized_c3,
+        alpha: absolutized_alpha,
+        ..
+    } = &rebuilt
+    else {
+        unreachable!();
+    };
+
     if descriptor.absolutizes_to_rgb {
         // https://drafts.csswg.org/css-color-4/#resolving-sRGB-values
         let c1 = if descriptor.channels[0].is_hue {
@@ -593,17 +750,6 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
         return Some(Absolutized::Changed(retain_new(canonical)));
     }
 
-    let rebuilt = StyleValueData::ColorFunction {
-        color_base: *color_base,
-        channel_0: absolutized_c1,
-        channel_1: absolutized_c2,
-        channel_2: absolutized_c3,
-        alpha: absolutized_alpha,
-        has_name: *has_name,
-        name: name.clone(),
-        origin_color: retained_null(),
-    };
-
     if color_base.color_type == crate::css::color_conversion::RGB
         && let Some(canonical) = canonical_legacy_rgb(&rebuilt)
     {
@@ -619,42 +765,34 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
     Some(Absolutized::Changed(retain_new(rebuilt)))
 }
 
-/// Normalize the mix percentages, resolve relative color forms, and interpolate to a concrete
-/// color. When interpolation cannot complete, rebuild the color mix around its absolutized parts.
-// FIXME: Follow the spec algorithm. https://drafts.csswg.org/css-color-5/#calculate-a-color-mix
+/// Normalize the mix percentages, resolve relative color forms, and mix to a concrete color.
+/// When mixing cannot complete, rebuild the color mix around its absolutized parts.
+// https://drafts.csswg.org/css-color-5/#color-mix-result
 fn absolutize_color_mix(value: &StyleValueData, context: &AbsolutizationContext) -> Option<Absolutized> {
     let StyleValueData::ColorMix {
         color_interpolation_method,
-        first_color,
-        first_percentage,
-        second_color,
-        second_percentage,
+        colors,
+        percentages,
         ..
     } = value
     else {
         return None;
     };
 
-    // Port of normalize_percentages(): each present percentage absolutizes, then the pair
-    // normalizes per https://drafts.csswg.org/css-color-5/#color-mix-percent-norm.
-    let absolutized_percentage = |slot: &RetainedStyleValueData| -> Option<Option<f64>> {
-        if slot.optional_data().is_none() {
-            return Some(None);
-        }
-        let mut changed = false;
-        let absolutized = absolutize_child(slot, context, &mut changed)?;
-        Some(Some(percentage_from_style_value(absolutized.data())?))
-    };
-    let p1 = absolutized_percentage(first_percentage)?;
-    let p2 = absolutized_percentage(second_percentage)?;
-    let normalized = normalize_percentage_pair(p1, p2);
+    let mut percentages_changed = false;
+    let absolutized_percentages = absolutize_list(percentages, context, &mut percentages_changed)?;
+    let specified_percentages = absolutized_percentages
+        .iter()
+        .map(|percentage| match percentage.optional_data() {
+            None => Some(None),
+            Some(value) => Some(Some(percentage_from_style_value(value)?)),
+        })
+        .collect::<Option<Vec<_>>>()?;
 
     let input = color_resolution_input(context);
 
     let mut method_changed = false;
     let absolutized_method = absolutize_child(color_interpolation_method, context, &mut method_changed)?;
-
-    let delta = normalized.second_percentage / 100.0;
 
     // An absent method interpolates in the rectangular Oklab space.
     let default_method = StyleValueData::ColorInterpolationMethod {
@@ -666,45 +804,54 @@ fn absolutize_color_mix(value: &StyleValueData, context: &AbsolutizationContext)
 
     // Resolve relative-color components before interpolation so channel-keyword references
     // and `none` missing-channel markers are made visible during interpolation.
-    let resolve_if_relative = |color: &StyleValueData| -> Option<StyleValueData> {
-        if let StyleValueData::ColorFunction { origin_color, .. } = color
-            && origin_color.optional_data().is_some()
-        {
-            return resolve_relative_form(color, &input);
-        }
-        None
-    };
-    let resolved_first_storage = resolve_if_relative(first_color.data());
-    let resolved_second_storage = resolve_if_relative(second_color.data());
-    let resolved_first = resolved_first_storage.as_ref().unwrap_or(first_color.data());
-    let resolved_second = resolved_second_storage.as_ref().unwrap_or(second_color.data());
+    let resolved_colors: Vec<Option<StyleValueData>> = colors
+        .as_slice()
+        .iter()
+        .map(|color| {
+            if let StyleValueData::ColorFunction { origin_color, .. } = color.data()
+                && origin_color.optional_data().is_some()
+            {
+                return resolve_relative_form(color.data(), &input);
+            }
+            None
+        })
+        .collect();
+    let colors_for_mix = colors
+        .as_slice()
+        .iter()
+        .zip(&resolved_colors)
+        .map(|(color, resolved)| resolved.as_ref().unwrap_or(color.data()));
 
-    let interpolated = (|| -> Option<RetainedStyleValueData> {
-        let resolved_from = resolve_color_for_interpolation(resolved_first, &input)?;
-        let resolved_to = resolve_color_for_interpolation(resolved_second, &input)?;
-        let result = crate::css::color_interpolation::interpolate_color(
-            &resolved_from,
-            &resolved_to,
-            method,
-            delta as f32,
-            normalized.alpha_multiplier as f32,
-        )?;
-        Some(retain_new(result))
-    })();
-    if let Some(result) = interpolated {
-        return Some(Absolutized::Changed(result));
+    // NB: Without a currentcolor to resolve against, a mix reading it keeps the mix, which the color it is used as
+    //     resolves against the element's own color.
+    let reads_unknown_current_color = context.current_color.is_none()
+        && colors
+            .as_slice()
+            .iter()
+            .any(|color| color.optional_data().is_some_and(value_depends_on_current_color));
+    if !reads_unknown_current_color
+        && let Some(result) = calculate_a_color_mix(colors_for_mix, &specified_percentages, method, &input)
+    {
+        return Some(Absolutized::Changed(retain_new(result)));
     }
 
-    // Fall back to a color-mix() over absolutized values when interpolation cannot complete;
-    // currently that means a component relies on currentcolor.
+    // Fall back to a color-mix() over absolutized values when mixing cannot complete; currently
+    // that means a color relies on currentcolor.
     let mut colors_changed = false;
-    let absolutized_first = absolutize_child(first_color, context, &mut colors_changed)?;
-    let absolutized_second = absolutize_child(second_color, context, &mut colors_changed)?;
-    let percentage_matches = |slot: &RetainedStyleValueData, normalized_value: f64| matches!(slot.optional_data(), Some(StyleValueData::Percentage { value }) if *value == normalized_value);
-    if !colors_changed
-        && percentage_matches(first_percentage, normalized.first_percentage)
-        && percentage_matches(second_percentage, normalized.second_percentage)
-    {
+    let absolutized_colors = absolutize_list(colors, context, &mut colors_changed)?;
+    // NB: The percentages are kept as given, since normalizing them here would lose the alpha multiplier of a sum
+    //     under 100%. The mix normalizes them when it resolves.
+    let percentages_match =
+        percentages
+            .as_slice()
+            .iter()
+            .zip(&specified_percentages)
+            .all(|(slot, absolutized)| match (slot.optional_data(), absolutized) {
+                (None, None) => true,
+                (Some(StyleValueData::Percentage { value }), Some(absolutized)) => value == absolutized,
+                _ => false,
+            });
+    if !colors_changed && percentages_match {
         return Some(Absolutized::Unchanged);
     }
     Some(Absolutized::Changed(retain_new(StyleValueData::ColorMix {
@@ -714,14 +861,16 @@ fn absolutize_color_mix(value: &StyleValueData, context: &AbsolutizationContext)
             color_syntax: COLOR_SYNTAX_MODERN,
         },
         color_interpolation_method: absolutized_method,
-        first_color: absolutized_first,
-        first_percentage: retain_new(StyleValueData::Percentage {
-            value: normalized.first_percentage,
-        }),
-        second_color: absolutized_second,
-        second_percentage: retain_new(StyleValueData::Percentage {
-            value: normalized.second_percentage,
-        }),
+        colors: RetainedStyleValueDataList::from_retained_values(absolutized_colors),
+        percentages: RetainedStyleValueDataList::from_retained_values(
+            specified_percentages
+                .into_iter()
+                .map(|percentage| match percentage {
+                    Some(value) => retain_new(StyleValueData::Percentage { value }),
+                    None => retained_null(),
+                })
+                .collect(),
+        ),
     })))
 }
 
@@ -1773,6 +1922,24 @@ pub(crate) fn absolutize(value: &StyleValueData, context: &AbsolutizationContext
             }
         }
         StyleValueData::Edge { .. } => absolutize_edge(value, context),
+        StyleValueData::Anchor { .. } | StyleValueData::AnchorSize { .. } => {
+            let mut tracked = false;
+            let mut calc_length_context = *context.length;
+            calc_length_context.resolved_viewport_relative_length = &raw mut tracked;
+            let outcome = crate::css::calc::absolutize_anchor_function(
+                value,
+                &calc_length_context,
+                context.tree_counting,
+                context.random_base_values,
+            );
+            if tracked {
+                context.resolved_viewport_relative_length.set(true);
+            }
+            match outcome? {
+                None => Some(Absolutized::Unchanged),
+                Some(absolutized) => Some(Absolutized::Changed(retain_new(absolutized))),
+            }
+        }
         StyleValueData::Position { edge_x, edge_y } => {
             let mut changed = false;
             let edge_x = absolutize_child(edge_x, context, &mut changed)?;
@@ -1782,6 +1949,25 @@ pub(crate) fn absolutize(value: &StyleValueData, context: &AbsolutizationContext
 
         StyleValueData::BasicShape { .. } => {
             absolutize_basic_shape(value, &mut |child, changed| absolutize_child(child, context, changed))
+        }
+        StyleValueData::Ray {
+            size,
+            contain,
+            angle,
+            position,
+        } => {
+            let mut changed = false;
+            let angle = absolutize_child(angle, context, &mut changed)?;
+            let position = absolutize_child(position, context, &mut changed)?;
+            rebuild!(
+                changed,
+                StyleValueData::Ray {
+                    size: *size,
+                    contain: *contain,
+                    angle,
+                    position,
+                }
+            )
         }
 
         StyleValueData::Cursor { image, x, y } => {
@@ -2067,6 +2253,7 @@ pub(crate) fn absolutize_with_element_facts(
             random_base_values: &random_base_values,
             document_base_url,
             style_sheet_resource_context: None,
+            current_color: None,
         },
     )
 }

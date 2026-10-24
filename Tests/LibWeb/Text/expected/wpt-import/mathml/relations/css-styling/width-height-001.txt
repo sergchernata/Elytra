@@ -1,0 +1,108 @@
+Harness status: OK
+
+Found 103 tests
+
+103 Pass
+Pass	width and height properties on a
+Pass	inline-size and block-size properties on a
+Pass	width and height properties on a (content overflowing)
+Pass	width property on a (preferred width)
+Pass	width and height properties on maction
+Pass	inline-size and block-size properties on maction
+Pass	width and height properties on maction (content overflowing)
+Pass	width property on maction (preferred width)
+Pass	width and height properties on menclose
+Pass	inline-size and block-size properties on menclose
+Pass	width and height properties on menclose (content overflowing)
+Pass	width property on menclose (preferred width)
+Pass	width and height properties on merror
+Pass	inline-size and block-size properties on merror
+Pass	width and height properties on merror (content overflowing)
+Pass	width property on merror (preferred width)
+Pass	width and height properties on mfrac
+Pass	inline-size and block-size properties on mfrac
+Pass	width and height properties on mfrac (content overflowing)
+Pass	width property on mfrac (preferred width)
+Pass	width and height properties on mi
+Pass	inline-size and block-size properties on mi
+Pass	width and height properties on mi (content overflowing)
+Pass	width property on mi (preferred width)
+Pass	width and height properties on mmultiscripts
+Pass	inline-size and block-size properties on mmultiscripts
+Pass	width and height properties on mmultiscripts (content overflowing)
+Pass	width property on mmultiscripts (preferred width)
+Pass	width and height properties on mn
+Pass	inline-size and block-size properties on mn
+Pass	width and height properties on mn (content overflowing)
+Pass	width property on mn (preferred width)
+Pass	width and height properties on mo
+Pass	inline-size and block-size properties on mo
+Pass	width and height properties on mo (content overflowing)
+Pass	width property on mo (preferred width)
+Pass	width and height properties on mover
+Pass	inline-size and block-size properties on mover
+Pass	width and height properties on mover (content overflowing)
+Pass	width property on mover (preferred width)
+Pass	width and height properties on mpadded
+Pass	inline-size and block-size properties on mpadded
+Pass	width and height properties on mpadded (content overflowing)
+Pass	width property on mpadded (preferred width)
+Pass	width and height properties on mphantom
+Pass	inline-size and block-size properties on mphantom
+Pass	width and height properties on mphantom (content overflowing)
+Pass	width property on mphantom (preferred width)
+Pass	width and height properties on mroot
+Pass	inline-size and block-size properties on mroot
+Pass	width and height properties on mroot (content overflowing)
+Pass	width property on mroot (preferred width)
+Pass	width and height properties on mrow
+Pass	inline-size and block-size properties on mrow
+Pass	width and height properties on mrow (content overflowing)
+Pass	width property on mrow (preferred width)
+Pass	width and height properties on ms
+Pass	inline-size and block-size properties on ms
+Pass	width and height properties on ms (content overflowing)
+Pass	width property on ms (preferred width)
+Pass	width and height properties on mspace
+Pass	inline-size and block-size properties on mspace
+Pass	width and height properties on mspace (content overflowing)
+Pass	width property on mspace (preferred width)
+Pass	width and height properties on msqrt
+Pass	inline-size and block-size properties on msqrt
+Pass	width and height properties on msqrt (content overflowing)
+Pass	width property on msqrt (preferred width)
+Pass	width and height properties on mstyle
+Pass	inline-size and block-size properties on mstyle
+Pass	width and height properties on mstyle (content overflowing)
+Pass	width property on mstyle (preferred width)
+Pass	width and height properties on msub
+Pass	inline-size and block-size properties on msub
+Pass	width and height properties on msub (content overflowing)
+Pass	width property on msub (preferred width)
+Pass	width and height properties on msubsup
+Pass	inline-size and block-size properties on msubsup
+Pass	width and height properties on msubsup (content overflowing)
+Pass	width property on msubsup (preferred width)
+Pass	width and height properties on msup
+Pass	inline-size and block-size properties on msup
+Pass	width and height properties on msup (content overflowing)
+Pass	width property on msup (preferred width)
+Pass	width and height properties on mtable
+Pass	inline-size and block-size properties on mtable
+Pass	width property on mtable (preferred width)
+Pass	width and height properties on mtext
+Pass	inline-size and block-size properties on mtext
+Pass	width and height properties on mtext (content overflowing)
+Pass	width property on mtext (preferred width)
+Pass	width and height properties on munder
+Pass	inline-size and block-size properties on munder
+Pass	width and height properties on munder (content overflowing)
+Pass	width property on munder (preferred width)
+Pass	width and height properties on munderover
+Pass	inline-size and block-size properties on munderover
+Pass	width and height properties on munderover (content overflowing)
+Pass	width property on munderover (preferred width)
+Pass	width and height properties on semantics
+Pass	inline-size and block-size properties on semantics
+Pass	width and height properties on semantics (content overflowing)
+Pass	width property on semantics (preferred width)

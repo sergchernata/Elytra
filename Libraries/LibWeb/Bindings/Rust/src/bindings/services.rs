@@ -35,6 +35,15 @@ unsafe extern "C" {
     /// Whether the global object of the realm is a Window.
     pub(crate) fn web_bindings_realm_is_window(realm: *mut c_void) -> bool;
 
+    /// Runs the steps with the context while an execution context of the realm is on the stack, as an
+    /// HTML::TemporaryExecutionContext puts it there, with callbacks enabled if `callbacks_enabled`.
+    pub(crate) fn web_bindings_with_temporary_execution_context(
+        realm: *mut c_void,
+        callbacks_enabled: bool,
+        context: *mut c_void,
+        steps: unsafe extern "C" fn(*mut c_void),
+    );
+
     /// Whether the object is a wrapper of an object that implements the interface, a Web::Bindings::InterfaceName of
     /// an interface that LibWeb implements in C++.
     pub(crate) fn web_bindings_object_implements_interface(object: *mut c_void, interface_name: u16) -> bool;

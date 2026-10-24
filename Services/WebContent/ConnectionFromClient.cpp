@@ -301,17 +301,13 @@ void ConnectionFromClient::deliver_posted_message(Web::PageId page_id, Web::HTML
         page->deliver_posted_message(navigable_id, move(message));
 }
 
-void ConnectionFromClient::close_traversable_from_script(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId source_navigable_id)
+void ConnectionFromClient::close_traversable_from_script(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id)
 {
     auto page = this->page(page_id);
     if (!page.has_value())
         return;
-    // The source is in another page of this process when it is in another tab.
-    auto source = Web::HTML::navigable_with_id_in_any_page(page->page(), source_navigable_id);
-    if (!source)
-        return;
     if (auto* traversable = as_if<Web::HTML::LocalTraversableNavigable>(page->page().navigable_with_id(navigable_id).ptr()))
-        traversable->close_top_level_traversable_from_script(*source);
+        traversable->close_top_level_traversable_from_script();
 }
 
 void ConnectionFromClient::run_focusing_steps_for_navigable(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::FocusTrigger focus_trigger)
@@ -1050,12 +1046,12 @@ void ConnectionFromClient::debug_request(Web::PageId page_id, ByteString request
         };
 
         if (auto doc = page->page().local_traversable()->active_document()) {
-            Queue<Web::DOM::Node*> nodes_to_visit;
-            nodes_to_visit.enqueue(doc->document_element());
-            while (!nodes_to_visit.is_empty()) {
-                auto node = nodes_to_visit.dequeue();
+            GC::RootVector<Web::DOM::Node*> nodes_to_visit;
+            nodes_to_visit.append(doc->document_element());
+            for (size_t i = 0; i < nodes_to_visit.size(); ++i) {
+                auto node = nodes_to_visit[i];
                 for (auto& child : node->children_as_vector())
-                    nodes_to_visit.enqueue(child.ptr());
+                    nodes_to_visit.append(child.ptr());
                 if (auto* element = as_if<Web::DOM::Element>(node)) {
                     doc->update_style_for_element(Web::DOM::AbstractElement { *element });
                     if (auto styles = element->computed_style())
@@ -1123,6 +1119,11 @@ void ConnectionFromClient::debug_request(Web::PageId page_id, ByteString request
 
     if (request == "clear-cache") {
         Web::Fetch::Fetching::clear_http_memory_cache();
+        return;
+    }
+
+    if (request == "clear-user-style") {
+        page->page().set_user_style({});
         return;
     }
 

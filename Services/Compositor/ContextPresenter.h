@@ -14,10 +14,11 @@
 #include <AK/RefPtr.h>
 #include <AK/Vector.h>
 #include <Compositor/BackingStoreManager.h>
+#include <Compositor/CanvasSurfaceRegistry.h>
+#include <Compositor/CompositedContext.h>
 #include <Compositor/Forward.h>
+#include <Compositor/PaintingSurface.h>
 #include <LibCompositing/DisplayList/AccumulatedVisualContext.h>
-#include <LibCompositing/DisplayList/CanvasSurfaceRegistry.h>
-#include <LibCompositing/DisplayList/CompositedContext.h>
 #include <LibCompositing/DisplayList/DisplayList.h>
 #include <LibCompositing/Forward.h>
 #include <LibCompositing/OverlayFade.h>
@@ -25,7 +26,6 @@
 #include <LibCompositing/Types.h>
 #include <LibCompositing/UIOverlays.h>
 #include <LibCore/Forward.h>
-#include <LibGfx/PaintingSurface.h>
 #include <LibGfx/Rect.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <LibGfx/Size.h>
@@ -41,7 +41,6 @@ namespace Compositor {
 
 class ContextScene;
 class ScrollbarController;
-using Compositing::CompositedContextResolver;
 
 struct PendingFrame {
     Gfx::IntRect viewport_rect;
@@ -72,7 +71,7 @@ public:
         CompositedContextResolver const* composited_context_resolver { nullptr };
     };
 
-    ContextPresenter(ContextScene&, Compositing::OwnedCanvasSurfaces, bool presents_to_client);
+    ContextPresenter(ContextScene&, OwnedCanvasSurfaces, bool presents_to_client);
     ~ContextPresenter();
 
     bool presents_to_client() const { return m_presents_to_client; }
@@ -104,7 +103,7 @@ public:
     RefPtr<Gfx::PaintingSurface> latest_rendered_surface() const { return m_latest_rendered_surface; }
 
     bool update_composited_raster_transform(Gfx::FloatRect destination_rect, Gfx::FloatMatrix4x4 const& canvas_transform);
-    Compositing::CompositedContextSurface composited_surface() const;
+    CompositedContextSurface composited_surface() const;
 
     void queue_present_frame(PendingFrame);
     void mark_pending_present_frame_scheduled();
@@ -160,7 +159,7 @@ private:
     void stop_surplus_backing_store_retirement_timer();
 
     ContextScene& m_scene;
-    Compositing::OwnedCanvasSurfaces m_canvas_surfaces;
+    OwnedCanvasSurfaces m_canvas_surfaces;
     bool m_presents_to_client { false };
 
     Gfx::IntSize m_viewport_size;

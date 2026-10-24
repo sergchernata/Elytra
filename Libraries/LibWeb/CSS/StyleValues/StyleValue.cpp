@@ -11,6 +11,7 @@
 #include <AK/Utf16StringBuilder.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/Font/FontStyleMapping.h>
+#include <LibWeb/CSS/CSSKeywordValue.h>
 #include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -236,6 +237,8 @@ ValueComparingNonnullRefPtr<StyleValue const> StyleValue::adopt_rust_style_value
         return adopt_ref(*new (nothrow) PositionStyleValue(data));
     case StyleValueFFI::StyleValueData::Tag::Ratio:
         return adopt_ref(*new (nothrow) RatioStyleValue(data));
+    case StyleValueFFI::StyleValueData::Tag::Ray:
+        return adopt_ref(*new (nothrow) StyleValue(Type::Ray, data));
     case StyleValueFFI::StyleValueData::Tag::Rect:
         return adopt_ref(*new (nothrow) StyleValue(Type::Rect, data));
     case StyleValueFFI::StyleValueData::Tag::RepeatStyle:
@@ -488,6 +491,12 @@ GC::Ref<CSSStyleValue> StyleValue::reify(Utf16FlyString const& associated_proper
     case Type::Resolution:
     case Type::Time:
         return as_dimension().reify(associated_property);
+    case Type::BackgroundSize:
+        // NB: A background size whose height is `auto` serializes as just its width, so reify it as that width. For
+        //     example, the `auto` keyword is parsed as a size of `auto auto`.
+        if (as_background_size().size_y()->has_auto())
+            return as_background_size().size_x()->reify(associated_property);
+        break;
     case Type::Calculated:
         return as_calculated().reify(associated_property);
     case Type::CustomIdent:
@@ -502,6 +511,16 @@ GC::Ref<CSSStyleValue> StyleValue::reify(Utf16FlyString const& associated_proper
         return as_number().reify(associated_property);
     case Type::OpacityValue:
         return as_opacity_value().reify(associated_property);
+    case Type::GridTrackSizeList:
+        // NB: A track list that is just one track size, as for `grid-auto-columns: 10px`, is that track size.
+        if (auto const* track_size = StyleValueFFI::rust_style_value_grid_track_size_list_single_size(rust_style_value_data()))
+            return adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(track_size))->reify(associated_property);
+        break;
+    case Type::TextIndent:
+        // NB: A text-indent without the `hanging` or `each-line` keywords is just its length-percentage.
+        if (!m_value->text_indent.hanging && !m_value->text_indent.each_line)
+            return wrap_rust_child(m_value->text_indent.length_percentage)->reify(associated_property);
+        break;
     case Type::Unresolved:
         return as_unresolved().reify(associated_property);
     case Type::ValueList:
@@ -509,6 +528,16 @@ GC::Ref<CSSStyleValue> StyleValue::reify(Utf16FlyString const& associated_proper
     default:
         break;
     }
+
+    // AD-HOC: Some values that are just a single keyword are represented by a more specific type, for example
+    //         `font-style: italic`, `grid-auto-flow: row` or `font-variant-numeric: ordinal`. Reify those as the
+    //         keyword. Colors and shorthands are left alone, as they are not keywords on their own.
+    if (type() != Type::Color && type() != Type::Shorthand) {
+        auto serialized_value = to_utf16_string(SerializationMode::Normal);
+        if (keyword_from_string(serialized_value).has_value())
+            return CSSKeywordValue::create(Utf16FlyString { serialized_value });
+    }
+
     return default_reify(associated_property);
 }
 

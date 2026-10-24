@@ -1,0 +1,10 @@
+Harness status: OK
+
+Found 5 tests
+
+5 Pass
+Pass	Fraction axis is aligned on the math axis
+Pass	Vertical positions of numerator and denominator
+Pass	Horizontal alignments of numerator and denominator
+Pass	Dimension of mfrac elements
+Pass	Preferred width of mfrac elements

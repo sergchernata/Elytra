@@ -8,6 +8,7 @@
  */
 
 #include <LibGC/Heap.h>
+#include <LibGC/WeakInlines.h>
 #include <LibURL/InternalURLs.h>
 #include <LibWeb/Bindings/HostDefined.h>
 #include <LibWeb/Bindings/Intrinsics.h>
@@ -32,11 +33,11 @@
 #include <LibWeb/HTML/WorkletGlobalScope.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/SecureContexts/AbstractOperations.h>
 #include <LibWeb/ServiceWorker/ServiceWorker.h>
 #include <LibWeb/ServiceWorker/ServiceWorkerRegistration.h>
 #include <LibWeb/StorageAPI/StorageManager.h>
 #include <LibWeb/WebLocks/LockManager.h>
+#include <LibWebCommon/SecureContexts/AbstractOperations.h>
 
 namespace Web::HTML {
 
@@ -48,13 +49,16 @@ GC::Ref<Environment> Environment::create(EnvironmentId id, URL::URL creation_url
     return GC::Heap::the().allocate<Environment>(move(id), move(creation_url), move(top_level_creation_url), move(top_level_origin), move(target_browsing_context));
 }
 
-Environment::~Environment() = default;
-
-void Environment::visit_edges(Cell::Visitor& visitor)
+Environment::Environment(EnvironmentId id, URL::URL creation_url, Optional<URL::URL> top_level_creation_url, Optional<URL::Origin> top_level_origin, GC::Ptr<BrowsingContext> target_browsing_context)
+    : id(move(id))
+    , creation_url(move(creation_url))
+    , top_level_creation_url(move(top_level_creation_url))
+    , top_level_origin(move(top_level_origin))
+    , target_browsing_context(target_browsing_context)
 {
-    Base::visit_edges(visitor);
-    visitor.visit(target_browsing_context);
 }
+
+Environment::~Environment() = default;
 
 EnvironmentSettingsObject::EnvironmentSettingsObject(NonnullOwnPtr<JS::ExecutionContext> realm_execution_context)
     : m_realm_execution_context(move(realm_execution_context))
@@ -119,7 +123,7 @@ void EnvironmentSettingsObject::remove_owned_worker_agent(WorkerAgentParent& wor
 
 void EnvironmentSettingsObject::release_owned_worker_agents()
 {
-    auto owned_worker_agents = move(m_owned_worker_agents);
+    GC::RootVector owned_worker_agents { move(m_owned_worker_agents) };
     for (auto& worker_agent : owned_worker_agents)
         worker_agent->terminate();
 }
@@ -700,12 +704,14 @@ SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
 {
     auto serialized_global = [this]() -> SerializedGlobal {
         bool relevant_settings_object_is_secure_context = is_secure_context(*this);
+        auto relevant_settings_object_policy_container = policy_container()->serialize();
         auto& global = global_object();
         if (auto const* window = window_from_global_object(global)) {
             return SerializedWindow {
                 .associated_document {
                     .url = window->associated_document().url(),
                     .relevant_settings_object_is_secure_context = relevant_settings_object_is_secure_context,
+                    .relevant_settings_object_policy_container = move(relevant_settings_object_policy_container),
                 }
             };
         }
@@ -715,6 +721,7 @@ SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
         auto supported_animation_frame_provider = dedicated_worker_global_scope && dedicated_worker_global_scope->is_supported();
         return SerializedWorkerGlobalScope {
             .relevant_settings_object_is_secure_context = relevant_settings_object_is_secure_context,
+            .relevant_settings_object_policy_container = move(relevant_settings_object_policy_container),
             .is_supported_animation_frame_provider = supported_animation_frame_provider,
         };
     }();
@@ -730,6 +737,7 @@ SerializedEnvironmentSettingsObject EnvironmentSettingsObject::serialize()
         .policy_container = policy_container()->serialize(),
         .cross_origin_isolated_capability = cross_origin_isolated_capability(),
         .agent_cluster_id = agent_cluster_id(),
+        .agent_cluster_cross_origin_isolation_mode = agent_cluster_cross_origin_isolation_mode(),
         .time_origin = this->time_origin(),
         .global = move(serialized_global),
     };

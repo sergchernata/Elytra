@@ -34,7 +34,6 @@
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/NetworkPartitionKey.h>
-#include <LibWeb/Fetch/Infrastructure/URL.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
@@ -46,6 +45,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWebCommon/Fetch/Infrastructure/URL.h>
 #include <LibWebCommon/Infra/Strings.h>
 #include <LibWebCommon/MimeSniff/MimeType.h>
 
@@ -1058,7 +1058,7 @@ void fetch_single_module_script(JS::Realm& realm,
     }
 
     // 7. Set moduleMap[(url, moduleType)] to « onComplete ».
-    ModuleMap::CallbackList callbacks;
+    GC::RootVector<ModuleMap::CallbackFunction> callbacks;
     callbacks.append(GC::create_function(GC::Heap::the(), [on_complete](GC::Ptr<ModuleScript> module_script) { on_complete->function()(module_script); }));
     module_map.set(url, module_type, move(callbacks));
 

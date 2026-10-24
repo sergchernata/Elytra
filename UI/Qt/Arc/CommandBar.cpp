@@ -155,7 +155,7 @@ void CommandBar::present(Mode mode, Tab* tab)
     m_header_icon = {};
     if (m_target_tab) {
         // A tab showing a page starts with its full URL, selected (typing replaces it); a blank one starts empty.
-        if (auto url = m_target_tab->view().url(); !is_blank_url(qstring_from_ak_string(url.serialize()))) {
+        if (auto url = m_target_tab->url(); !is_blank_url(qstring_from_ak_string(url.serialize()))) {
             m_initial_text = qstring_from_ak_string(url.serialize());
             m_header_icon = m_target_tab->favicon();
         }
@@ -305,7 +305,7 @@ void CommandBar::rebuild_rows()
             auto* tab = tabs->tab(i);
             if (!tab || tab == m_window->current_tab())
                 continue;
-            auto url = qstring_from_ak_string(tab->view().url().serialize());
+            auto url = qstring_from_ak_string(tab->url().serialize()); // Also for a restored tab not shown yet.
             if (is_blank_url(url) || !tab_matches(query, tab->title(), url))
                 continue;
             CommandBarRow row;

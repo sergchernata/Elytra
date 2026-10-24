@@ -46,7 +46,6 @@
 #include <LibWeb/Fetch/Infrastructure/PortBlocking.h>
 #include <LibWeb/Fetch/Infrastructure/PreflightCache.h>
 #include <LibWeb/Fetch/Infrastructure/Task.h>
-#include <LibWeb/Fetch/Infrastructure/URL.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/BlobURLStore.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
@@ -67,16 +66,16 @@
 #include <LibWeb/ReferrerPolicy/AbstractOperations.h>
 #include <LibWeb/ResourceTiming/PerformanceResourceTiming.h>
 #include <LibWeb/SRI/SRI.h>
-#include <LibWeb/SecureContexts/AbstractOperations.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/Streams/TransformStream.h>
-#include <LibWeb/Streams/TransformStreamDefaultController.h>
-#include <LibWeb/Streams/TransformStreamOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOrUtils.h>
+#include <LibWebCommon/Fetch/Infrastructure/DataURL.h>
 #include <LibWebCommon/Fetch/Infrastructure/HTTP/Statuses.h>
+#include <LibWebCommon/Fetch/Infrastructure/URL.h>
 #include <LibWebCommon/Loader/UserAgent.h>
+#include <LibWebCommon/SecureContexts/AbstractOperations.h>
 
 namespace Web::Fetch::Fetching {
 
@@ -273,6 +272,7 @@ GC::Ref<Infrastructure::FetchController> fetch(JS::Realm& realm, Infrastructure:
         // 3. Let foundPreloadedResource be the result of invoking consume a preloaded resource for request’s
         //    window, given request’s URL, request’s destination, request’s mode, request’s credentials mode,
         //    request’s integrity metadata, and onPreloadedResponseAvailable.
+        bool preload_reports_timing = false;
         auto found_preloaded_resource = HTML::consume_a_preloaded_resource(
             *client_window,
             request.url(),
@@ -281,7 +281,9 @@ GC::Ref<Infrastructure::FetchController> fetch(JS::Realm& realm, Infrastructure:
             request.credentials_mode(),
             request.integrity_metadata(),
             on_preloaded_response_available,
-            fetch_params->task_destination());
+            fetch_params->task_destination(),
+            preload_reports_timing);
+        fetch_params->set_preload_reports_timing(preload_reports_timing);
 
         // 4. If foundPreloadedResource is true and fetchParams’s preloaded response candidate is null, then set
         //    fetchParams’s preloaded response candidate to "pending".
@@ -917,9 +919,11 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
             // 3. If fetchParams’s request’s initiator type is non-null and fetchParams’s request’s client’s global
             //    object is fetchParams’s task destination, then run fetchParams’s controller’s report timing steps
             //    given fetchParams’s request’s client’s global object.
+            // AD-HOC: Not when this fetch consumed a preload that reports its own timing. Other engines report a single
+            //         entry for a preloaded resource and its consumer.
             auto client = fetch_params.request()->client();
             auto const* task_destination_global_object = fetch_params.task_destination().get_pointer<GC::Ref<JS::Object>>();
-            if (client != nullptr && task_destination_global_object != nullptr) {
+            if (client != nullptr && task_destination_global_object != nullptr && !fetch_params.preload_reports_timing()) {
                 if (fetch_params.request()->initiator_type().has_value() && &client->global_object() == task_destination_global_object->ptr())
                     fetch_params.controller()->report_timing(client->global_object());
             }
@@ -979,11 +983,11 @@ void fetch_response_handover(JS::Realm& realm, Infrastructure::FetchParams const
         HTML::TemporaryExecutionContext const execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
         // 1. Let transformStream be a new TransformStream.
-        auto transform_stream = GC::Heap::the().allocate<Streams::TransformStream>();
+        auto transform_stream = Streams::TransformStream::create(realm);
 
         // 2. Let identityTransformAlgorithm be an algorithm which, given chunk, enqueues chunk in transformStream.
         auto identity_transform_algorithm = GC::create_function(GC::Heap::the(), [&realm, transform_stream](JS::Value chunk) -> GC::Ref<WebIDL::Promise> {
-            if (auto result = Streams::transform_stream_default_controller_enqueue(realm, *transform_stream->controller(), chunk); result.is_error())
+            if (auto result = transform_stream->enqueue(chunk); result.is_error())
                 return WebIDL::create_rejected_promise_from_exception(realm, result.release_error());
 
             return WebIDL::create_resolved_promise(realm, JS::js_undefined());
@@ -1246,7 +1250,7 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
             }
 
             // 8. Let slicedBlob be the result of invoking slice blob given blob, rangeStart, rangeEnd + 1, and type.
-            auto sliced_blob = MUST(blob->slice_blob(*range_start, *range_end + 1, type));
+            auto sliced_blob = blob->slice_blob(*range_start, *range_end + 1, type);
 
             // 9. Let slicedBodyWithType be the result of safely extracting slicedBlob.
             auto sliced_body_with_type = safely_extract_body(realm, sliced_blob->raw_bytes());
@@ -1519,9 +1523,11 @@ GC::Ref<PendingResponse> http_fetch(JS::Realm& realm, Infrastructure::FetchParam
         // NOTE: The cross-origin resource policy check runs for responses coming from the network and responses coming
         //       from the service worker. This is different from the CORS check, as request’s client and the service
         //       worker can have different embedder policies.
+        // AD-HOC: request's client can be null, which the check does not allow for. Such a request is checked against a
+        //         new embedder policy.
+        auto client_embedder_policy = request->client() ? request->client()->policy_container()->embedder_policy : HTML::EmbedderPolicy {};
         if ((request->response_tainting() == Infrastructure::Request::ResponseTainting::Opaque || response->type() == Infrastructure::Response::Type::Opaque)
-            && false // FIXME: "and the cross-origin resource policy check with request’s origin, request’s client, request’s destination, and actualResponse returns blocked"
-        ) {
+            && cross_origin_resource_policy_check(request->origin().get<URL::Origin>(), client_embedder_policy, *internal_response) == Infrastructure::RequestOrResponseBlocking::Blocked) {
             returned_pending_response->resolve(Infrastructure::Response::network_error("Response was blocked by cross-origin resource policy check"_string));
             return;
         }
@@ -2361,7 +2367,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
     // 10. Let stream be a new ReadableStream.
-    auto stream = GC::Heap::the().allocate<Streams::ReadableStream>();
+    auto stream = Streams::ReadableStream::create(realm);
 
     // 9. Let buffer be an empty byte sequence.
     auto fetched_data_receiver = GC::Heap::the().allocate<FetchedDataReceiver>(fetch_params, stream, move(http_cache));

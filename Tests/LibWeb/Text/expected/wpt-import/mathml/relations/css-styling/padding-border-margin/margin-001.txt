@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	Margin properties on mrow
+Pass	Margin properties on mrow (rtl)
+Pass	Margin properties on mrow (shorthand)
+Pass	Margin properties on mrow (logical)
+Pass	Margin properties on mrow (logical, rtl)
+Pass	Margin properties on mrow (logical, shorthand)

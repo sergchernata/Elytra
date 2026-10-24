@@ -1,0 +1,17 @@
+Harness status: OK
+
+Found 12 tests
+
+12 Pass
+Pass	Can anchor to a name both defined and scoped by the same element
+Pass	Sibling can not anchor into anchor-scope, even when anchor-name present
+Pass	anchor-scope:all on common ancestor
+Pass	anchor-scope:--a on common ancestor
+Pass	anchor-scope:all on sibling
+Pass	anchor-scope:all scopes multiple names
+Pass	anchor-scope:--a,--b scopes --a and --b
+Pass	anchor-scope:--a scopes only --a
+Pass	anchor-scope:--b scopes only --b
+Pass	anchor-scope:--a scopes only --a (out-of-flow anchors)
+Pass	anchor-scope:--a scopes only --a (both out-of-flow and in-flow anchors)
+Pass	anchor-scope:--a scopes only --a (both out-of-flow and in-flow anchors, reverse)

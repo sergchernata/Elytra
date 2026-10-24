@@ -548,7 +548,7 @@ WebIDL::ExceptionOr<void> Node::normalize()
         // and its contiguous exclusive Text nodes, and node’s next sibling exclusive Text node, if any,
         // and its contiguous exclusive Text nodes, avoiding any duplicates.
         // NOTE: The callers of this method require node itself to be excluded.
-        Vector<Text*> nodes;
+        GC::RootVector<Text*> nodes;
 
         auto* current_node = node.previous_sibling();
         while (current_node && current_node->is_exclusive_text()) {
@@ -569,7 +569,7 @@ WebIDL::ExceptionOr<void> Node::normalize()
     };
 
     // The normalize() method steps are to run these steps for each descendant exclusive Text node node of this
-    Vector<Text&> descendant_exclusive_text_nodes;
+    GC::RootVector<GC::Ref<Text>> descendant_exclusive_text_nodes;
     for_each_in_inclusive_subtree_of_type<Text>([&](Text const& node) {
         if (!node.is_cdata_section())
             descendant_exclusive_text_nodes.append(const_cast<Text&>(node));
@@ -577,7 +577,7 @@ WebIDL::ExceptionOr<void> Node::normalize()
         return TraversalDecision::Continue;
     });
 
-    for (auto& node : descendant_exclusive_text_nodes) {
+    for (Text& node : descendant_exclusive_text_nodes) {
         // 1. Let length be node’s length.
         auto& character_data = static_cast<CharacterData&>(node);
         auto length = character_data.length_in_utf16_code_units();
@@ -1562,10 +1562,10 @@ void Node::detach_remaining_layout_nodes_for_removal()
     Layout::RustFFI::render_state_detach_remaining_rows_for_removal(arena->host(), style_nodes.data(), style_nodes.size());
 }
 
-Vector<GC::Ref<HTML::HTMLSlotElement>> Node::descendant_slots_before_removal(Node& parent_root)
+GC::RootVector<GC::Ref<HTML::HTMLSlotElement>> Node::descendant_slots_before_removal(Node& parent_root)
 {
     // AD-HOC: Assigned nodes are recomputed lazily.
-    Vector<GC::Ref<HTML::HTMLSlotElement>> descendant_slots;
+    GC::RootVector<GC::Ref<HTML::HTMLSlotElement>> descendant_slots;
     if (auto* shadow_root = as_if<ShadowRoot>(parent_root)) {
         for_each_in_inclusive_subtree_of_type<HTML::HTMLSlotElement>([&](auto& slot) {
             descendant_slots.append(slot);
@@ -2260,6 +2260,10 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Node::clone_single_node(Document& document, G
             element_copy->append_attribute(name, Utf16String::from_utf16(value));
         });
 
+        // INTEROP: The copy takes the inline style declarations of node instead of having Content Security Policy
+        //          check the style attribute it was given again, so that styles set through CSSOM survive cloning.
+        element_copy->clone_inline_style_from(*element);
+
         copy = move(element_copy);
     }
 
@@ -2409,6 +2413,10 @@ bool Node::recompute_editable_subtree_flag()
     bool new_value;
     if (is_document()) {
         new_value = as<Document>(*this).design_mode_enabled_state();
+    } else if (is<HTML::HTMLSelectElement>(*this) || is<HTML::HTMLOptGroupElement>(*this) || is<HTML::HTMLOptionElement>(*this)) {
+        // INTEROP: Browsers do not let editing modify the content of select, optgroup and option elements, even if
+        //          they are in an editing host or have a contenteditable attribute. Their descendants are not editable.
+        new_value = false;
     } else if (auto const* html_element = as_if<HTML::HTMLElement>(*this)) {
         auto state = html_element->content_editable_state();
         if (state == HTML::ContentEditableState::True || state == HTML::ContentEditableState::PlaintextOnly)
@@ -2499,6 +2507,11 @@ bool Node::is_editing_host() const
     // NOTE: Both conditions below require this to be an HTML element.
     auto const* html_element = as_if<HTML::HTMLElement>(*this);
     if (!html_element)
+        return false;
+
+    // INTEROP: See recompute_editable_subtree_flag(). Select, optgroup and option elements are not editing hosts
+    //          either.
+    if (is<HTML::HTMLSelectElement>(*this) || is<HTML::HTMLOptGroupElement>(*this) || is<HTML::HTMLOptionElement>(*this))
         return false;
 
     // An editing host is either an HTML element with its contenteditable attribute in the true state or
@@ -3179,11 +3192,11 @@ u16 Node::compare_document_position(GC::Ptr<Node> other)
     if ((node1 == nullptr || node2 == nullptr) || (&node1->root() != &node2->root()))
         return DOCUMENT_POSITION_DISCONNECTED | DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC | (node1 > node2 ? DOCUMENT_POSITION_PRECEDING : DOCUMENT_POSITION_FOLLOWING);
 
-    Vector<Node*> node1_ancestors;
+    GC::RootVector<Node*> node1_ancestors;
     for (auto* node = node1; node; node = node->parent())
         node1_ancestors.append(node);
 
-    Vector<Node*> node2_ancestors;
+    GC::RootVector<Node*> node2_ancestors;
     for (auto* node = node2; node; node = node->parent())
         node2_ancestors.append(node);
 
@@ -4053,7 +4066,7 @@ void Node::queue_mutation_record(Utf16FlyString const& type, Optional<Utf16FlySt
 
     // 1. Let interestedObservers be an empty map.
     // mutationObserver -> mappedOldValue
-    OrderedHashMap<MutationObserver*, Optional<Utf16String>> interested_observers;
+    GC::OrderedRootHashMap<MutationObserver*, Optional<Utf16String>> interested_observers;
 
     // 2. Let nodes be the inclusive ancestors of target.
     // 3. For each node of nodes, and then for each registered of node’s registered observer list:
@@ -4769,7 +4782,7 @@ ErrorOr<Utf16String> Node::name_or_description(Layout::BegunRead const& read, Na
     // aria-labelledby or aria-describedby and/or un-hidden. See the comment for substep A above.
     if (is_text() && (!parent_element() || (parent_element()->is_referenced() || !parent_element()->is_hidden(read) || !parent_element()->has_hidden_ancestor(read) || parent_element()->has_referenced_and_hidden_ancestor(read)))) {
         if (auto const* text_node = as_if<Layout::TextNode>(layout_node(read))) {
-            auto text = text_node->rendered_text_for_dom(false);
+            auto text = text_node->rendered_text_for_dom();
             if (!text.is_empty())
                 return text;
         }

@@ -622,9 +622,9 @@ static Web::WebIDL::ExceptionOr<GC::Ref<JS::HostObject>> receive_image_bitmap(JS
     return Web::Bindings::create_transferred_platform_object(Web::HTML::TransferType::ImageBitmap, realm, decoder);
 }
 
-static Vector<JS::Value> deserialize_transfer_data_holders(JS::Realm& realm, Web::HTML::SerializedTransferRecord& record)
+static GC::RootVector<JS::Value> deserialize_transfer_data_holders(JS::Realm& realm, Web::HTML::SerializedTransferRecord& record)
 {
-    Vector<JS::Value> values;
+    GC::RootVector<JS::Value> values;
     for (auto& holder : record.transfer_data_holders) {
         Web::HTML::TransferDataDecoder decoder { move(holder) };
         decoder.set_shared_buffers(record.shared_buffers);
@@ -962,7 +962,7 @@ TEST_CASE(file_api_serializables_encode_to_frozen_bytes)
         expect_storage_encoding(blob, serializable_storage_record("Blob"sv, 1, body));
     }
 
-    auto file = MUST(Web::FileAPI::File::create({ { "data"_utf16 } }, "f.txt"_utf16));
+    auto file = Web::FileAPI::File::create("data"sv.bytes(), "f.txt"_utf16, {});
     {
         Vector<u8> body;
         append_storage_string(body, ""sv); // default type

@@ -5,7 +5,7 @@
  */
 
 use super::*;
-use crate::painting::chrome_geometry::{ChromeGeometry, scrollbar_is_enlarged};
+use crate::painting::chrome_geometry::{ChromeGeometry, scrollbar_is_enlarged, scrollbar_is_hidden};
 use crate::painting::ffi::ScrollDirection;
 use crate::painting::host::FfiHitTestQueryCallbacks;
 use crate::painting::paint_read::PaintRead;
@@ -110,11 +110,18 @@ impl HitTestList {
                     && x < rect.right().to_float()
                     && y >= rect.top().to_float()
                     && y < rect.bottom().to_float();
-                in_rect
-                    && item
-                        .path
-                        .as_ref()
-                        .is_some_and(|path| path.contains(x, y, item.winding_rule))
+                if !in_rect {
+                    return false;
+                }
+                let Some(path) = item.path.as_ref() else {
+                    return false;
+                };
+                (item.svg_hit_areas & svg_hit_area::FILL != 0 && path.contains(x, y, item.winding_rule))
+                    || (item.svg_hit_areas & svg_hit_area::STROKE != 0
+                        && item
+                            .svg_stroke
+                            .as_ref()
+                            .is_some_and(|stroke| stroke.contains(path, x, y)))
             }
             HitTestItemKind::TextFragment => item.rect.contains_point(local_point),
             // Empty lines are caret targets only; they never contain a point for regular hit testing.
@@ -139,9 +146,11 @@ impl HitTestList {
                         } else {
                             ScrollDirection::Vertical
                         };
-                        chrome_geometry
-                            .absolute_scrollbar_rect(node, direction, scrollbar_is_enlarged(rows, node, direction))
-                            .is_some_and(|rect| rect.contains_point(local_point))
+                        // An overlay scrollbar that has faded out takes no pointer input, as in Chromium.
+                        !scrollbar_is_hidden(rows, node, direction)
+                            && chrome_geometry
+                                .absolute_scrollbar_rect(node, direction, scrollbar_is_enlarged(rows, node, direction))
+                                .is_some_and(|rect| rect.contains_point(local_point))
                     }
                     _ => false,
                 }

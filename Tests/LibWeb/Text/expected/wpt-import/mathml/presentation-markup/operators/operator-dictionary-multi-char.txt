@@ -1,0 +1,25 @@
+Harness status: OK
+
+Found 20 tests
+
+20 Pass
+Pass	Operator dictionary spacing for "!!" (postfix)
+Pass	Operator dictionary spacing for "!=" (infix)
+Pass	Operator dictionary spacing for "&&" (infix)
+Pass	Operator dictionary spacing for "**" (infix)
+Pass	Operator dictionary spacing for "*=" (infix)
+Pass	Operator dictionary spacing for "++" (postfix)
+Pass	Operator dictionary spacing for "+=" (infix)
+Pass	Operator dictionary spacing for "--" (postfix)
+Pass	Operator dictionary spacing for "-=" (infix)
+Pass	Operator dictionary spacing for "->" (infix)
+Pass	Operator dictionary spacing for "//" (infix)
+Pass	Operator dictionary spacing for "/=" (infix)
+Pass	Operator dictionary spacing for ":=" (infix)
+Pass	Operator dictionary spacing for "<=" (infix)
+Pass	Operator dictionary spacing for "<>" (infix)
+Pass	Operator dictionary spacing for "==" (infix)
+Pass	Operator dictionary spacing for ">=" (infix)
+Pass	Operator dictionary spacing for "||" (infix)
+Pass	Operator dictionary spacing for "||" (postfix)
+Pass	Operator dictionary spacing for "||" (prefix)

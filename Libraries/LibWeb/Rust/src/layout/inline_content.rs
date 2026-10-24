@@ -9,6 +9,7 @@ use super::geometry::AvailableSize;
 use super::layout_node_arena::LayoutNodeArena;
 use super::node_data::NodeSlotId;
 use super::{formatting_context, inline_formatting_context, used_values};
+use crate::css::style::fast_hash::FastSet as HashSet;
 
 // Finalized inline output shared by committed fragments, formatting-context caches and painting.
 // Glyph buffers move here from the line builder and own their fonts. No borrowed text or mutable
@@ -22,6 +23,8 @@ pub struct InlineContent {
     /// there are no boxes to interleave, so text can be painted together.
     pub items: Vec<InlineItem>,
     pub lines_after_clamp_point_rect: Option<Box<used_values::FfiCssPixelRect>>,
+    /// Where the content that text-overflow elided from the end of a line would be, by line index.
+    pub elided_content_rects: Vec<(u32, used_values::FfiCssPixelRect)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +140,11 @@ impl InlineContent {
     pub(crate) fn finish(data: used_values::LineData, arena: &LayoutNodeArena, content_inline_size: CssPixels) -> Self {
         let mut lines = Vec::with_capacity(data.line_boxes.len());
         let mut fragment_count = 0usize;
-        for line in &data.line_boxes {
+        let mut elided_content_rects = Vec::new();
+        for (line_index, line) in data.line_boxes.iter().enumerate() {
+            if let Some(rect) = inline_formatting_context::elided_content_rect(line) {
+                elided_content_rects.push((line_index as u32, rect));
+            }
             let visible_fragment_count = line.visible_fragments().count();
             fragment_count = fragment_count
                 .checked_add(visible_fragment_count)
@@ -193,6 +200,7 @@ impl InlineContent {
             inline_box_pieces: pieces,
             items: Vec::new(),
             lines_after_clamp_point_rect: data.lines_after_clamp_point_rect,
+            elided_content_rects,
         };
         // Plain text needs no interleaving and keeps its single foreground producer.
         if content.inline_box_pieces.is_empty() && !content.fragments.iter().any(|fragment| fragment.is_atomic_inline) {
@@ -226,30 +234,97 @@ impl InlineContent {
     pub(crate) fn merge_box_fragments<'content>(
         contents: impl Iterator<Item = Option<&'content InlineContent>>,
     ) -> Option<std::sync::Arc<InlineContent>> {
-        let contents: Vec<(u32, &InlineContent)> = contents
+        let contents: Vec<(&InlineContent, u32, used_values::FfiCssPixelPoint)> = contents
             .enumerate()
-            .filter_map(|(index, content)| content.map(|content| (index as u32, content)))
+            .filter_map(|(index, content)| {
+                content.map(|content| (content, index as u32, used_values::FfiCssPixelPoint::default()))
+            })
             .collect();
         if contents.is_empty() {
             return None;
         }
-        let interleaves = contents.iter().any(|(_, content)| !content.items.is_empty());
-        let mut merged = InlineContent::default();
-        for (box_fragment, content) in contents {
-            merged.append(content, interleaves, box_fragment);
-        }
-        Some(std::sync::Arc::new(merged))
+        Some(Self::combine(&contents))
     }
 
-    fn append(&mut self, content: &InlineContent, interleaves: bool, box_fragment: u32) {
+    pub(crate) fn concatenate_translated(
+        contents: &[(std::sync::Arc<InlineContent>, used_values::FfiCssPixelPoint)],
+    ) -> std::sync::Arc<InlineContent> {
+        let contents: Vec<(&InlineContent, u32, used_values::FfiCssPixelPoint)> = contents
+            .iter()
+            .map(|(content, offset)| (&**content, 0, *offset))
+            .collect();
+        Self::combine(&contents)
+    }
+
+    fn combine(contents: &[(&InlineContent, u32, used_values::FfiCssPixelPoint)]) -> std::sync::Arc<InlineContent> {
+        let interleaves = contents.iter().any(|(content, ..)| !content.items.is_empty());
+        let mut combined = InlineContent::default();
+        for (content, box_fragment, offset) in contents {
+            combined.append_translated(content, interleaves, *box_fragment, *offset);
+        }
+        combined.drop_repeated_placeholder_pieces();
+        std::sync::Arc::new(combined)
+    }
+
+    fn drop_repeated_placeholder_pieces(&mut self) {
+        let is_placeholder =
+            |piece: &InlineBoxPieceRecord| piece.is_geometry_only_placeholder && piece.fragment_count == 0;
+        if !self.inline_box_pieces.iter().any(is_placeholder) {
+            return;
+        }
+        let mut nodes_with_pieces: HashSet<NodeSlotId> = self
+            .inline_box_pieces
+            .iter()
+            .filter(|piece| !is_placeholder(piece))
+            .map(|piece| piece.node)
+            .collect();
+        let mut new_indices = Vec::with_capacity(self.inline_box_pieces.len());
+        let mut kept_count = 0u32;
+        self.inline_box_pieces.retain(|piece| {
+            let keep = !is_placeholder(piece) || nodes_with_pieces.insert(piece.node);
+            new_indices.push(kept_count);
+            kept_count += u32::from(keep);
+            keep
+        });
+        for item in &mut self.items {
+            if let InlineItem::BoxPiece(index) = item {
+                *index = new_indices[*index as usize];
+            }
+        }
+    }
+
+    fn append_translated(
+        &mut self,
+        content: &InlineContent,
+        interleaves: bool,
+        box_fragment: u32,
+        offset: used_values::FfiCssPixelPoint,
+    ) {
         let line_offset = self.lines.len() as u32;
         let fragment_offset = self.fragments.len() as u32;
         let piece_offset = self.inline_box_pieces.len() as u32;
-        self.lines
-            .extend(content.lines.iter().map(|line| LineRecord { box_fragment, ..*line }));
+        self.lines.extend(content.lines.iter().map(|line| {
+            let mut line = LineRecord { box_fragment, ..*line };
+            line.rect.x += offset.x;
+            line.rect.y += offset.y;
+            line.block_start += offset.y;
+            line.block_end += offset.y;
+            line.next_line_block_offset += offset.y;
+            line
+        }));
+        self.elided_content_rects
+            .extend(content.elided_content_rects.iter().map(|&(line_index, mut rect)| {
+                rect.x += offset.x;
+                rect.y += offset.y;
+                (line_index + line_offset, rect)
+            }));
         self.fragments
             .extend(content.fragments.iter().cloned().map(|mut fragment| {
                 fragment.line_index += line_offset;
+                let (inline_delta, block_delta) =
+                    super::geometry::to_physical(fragment.writing_mode, offset.x, offset.y);
+                fragment.inline_offset += inline_delta;
+                fragment.block_offset += block_delta;
                 fragment
             }));
         self.inline_box_pieces
@@ -257,6 +332,9 @@ impl InlineContent {
                 let mut piece = *piece;
                 piece.line_index += line_offset;
                 piece.first_fragment_index += fragment_offset;
+                piece.border_box_rect.x += offset.x;
+                piece.border_box_rect.y += offset.y;
+                piece.baseline += offset.y;
                 piece
             }));
         if !interleaves {

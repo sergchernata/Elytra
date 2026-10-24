@@ -366,7 +366,7 @@ CanonicalBrowsingContext::BrowsingContextAndDocument CanonicalNavigable::obtain_
     // 12. If navigationCOOP's value is "same-origin-plus-COEP", then set newBrowsingContext's group's cross-origin
     //     isolation mode to either "logical" or "concrete". The choice of which is implementation-defined.
     if (navigation_coop.value == Web::HTML::OpenerPolicyValue::SameOriginPlusCOEP)
-        new_browsing_context.browsing_context->group()->set_cross_origin_isolation_mode(CrossOriginIsolationMode::Concrete);
+        new_browsing_context.browsing_context->group()->set_cross_origin_isolation_mode(Web::HTML::CrossOriginIsolationMode::Concrete);
 
     // 13. Let sandboxFlags be a clone of navigationParams's final sandboxing flag set.
     // FIXME: 14. If sandboxFlags is not empty, then:
@@ -430,12 +430,15 @@ NonnullRefPtr<CanonicalDocument> CanonicalNavigable::create_and_initialize_a_doc
     // 9. Let document be a new Document, with
     //    origin: navigationParams's origin
     //    browsing context: browsingContext
+    //    policy container: navigationParams's policy container
     //    active sandboxing flag set: navigationParams's final sandboxing flag set
     //    opener policy: navigationParams's cross-origin opener policy
     //    URL: creationURL
     // NB: The process hosting window's agent creates the document, with its other fields, and runs the remaining steps.
+    //     The UI process holds the embedder policy of the document's policy container.
     auto document = CanonicalDocument::create(navigation_params.document_id, move(creation_url), navigation_params.origin, browsing_context, window.release_nonnull(), navigation_params.final_sandboxing_flag_set, CanonicalDocument::IsInitialAboutBlank::No);
     document->set_opener_policy(navigation_params.opener_policy);
+    document->set_embedder_policy(navigation_params.embedder_policy);
 
     // 22. Return document.
     return document;
@@ -515,6 +518,41 @@ bool CanonicalNavigable::is_ancestor_of(CanonicalNavigable const& potential_desc
         if (parent == this)
             return true;
     }
+    return false;
+}
+
+// https://html.spec.whatwg.org/multipage/document-sequences.html#familiar-with
+// NB: Stated on the navigables whose active browsing contexts are compared, as in the renderer.
+bool CanonicalNavigable::is_familiar_with(CanonicalNavigable const& other) const
+{
+    // A browsing context A is familiar with a second browsing context B if the following algorithm returns true:
+    auto const& A = *this;
+    auto const& B = other;
+
+    // 1. If A's active document's origin is same origin with B's active document's origin, then return true.
+    if (A.active_document().origin().is_same_origin(B.active_document().origin()))
+        return true;
+
+    // 2. If A's top-level browsing context is B, then return true.
+    if (&A.top_level_traversable() == &B)
+        return true;
+
+    // 3. If B is an auxiliary browsing context and A is familiar with B's opener browsing context, then return true.
+    if (B.active_browsing_context().is_auxiliary()) {
+        if (auto opener = B.active_browsing_context().opener_browsing_context()) {
+            if (auto const* opener_navigable = CanonicalTraversable::navigable_with_active_browsing_context(*opener); opener_navigable && A.is_familiar_with(*opener_navigable))
+                return true;
+        }
+    }
+
+    // 4. If there exists an ancestor browsing context of B whose active document has the same origin as the active document of A, then return true.
+    // NOTE: This includes the case where A is an ancestor browsing context of B.
+    for (auto const* ancestor = B.parent(); ancestor; ancestor = ancestor->parent()) {
+        if (ancestor->active_document().origin().is_same_origin(A.active_document().origin()))
+            return true;
+    }
+
+    // 5. Return false.
     return false;
 }
 
@@ -889,6 +927,7 @@ void CanonicalNavigable::did_create_populated_document_with_an_origin_of_its_own
         .request_current_url = {},
         .origin = origin,
         .opener_policy = {},
+        .embedder_policy = {},
         .final_sandboxing_flag_set = populated_document->document->active_sandboxing_flag_set(),
         .environment_id = environment_id,
         .document_id = document_id,
@@ -1036,8 +1075,10 @@ void CanonicalNavigable::update_container_state(Web::HTML::ReplicatedContainerSt
 {
     if (!m_hosted_state.has_value())
         return;
-    if (m_container_document)
+    if (m_container_document) {
         state.document_active_sandboxing_flag_set = m_container_document->active_sandboxing_flag_set();
+        state.document_embedder_policy = m_container_document->embedder_policy();
+    }
     m_hosted_state->container = state;
     if (has_remote_host())
         remote_host().async_update_local_root_container_state(id(), move(state));
@@ -1083,6 +1124,8 @@ Optional<Web::HTML::ReplicatedNavigableState> CanonicalNavigable::replicated_sta
         .active_document_is_fully_active = hosted_state.active_document_is_fully_active,
         .top_level_creation_url = traversable.active_document().creation_url(),
         .top_level_origin = traversable.active_document().origin(),
+        .top_level_is_created_by_web_content = traversable.is_created_by_web_content(),
+        .top_level_session_history_entry_count = traversable.session_history().size(),
         .has_cross_site_ancestor = active_document_has_cross_site_ancestor(),
         .browsing_context_group_id = browsing_context_group_id,
         .opener_policy = active_document().opener_policy(),
@@ -1166,6 +1209,20 @@ bool CanonicalNavigable::has_session_history_entry_and_ready_for_navigation() co
     // The traversable's initial entry is among its session history entries from its creation; a child's is once the
     // steps its creation appended have added its nested history.
     return is_top_level_traversable() || top_level_traversable().session_history().get_session_history_entries(*this).has_value();
+}
+
+// https://html.spec.whatwg.org/multipage/nav-history-apis.html#script-closable
+bool CanonicalNavigable::is_script_closable() const
+{
+    // A navigable is script-closable if it is a top-level traversable, and any of the following are true:
+    // - its is created by web content is true; or
+    // - its session history entries's size is 1.
+    if (!is_top_level_traversable())
+        return false;
+
+    auto const& traversable = top_level_traversable();
+    return traversable.is_created_by_web_content()
+        || traversable.session_history().size() == 1;
 }
 
 void CanonicalNavigable::document_completely_finished_loading(CanonicalDocument& document)

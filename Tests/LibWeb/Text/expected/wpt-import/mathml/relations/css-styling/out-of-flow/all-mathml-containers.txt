@@ -1,0 +1,55 @@
+Harness status: OK
+
+Found 50 tests
+
+50 Pass
+Pass	position: absolute; children in a
+Pass	position: absolute; children in maction
+Pass	position: absolute; children in menclose
+Pass	position: absolute; children in merror
+Pass	position: absolute; children in mfrac
+Pass	position: absolute; children in mi
+Pass	position: absolute; children in mmultiscripts
+Pass	position: absolute; children in mn
+Pass	position: absolute; children in mo
+Pass	position: absolute; children in mover
+Pass	position: absolute; children in mpadded
+Pass	position: absolute; children in mphantom
+Pass	position: absolute; children in mroot
+Pass	position: absolute; children in mrow
+Pass	position: absolute; children in ms
+Pass	position: absolute; children in msqrt
+Pass	position: absolute; children in mstyle
+Pass	position: absolute; children in msub
+Pass	position: absolute; children in msubsup
+Pass	position: absolute; children in msup
+Pass	position: absolute; children in mtable
+Pass	position: absolute; children in mtext
+Pass	position: absolute; children in munder
+Pass	position: absolute; children in munderover
+Pass	position: absolute; children in semantics
+Pass	position: fixed; children in a
+Pass	position: fixed; children in maction
+Pass	position: fixed; children in menclose
+Pass	position: fixed; children in merror
+Pass	position: fixed; children in mfrac
+Pass	position: fixed; children in mi
+Pass	position: fixed; children in mmultiscripts
+Pass	position: fixed; children in mn
+Pass	position: fixed; children in mo
+Pass	position: fixed; children in mover
+Pass	position: fixed; children in mpadded
+Pass	position: fixed; children in mphantom
+Pass	position: fixed; children in mroot
+Pass	position: fixed; children in mrow
+Pass	position: fixed; children in ms
+Pass	position: fixed; children in msqrt
+Pass	position: fixed; children in mstyle
+Pass	position: fixed; children in msub
+Pass	position: fixed; children in msubsup
+Pass	position: fixed; children in msup
+Pass	position: fixed; children in mtable
+Pass	position: fixed; children in mtext
+Pass	position: fixed; children in munder
+Pass	position: fixed; children in munderover
+Pass	position: fixed; children in semantics

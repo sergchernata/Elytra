@@ -55,6 +55,10 @@ pub struct HitTestItem {
     pub border_radii: BorderRadii,
     pub path: Option<Arc<libgfx_rust::path::OwnedPath>>,
     pub winding_rule: i32,
+    /// For an SVG path, the `svg_hit_area` flags naming which of its areas pointer events can target.
+    pub svg_hit_areas: u8,
+    /// For an SVG path whose stroke pointer events can target, the shape of that stroke.
+    pub svg_stroke: Option<Arc<SvgStrokeHitRegion>>,
     pub writing_mode: u8,
     pub inline_axis_is_reverse: bool,
     pub block_axis_is_reverse: bool,
@@ -66,6 +70,56 @@ impl HitTestItem {
     fn recorded_caret_line(&self) -> Option<(ContextRef, NodeSlotId, usize)> {
         self.caret_line_index
             .map(|index| (self.context, self.block_container, index))
+    }
+}
+
+/// The areas of an SVG graphics element that pointer events can target.
+pub mod svg_hit_area {
+    pub const FILL: u8 = 1 << 0;
+    pub const STROKE: u8 = 1 << 1;
+    pub const BOUNDING_BOX: u8 = 1 << 2;
+}
+
+/// The stroke of an SVG path as hit testing reads it. The outline of the stroke is only built when a point first
+/// reaches it, and the copies of an item that later recordings reuse share it.
+#[derive(Debug)]
+pub struct SvgStrokeHitRegion {
+    style: libgfx_rust::path::StrokeStyle,
+    outline: std::sync::OnceLock<libgfx_rust::path::OwnedPath>,
+}
+
+impl SvgStrokeHitRegion {
+    pub fn new(style: libgfx_rust::path::StrokeStyle) -> Self {
+        Self {
+            style,
+            outline: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// How far past the path its stroke can reach.
+    pub fn outset(&self) -> f32 {
+        let mut factor = 1.0f32;
+        if self.style.join_style == libgfx_rust::JoinStyle::Miter {
+            factor = factor.max(self.style.miter_limit);
+        }
+        if self.style.cap_style == libgfx_rust::CapStyle::Square {
+            factor = factor.max(std::f32::consts::SQRT_2);
+        }
+        self.style.thickness / 2.0 * factor
+    }
+
+    pub fn contains(&self, path: &libgfx_rust::path::OwnedPath, x: f32, y: f32) -> bool {
+        self.outline.get_or_init(|| path.stroke_to_fill(&self.style)).contains(
+            x,
+            y,
+            libgfx_rust::WindingRule::Nonzero as i32,
+        )
+    }
+}
+
+impl PartialEq for SvgStrokeHitRegion {
+    fn eq(&self, other: &Self) -> bool {
+        self.style == other.style
     }
 }
 
@@ -82,6 +136,7 @@ pub struct SpatialIndex {
 pub struct CaretLine {
     pub rect: CssPixelRect,
     pub block_container: NodeSlotId,
+    pub box_fragment: u32,
     pub context: ContextRef,
     pub first_caret_item_index: usize,
     pub last_caret_item_index: usize,
@@ -164,6 +219,24 @@ impl HitTestList {
             items.reserve(self.item_capacity_hint_from_previous_list.max(source.len()));
         }
         items.extend_from_slice(source);
+    }
+
+    fn box_fragment_of_caret_item(rows: &impl PaintRead, item: &HitTestItem) -> u32 {
+        let Some(line_index) = item.caret_line_index else {
+            return 0;
+        };
+        let line_root = match item.kind {
+            HitTestItemKind::TextFragment | HitTestItemKind::EmptyLine => item.paintable,
+            HitTestItemKind::Box => rows.paintable_data(item.paintable).containing_block,
+            HitTestItemKind::SvgPath | HitTestItemKind::EmptyEditable | HitTestItemKind::ChromeWidget => return 0,
+        };
+        if line_root.is_invalid() || !rows.paintable_row_is_populated(line_root) {
+            return 0;
+        }
+        rows.committed_side_data(line_root)
+            .lines()
+            .get(line_index)
+            .map_or(0, |line| line.box_fragment)
     }
 
     pub(crate) fn caret_line_rect_for_item(rows: &impl PaintRead, item: &HitTestItem) -> CssPixelRect {
@@ -310,6 +383,7 @@ impl HitTestList {
         self.caret_lines.push(CaretLine {
             rect: item_line_rect,
             block_container: item_block_container,
+            box_fragment: Self::box_fragment_of_caret_item(rows, item),
             context: item.context,
             first_caret_item_index: caret_item_index,
             last_caret_item_index: caret_item_index,

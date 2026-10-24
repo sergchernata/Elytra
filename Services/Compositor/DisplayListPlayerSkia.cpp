@@ -33,15 +33,15 @@
 #include <gpu/ganesh/SkSurfaceGanesh.h>
 #include <pathops/SkPathOps.h>
 
+#include <Compositor/CanvasSurfaceRegistry.h>
 #include <Compositor/DisplayListPlayerSkia.h>
 #include <Compositor/DisplayListRasterCache.h>
 #include <Compositor/ScrollbarController.h>
-#include <LibCompositing/DisplayList/CanvasSurfaceRegistry.h>
+#include <Compositor/SkiaBackendContext.h>
+#include <Compositor/SkiaUtils.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ColorSpace.h>
 #include <LibGfx/DecodedImageFrame.h>
-#include <LibGfx/SkiaBackendContext.h>
-#include <LibGfx/SkiaUtils.h>
 
 namespace Compositor {
 
@@ -94,6 +94,7 @@ void DisplayListPlayerSkia::execute(
 {
     TemporaryChange composited_context_resolver_change { m_composited_context_resolver, composited_context_resolver };
     TemporaryChange scrollbar_controller_change { m_scrollbar_controller, scrollbar_controller };
+    raster_cache.drop_clip_paths_not_used_since_last_frame();
     TemporaryChange raster_cache_change { m_raster_cache, &raster_cache };
     if (m_layer_image_filter_cache->tree_structural_epoch != visual_context_tree.structural_epoch()) {
         m_layer_image_filter_cache->entries_by_tree_structural_epoch_and_effect.clear();
@@ -190,43 +191,31 @@ void DisplayListPlayerSkia::flush_async(Gfx::PaintingSurface& surface, Function<
     surface.flush();
 }
 
-// A scroll offset outside the scroll range moves the thumb past an end of its track, where it is cut short instead.
-static Gfx::IntRect thumb_rect_kept_inside_track(PaintScrollBar const& command)
+static bool rect_is_pixel_aligned(SkRect const& rect)
 {
-    auto thumb_rect = command.thumb_rect;
-    auto const& track_rect = command.track_rect;
-    if (command.vertical) {
-        auto top = max(thumb_rect.top(), track_rect.top());
-        auto bottom = min(thumb_rect.bottom(), track_rect.bottom());
-        thumb_rect.set_y(top);
-        thumb_rect.set_height(max(0, bottom - top));
-    } else {
-        auto left = max(thumb_rect.left(), track_rect.left());
-        auto right = min(thumb_rect.right(), track_rect.right());
-        thumb_rect.set_x(left);
-        thumb_rect.set_width(max(0, right - left));
-    }
-    return thumb_rect;
+    return rect.left() == roundf(rect.left()) && rect.top() == roundf(rect.top()) && rect.right() == roundf(rect.right()) && rect.bottom() == roundf(rect.bottom());
 }
 
-static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, PaintScrollBar const& command, float opacity, Optional<SkRRect> const& corner_clip = {})
+static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, ScrollbarController::PresentedScrollbar const& scrollbar, Optional<SkRRect> const& corner_clip = {})
 {
+    auto opacity = scrollbar.opacity;
     if (opacity <= 0)
         return;
 
-    auto gutter_rect = to_skia_rect(command.gutter_rect);
+    auto gutter_rect = to_skia_rect(scrollbar.gutter_rect);
 
-    auto thumb_rect = to_skia_rect(thumb_rect_kept_inside_track(command));
+    auto thumb_rect = to_skia_rect(scrollbar.thumb_rect);
     auto radius = thumb_rect.width() / 2;
     auto thumb_rrect = SkRRect::MakeRectXY(thumb_rect, radius, radius);
 
     auto& canvas = surface.canvas();
 
-    auto gutter_fill_color = command.track_color;
     SkPaint gutter_fill_paint;
-    gutter_fill_paint.setColor(to_skia_color(gutter_fill_color));
+    gutter_fill_paint.setColor(to_skia_color(scrollbar.track_color));
     gutter_fill_paint.setAlphaf(gutter_fill_paint.getAlphaf() * opacity);
-    canvas.drawRect(gutter_rect, gutter_fill_paint);
+    gutter_fill_paint.setAntiAlias(!rect_is_pixel_aligned(gutter_rect));
+    if (gutter_fill_paint.getAlphaf() > 0)
+        canvas.drawRect(gutter_rect, gutter_fill_paint);
 
     if (thumb_rect.isEmpty())
         return;
@@ -248,12 +237,13 @@ static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, PaintScr
     };
 
     SkPaint thumb_fill_paint;
-    thumb_fill_paint.setColor(to_skia_color(command.thumb_color));
+    thumb_fill_paint.setColor(to_skia_color(scrollbar.thumb_color));
     thumb_fill_paint.setAlphaf(thumb_fill_paint.getAlphaf() * opacity);
-    thumb_fill_paint.setAntiAlias(clipped_thumb.has_value());
+    // A thumb that is growing or shrinking has edges between pixels.
+    thumb_fill_paint.setAntiAlias(clipped_thumb.has_value() || !rect_is_pixel_aligned(thumb_rect));
     draw_thumb(thumb_fill_paint);
 
-    auto stroke_color = command.thumb_color.lightened();
+    auto stroke_color = scrollbar.thumb_color.lightened();
     SkPaint stroke_paint;
     stroke_paint.setStroke(true);
     stroke_paint.setStrokeWidth(1);
@@ -263,14 +253,14 @@ static void paint_scrollbar_into_surface(Gfx::PaintingSurface& surface, PaintScr
     draw_thumb(stroke_paint);
 }
 
-void DisplayListPlayerSkia::paint_scrollbar(Gfx::PaintingSurface& surface, PaintScrollBar const& command, float opacity, Gfx::IntRect const& corner_clip_rect, int corner_clip_radius)
+void DisplayListPlayerSkia::paint_scrollbar(Gfx::PaintingSurface& surface, ScrollbarController::PresentedScrollbar const& scrollbar, Gfx::IntRect const& corner_clip_rect, int corner_clip_radius)
 {
     Optional<SkRRect> corner_clip;
     if (corner_clip_radius > 0) {
         auto radius = static_cast<SkScalar>(corner_clip_radius);
         corner_clip = SkRRect::MakeRectXY(to_skia_rect(corner_clip_rect), radius, radius);
     }
-    paint_scrollbar_into_surface(surface, command, opacity, corner_clip);
+    paint_scrollbar_into_surface(surface, scrollbar, corner_clip);
 }
 
 static SkMatrix vertical_glyph_run_rotation(Gfx::IntRect const& rect)
@@ -1468,6 +1458,8 @@ void DisplayListPlayerSkia::play_command(PaintNestedDisplayList const& command)
             canvas.scale(command.rect.width() / command.list_size.width(), command.rect.height() / command.list_size.height());
     }
     ScrollStateSnapshot scroll_state_snapshot;
+    // The scrollbars of this context do not belong to the scroll nodes of a nested display list.
+    TemporaryChange<ScrollbarController const*> scrollbar_controller_change { m_scrollbar_controller, nullptr };
     execute_nested_display_list(*nested_display_list.display_list, nested_display_list.visual_context_tree, scroll_state_snapshot);
     canvas.restore();
 }
@@ -1514,8 +1506,19 @@ void DisplayListPlayerSkia::play_command(CompositorNestedContextWheelRegion cons
 
 void DisplayListPlayerSkia::play_command(PaintScrollBar const& command)
 {
-    auto opacity = m_scrollbar_controller ? m_scrollbar_controller->opacity_of_scrollbar_painted_by_display_list(command.scroll_node_index, command.vertical) : 1.0f;
-    paint_scrollbar_into_surface(surface(), command, opacity);
+    if (m_scrollbar_controller) {
+        if (auto scrollbar = m_scrollbar_controller->presented_scrollbar_painted_by_display_list(command.scroll_node_index, command.vertical, command.thumb_color, command.track_color, active_scroll_state()); scrollbar.has_value()) {
+            paint_scrollbar_into_surface(surface(), *scrollbar);
+            return;
+        }
+    }
+    ScrollbarController::PresentedScrollbar scrollbar {
+        .gutter_rect = command.gutter_rect.to_type<float>(),
+        .thumb_rect = ScrollbarController::thumb_rect_kept_inside_track(command.thumb_rect, command.track_rect, command.vertical).to_type<float>(),
+        .thumb_color = command.thumb_color,
+        .track_color = command.track_color,
+    };
+    paint_scrollbar_into_surface(surface(), scrollbar);
 }
 
 void DisplayListPlayerSkia::push_clip(ReplayClip const& clip)
@@ -1525,10 +1528,17 @@ void DisplayListPlayerSkia::push_clip(ReplayClip const& clip)
     clip_to_rounded_rect(canvas, clip.rect, clip.corner_radii, clip.mode == ClipMode::Difference ? SkClipOp::kDifference : SkClipOp::kIntersect);
 }
 
-void DisplayListPlayerSkia::push_clip_path(Gfx::Path const& path, Gfx::WindingRule winding_rule)
+void DisplayListPlayerSkia::push_clip_path(Gfx::Path const& path, u64 path_identity, Gfx::WindingRule winding_rule)
 {
     surface().canvas().save();
-    clip_path(path, winding_rule, true);
+    // A path that stays the same keeps one Skia path, so caches that are keyed on it work.
+    clip_path(raster_cache().clip_path(path_identity, path), winding_rule, true);
+}
+
+void DisplayListPlayerSkia::push_clip_path_bytes(ReadonlyBytes path_bytes, Gfx::WindingRule winding_rule)
+{
+    surface().canvas().save();
+    clip_path(Gfx::to_skia_path(Gfx::Path::from_serialized_bytes(path_bytes)), winding_rule, true);
 }
 
 void DisplayListPlayerSkia::push_transform(Gfx::AffineTransform const& transform)
@@ -1688,7 +1698,7 @@ void DisplayListPlayerSkia::push_device_space_plane_clip(Gfx::Path const& path)
     auto& canvas = surface().canvas();
     canvas.save();
     canvas.setMatrix(SkM44());
-    clip_path(path, Gfx::WindingRule::Nonzero, false);
+    clip_path(Gfx::to_skia_path(path), Gfx::WindingRule::Nonzero, false);
 }
 
 void DisplayListPlayerSkia::set_matrix(Gfx::FloatMatrix4x4 const& matrix)
@@ -1701,12 +1711,10 @@ Gfx::FloatMatrix4x4 DisplayListPlayerSkia::canvas_matrix() const
     return to_gfx_matrix4x4(surface().canvas().getLocalToDevice());
 }
 
-void DisplayListPlayerSkia::clip_path(Gfx::Path const& path, Gfx::WindingRule winding_rule, bool anti_aliased)
+void DisplayListPlayerSkia::clip_path(SkPath path, Gfx::WindingRule winding_rule, bool anti_aliased)
 {
-    auto& canvas = surface().canvas();
-    auto sk_path = to_skia_path(path);
-    sk_path.setFillType(to_skia_path_fill_type(winding_rule));
-    canvas.clipPath(sk_path, anti_aliased);
+    path.setFillType(to_skia_path_fill_type(winding_rule));
+    surface().canvas().clipPath(path, anti_aliased);
 }
 
 bool DisplayListPlayerSkia::would_be_fully_clipped_by_painter(Gfx::IntRect rect) const

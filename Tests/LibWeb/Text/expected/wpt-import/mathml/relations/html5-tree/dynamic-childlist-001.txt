@@ -1,0 +1,49 @@
+Harness status: OK
+
+Found 44 tests
+
+44 Pass
+Pass	Adding missing children to mfrac
+Pass	Removing child from valid mfrac
+Pass	Adding child to valid mfrac
+Pass	Removing extra child from mfrac
+Pass	Adding missing children to munder
+Pass	Removing child from valid munder
+Pass	Adding child to valid munder
+Pass	Removing extra child from munder
+Pass	Adding missing children to mover
+Pass	Removing child from valid mover
+Pass	Adding child to valid mover
+Pass	Removing extra child from mover
+Pass	Adding missing children to munderover
+Pass	Removing child from valid munderover
+Pass	Adding child to valid munderover
+Pass	Removing extra child from munderover
+Pass	Adding missing children to msub
+Pass	Removing child from valid msub
+Pass	Adding child to valid msub
+Pass	Removing extra child from msub
+Pass	Adding missing children to msup
+Pass	Removing child from valid msup
+Pass	Adding child to valid msup
+Pass	Removing extra child from msup
+Pass	Adding missing children to msubsup
+Pass	Removing child from valid msubsup
+Pass	Adding child to valid msubsup
+Pass	Removing extra child from msubsup
+Pass	Adding missing children to mroot
+Pass	Removing child from valid mroot
+Pass	Adding child to valid mroot
+Pass	Removing extra child from mroot
+Pass	Removing children from msqrt
+Pass	Adding children to msqrt
+Pass	Removing children from mpadded
+Pass	Adding children to mpadded
+Pass	Removing children from mspace
+Pass	Adding children to mspace
+Pass	multiscripts child count from 3 to 0
+Pass	multiscripts child count from 3 to 1
+Pass	multiscripts child count from 3 to 2
+Pass	multiscripts child count from 0 to 3
+Pass	multiscripts child count from 3 to 6
+Pass	multiscripts child count from 3 to 8

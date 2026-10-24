@@ -250,7 +250,7 @@ void Page::process_screenshot_requests()
                 client.page_did_take_screenshot({});
                 continue;
             }
-            auto rect = enclosing_device_rect(Painting::absolute_border_box_rect(*layout_node));
+            auto rect = enclosing_device_rect(Painting::border_box_rect_of_fragments(*layout_node));
             auto bitmap_or_error = Gfx::Bitmap::create_shareable(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, rect.size().to_type<int>());
             if (bitmap_or_error.is_error()) {
                 client.page_did_take_screenshot({});
@@ -729,9 +729,9 @@ GC::Ref<HTML::LocalNavigable> Page::local_traversable() const
     return as<HTML::LocalNavigable>(*m_top_level_traversable);
 }
 
-Vector<GC::Ref<HTML::LocalNavigable>> Page::local_roots() const
+GC::RootVector<GC::Ref<HTML::LocalNavigable>> Page::local_roots() const
 {
-    Vector<GC::Ref<HTML::LocalNavigable>> roots;
+    GC::RootVector<GC::Ref<HTML::LocalNavigable>> roots;
     if (!m_top_level_traversable)
         return roots;
     Function<void(HTML::Navigable&)> collect = [&](HTML::Navigable& navigable) {
@@ -874,6 +874,8 @@ GC::Ref<HTML::LocalNavigable> Page::begin_hosting(HTML::CrossProcessId id, HTML:
         auto& browsing_context = *stand_in->active_browsing_context();
         browsing_context.set_browsing_context_group_id(replicated_state.browsing_context_group_id);
         browsing_context.set_is_auxiliary(replicated_state.active_browsing_context_is_auxiliary);
+        stand_in->set_is_created_by_web_content(replicated_state.top_level_is_created_by_web_content);
+        stand_in->set_session_history_entry_count(replicated_state.top_level_session_history_entry_count);
         VERIFY(m_top_level_traversable.ptr() == navigable.ptr());
         m_top_level_traversable = stand_in;
         update_needs_beforeunload_check();
@@ -1057,7 +1059,7 @@ void Page::discard()
 
     // The navigables of other processes this page held no longer stand for anything here, and a WindowProxy a script
     // of another page holds for one of them is closed.
-    Vector<GC::Ref<HTML::RemoteNavigable>> remote_navigables;
+    GC::RootVector<GC::Ref<HTML::RemoteNavigable>> remote_navigables;
     for (auto& remote_navigable : HTML::all_remote_navigables()) {
         if (&remote_navigable->page() == this)
             remote_navigables.append(remote_navigable);
@@ -1414,7 +1416,8 @@ void Page::notify_spell_check_progress()
 {
     if (m_spell_checking_settled_callbacks.is_empty() || !spell_checking_is_settled(*this))
         return;
-    for (auto& callback : exchange(m_spell_checking_settled_callbacks, {}))
+    GC::RootVector callbacks { exchange(m_spell_checking_settled_callbacks, {}) };
+    for (auto& callback : callbacks)
         callback->function()();
 }
 
@@ -1524,7 +1527,7 @@ void Page::receive_geolocation_position(u64 request_id, GeolocationPositionResul
 
     m_active_geolocation_request_id = {};
 
-    Vector<GeolocationPositionCallback> callbacks;
+    GC::RootVector<GeolocationPositionCallback> callbacks;
     Vector<u64> completed_request_ids;
     for (auto const& entry : m_pending_geolocation_requests) {
         if (entry.value.type != GeolocationRequestType::OneShot)
@@ -2154,7 +2157,7 @@ void Page::update_find_in_page_active_match(Vector<GC::Root<DOM::Range>> const& 
 
 void Page::update_find_in_page_highlighted_matches(Vector<GC::Root<DOM::Range>> const& matches, bool highlight_all_matches)
 {
-    HashMap<DOM::Document*, Vector<GC::Ref<DOM::Range>>> matches_by_document;
+    GC::RootHashMap<DOM::Document*, GC::RootVector<GC::Ref<DOM::Range>>> matches_by_document;
     if (highlight_all_matches) {
         for (auto const& match : matches)
             matches_by_document.ensure(&match->start_container()->document()).append(*match);

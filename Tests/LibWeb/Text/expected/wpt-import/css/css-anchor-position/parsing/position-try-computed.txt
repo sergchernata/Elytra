@@ -1,0 +1,14 @@
+Harness status: OK
+
+Found 9 tests
+
+9 Pass
+Pass	Property position-try value 'none'
+Pass	Property position-try value 'normal none'
+Pass	Property position-try value 'flip-block'
+Pass	Property position-try value 'flip-y'
+Pass	Property position-try value 'most-width none'
+Pass	Property position-try value 'most-height flip-block, flip-inline'
+Pass	Property position-try value 'most-height flip-y, flip-x'
+Pass	Property position-try value 'most-width --foo, --bar'
+Pass	Property position-try value 'normal --foo'

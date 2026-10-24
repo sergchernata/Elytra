@@ -1,0 +1,23 @@
+Harness status: OK
+
+Found 18 tests
+
+18 Pass
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should set offset-anchor
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should set offset-distance
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should set offset-path
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should set offset-position
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should set offset-rotate
+Pass	e.style['offset'] = "left bottom ray(0rad closest-corner) 10px auto 30deg / right bottom" should not set unrelated longhands
+Pass	e.style['offset'] = "top right / top left" should set offset-anchor
+Pass	e.style['offset'] = "top right / top left" should set offset-distance
+Pass	e.style['offset'] = "top right / top left" should set offset-path
+Pass	e.style['offset'] = "top right / top left" should set offset-position
+Pass	e.style['offset'] = "top right / top left" should set offset-rotate
+Pass	e.style['offset'] = "top right / top left" should not set unrelated longhands
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should set offset-anchor
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should set offset-distance
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should set offset-path
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should set offset-position
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should set offset-rotate
+Pass	e.style['offset'] = "path(\"M 0 0 H 2\") reverse 50%" should not set unrelated longhands

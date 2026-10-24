@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use crate::css::color_conversion;
+use crate::css::color_resolution::make_powerless_hue_missing;
 use crate::css::style_value::{ColorBase, RetainedStyleValueData, StyleValueData};
 use crate::css::value_codes::*;
 
@@ -53,11 +54,13 @@ fn categories_for_color_type(color_type: u8) -> [ComponentCategory; 3] {
 // Carry forward missing components from the input color space to the interpolation color space.
 // A missing component is carried forward if it has an analogous component in the target space.
 // Additionally, if ALL components of an analogous set are missing, they are all carried forward.
-fn carry_forward_missing_components(
+pub(crate) fn carry_forward_missing_components(
     source_missing: [bool; 4],
-    source_categories: [ComponentCategory; 3],
-    target_categories: [ComponentCategory; 3],
+    source_type: u8,
+    target_type: u8,
 ) -> [bool; 4] {
+    let source_categories = categories_for_color_type(source_type);
+    let target_categories = categories_for_color_type(target_type);
     let mut result = [false; 4];
 
     // Same-space: all components map to themselves, including NotAnalogous ones (e.g. HWB W/B).
@@ -193,30 +196,6 @@ fn substitute_missing_components(
     }
 }
 
-fn mark_powerless_hue_after_conversion(
-    source_type: u8,
-    target_type: u8,
-    components: [f32; 4],
-    missing: &mut [bool; 4],
-) {
-    if source_type == target_type {
-        return;
-    }
-    // NB: Achromatic colors converted through the sRGB -> XYZ-D65 -> XYZ-D50 -> Lab -> LCH chain accumulate
-    //     floating-point error of ~0.016 in the chroma component due to the Bradford chromatic adaptation matrices.
-    //     This is the worst case for all color conversion types, so the threshold is large enough to account for this.
-    const ACHROMATIC_THRESHOLD: f32 = 0.02;
-    let powerless = match target_type {
-        color_conversion::HSL => components[1].abs() < ACHROMATIC_THRESHOLD,
-        color_conversion::HWB => components[1] + components[2] >= 1.0 - ACHROMATIC_THRESHOLD,
-        color_conversion::LCH | color_conversion::OKLCH => components[1].abs() < ACHROMATIC_THRESHOLD,
-        _ => false,
-    };
-    if powerless {
-        missing[hue_index(target_type).unwrap()] = true;
-    }
-}
-
 fn retained_number(value: f32) -> RetainedStyleValueData {
     RetainedStyleValueData::from_arc(Arc::new(StyleValueData::Number { value: value as f64 }))
 }
@@ -237,6 +216,22 @@ fn retained_component(value: f32, missing: bool) -> RetainedStyleValueData {
 
 fn make_result(color_type: u8, components: [f32; 4], missing: [bool; 4]) -> StyleValueData {
     let (color_type, components, missing) = match color_type {
+        // https://drafts.csswg.org/css-color-5/#serial-color-mix
+        // However, if the result of mixing in the hsl or hwb color space has at least one missing color
+        // component (including a missing alpha carried forward per [[css-color-4#interpolation-missing]]), the
+        // form used is the modern hsl(h s l / a) or hwb(h w b / a) syntax respectively, preserving the original
+        // color function and each none value per [[css-color-4#css-serialization-of-srgb]], rather than
+        // degrading to color(srgb r g b) (which would lose the hsl/hwb identity).
+        color_conversion::HSL | color_conversion::HWB if missing.contains(&true) => (
+            color_type,
+            [
+                components[0],
+                components[1] * 100.0,
+                components[2] * 100.0,
+                components[3],
+            ],
+            missing,
+        ),
         color_conversion::HSL | color_conversion::HWB => (
             color_conversion::SRGB,
             color_conversion::legacy_color_to_srgb(color_type, components).unwrap(),
@@ -264,44 +259,17 @@ fn make_result(color_type: u8, components: [f32; 4], missing: [bool; 4]) -> Styl
 fn interpolate(
     from: &ResolvedColor,
     to: &ResolvedColor,
+    target_type: u8,
     is_polar: bool,
-    color_space: u8,
     hue_interpolation_method: u8,
     delta: f32,
-    alpha_multiplier: f32,
-) -> Option<StyleValueData> {
+) -> Option<ResolvedColor> {
     // 1. checking the two colors for analogous components and analogous sets which will be carried forward
-    let target_type = interpolation_color_type(is_polar, color_space)?;
-
     // 2. prepare both colors for conversion. this changes any powerless components to missing values
-    let mut from_source_missing = from.missing;
-    let mut to_source_missing = to.missing;
-    if !from.has_native_components && !from.missing[3] && from.components[3] == 0.0 {
-        from_source_missing[..3].fill(true);
-    }
-    if !to.has_native_components && !to.missing[3] && to.components[3] == 0.0 {
-        to_source_missing[..3].fill(true);
-    }
-
     // 3. converting them both to a given color space which will be referred to as the interpolation color space
     //    below.
-    let mut from_components = color_conversion::convert(from.color_type, target_type, from.components)?;
-    let mut to_components = color_conversion::convert(to.color_type, target_type, to.components)?;
-    let target_categories = categories_for_color_type(target_type);
-    let mut from_missing = carry_forward_missing_components(
-        from_source_missing,
-        categories_for_color_type(from.color_type),
-        target_categories,
-    );
-    let mut to_missing = carry_forward_missing_components(
-        to_source_missing,
-        categories_for_color_type(to.color_type),
-        target_categories,
-    );
-    if is_polar {
-        mark_powerless_hue_after_conversion(from.color_type, target_type, from_components, &mut from_missing);
-        mark_powerless_hue_after_conversion(to.color_type, target_type, to_components, &mut to_missing);
-    }
+    let (mut from_components, from_missing) = convert_for_interpolation(from, target_type, is_polar)?;
+    let (mut to_components, to_missing) = convert_for_interpolation(to, target_type, is_polar)?;
 
     // 4. (if required) re-inserting carried forward values in the converted colors
     let both_alpha_missing = from_missing[3] && to_missing[3];
@@ -318,7 +286,7 @@ fn interpolate(
 
     let interpolate = |from: f32, to: f32| from + (to - from) * delta;
     let interpolated_alpha = interpolate(from_components[3], to_components[3]).clamp(0.0, 1.0);
-    let mut result = if interpolated_alpha == 0.0 && !both_alpha_missing {
+    let result = if interpolated_alpha == 0.0 && !both_alpha_missing {
         // OPTIMIZATION: Fully transparent results can skip the premultiply/interpolate/unpremultiply cycle.
         [0.0; 4]
     } else {
@@ -357,23 +325,84 @@ fn interpolate(
             interpolated_alpha,
         ]
     };
-    result[3] *= alpha_multiplier;
     let missing = [
         from_missing[0] && to_missing[0],
         from_missing[1] && to_missing[1],
         from_missing[2] && to_missing[2],
         from_missing[3] && to_missing[3],
     ];
-    Some(make_result(target_type, result, missing))
+    Some(ResolvedColor {
+        color_type: target_type,
+        components: result,
+        missing,
+        has_native_components: true,
+    })
 }
 
-pub(crate) fn interpolate_color(
-    from: &ResolvedColor,
-    to: &ResolvedColor,
-    color_interpolation_method: &StyleValueData,
-    delta: f32,
-    alpha_multiplier: f32,
-) -> Option<StyleValueData> {
+/// Converts one color to the interpolation color space, returning its components and which of
+/// them are missing after carrying forward.
+fn convert_for_interpolation(color: &ResolvedColor, target_type: u8, is_polar: bool) -> Option<([f32; 4], [bool; 4])> {
+    let mut source_missing = color.missing;
+    if !color.has_native_components && !color.missing[3] && color.components[3] == 0.0 {
+        source_missing[..3].fill(true);
+    }
+    let mut source_components = color.components;
+    if color.color_type != target_type {
+        // https://drafts.csswg.org/css-color-4/#color-convert-algorithm
+        // To prepare a color col1 for conversion:
+        // 1. Change any powerless components in src to missing components
+        // NB: The powerless rules use percentages for the hsl() and hwb() components other than hue.
+        let scale = if matches!(color.color_type, color_conversion::HSL | color_conversion::HWB) {
+            100.0
+        } else {
+            1.0
+        };
+        let mut components = [
+            f64::from(source_components[0]),
+            f64::from(source_components[1]) * scale,
+            f64::from(source_components[2]) * scale,
+        ];
+        let mut missing = [source_missing[0], source_missing[1], source_missing[2]];
+        make_powerless_hue_missing(color.color_type, &mut components, &mut missing);
+        source_components = [
+            components[0] as f32,
+            (components[1] / scale) as f32,
+            (components[2] / scale) as f32,
+            source_components[3],
+        ];
+        source_missing[..3].copy_from_slice(&missing);
+    }
+    let mut components = color_conversion::convert(color.color_type, target_type, source_components)?;
+    let mut missing = carry_forward_missing_components(source_missing, color.color_type, target_type);
+    if is_polar && color.color_type != target_type {
+        // https://drafts.csswg.org/css-color-4/#powerless
+        // However, if a color is automatically produced by color space conversion, then any powerless components in
+        // the result must instead be set to missing, instead of whatever value was produced by the conversion
+        // process.
+        let scale = if matches!(target_type, color_conversion::HSL | color_conversion::HWB) {
+            100.0
+        } else {
+            1.0
+        };
+        let mut target_components = [
+            f64::from(components[0]),
+            f64::from(components[1]) * scale,
+            f64::from(components[2]) * scale,
+        ];
+        let mut target_missing = [missing[0], missing[1], missing[2]];
+        make_powerless_hue_missing(target_type, &mut target_components, &mut target_missing);
+        components = [
+            target_components[0] as f32,
+            (target_components[1] / scale) as f32,
+            (target_components[2] / scale) as f32,
+            components[3],
+        ];
+        missing[..3].copy_from_slice(&target_missing);
+    }
+    Some((components, missing))
+}
+
+fn interpolation_method_parts(color_interpolation_method: &StyleValueData) -> Option<(u8, bool, u8)> {
     let StyleValueData::ColorInterpolationMethod {
         is_polar,
         color_space,
@@ -382,13 +411,85 @@ pub(crate) fn interpolate_color(
     else {
         return None;
     };
-    interpolate(
-        from,
-        to,
+    Some((
+        interpolation_color_type(*is_polar, *color_space)?,
         *is_polar,
-        *color_space,
         *hue_interpolation_method,
-        delta,
-        alpha_multiplier,
-    )
+    ))
+}
+
+fn finish(mut color: ResolvedColor, alpha_multiplier: f32) -> StyleValueData {
+    color.components[3] *= alpha_multiplier;
+    make_result(color.color_type, color.components, color.missing)
+}
+
+/// One color of a color-mix() with its normalized percentage (from 0 to 100).
+pub(crate) struct MixItem {
+    pub color: ResolvedColor,
+    pub percentage: f64,
+}
+
+// https://drafts.csswg.org/css-color-5/#calculate-a-color-mix
+pub(crate) fn mix_colors(
+    items: Vec<MixItem>,
+    color_interpolation_method: &StyleValueData,
+    alpha_multiplier: f32,
+) -> Option<StyleValueData> {
+    let (target_type, is_polar, hue_interpolation_method) = interpolation_method_parts(color_interpolation_method)?;
+
+    // 3. If items is length 1, set color to the color of that sole item, converted to the specified
+    //    interpolation <color-space>.
+    let color = if items.len() == 1 {
+        let (components, missing) = convert_for_interpolation(&items[0].color, target_type, is_polar)?;
+        ResolvedColor {
+            color_type: target_type,
+            components,
+            missing,
+            has_native_components: true,
+        }
+    } else {
+        // Otherwise:
+        // 1. Let item stack be a stack made by reversing items. (Thus, with the first item at the top of the
+        //    stack.)
+        let mut item_stack: Vec<MixItem> = items.into_iter().rev().collect();
+        // 2. While item stack has length 2 or greater:
+        while item_stack.len() >= 2 {
+            // 1. Pop from item stack twice, letting a and b be the two results in order. Let combined percentage
+            //    be the sum of a and b’s percentages.
+            let a = item_stack.pop()?;
+            let b = item_stack.pop()?;
+            let combined_percentage = a.percentage + b.percentage;
+            // 2. Interpolate a and b’s colors as described in [[css-color-4#interpolation]], with a progress
+            //    percentage equal to (b’s percentage) / combined percentage), if combined percentage is greater
+            //    than 0, and 0.5 otherwise. If the specified color space is a cylindrical polar color space, then
+            //    the <hue-interpolation-method> controls the interpolation of hue, as described in
+            //    [[css-color-4#hue-interpolation]]. If no <hue-interpolation-method> is specified, assume
+            //    shorter.
+            let progress = if combined_percentage > 0.0 {
+                b.percentage / combined_percentage
+            } else {
+                0.5
+            };
+            let color = interpolate(
+                &a.color,
+                &b.color,
+                target_type,
+                is_polar,
+                hue_interpolation_method,
+                progress as f32,
+            )?;
+            // 3. Create a new mix item with the resulting color and a percentage of combined percentage, and push
+            //    it onto item stack.
+            item_stack.push(MixItem {
+                color,
+                percentage: combined_percentage,
+            });
+        }
+        // 3. Set color to the color of the sole remaining item in item stack.
+        item_stack.pop()?.color
+    };
+
+    // 4. Multiply the alpha component of color by alpha mult.
+    // 5. Return color.
+    Some(finish(color, alpha_multiplier))
 }

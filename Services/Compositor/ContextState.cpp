@@ -11,18 +11,30 @@
 #include <Compositor/CompositorState.h>
 #include <Compositor/ContextState.h>
 #include <Compositor/DisplayListPlayerSkia.h>
+#include <Compositor/PaintingSurface.h>
 #include <Compositor/PausedDebuggerOverlay.h>
+#include <Compositor/SkiaUtils.h>
 #include <LibCompositing/DisplayList/DisplayListDamage.h>
 #include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/PaintingSurface.h>
-#include <LibGfx/SkiaUtils.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <core/SkCanvas.h>
 #include <core/SkImage.h>
 #include <math.h>
 
 namespace Compositor {
+
+// INTEROP: Holding a press beside the thumb pages again after these delays, as in Chromium and Firefox.
+static constexpr auto scrollbar_paging_initial_delay = AK::Duration::from_milliseconds(250);
+static constexpr auto scrollbar_paging_repeat_interval = AK::Duration::from_milliseconds(50);
+
+// INTEROP: The modifier that makes a press beside the thumb page instead of jumping there or the other way around, as in
+//          Chromium and Firefox.
+#if defined(AK_OS_MACOS)
+static constexpr auto scrollbar_track_press_inverting_modifier = Web::UIEvents::Mod_Alt;
+#else
+static constexpr auto scrollbar_track_press_inverting_modifier = Web::UIEvents::Mod_Shift;
+#endif
 
 static Web::AsyncScrollNodeStableID viewport_stable_id_from(Compositing::AsyncScrollNodeID node_id)
 {
@@ -47,18 +59,22 @@ static void clamp_visual_viewport_transform_to_viewport(Compositing::TransformWi
     transform.matrix[1, 3] = clamp(transform.matrix[1, 3], min_y, 0.0f);
 }
 
-ContextState::ContextState(Web::CompositorContextId context_id, Optional<u64> page_id, CompositorStateWebContentClient& web_content_client, Compositing::OwnedCanvasSurfaces canvas_surfaces, Function<void(Gfx::IntRect)> schedule_caret_repaint, Function<void()> request_scrollbar_fade_frames)
+ContextState::ContextState(Web::CompositorContextId context_id, Optional<u64> page_id, CompositorStateWebContentClient& web_content_client, OwnedCanvasSurfaces canvas_surfaces, Function<void(Gfx::IntRect)> schedule_caret_repaint, Function<void()> request_animation_frames)
     : m_web_content_client(web_content_client)
     , m_context_id(context_id)
     , m_page_id(page_id)
     , m_presenter(m_scene, canvas_surfaces, page_id.has_value())
     , m_caret_blink_timer([this] { return damage_rect_of_blinking_carets(); }, move(schedule_caret_repaint))
-    , m_request_scrollbar_fade_frames(move(request_scrollbar_fade_frames))
+    , m_request_animation_frames(move(request_animation_frames))
 {
 }
 
 ContextState::~ContextState()
 {
+    if (m_scrollbar_paging_timer) {
+        m_scrollbar_paging_timer->on_timeout = {};
+        m_scrollbar_paging_timer->stop();
+    }
     if (m_scrollbar_fade_out_timer) {
         m_scrollbar_fade_out_timer->on_timeout = {};
         m_scrollbar_fade_out_timer->stop();
@@ -142,6 +158,8 @@ void ContextState::install_display_list_update(
 
     auto was_dragging_scrollbar = m_scrollbar_controller.has_captured_scrollbar();
     m_scrollbar_controller.set_scrollbars(async_scrolling_state.scrollbars);
+    if (!m_scrollbar_controller.has_captured_scrollbar())
+        stop_scrollbar_paging();
     note_user_scroll_gesture_end_if_drag_ended(was_dragging_scrollbar);
     m_async_scroll_tree.set_state(move(async_scrolling_state));
     m_elastic_overscroll_controller.did_install_scrolling_state(m_async_scroll_tree);
@@ -397,6 +415,8 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         auto drag = m_scrollbar_controller.begin_drag(m_async_scroll_tree, m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
         if (!drag.has_value())
             return ContextUpdateResult::declined(Web::InputRoutingDecision::NotOverAScrollbar);
+        m_scrollbar_press_scroll_operation.clear();
+        stop_scrollbar_paging();
 
         ContextUpdateResult result;
         result.accepted = true;
@@ -405,6 +425,42 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         result.scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
         if (!result.scrollbar_dragged_by_compositor.has_value())
             result.frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+
+        // A press beside the thumb pages toward the pointer or jumps there, as the platform says, and a modifier swaps
+        // the two.
+        auto press_jumps = m_scrollbar_track_press_jumps != static_cast<bool>(event.modifiers & scrollbar_track_press_inverting_modifier);
+        if (drag->is_press_beside_thumb && !press_jumps) {
+            auto const& scrollbar = m_scrollbar_controller.scrollbars()[drag->scrollbar_index];
+            auto scroll_offset = m_async_scroll_tree.scroll_offset_for_node(scrollbar.scroll_node_id, m_scroll_state_snapshot);
+            VERIFY(scroll_offset.has_value());
+            m_scrollbar_paging = ScrollbarPaging {
+                .direction = m_scrollbar_controller.paging_direction(drag->scrollbar_index, drag->primary_position, *scroll_offset),
+                .primary_position = drag->primary_position,
+            };
+            if (auto frame_to_present = page_captured_scrollbar(); frame_to_present.has_value()) {
+                result.frame_to_present = *frame_to_present;
+                result.should_request_rendering_update = true;
+            }
+            if (!m_scrollbar_paging_timer) {
+                m_scrollbar_paging_timer = Core::Timer::create_single_shot(scrollbar_paging_initial_delay, [this] {
+                    // Paging ends with the press, and with the scrollbar the press holds.
+                    if (!m_scrollbar_paging.has_value() || !m_scrollbar_controller.has_captured_scrollbar()) {
+                        stop_scrollbar_paging();
+                        return;
+                    }
+                    // Once the thumb reaches the pointer, paging waits for the pointer to move.
+                    if (!page_captured_scrollbar().has_value())
+                        return;
+                    request_rendering_update();
+                    if (m_request_animation_frames)
+                        m_request_animation_frames();
+                    m_scrollbar_paging_timer->restart(scrollbar_paging_repeat_interval);
+                });
+            }
+            m_scrollbar_paging_timer->restart(scrollbar_paging_initial_delay);
+            return result;
+        }
+
         if (auto frame_to_present = apply_scrollbar_drag(*drag); frame_to_present.has_value()) {
             result.frame_to_present = *frame_to_present;
             result.should_request_rendering_update = true;
@@ -416,7 +472,15 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
             auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
             auto drag = m_scrollbar_controller.captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
             VERIFY(drag.has_value());
-            auto frame_to_present = apply_scrollbar_drag(*drag);
+            // While paging, the pointer only says where the thumb pages to.
+            Optional<PendingFrame> frame_to_present;
+            if (m_scrollbar_paging.has_value()) {
+                m_scrollbar_paging->primary_position = drag->primary_position;
+                if (!m_scrollbar_paging_timer->is_active())
+                    m_scrollbar_paging_timer->restart(scrollbar_paging_repeat_interval);
+            } else {
+                frame_to_present = apply_scrollbar_drag(*drag);
+            }
             return {
                 .accepted = true,
                 .frame_to_present = frame_to_present,
@@ -449,6 +513,8 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         auto was_dragging_scrollbar = m_scrollbar_controller.has_captured_scrollbar();
         auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
         auto drag = m_scrollbar_controller.release_captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
+        auto was_paging = m_scrollbar_paging.has_value();
+        stop_scrollbar_paging();
         if (!drag.has_value())
             return ContextUpdateResult::declined(Web::InputRoutingDecision::NoScrollbarDrag);
 
@@ -464,8 +530,10 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         result.should_request_rendering_update = true;
         if (!scrollbar_dragged_by_compositor.has_value())
             result.frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
-        if (auto frame_to_present = apply_scrollbar_drag(*drag); frame_to_present.has_value())
-            result.frame_to_present = *frame_to_present;
+        if (!was_paging) {
+            if (auto frame_to_present = apply_scrollbar_drag(*drag); frame_to_present.has_value())
+                result.frame_to_present = *frame_to_present;
+        }
 
         auto hovered_scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_compositor(m_async_scroll_tree, m_scroll_state_snapshot, position);
         if (m_scrollbar_controller.set_hovered_scrollbar(hovered_scrollbar_index)) {
@@ -494,6 +562,7 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         auto was_dragging_scrollbar = m_scrollbar_controller.has_captured_scrollbar();
         auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
         (void)m_scrollbar_controller.release_captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
+        stop_scrollbar_paging();
         note_user_scroll_gesture_end_if_drag_ended(was_dragging_scrollbar);
         auto hovered_scrollbar_changed = m_scrollbar_controller.set_hovered_scrollbar({});
 
@@ -1534,27 +1603,45 @@ ContextPresenter::FrameContent ContextState::frame_content(Compositing::ScrollSt
 }
 
 // Each frame shows the scrollbars as of when it is painted. An elastic overscroll moves the presented scroll offsets
-// only, and shows the scrollbars of the stretched scroller as a scroll does.
-void ContextState::update_scrollbar_visibility()
+// only, and shows the scrollbars of the stretched scroller as a scroll does. Returns the damage of the scrollbars that
+// the display list does not damage itself.
+Gfx::IntRect ContextState::update_scrollbar_visibility()
 {
     auto stretched_scroll_state_snapshot = scroll_state_snapshot_stretched_by_elastic_overscrolls();
     auto const& presented_scroll_state_snapshot = stretched_scroll_state_snapshot.has_value() ? *stretched_scroll_state_snapshot : m_scroll_state_snapshot;
-    m_scrollbar_controller.update_visibility(presented_scroll_state_snapshot, MonotonicTime::now());
+    auto const* visual_context_tree = m_scene.visual_context_tree().has_value() ? &m_scene.visual_context_tree_for_compositing() : nullptr;
+    auto now = MonotonicTime::now();
+    auto damage_rect = m_scrollbar_controller.update_visibility(visual_context_tree, presented_scroll_state_snapshot, now);
+    report_scrollbar_visibility_changes();
+
+    // A hovered scrollbar starts to grow here, which needs display ticks before anything else asks for a frame.
+    if (m_request_animation_frames && m_scrollbar_controller.fades_need_frame(now))
+        m_request_animation_frames();
 
     // The fade out runs on display ticks, which the wait before it does not need.
     auto fade_out_time = m_scrollbar_controller.next_fade_out_time();
-    if (!fade_out_time.has_value() || !m_request_scrollbar_fade_frames) {
+    if (!fade_out_time.has_value() || !m_request_animation_frames) {
         if (m_scrollbar_fade_out_timer)
             m_scrollbar_fade_out_timer->stop();
-        return;
+        return damage_rect;
     }
     if (!m_scrollbar_fade_out_timer) {
         m_scrollbar_fade_out_timer = Core::Timer::create_single_shot(AK::Duration::zero(), [this] {
-            m_request_scrollbar_fade_frames();
+            m_request_animation_frames();
         });
     }
-    auto delay = max(AK::Duration::zero(), *fade_out_time - MonotonicTime::now());
+    auto delay = max(AK::Duration::zero(), *fade_out_time - now);
     m_scrollbar_fade_out_timer->restart(delay);
+    return damage_rect;
+}
+
+// NB: This goes on the connection the compositor forwards input on, so the main thread knows which scrollbars have
+//     faded out before it hit tests any later press.
+void ContextState::report_scrollbar_visibility_changes()
+{
+    auto changes = m_scrollbar_controller.take_visibility_changes();
+    if (!changes.is_empty())
+        m_web_content_client.overlay_scrollbar_visibilities_changed(changes);
 }
 
 Optional<PendingFrame> ContextState::advance_scrollbar_fades(MonotonicTime frame_time)
@@ -1564,6 +1651,7 @@ Optional<PendingFrame> ContextState::advance_scrollbar_fades(MonotonicTime frame
     auto stretched_scroll_state_snapshot = scroll_state_snapshot_stretched_by_elastic_overscrolls();
     auto const& presented_scroll_state_snapshot = stretched_scroll_state_snapshot.has_value() ? *stretched_scroll_state_snapshot : m_scroll_state_snapshot;
     auto damage_rect = m_scrollbar_controller.advance_fades(m_scene.visual_context_tree_for_compositing(), presented_scroll_state_snapshot, frame_time);
+    report_scrollbar_visibility_changes();
     auto viewport_rect = m_presenter.viewport_rect_for_ui_overlay();
     if (damage_rect.is_empty() || !viewport_rect.has_value())
         return {};
@@ -1572,7 +1660,7 @@ Optional<PendingFrame> ContextState::advance_scrollbar_fades(MonotonicTime frame
 
 Optional<PreparedFrame> ContextState::prepare_frame(DisplayListPlayerSkia& display_list_player, PendingFrame pending_frame, CompositedContextResolver const* composited_context_resolver)
 {
-    update_scrollbar_visibility();
+    pending_frame.forced_damage_rect.unite(update_scrollbar_visibility());
     auto stretched_scroll_state_snapshot = scroll_state_snapshot_stretched_by_elastic_overscrolls();
     auto const& presented_scroll_state_snapshot = stretched_scroll_state_snapshot.has_value() ? *stretched_scroll_state_snapshot : m_scroll_state_snapshot;
     return m_presenter.prepare_frame(display_list_player, pending_frame, frame_content(presented_scroll_state_snapshot, composited_context_resolver));
@@ -1808,6 +1896,84 @@ void ContextState::end_scroll_step_gestures_whose_input_ran_out(MonotonicTime no
     schedule_end_of_scroll_step_gestures(now);
 }
 
+Optional<PendingFrame> ContextState::start_scrollbar_press_scroll(Compositing::AsyncScrollNode const& node, Gfx::FloatPoint old_scroll_offset, Gfx::FloatPoint destination, bool is_absolute_scroll)
+{
+    auto operation_id = m_async_scroll_update_outbox.allocate_operation_id();
+    m_smooth_scroll_animations.append({
+        .stable_node_id = node.stable_node_id,
+        .operation_id = operation_id,
+        .animation = Compositing::SmoothScrollAnimation { old_scroll_offset, destination, m_async_scroll_tree.device_pixels_per_css_pixel() },
+        .started_at = MonotonicTime::now(),
+        .is_user_scroll = true,
+    });
+    report_started_user_scroll(operation_id, node.stable_node_id, old_scroll_offset, destination, Compositing::ScrollAnimationKind::SmoothScroll, is_absolute_scroll);
+    m_scrollbar_press_scroll_operation = operation_id;
+    return PendingFrame::repainting_changes(m_async_scrolling_viewport_rect);
+}
+
+// https://source.chromium.org/chromium/chromium/src/+/main:cc/input/scroll_utils.cc
+// INTEROP: A page is most of the scrollport, keeping as much of the last page in view as Chromium does.
+static float scrollbar_page_step(float scrollport_length, float device_pixels_per_css_pixel)
+{
+    static constexpr float min_fraction_to_step_when_paging = 0.875f;
+    static constexpr float max_overlap_between_pages = 40;
+    return max(1.0f, max(scrollport_length * min_fraction_to_step_when_paging, scrollport_length - max_overlap_between_pages * device_pixels_per_css_pixel));
+}
+
+// Pages the scroller of the captured scrollbar once toward the pointer, from where a page scroll in flight goes, unless
+// the thumb has reached the pointer there.
+Optional<PendingFrame> ContextState::page_captured_scrollbar()
+{
+    auto scrollbar_index = m_scrollbar_controller.captured_scrollbar_index();
+    if (!scrollbar_index.has_value() || !m_scrollbar_paging.has_value() || m_scrollbar_paging->direction == 0)
+        return {};
+    auto const& scrollbar = m_scrollbar_controller.scrollbars()[*scrollbar_index];
+    auto const* node = m_async_scroll_tree.scroll_node_for_id(scrollbar.scroll_node_id);
+    auto old_scroll_offset = m_async_scroll_tree.scroll_offset_for_node(scrollbar.scroll_node_id, m_scroll_state_snapshot);
+    if (!node || !old_scroll_offset.has_value())
+        return {};
+
+    auto* running_animation = running_scrollbar_press_scroll();
+    auto step_start = running_animation ? running_animation->animation.destination_offset() : *old_scroll_offset;
+    if (m_scrollbar_controller.paging_direction(*scrollbar_index, m_scrollbar_paging->primary_position, step_start) != m_scrollbar_paging->direction)
+        return {};
+
+    auto orientation = scrollbar.vertical ? Gfx::Orientation::Vertical : Gfx::Orientation::Horizontal;
+    auto step = scrollbar_page_step(static_cast<float>(node->scrollport_rect.primary_size_for_orientation(orientation)), m_async_scroll_tree.device_pixels_per_css_pixel());
+    auto destination = step_start;
+    destination.set_primary_offset_for_orientation(orientation, step_start.primary_offset_for_orientation(orientation) + static_cast<float>(m_scrollbar_paging->direction) * step);
+    destination = m_async_scroll_tree.clamped_scroll_offset_for_node(scrollbar.scroll_node_id, destination);
+    if (destination == step_start)
+        return {};
+
+    if (running_animation) {
+        retarget_user_scroll(*running_animation, destination, MonotonicTime::now());
+        report_started_user_scroll(running_animation->operation_id, node->stable_node_id, step_start, destination, Compositing::ScrollAnimationKind::SmoothScroll, false);
+        return PendingFrame::repainting_changes(m_async_scrolling_viewport_rect);
+    }
+    cancel_smooth_scroll_taken_over_by_user_input(scrollbar.scroll_node_id);
+    return start_scrollbar_press_scroll(*node, *old_scroll_offset, destination, false);
+}
+
+ContextState::ActiveSmoothScrollAnimation* ContextState::running_scrollbar_press_scroll()
+{
+    if (!m_scrollbar_press_scroll_operation.has_value())
+        return nullptr;
+    auto animation = m_smooth_scroll_animations.first_matching([&](auto const& animation) { return animation.operation_id == *m_scrollbar_press_scroll_operation; });
+    if (!animation.has_value()) {
+        m_scrollbar_press_scroll_operation.clear();
+        return nullptr;
+    }
+    return &animation.value();
+}
+
+void ContextState::stop_scrollbar_paging()
+{
+    m_scrollbar_paging.clear();
+    if (m_scrollbar_paging_timer)
+        m_scrollbar_paging_timer->stop();
+}
+
 Optional<PendingFrame> ContextState::apply_scrollbar_drag(ScrollbarController::Drag const& drag)
 {
     auto dragged_to = m_scrollbar_controller.scroll_offset_for_drag(m_async_scroll_tree, m_scroll_state_snapshot, drag);
@@ -1820,10 +1986,26 @@ Optional<PendingFrame> ContextState::apply_scrollbar_drag(ScrollbarController::D
     auto old_scroll_offset = m_async_scroll_tree.scroll_offset_for_node(node_id, m_scroll_state_snapshot);
     if (!node || !old_scroll_offset.has_value())
         return {};
-    if (m_async_scroll_tree.clamped_scroll_offset_for_node(node_id, dragged_to->scroll_offset) == *old_scroll_offset)
+    auto destination = m_async_scroll_tree.clamped_scroll_offset_for_node(node_id, dragged_to->scroll_offset);
+
+    // A press beside the thumb scrolls there smoothly, as a page step does. Dragging on before that scroll has ended
+    // moves where it goes.
+    if (auto* running_animation = running_scrollbar_press_scroll()) {
+        if (running_animation->animation.destination_offset() == destination)
+            return {};
+        retarget_user_scroll(*running_animation, destination, MonotonicTime::now());
+        report_started_user_scroll(running_animation->operation_id, node->stable_node_id, *old_scroll_offset, destination, Compositing::ScrollAnimationKind::SmoothScroll, true);
+        return PendingFrame::repainting_changes(m_async_scrolling_viewport_rect);
+    }
+
+    if (destination == *old_scroll_offset)
         return {};
 
     cancel_smooth_scroll_taken_over_by_user_input(node_id);
+
+    if (drag.is_press_beside_thumb)
+        return start_scrollbar_press_scroll(*node, *old_scroll_offset, destination, true);
+
     auto new_scroll_offset = m_async_scroll_tree.set_scroll_offset(node_id, dragged_to->scroll_offset, m_scene.current_visual_context_tree(), m_scroll_state_snapshot);
     VERIFY(new_scroll_offset.has_value());
     rebuild_wheel_hit_test_targets();

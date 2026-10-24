@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 2 tests
+
+1 Pass
+1 Fail
+Pass	Vertical alignment of cells
+Fail	Horizontal alignment of cells

@@ -17,9 +17,7 @@
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Page/RenderingStats.h>
-#include <LibWeb/Streams/ReadableByteStreamController.h>
 #include <LibWeb/Streams/ReadableStream.h>
-#include <LibWeb/Streams/ReadableStreamDefaultController.h>
 
 namespace Web {
 
@@ -192,7 +190,7 @@ void Detail::track_rendering_pending_stream(GC::Cell const* token, Streams::Read
         return;
     // Closing a source with unread queued bytes need not close its identity transform. Observe the source's
     // close request, before fetch installs that transform, so an unread response cannot keep the page pending.
-    if (!stream.is_readable() || (stream.controller().has_value() && stream.controller()->visit([](auto controller) { return controller->close_requested(); }))) {
+    if (!stream.is_readable() || stream.close_requested()) {
         end_rendering_pending_operation(token);
         return;
     }
@@ -205,7 +203,7 @@ void Detail::complete_rendering_pending_stream(Streams::ReadableStream const& st
 {
     if (!s_pending_stats)
         return;
-    auto tokens = s_pending_stats->streams.take(&stream);
+    Optional<HashTable<GC::RawPtr<GC::Cell const>>> tokens = s_pending_stats->streams.take(&stream);
     if (!tokens.has_value())
         return;
     for (auto token : *tokens)
@@ -230,7 +228,7 @@ void Detail::flush_rendering_pending()
     auto* log = Core::StatsLog::the();
     if (!log || !s_pending_stats || s_pending_stats->task_depth)
         return;
-    auto dirty_pages = move(s_pending_stats->dirty_pages);
+    HashTable<GC::RawPtr<Page const>> dirty_pages = move(s_pending_stats->dirty_pages);
     for (auto page : dirty_pages) {
         auto it = s_pending_stats->pages.find(page);
         if (it == s_pending_stats->pages.end() || !page->has_top_level_traversable())

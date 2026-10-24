@@ -7,10 +7,10 @@
 #include "CSSKeywordValue.h"
 #include <LibWeb/Bindings/CSSKeywordValue.h>
 #include <LibWeb/CSS/Keyword.h>
+#include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/Serialize.h>
 #include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
-#include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
@@ -85,8 +85,10 @@ WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> CSSKeywordValue::create_an_
             // FIXME: If this is a registered custom property, check if that allows the keyword.
             return true;
         }
-        auto keyword = keyword_from_string(m_value);
-        return keyword.has_value() && property_accepts_keyword(property.id(), keyword.value());
+        // NB: The keywords listed for a property are not all valid on their own, like `hanging` for text-indent,
+        //     and a property may accept identifiers that are not listed, like a <custom-ident> or the axis keywords
+        //     of scroll-snap-type. So we check if the property accepts the value, as an identifier, when parsed.
+        return parse_css_value(Parser::ParsingParams {}, serialize_an_identifier(m_value), property.id()) != nullptr;
     }();
     if (perform_type_check == PerformTypeCheck::Yes && !matches_grammar) {
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Property '{}' does not accept the keyword '{}'", property.name(), m_value) };
@@ -99,10 +101,14 @@ WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> CSSKeywordValue::create_an_
 
     //     Return the value.
     if (auto keyword = keyword_from_string(m_value); keyword.has_value()) {
-        if (!is_css_wide_keyword(*keyword)) {
-            // NB: Non-css-wide keyword `display` values are represented internally by DisplayStyleValue, not KeywordStyleValue.
-            if (property.id() == PropertyID::Display)
-                return DisplayStyleValue::create(Display::from_keyword(keyword.release_value()));
+        // NB: Style computation expects the same internal representation that the CSS parser produces for the
+        //     property. For example, `display` keywords become a DisplayStyleValue, and keyword combinations like
+        //     `text-decoration-line` or `white-space-trim` become a list even when only one keyword is given. So we
+        //     parse the keyword as a value of the property to get that representation. List-valued properties are
+        //     instead wrapped in a list by StylePropertyMap.
+        if (!is_css_wide_keyword(*keyword) && !property.is_custom_property() && !property_is_list_valued(property.id())) {
+            if (auto parsed_value = parse_css_value(Parser::ParsingParams {}, m_value.view(), property.id()))
+                return parsed_value.release_nonnull();
         }
 
         return KeywordStyleValue::create(*keyword);

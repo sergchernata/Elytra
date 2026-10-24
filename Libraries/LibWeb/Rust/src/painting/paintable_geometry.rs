@@ -124,6 +124,15 @@ pub(crate) fn committed_grid_layout_data(
     })
 }
 
+pub(crate) fn committed_multicol_layout_data(
+    arena: &impl GeometryRead,
+    slot: NodeSlotId,
+) -> Option<std::sync::Arc<crate::layout::fragmentation::MulticolLayoutData>> {
+    arena.with_committed_fragment_link(slot, |link| {
+        link.and_then(|link| link.fragment.multicol_layout_data.clone())
+    })
+}
+
 pub(crate) fn committed_flex_layout_data(
     arena: &impl GeometryRead,
     slot: NodeSlotId,
@@ -279,7 +288,7 @@ pub(crate) fn absolute_rect(arena: &impl GeometryRead, slot: NodeSlotId) -> CssP
         return rect;
     }
     let mut block = data.containing_block;
-    let mut block_fragment = arena.committed_side_data(slot).containing_block_fragment;
+    let mut block_fragment = containing_block_fragment(arena, slot);
     while !block.is_invalid() && arena.paintable_row_is_populated(block) {
         if block_fragment != 0 {
             rect = rect.translated_by(absolute_fragment_rect(arena, block, block_fragment as usize).location());
@@ -302,14 +311,30 @@ pub(crate) fn absolute_rect(arena: &impl GeometryRead, slot: NodeSlotId) -> CssP
             break;
         }
         rect = rect.translated_by(committed_offset(arena, block).into());
-        block_fragment = arena.committed_side_data(block).containing_block_fragment;
+        block_fragment = containing_block_fragment(arena, block);
         block = block_data.containing_block;
     }
     arena.memoize_absolute_rect(slot, rect);
     rect
 }
 
+fn containing_block_fragment(arena: &impl GeometryRead, slot: NodeSlotId) -> u32 {
+    if !arena
+        .paintable_data(slot)
+        .has_flag(crate::painting::paintable_data::PaintableFlag::InLaterContainingBlockFragment)
+    {
+        return 0;
+    }
+    arena.committed_side_data(slot).containing_block_fragment
+}
+
 pub(crate) fn fragment_count(arena: &impl GeometryRead, slot: NodeSlotId) -> usize {
+    if !arena
+        .paintable_data(slot)
+        .has_flag(crate::painting::paintable_data::PaintableFlag::HasLaterBoxFragments)
+    {
+        return 1;
+    }
     1 + arena.committed_side_data(slot).box_fragments().len()
 }
 
@@ -453,6 +478,7 @@ pub(crate) fn absolute_fragment_border_box_rect(
     )
 }
 
+#[derive(Clone)]
 pub(crate) struct LineRootPositions(smallvec::SmallVec<[CssPixelPoint; 1]>);
 
 impl LineRootPositions {
@@ -555,6 +581,19 @@ pub(crate) fn absolute_border_box_rect(arena: &impl GeometryRead, slot: NodeSlot
         rect.unite(absolute_fragment_border_box_rect(arena, slot, index));
     }
     rect
+}
+
+pub(crate) fn absolute_border_box_rects_of_fragments(
+    arena: &impl GeometryRead,
+    slot: NodeSlotId,
+) -> smallvec::SmallVec<[CssPixelRect; 1]> {
+    let count = fragment_count(arena, slot);
+    if count == 1 || node_painting::is_fragmented_inline(arena, slot) {
+        return smallvec::smallvec![absolute_border_box_rect(arena, slot)];
+    }
+    (0..count)
+        .map(|index| absolute_fragment_border_box_rect(arena, slot, index))
+        .collect()
 }
 
 pub(crate) fn first_fragment_border_box_rect(arena: &impl GeometryRead, slot: NodeSlotId) -> CssPixelRect {

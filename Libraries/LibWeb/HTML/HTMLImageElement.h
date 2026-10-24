@@ -109,6 +109,12 @@ public:
     // https://html.spec.whatwg.org/multipage/embedded-content.html#allows-auto-sizes
     bool allows_auto_sizes() const;
 
+    Optional<CSSPixels> concrete_object_size_width_if_rendered() const;
+
+    // https://html.spec.whatwg.org/multipage/images.html#last-auto-sizes-width
+    Optional<CSSPixels> last_auto_sizes_width() const { return m_last_auto_sizes_width; }
+    void set_last_auto_sizes_width(CSSPixels width) const { m_last_auto_sizes_width = width; }
+
     // ^Layout::ImageProvider
     virtual bool is_image_pending() const override;
 
@@ -120,6 +126,14 @@ public:
     virtual void visit_edges(Cell::Visitor&) override;
 
 private:
+    CSSPixelSize density_corrected_natural_width_and_height() const;
+    struct Dimensions {
+        double width { 0 };
+        double height { 0 };
+    };
+    Dimensions dimensions(DOM::UpdateLayoutReason) const;
+    Dimensions determine_the_dimensions(Optional<CSSPixelSize> natural_dimensions, DOM::UpdateLayoutReason) const;
+
     HTMLImageElement(DOM::Document&, DOM::QualifiedName);
 
     void update_the_image_data_impl(bool restart_the_animations, bool maybe_omit_events, u64 update_the_image_data_count);
@@ -130,6 +144,8 @@ private:
     virtual void finalize() override;
 
     virtual void adopted_from(DOM::Document&) override;
+    virtual void moved_from(IsSubtreeRoot, GC::Ptr<DOM::Node> old_ancestor) override;
+    virtual void removed_from(IsSubtreeRoot, DOM::Node* old_ancestor, DOM::Node& old_root) override;
 
     virtual bool is_presentational_hint(Utf16FlyString const&) const override;
     virtual void apply_presentational_hints(Vector<CSS::StyleProperty>&) const override;
@@ -157,6 +173,10 @@ private:
     GC::Ptr<DOM::DocumentObserver> m_document_observer;
 
     CORSSettingAttribute m_cors_setting { CORSSettingAttribute::NoCORS };
+
+    // https://html.spec.whatwg.org/multipage/images.html#last-auto-sizes-width
+    // NB: Parsing a sizes attribute records this through a const img, so it is mutable.
+    mutable Optional<CSSPixels> m_last_auto_sizes_width;
 
     // https://html.spec.whatwg.org/multipage/images.html#last-selected-source
     // Each img element has a last selected source, which must initially be null.
@@ -187,6 +207,8 @@ private:
     GC::Ptr<HTMLMapElement> m_cached_associated_map_element;
     Optional<u64> m_cached_associated_map_element_dom_tree_version;
 };
+
+void update_the_source_set(DOM::Element&);
 
 }
 

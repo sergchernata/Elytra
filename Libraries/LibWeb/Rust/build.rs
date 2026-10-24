@@ -627,7 +627,7 @@ fn generate_selector_pseudo_types(manifest_dir: &Path, out_dir: &Path) -> Result
             None => "None",
             Some("<compound-selector>") => "CompoundSelector",
             Some("<ident>+") => "IdentList",
-            Some("<pt-name-selector>") => "PTNameSelector",
+            Some("<pt-name-and-class-selector>") => "PTNameAndClassSelector",
             Some(argument) => return Err(format!("unsupported pseudo-element parameter type {argument}").into()),
         };
         writeln!(
@@ -877,6 +877,7 @@ fn generate_property_metadata(manifest_dir: &Path, out_dir: &Path) -> Result<(),
         "font-kerning",
         "font-optical-sizing",
         "font-size",
+        "font-size-adjust",
         "font-style",
         "font-variant-alternates",
         "font-variant-caps",
@@ -1478,8 +1479,8 @@ fn generate_property_metadata(manifest_dir: &Path, out_dir: &Path) -> Result<(),
         .collect();
     let expanded_longhand_counts: Vec<usize> = expanded_shorthand_longhands.iter().map(Vec::len).collect();
 
-    // Accepted property keywords mirror property_accepts_keyword() in
-    // generate_libweb_css_property_id.py.
+    // Accepted property keywords are a property's valid identifiers and the
+    // keywords of the enums in its valid types.
     let mut accepted_keyword_rows = Vec::new();
     let mut accepted_value_type_rows = Vec::new();
     let mut custom_ident_blacklist_rows = Vec::new();
@@ -2280,9 +2281,9 @@ fn expose_shared_abi_types_as_cpp_types(config: &mut cbindgen::Config) {
             "AK/Optional.h",
             "LibGfx/AffineTransform.h",
             "LibGfx/Color.h",
+            "LibGfx/ColorFilterType.h",
             "LibGfx/CompositingAndBlendingOperator.h",
             "LibGfx/CornerRadii.h",
-            "LibGfx/Filter.h",
             "LibGfx/GradientInterpolation.h",
             "LibGfx/InterpolationColorSpace.h",
             "LibGfx/Matrix4x4.h",
@@ -2888,6 +2889,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             manifest_dir.join("src/layout/flex_formatting_context.rs"),
             manifest_dir.join("src/layout/grid_formatting_context.rs"),
             manifest_dir.join("src/layout/svg_formatting_context.rs"),
+            manifest_dir.join("src/layout/math_formatting_context.rs"),
             manifest_dir.join("src/layout/table_formatting_context.rs"),
             manifest_dir.join("src/layout/inline_formatting_context.rs"),
             manifest_dir.join("src/layout/inline_level_iterator.rs"),

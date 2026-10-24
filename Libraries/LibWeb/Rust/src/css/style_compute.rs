@@ -1212,6 +1212,13 @@ pub(crate) fn value_is_computationally_independent(value: &StyleValueData) -> Op
         }
         // Every filter kind's rule recurses into its single value.
         StyleValueData::Filter { value, .. } => all_data(&[value]),
+        StyleValueData::Ray { angle, position, .. } => {
+            let mut independent = value_is_computationally_independent(angle.data())?;
+            if let Some(position) = position.optional_data() {
+                independent = independent && value_is_computationally_independent(position)?;
+            }
+            Some(independent)
+        }
         StyleValueData::Counter { counter_style, .. } => all_data(&[counter_style]),
         StyleValueData::OpenTypeTagged { value, .. } => all_data(&[value]),
         StyleValueData::RandomValueSharing { fixed_value, .. } => match fixed_value.optional_data() {
@@ -1375,20 +1382,15 @@ pub(crate) fn value_is_computationally_independent(value: &StyleValueData) -> Op
         }
         StyleValueData::ColorMix {
             color_interpolation_method,
-            first_color,
-            first_percentage,
-            second_color,
-            second_percentage,
+            colors,
+            percentages,
             ..
         } => {
             let mut independent = true;
-            for value in [
-                color_interpolation_method,
-                first_color,
-                first_percentage,
-                second_color,
-                second_percentage,
-            ] {
+            for value in std::iter::once(color_interpolation_method)
+                .chain(colors.as_slice())
+                .chain(percentages.as_slice())
+            {
                 if let Some(value) = value.optional_data() {
                     independent = independent && value_is_computationally_independent(value)?;
                 }
@@ -1529,6 +1531,13 @@ pub(crate) fn collect_external_value_dependencies(value: &StyleValueData) -> Ext
                 collect_values(&[numerator, denominator], dependencies);
             }
             StyleValueData::Edge { offset, .. } => collect_optional(offset, dependencies),
+            StyleValueData::Anchor { fallback_value, .. } | StyleValueData::AnchorSize { fallback_value, .. } => {
+                collect_optional(fallback_value, dependencies);
+            }
+            StyleValueData::Ray { angle, position, .. } => {
+                collect_optional(angle, dependencies);
+                collect_optional(position, dependencies);
+            }
             StyleValueData::Function { value, .. }
             | StyleValueData::OpacityValue { value }
             | StyleValueData::Filter { value, .. }
@@ -1668,21 +1677,14 @@ pub(crate) fn collect_external_value_dependencies(value: &StyleValueData) -> Ext
             }
             StyleValueData::ColorMix {
                 color_interpolation_method,
-                first_color,
-                first_percentage,
-                second_color,
-                second_percentage,
+                colors,
+                percentages,
                 ..
-            } => collect_values(
-                &[
-                    color_interpolation_method,
-                    first_color,
-                    first_percentage,
-                    second_color,
-                    second_percentage,
-                ],
-                dependencies,
-            ),
+            } => {
+                collect_values(&[color_interpolation_method], dependencies);
+                collect_values(&colors.as_slice().iter().collect::<Vec<_>>(), dependencies);
+                collect_values(&percentages.as_slice().iter().collect::<Vec<_>>(), dependencies);
+            }
             StyleValueData::ContrastColor { color, .. } => collect(color.data(), dependencies),
             StyleValueData::LightDark { light, dark, .. } => collect_values(&[light, dark], dependencies),
             StyleValueData::Superellipse { parameter } => collect_optional(parameter, dependencies),
@@ -1809,6 +1811,7 @@ pub(crate) fn collect_unfixed_random_sharings_in_value(
         },
         StyleValueData::Ratio { numerator, denominator } => collect_values(&[numerator, denominator], sharings),
         StyleValueData::Edge { offset, .. } => collect_values(&[offset], sharings),
+        StyleValueData::Ray { angle, position, .. } => collect_values(&[angle, position], sharings),
         StyleValueData::Function { value, .. }
         | StyleValueData::OpacityValue { value }
         | StyleValueData::Filter { value, .. }
@@ -1915,21 +1918,14 @@ pub(crate) fn collect_unfixed_random_sharings_in_value(
         }
         StyleValueData::ColorMix {
             color_interpolation_method,
-            first_color,
-            first_percentage,
-            second_color,
-            second_percentage,
+            colors,
+            percentages,
             ..
-        } => collect_values(
-            &[
-                color_interpolation_method,
-                first_color,
-                first_percentage,
-                second_color,
-                second_percentage,
-            ],
-            sharings,
-        ),
+        } => {
+            collect_values(&[color_interpolation_method], sharings);
+            collect_values(&colors.as_slice().iter().collect::<Vec<_>>(), sharings);
+            collect_values(&percentages.as_slice().iter().collect::<Vec<_>>(), sharings);
+        }
         StyleValueData::ContrastColor { color, .. } => collect_values(&[color], sharings),
         StyleValueData::LightDark { light, dark, .. } => collect_values(&[light, dark], sharings),
         StyleValueData::Superellipse { parameter } => collect_values(&[parameter], sharings),
@@ -2122,7 +2118,7 @@ fn compute_border_or_outline_width(
 }
 
 // https://drafts.csswg.org/css-backgrounds/#compute-a-border-width
-fn snap_a_length_as_a_border_width(device_pixels_per_css_pixel: f64, length: CssPixels) -> CssPixels {
+pub(crate) fn snap_a_length_as_a_border_width(device_pixels_per_css_pixel: f64, length: CssPixels) -> CssPixels {
     // 1. Assert: len is non-negative.
     // NB: The caller guarantees this; negative widths are invalid at parse time.
 
@@ -2559,6 +2555,49 @@ fn canonicalize_animation_range(value: &StyleValueData, default_offset: f64) -> 
             collapsible: *collapsible,
         })
     })
+}
+
+/// https://drafts.csswg.org/motion-1/#offset-rotate-property
+/// Computed value: computed <angle> value, optionally preceded by auto
+/// Returns `None` when the value is already canonical.
+#[allow(clippy::arc_with_non_send_sync)]
+fn canonicalize_offset_rotate(value: &StyleValueData) -> Option<Arc<StyleValueData>> {
+    // NB: The C++ AngleUnit for degrees.
+    const DEGREES: u8 = 0;
+    let degrees = match value {
+        StyleValueData::Keyword {
+            keyword: keyword::REVERSE,
+        } => 0.0,
+        StyleValueData::ValueList { values, .. } => match values.as_slice() {
+            [first, angle]
+                if matches!(
+                    first.data(),
+                    StyleValueData::Keyword {
+                        keyword: keyword::REVERSE
+                    }
+                ) =>
+            {
+                let StyleValueData::Angle { value, unit: DEGREES } = angle.data() else {
+                    return None;
+                };
+                *value
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // reverse <angle>?: Identical to auto, but adds an additional 180deg to the rotation.
+    Some(Arc::new(StyleValueData::ValueList {
+        values: RetainedStyleValueDataList::from_retained_values(vec![
+            retained_new(StyleValueData::Keyword { keyword: keyword::AUTO }),
+            retained_new(StyleValueData::Angle {
+                value: degrees + 180.0,
+                unit: DEGREES,
+            }),
+        ]),
+        separator: 0,
+        collapsible: false,
+    }))
 }
 
 // https://drafts.csswg.org/css-contain-2/#contain-property
@@ -3171,9 +3210,16 @@ impl<'a> ParentSnapshot<'a> {
         {
             return Some(entry.value_handle());
         }
-        for (property, value) in self.table.retained_inheritance_dependent_values() {
-            if property == property_id && crate::css::style_value::style_value_dependency_flags(value.data()) & 1 != 0 {
-                return Some(value);
+        // NB: A value reading currentcolor is inherited as specified, to resolve against the inheriting element's own
+        //     color, except in the color property, whose currentcolor is the inherited value and so resolved where
+        //     it computes.
+        if property_id != crate::css::property_metadata::property_id::COLOR {
+            for (property, value) in self.table.retained_inheritance_dependent_values() {
+                if property == property_id
+                    && crate::css::style_value::style_value_dependency_flags(value.data()) & 1 != 0
+                {
+                    return Some(value);
+                }
             }
         }
         self.table.get(property_id)
@@ -3714,6 +3760,15 @@ pub(crate) unsafe fn drive_property_computation(
         } else {
             None
         };
+        // https://www.w3.org/TR/css-color-4/#resolving-other-colors
+        // In the color property, the used value of currentcolor is the resolved inherited value.
+        let current_color = (inherited_property_id == prop::COLOR).then(|| {
+            highlight_parent_snapshot
+                .or(snapshot)
+                .and_then(|snapshot| snapshot.value_handle(prop::COLOR))
+                .and_then(RetainedStyleValueData::optional_data)
+                .unwrap_or_else(|| initial_value_handle(prop::COLOR).data())
+        });
         // Absolutizes a value against this element's facts, noting in `results` when it resolved a viewport-relative
         // length.
         let absolutize_value = |value: &StyleValueData,
@@ -3728,6 +3783,7 @@ pub(crate) unsafe fn drive_property_computation(
                 random_base_values,
                 document_base_url,
                 style_sheet_resource_context,
+                current_color,
             };
             let outcome = crate::css::absolutize::absolutize(value, &context);
             if context.resolved_viewport_relative_length.get() {
@@ -4319,6 +4375,21 @@ pub(crate) unsafe fn drive_property_computation(
                             .map_or(NativeValue::Unchanged, NativeValue::StyleValue),
                         Some(crate::css::absolutize::Absolutized::Changed(new_value)) => {
                             match canonicalize_border_shape(new_value.data()) {
+                                Some(canonical) => NativeValue::StyleValue(canonical),
+                                None => NativeValue::StyleValue(new_value.into_arc()),
+                            }
+                        }
+                        None => NativeValue::Unsupported,
+                    }
+                }
+                (_, prop::OFFSET_ROTATE) => {
+                    let resolution_context =
+                        length_resolution_context.expect("offset-rotate must compute with a resolution context");
+                    match absolutize_value(value_data, resolution_context, current_effective_color_scheme, results) {
+                        Some(crate::css::absolutize::Absolutized::Unchanged) => canonicalize_offset_rotate(value_data)
+                            .map_or(NativeValue::Unchanged, NativeValue::StyleValue),
+                        Some(crate::css::absolutize::Absolutized::Changed(new_value)) => {
+                            match canonicalize_offset_rotate(new_value.data()) {
                                 Some(canonical) => NativeValue::StyleValue(canonical),
                                 None => NativeValue::StyleValue(new_value.into_arc()),
                             }
@@ -6130,6 +6201,10 @@ impl AnimationSampleInput<'_> {
     ) -> crate::css::animation::FfiAnimationContext<'_> {
         let mut context = crate::css::animation::FfiAnimationContext {
             allow_discrete: length_resolution_context.is_some(),
+            allow_keyword_size_interpolation: crate::css::animation::allows_keyword_size_interpolation(
+                self.longhand_table,
+                None,
+            ),
             current_color: Some(&self.current_color),
             has_length_resolution_context: length_resolution_context.is_some(),
             length_resolution_context: length_resolution_context
@@ -6524,6 +6599,7 @@ fn begin_animation_sample(
     if anim::animation_preparation_matches(Some(mutated_overlay), &composed, input.custom_property_environments) {
         anim::evaluate_animations(anim::ComputedAnimationBatch {
             context: input.animation_context(None, reference_box),
+            device_pixels_per_css_pixel: input.environment.device_pixels_per_css_pixel,
             sampled_effects: &composed,
             custom_property_environments: input.custom_property_environments,
             cache_preparation: true,
@@ -6691,6 +6767,7 @@ fn finish_animation_sample(
         && resolved.unfixed_random_sharings.is_empty();
     let custom_results = anim::evaluate_animations(anim::ComputedAnimationBatch {
         context: input.animation_context(Some(&length_contexts.remaining), reference_box),
+        device_pixels_per_css_pixel: input.environment.device_pixels_per_css_pixel,
         sampled_effects: &composed,
         custom_property_environments: input.custom_property_environments,
         cache_preparation,

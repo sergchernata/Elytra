@@ -5,6 +5,7 @@
  */
 
 #include <AK/Array.h>
+#include <LibCore/CrashHandler.h>
 #include <LibSandbox/ConnectBroker.h>
 #include <LibSandbox/Seccomp.h>
 #include <asm/termbits.h>
@@ -676,6 +677,9 @@ static char const* syscall_name(long syscall_number)
 #ifdef __NR_socket
         CASE_SYSCALL_NAME(socket);
 #endif
+#ifdef __NR_socketpair
+        CASE_SYSCALL_NAME(socketpair);
+#endif
 #ifdef __NR_stat
         CASE_SYSCALL_NAME(stat);
 #endif
@@ -1086,12 +1090,7 @@ static void handle_sigsys(int, siginfo_t* info, void* context)
 
     write_string("\n");
 
-    struct sigaction action {};
-    action.sa_handler = SIG_DFL;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGSYS, &action, nullptr);
-    raise(SIGSYS);
-    _exit(128 + SIGSYS);
+    Core::CrashHandler::handle_fatal_signal(SIGSYS, info, context);
 }
 
 static ErrorOr<void> install_sigsys_handler()

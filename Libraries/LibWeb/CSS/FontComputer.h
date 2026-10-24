@@ -33,6 +33,8 @@ enum class FontFeatureValuesRuleKind : uint8_t;
 
 namespace Web::CSS {
 
+enum class FontSizeAdjustMetric : u8;
+
 class FontCascadeMemo;
 class FontFaceSnapshot;
 class RustRuleView;
@@ -87,10 +89,22 @@ using ComputedFontFamily = Variant<GenericFontFamily, ComputedFontFamilyName>;
 static constexpr size_t font_resolution_feature_input_count = 11;
 using FontResolutionFeatureValues = Array<ValueComparingRefPtr<StyleValue const>, font_resolution_feature_input_count>;
 
+// A font-size-adjust that scales the size fonts are selected at: the metric it normalizes, and the proportion of the
+// computed font size that metric of the first available font is scaled to.
+// https://drafts.csswg.org/css-fonts-5/#font-size-adjust-prop
+struct FontSizeAdjust {
+    FontSizeAdjustMetric metric;
+    double value;
+
+    [[nodiscard]] bool operator==(FontSizeAdjust const&) const = default;
+};
+
 struct ComputedFontCacheKey {
     Vector<ComputedFontFamily> font_families;
     FontOpticalSizing font_optical_sizing;
     CSSPixels font_size;
+    // NB: Empty for none, and for the lookup that measures the first available font for from-font.
+    Optional<FontSizeAdjust> font_size_adjust {};
     int font_slope;
     double font_weight;
     Percentage font_width;
@@ -180,10 +194,11 @@ class WEB_API FontComputer final : public GC::Cell {
     GC_DECLARE_ALLOCATOR(FontComputer);
 
 public:
-    FontComputer();
+    explicit FontComputer(HTML::EnvironmentSettingsObject&);
     explicit FontComputer(DOM::Document&);
     virtual ~FontComputer() override;
 
+    bool has_document() const { return m_document != nullptr; }
     DOM::Document& document() { return *m_document; }
     DOM::Document const& document() const { return *m_document; }
 
@@ -238,6 +253,7 @@ private:
     NonnullRefPtr<FontFeatureValuesByScope const> font_feature_values_by_scope() const;
 
     GC::Ptr<DOM::Document> m_document;
+    GC::Ptr<HTML::EnvironmentSettingsObject> m_environment_settings_object;
 
     HashMap<FontFaceKey, Vector<NonnullRefPtr<FontFaceState>>> m_font_faces;
     HashMap<String, GC::Ref<FontLoader>> m_loaders_by_source;
@@ -259,5 +275,7 @@ private:
     Vector<Utf16FlyString> m_font_families_changed_beside_flown_transaction;
     Vector<Gfx::FontCascadeList const*> m_font_lists_changed_beside_flown_transaction;
 };
+
+WEB_API Optional<FontComputer&> font_computer_for_font_source(JS::Object& global);
 
 }

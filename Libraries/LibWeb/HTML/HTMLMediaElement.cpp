@@ -1749,7 +1749,13 @@ void HTMLMediaElement::run_remote_mode_resource_fetch_steps(ByteRange byte_range
             weak_self->queue_interrupted_fetch_steps();
         });
 
-        VERIFY(response->body());
+        // AD-HOC: A response with a null body status (204, 205, 304) has nothing to read, so treat the resource as
+        //         complete with no content, so that it fails to parse metadata.
+        if (!response->body()) {
+            process_end_of_media->function()();
+            return;
+        }
+
         response->body()->incrementally_read(HTML::relevant_realm(*self), update_media, process_end_of_media, process_body_error, GC::Ref { global });
     };
 
@@ -1919,6 +1925,16 @@ Optional<Utf16String> HTMLMediaElement::verify_response_or_get_failure_reason(GC
         return Utf16String::formatted("Failed to extract values from Content-Range: {}", internal_response->header_list()->get("Content-Range"sv));
 
     auto const& content_range = maybe_content_range.get<HTTP::HeaderList::ContentRangeValues>();
+
+    // AD-HOC: The server chooses where its bytes land in the resource, so hold it to the range that was asked for.
+    //         Otherwise a response could place bytes anywhere, including past the end of the representable resource.
+    if (content_range.last_byte_pos < content_range.first_byte_pos)
+        return Utf16String::formatted("Content-Range ends before it begins: {}", internal_response->header_list()->get("Content-Range"sv));
+    if (content_range.complete_length.has_value() && content_range.last_byte_pos >= content_range.complete_length.value())
+        return Utf16String::formatted("Content-Range extends past the complete length: {}", internal_response->header_list()->get("Content-Range"sv));
+    if (content_range.first_byte_pos != byte_range.get<UntilEnd>().first)
+        return Utf16String::formatted("Content-Range does not begin at the requested byte {}: {}", byte_range.get<UntilEnd>().first, internal_response->header_list()->get("Content-Range"sv));
+
     m_remote_fetch_data->offset = content_range.first_byte_pos;
     if (content_range.complete_length.has_value())
         m_remote_fetch_data->stream->set_expected_size(content_range.complete_length.value());
@@ -2368,14 +2384,20 @@ void HTMLMediaElement::set_up_playback_manager_for_remote()
     }));
 
     m_playback_manager->add_media_source(*m_remote_fetch_data->stream)
-        ->when_resolved(GC::weak_callback(*this, [](auto& self, MediaClient::RemotePlaybackManager::AddedTracks& added_tracks) {
+        ->when_resolved(GC::weak_callback(*this, [weak_manager = m_playback_manager->make_weak_ptr()](auto& self, MediaClient::RemotePlaybackManager::AddedTracks& added_tracks) {
             // -> If the media resource is found to have an audio track
-            for (auto const& track : added_tracks.audio_tracks)
+            for (auto const& track : added_tracks.audio_tracks) {
                 self.on_audio_track_added(track);
+                if (!weak_manager)
+                    return;
+            }
 
             // -> If the media resource is found to have a video track
-            for (auto const& track : added_tracks.video_tracks)
+            for (auto const& track : added_tracks.video_tracks) {
                 self.on_video_track_added(track);
+                if (!weak_manager)
+                    return;
+            }
 
             // -> Once enough of the media data has been fetched to determine the duration of the media resource, its dimensions, and other metadata
             self.on_metadata_parsed(SourceType::Remote);

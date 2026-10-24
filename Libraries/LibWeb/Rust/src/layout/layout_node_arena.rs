@@ -1112,6 +1112,8 @@ struct StyleNodeTables {
     /// tree build is under way: an element styled on the build's behalf replaces its style record,
     /// which republishes the resources its style names. No reader holds a borrow across a host call.
     svg_attribute_facts: RefCell<HashMap<StyleNodeID, super::svg_formatting_context::FfiSvgAttributeFacts>>,
+    /// The parsed MathML attributes each MathML element published, keyed by its style node.
+    math_attribute_facts: RefCell<HashMap<StyleNodeID, super::math_formatting_context::FfiMathAttributeFacts>>,
     /// The `points` list each <polyline> and <polygon> published beside its facts.
     svg_points: RefCell<HashMap<StyleNodeID, std::sync::Arc<[super::svg_formatting_context::FfiFloatPoint]>>>,
     /// The elements carrying each anchor name, in tree order. The DOM's registry republishes a
@@ -1279,6 +1281,8 @@ pub(crate) struct LayoutNodeArena {
     pub(super) searchable_text: Option<Vec<super::text_queries::MappedText>>,
     replaced_content_facts: Vec<ReplacedContentFactsSlot>,
     raw_table_column_spans: RefCell<HashMap<NodeSlotId, u32>>,
+    /// The layout kind of each row built for a MathML element, from its tag name.
+    math_layout_kinds: RefCell<HashMap<NodeSlotId, super::math_formatting_context::MathLayoutKind>>,
     replaced_paint_facts: RefCell<Arc<crate::painting::replaced_paint_facts::ReplacedPaintFactsTable>>,
     layer_image_paint_facts: RefCell<Arc<crate::painting::layer_image_paint_facts::LayerImagePaintFactsTable>>,
     svg_paint_resources: crate::painting::svg_paint_resources::SvgPaintResources,
@@ -1394,6 +1398,7 @@ impl LayoutNodeArena {
             searchable_text: None,
             replaced_content_facts: Vec::new(),
             raw_table_column_spans: RefCell::default(),
+            math_layout_kinds: RefCell::default(),
             replaced_paint_facts: RefCell::default(),
             layer_image_paint_facts: RefCell::default(),
             svg_paint_resources: crate::painting::svg_paint_resources::SvgPaintResources::default(),
@@ -1750,6 +1755,7 @@ impl LayoutNodeArena {
         self.in_flow_block_cache_store.remove_entry(index);
         self.remove_layout_update_flag_node(id);
         self.raw_table_column_spans.get_mut().remove(&id);
+        self.math_layout_kinds.get_mut().remove(&id);
         if self.replaced_paint_facts.get_mut().contains_key(&id) {
             Arc::make_mut(self.replaced_paint_facts.get_mut()).remove(&id);
         }
@@ -2161,6 +2167,11 @@ impl LayoutNodeArena {
             .find(is_acceptable)
     }
 
+    /// The parent element of `element` in the style tree, if any.
+    pub(crate) fn style_node_parent(&self, element: StyleNodeID) -> Option<StyleNodeID> {
+        self.with_style_store(|engine| engine.tree().parent(element))
+    }
+
     /// The shadow host of the shadow tree `element` is in, or none in the document tree. A shadow
     /// root has no layout row, so the tree scope is named by its host.
     pub(crate) fn tree_scope_host(&self, element: StyleNodeID) -> Option<StyleNodeID> {
@@ -2313,6 +2324,7 @@ impl LayoutNodeArena {
             counters_sets,
             generated_content,
             svg_attribute_facts,
+            math_attribute_facts,
             svg_points,
             anchor_name_elements,
             identities_in_focused_text_control,
@@ -2330,6 +2342,7 @@ impl LayoutNodeArena {
             );
         }
         svg_points.borrow_mut().remove(&style_node);
+        math_attribute_facts.borrow_mut().remove(&style_node);
         identities_in_focused_text_control.borrow_mut().remove(&style_node);
         element_scroll_offsets.borrow_mut().remove(&style_node);
         pseudo_element_scroll_offsets.borrow_mut().remove(&style_node);
@@ -2655,7 +2668,12 @@ impl LayoutNodeArena {
                         });
                         return None;
                     }
-                    let derived = self.reinherit_anonymous_style_record(host_record(child), parent_record);
+                    let column_source = self
+                        .anonymous_box_column_source(child)
+                        .filter(|source| *source == row)
+                        .map(|_| sample.record);
+                    let derived =
+                        self.reinherit_anonymous_style_record(host_record(child), parent_record, column_source);
                     parents.push((child, derived.record));
                     samples.push((child, derived));
                 }
@@ -3202,6 +3220,31 @@ impl LayoutNodeArena {
             .unwrap_or_default()
     }
 
+    /// The parsed MathML attributes of the element a row is built for. A row built for no MathML element answers
+    /// with the default facts, in which every attribute is absent.
+    pub(crate) fn math_attribute_facts(&self, id: NodeSlotId) -> super::math_formatting_context::FfiMathAttributeFacts {
+        self.dom_node_style_node(id)
+            .and_then(|style_node| {
+                self.style_node_tables
+                    .math_attribute_facts
+                    .borrow()
+                    .get(&style_node)
+                    .copied()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_style_node_math_attribute_facts(
+        &self,
+        style_node: StyleNodeID,
+        facts: super::math_formatting_context::FfiMathAttributeFacts,
+    ) {
+        self.style_node_tables
+            .math_attribute_facts
+            .borrow_mut()
+            .insert(style_node, facts);
+    }
+
     /// The `points` list a <polyline> or <polygon> parsed, shared rather than borrowed: a
     /// publication can replace it while a reader still uses it.
     pub(crate) fn svg_points(
@@ -3545,12 +3588,39 @@ impl LayoutNodeArena {
         })
     }
 
-    pub(crate) fn reinherit_anonymous_style_record(&self, record: u64, parent: u64) -> DerivedStyleRecord {
+    pub(crate) fn reinherit_anonymous_style_record(
+        &self,
+        record: u64,
+        parent: u64,
+        column_source: Option<u64>,
+    ) -> DerivedStyleRecord {
         self.with_style_engine(|engine| {
             let mut style = LayoutStyle::from_record(engine, record);
             style.inherit_from(engine, parent);
+            if let Some(column_source) = column_source {
+                style.copy_column_properties(&LayoutStyle::from_record(engine, column_source));
+            }
             style.intern(engine)
         })
+    }
+
+    fn anonymous_box_column_source(&self, node: NodeSlotId) -> Option<NodeSlotId> {
+        let parent = self.data(node).parent.get();
+        if parent.is_invalid() {
+            return None;
+        }
+        if super::node_facts::has_ancestor_fact(self.data(node), AncestorFact::IsAnonymousButtonContentBox) {
+            let button = self.data(parent).parent.get();
+            return (!button.is_invalid()
+                && !super::node_facts::has_flag(self.data(button), NodeFlag::IsHtmlInputElement))
+            .then_some(button);
+        }
+        let is_fieldset_content_wrapper = self.data(parent).kind.get() == NodeKind::FieldSetBox
+            && super::node_facts::node_is_fieldset_content_wrapper(
+                self.data(node),
+                super::node_facts::node_style_view(self.data(node)),
+            );
+        is_fieldset_content_wrapper.then_some(parent)
     }
 
     pub(crate) fn update_layout_style(
@@ -3625,8 +3695,14 @@ impl LayoutNodeArena {
                     self.reinherit_anonymous_descendants(host_calls, child);
                     self.notify_shell_of_style_change(host_calls, child, true);
                 } else {
-                    let derived =
-                        self.reinherit_anonymous_style_record(self.node_style_record(child), parent_style_record);
+                    let column_source = self
+                        .anonymous_box_column_source(child)
+                        .map(|source| self.node_style_record(source));
+                    let derived = self.reinherit_anonymous_style_record(
+                        self.node_style_record(child),
+                        parent_style_record,
+                        column_source,
+                    );
                     self.apply_reinherited_style_record(host_calls, child, derived);
                     self.reinherit_anonymous_children(host_calls, child, derived.record);
                 }
@@ -3865,6 +3941,25 @@ impl LayoutNodeArena {
             self.derive_containing_block_establishment_flags_of_children(slot);
         }
         self.refresh_ancestor_facts_of_anonymous_children(slot);
+        let mut first_styled_child = self.data(slot).first_child.get();
+        while !first_styled_child.is_invalid()
+            && super::node_facts::has_flag(self.data(first_styled_child), NodeFlag::Anonymous)
+        {
+            first_styled_child = self.data(first_styled_child).next_sibling.get();
+        }
+        if !first_styled_child.is_invalid()
+            && super::node_facts::has_ancestor_fact(self.data(first_styled_child), AncestorFact::ParentLaysOutInColumns)
+                != super::node_facts::node_style_view(self.data(slot))
+                    .is_some_and(|style| super::node_facts::node_lays_out_in_columns(self.data(slot), style))
+        {
+            let mut child = first_styled_child;
+            while !child.is_invalid() {
+                if self.derive_ancestor_facts_for_node(child) {
+                    self.bump_fragment_cache_epoch_of_self_and_ancestors(child);
+                }
+                child = self.data(child).next_sibling.get();
+            }
+        }
     }
 
     pub(crate) fn enroll_text_node_for_content_sync(&self, node: NodeSlotId) {
@@ -3887,6 +3982,11 @@ impl LayoutNodeArena {
             self.with_style_store(|engine| engine.element_construction_facts(style_node))
         });
         data.set_flags(super::node_facts::construction_flags(kind, false, construction_facts));
+        let math_layout_kind =
+            super::math_formatting_context::MathLayoutKind::from_construction_facts(construction_facts);
+        if math_layout_kind != super::math_formatting_context::MathLayoutKind::NotMathML {
+            self.math_layout_kinds.borrow_mut().insert(slot, math_layout_kind);
+        }
         if let Some(style_node) = style_node {
             self.stamp_dom_paint_facts(slot, style_node);
             // The name the document knows the row's node by. The mirror publishes one for an
@@ -4516,6 +4616,14 @@ impl LayoutNodeArena {
             if super::node_facts::node_is_flex_or_grid_container(parent_style) {
                 facts |= AncestorFact::ParentIsFlexOrGridContainer as u8;
             }
+            if parent_style.is_some_and(|style| super::node_facts::node_lays_out_in_columns(parent_data, style)) {
+                facts |= AncestorFact::ParentLaysOutInColumns as u8;
+            }
+            if parent_style.is_some_and(|style| style.display().is_math_inside())
+                && self.math_layout_kind(parent).uses_math_layout()
+            {
+                facts |= AncestorFact::ParentUsesMathLayout as u8;
+            }
             if parent_style.is_none_or(|style| {
                 !style.is_floating() && (style.display().is_flow_inside() || style.display().is_flow_root_inside())
             }) {
@@ -5132,6 +5240,15 @@ impl LayoutNodeArena {
             raw_spans.insert(id, spans.raw_column_span)
         };
         effective_spans_changed || previous_raw_column_span.unwrap_or(1) != spans.raw_column_span
+    }
+
+    /// The layout algorithm the MathML element a row is built for selects by its tag name.
+    pub(crate) fn math_layout_kind(&self, id: NodeSlotId) -> super::math_formatting_context::MathLayoutKind {
+        self.math_layout_kinds
+            .borrow()
+            .get(&id)
+            .copied()
+            .unwrap_or(super::math_formatting_context::MathLayoutKind::NotMathML)
     }
 
     pub(crate) fn raw_table_column_span(&self, id: NodeSlotId) -> u32 {
@@ -7021,8 +7138,10 @@ mod tests {
                 inline_alignment: None,
                 block_alignment: None,
                 derives_from_own_computed_values: true,
+                is_position_area: false,
             },
             resolved_anchor_insets: None,
+            resolved_anchor_sizes: Default::default(),
         }
     }
 

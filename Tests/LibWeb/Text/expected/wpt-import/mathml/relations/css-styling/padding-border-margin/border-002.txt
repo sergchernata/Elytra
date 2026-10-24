@@ -1,0 +1,56 @@
+Harness status: OK
+
+Found 51 tests
+
+51 Pass
+Pass	Border properties on a
+Pass	Border properties on a (rtl)
+Pass	Border properties on maction
+Pass	Border properties on maction (rtl)
+Pass	Border properties on menclose
+Pass	Border properties on menclose (rtl)
+Pass	Border properties on merror
+Pass	Border properties on merror (rtl)
+Pass	Border properties on mfrac
+Pass	Border properties on mfrac (rtl)
+Pass	Border properties on mi
+Pass	Border properties on mi (rtl)
+Pass	Border properties on mmultiscripts
+Pass	Border properties on mmultiscripts (rtl)
+Pass	Border properties on mn
+Pass	Border properties on mn (rtl)
+Pass	Border properties on mo
+Pass	Border properties on mo (rtl)
+Pass	Border properties on mover
+Pass	Border properties on mover (rtl)
+Pass	Border properties on mpadded
+Pass	Border properties on mpadded (rtl)
+Pass	Border properties on mphantom
+Pass	Border properties on mphantom (rtl)
+Pass	Border properties on mroot
+Pass	Border properties on mroot (rtl)
+Pass	Border properties on mrow
+Pass	Border properties on mrow (rtl)
+Pass	Border properties on ms
+Pass	Border properties on ms (rtl)
+Pass	Border properties on mspace
+Pass	Border properties on msqrt
+Pass	Border properties on msqrt (rtl)
+Pass	Border properties on mstyle
+Pass	Border properties on mstyle (rtl)
+Pass	Border properties on msub
+Pass	Border properties on msub (rtl)
+Pass	Border properties on msubsup
+Pass	Border properties on msubsup (rtl)
+Pass	Border properties on msup
+Pass	Border properties on msup (rtl)
+Pass	Border properties on mtable
+Pass	Border properties on mtable (rtl)
+Pass	Border properties on mtext
+Pass	Border properties on mtext (rtl)
+Pass	Border properties on munder
+Pass	Border properties on munder (rtl)
+Pass	Border properties on munderover
+Pass	Border properties on munderover (rtl)
+Pass	Border properties on semantics
+Pass	Border properties on semantics (rtl)

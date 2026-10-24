@@ -39,11 +39,24 @@ pub(crate) struct InlineBoxBaseline {
     pub(crate) accumulated_vertical_shift: CssPixels,
 }
 
+/// What text-overflow elided from the end of a line.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct TextOverflowElision {
+    /// The inline length of the line before the ellipsis.
+    pub(crate) inline_length: CssPixels,
+    /// Where in the line the fragment that ends in the ellipsis starts.
+    pub(crate) ellipsis_fragment_start: CssPixels,
+    /// The inline length of the fragment that ends in the ellipsis before it was shortened.
+    pub(crate) ellipsis_fragment_inline_length: CssPixels,
+}
+
 #[derive(Clone, PartialEq)]
 pub(crate) struct LineBoxData {
+    pub(crate) start: super::fragmentation::LinePosition,
     pub(crate) fragments: Vec<line_box_fragment::LineBoxFragmentData>,
     pub(crate) static_position_markers: Vec<StaticPositionMarker>,
     pub(crate) inline_box_baselines: Vec<InlineBoxBaseline>,
+    pub(crate) text_overflow_elision: Option<TextOverflowElision>,
     pub(crate) record: inline_content::LineRecord,
 }
 
@@ -61,11 +74,13 @@ impl std::ops::DerefMut for LineBoxData {
 }
 
 impl LineBoxData {
-    pub(crate) fn new(direction: u8, writing_mode: u8) -> Self {
+    pub(crate) fn new(direction: u8, writing_mode: u8, start: super::fragmentation::LinePosition) -> Self {
         Self {
+            start,
             fragments: Vec::new(),
             static_position_markers: Vec::new(),
             inline_box_baselines: Vec::new(),
+            text_overflow_elision: None,
             record: inline_content::LineRecord {
                 direction,
                 writing_mode,

@@ -195,11 +195,11 @@ void CompositorState::create_context(Web::CompositorContextId context_id, Option
         auto schedule_caret_repaint = [this, context_id](Gfx::IntRect damage_rect) {
             this->schedule_caret_repaint(context_id, damage_rect);
         };
-        auto request_scrollbar_fade_frames = [this, context_id] {
+        auto request_animation_frames = [this, context_id] {
             if (auto* context = context_if_present(context_id))
                 schedule_animation_frames_if_needed(*context);
         };
-        return make<ContextState>(context_id, page_id, web_content_client, Compositing::OwnedCanvasSurfaces { m_canvas_surface_registry, web_content_client.canvas_surface_owner_id() }, move(schedule_caret_repaint), move(request_scrollbar_fade_frames));
+        return make<ContextState>(context_id, page_id, web_content_client, OwnedCanvasSurfaces { m_canvas_surface_registry, web_content_client.canvas_surface_owner_id() }, move(schedule_caret_repaint), move(request_animation_frames));
     });
     resize_backing_stores_if_needed(context_id, context);
 }
@@ -673,9 +673,10 @@ void CompositorState::handle_and_dispatch_mouse_event(Web::CompositorContextId c
     // Schedules the present, publishes the scroll updates the event produced and asks for a rendering update, all of
     // which reach WebContent ahead of the event itself on the same connection.
     auto handled = apply_context_update_result(context_id, *context, result);
+    // A wheel event that lets go of a stretched scroller presents nothing itself; the rebound does from here on. A press
+    // beside the thumb of a scrollbar scrolls there in an animation too.
+    schedule_animation_frames_if_needed(*context);
     if (is_wheel_event) {
-        // A wheel event that lets go of a stretched scroller presents nothing itself; the rebound does from here on.
-        schedule_animation_frames_if_needed(*context);
         event.async_scroll_performed_default_action = handled;
     } else if (handled) {
         // The page still sees the events of a drag the compositor scrolls for a scrollbar the display list paints.
@@ -1419,7 +1420,7 @@ CompositedContextResolver CompositorState::resolver_for(Web::CompositorContextId
     };
 }
 
-Compositing::CompositedContextSurface CompositorState::resolve_composited_context(Web::CompositorContextId parent_context_id, Web::CompositorContextId child_context_id, Gfx::FloatRect destination_rect, Gfx::FloatMatrix4x4 const& canvas_transform)
+CompositedContextSurface CompositorState::resolve_composited_context(Web::CompositorContextId parent_context_id, Web::CompositorContextId child_context_id, Gfx::FloatRect destination_rect, Gfx::FloatMatrix4x4 const& canvas_transform)
 {
     auto* child_context = context_if_present(child_context_id);
     if (!child_context)
@@ -1462,13 +1463,20 @@ BackingStoreManager::GpuSharing CompositorState::gpu_sharing_for_context([[maybe
     return BackingStoreManager::GpuSharing::Allowed;
 }
 
-// A context scrolls elastically if the presentation of its root context does.
+// A context scrolls elastically, and takes presses on scrollbar tracks, as the presentation of its root context does.
 void CompositorState::update_scroll_capabilities()
 {
     for (auto& [context_id, context] : m_contexts) {
         auto* presentation = presentation_for_context(root_context_of(*context)->context_id());
         context->set_scrolls_elastically(presentation && m_presentations.get(presentation)->scrolls_elastically);
+        context->set_scrollbar_track_press_jumps(presentation && m_presentations.get(presentation)->scrollbar_track_press_jumps);
     }
+}
+
+void CompositorState::set_scrollbar_track_press_jumps(CompositorStateClient& presentation, bool jumps)
+{
+    m_presentations.get(&presentation)->scrollbar_track_press_jumps = jumps;
+    update_scroll_capabilities();
 }
 
 String CompositorState::scroll_state_for_testing(Web::CompositorContextId context_id, Web::AsyncScrollNodeStableID stretched_scroller) const

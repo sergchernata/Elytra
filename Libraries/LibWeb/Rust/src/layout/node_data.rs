@@ -69,6 +69,7 @@ pub struct FfiReplacedContentFacts {
     pub default_preferred_width: CssPixels,
     pub has_default_preferred_height: bool,
     pub default_preferred_height: CssPixels,
+    pub text_entry_content_is_ordinary_box: bool,
 }
 
 impl From<crate::painting::host::FfiNaturalSize> for crate::css::style::NaturalSize {
@@ -234,6 +235,9 @@ pub(crate) enum AncestorFact {
     HasInlineLevelInclusiveAncestor = 1 << 4,
     /// An anonymous box whose nearest non-anonymous ancestor puts an ellipsis on overflowing lines.
     InheritsTextOverflowEllipsis = 1 << 5,
+    ParentLaysOutInColumns = 1 << 6,
+    /// The parent lays out its children with a MathML layout algorithm.
+    ParentUsesMathLayout = 1 << 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

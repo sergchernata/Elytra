@@ -281,6 +281,7 @@ fn property_uses_special_keyword_parser(property: u16) -> bool {
             | property_id::TRANSFORM_ORIGIN
             | property_id::TRANSITION_PROPERTY
             | property_id::TRANSLATE
+            | property_id::VIEW_TRANSITION_CLASS
             | property_id::WHITE_SPACE
             | property_id::WHITE_SPACE_TRIM
             | property_id::WILL_CHANGE
@@ -1200,6 +1201,31 @@ pub(crate) fn parse_calculated_numeric_value_with_ranges(
     name: &[u16],
     values: &[ComponentValue],
 ) -> Option<StyleValueData> {
+    parse_calculated_numeric_value_allowing_size_keyword(
+        context,
+        property,
+        value_type,
+        percentages_resolve_as,
+        range,
+        name,
+        values,
+        false,
+    )
+}
+
+/// Parses a math function like parse_calculated_numeric_value_with_ranges(), where `allow_size_keyword` lets the
+/// calculation read the size keyword of a calc-size() calculation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_calculated_numeric_value_allowing_size_keyword(
+    context: &ParseContext,
+    property: u16,
+    value_type: u8,
+    percentages_resolve_as: Option<u8>,
+    range: NumericRange,
+    name: &[u16],
+    values: &[ComponentValue],
+    allow_size_keyword: bool,
+) -> Option<StyleValueData> {
     if equals_ascii_case_insensitive(name, b"calc")
         && let Some(tree_value) = single_non_whitespace_value(values)
         && let Some((tree_name, tree_arguments)) = tree_value.function()
@@ -1228,6 +1254,7 @@ pub(crate) fn parse_calculated_numeric_value_with_ranges(
             property,
             random_function_index: context.random_function_index,
             allowed_color_channels: 0,
+            allow_size_keyword,
             allow_random_functions: context_allows_random_functions(context),
             parse_context: Some(context),
         },
@@ -2557,7 +2584,11 @@ fn parse_position_try_fallbacks_property(context: &ParseContext, values: &[Compo
                 if let Some(keyword) = value.ident().and_then(keyword_from_ascii_case_insensitive)
                     && matches!(
                         keyword,
-                        keyword::FLIP_BLOCK | keyword::FLIP_INLINE | keyword::FLIP_START
+                        keyword::FLIP_BLOCK
+                            | keyword::FLIP_INLINE
+                            | keyword::FLIP_START
+                            | keyword::FLIP_X
+                            | keyword::FLIP_Y
                     )
                 {
                     if dashed_ident.is_some() {
@@ -2736,6 +2767,23 @@ fn parse_comma_separated_dashed_ident_list(
     Some(value_list(values, 1, true))
 }
 
+fn parse_custom_ident_list(
+    context: &ParseContext,
+    values: &[ComponentValue],
+    blacklist: &[&str],
+) -> Option<StyleValueData> {
+    let names = values
+        .iter()
+        .filter(|value| !value.is_whitespace())
+        .map(|value| parse_custom_ident_value(context, value, blacklist))
+        .collect::<Option<Vec<_>>>()?;
+    match names.as_slice() {
+        [] => None,
+        [_] => names.into_iter().next(),
+        _ => Some(value_list(names, 0, false)),
+    }
+}
+
 fn parse_special_text_property(context: &ParseContext, property: u16, values: &[ComponentValue]) -> ParseOutcome {
     if !matches!(
         property,
@@ -2746,6 +2794,7 @@ fn parse_special_text_property(context: &ParseContext, property: u16, values: &[
             | property_id::POSITION_ANCHOR
             | property_id::TIMELINE_SCOPE
             | property_id::TRANSITION_PROPERTY
+            | property_id::VIEW_TRANSITION_CLASS
             | property_id::WILL_CHANGE
     ) {
         return ParseOutcome::NotHandled;
@@ -2768,18 +2817,13 @@ fn parse_special_text_property(context: &ParseContext, property: u16, values: &[
         }),
         property_id::CONTAINER_NAME => single_value
             .and_then(|value| parse_specific_keyword(value, &[keyword::NONE]))
-            .or_else(|| {
-                let names = values
-                    .iter()
-                    .filter(|value| !value.is_whitespace())
-                    .map(|value| parse_custom_ident_value(context, value, &["none", "and", "not", "or"]))
-                    .collect::<Option<Vec<_>>>()?;
-                match names.as_slice() {
-                    [] => None,
-                    [_] => names.into_iter().next(),
-                    _ => Some(value_list(names, 0, false)),
-                }
-            }),
+            .or_else(|| parse_custom_ident_list(context, values, &["none", "and", "not", "or"])),
+        // https://drafts.csswg.org/css-view-transitions-2/#view-transition-class-prop
+        // none | <custom-ident>+
+        // none is an invalid <custom-ident> for view-transition-class, even when combined with another <custom-ident>.
+        property_id::VIEW_TRANSITION_CLASS => single_value
+            .and_then(|value| parse_specific_keyword(value, &[keyword::NONE]))
+            .or_else(|| parse_custom_ident_list(context, values, &["none"])),
         property_id::FONT_LANGUAGE_OVERRIDE => single_value.and_then(|value| {
             if let Some(normal) = parse_specific_keyword(value, &[keyword::NORMAL]) {
                 return Some(normal);
@@ -3949,7 +3993,7 @@ pub(crate) fn parse_initial_value(property: u16) -> Option<Arc<StyleValueData>> 
     }
 }
 
-fn parse_initial_longhand(context: &ParseContext, property: u16) -> Option<StyleValueData> {
+pub(crate) fn parse_initial_longhand(context: &ParseContext, property: u16) -> Option<StyleValueData> {
     let initial = property_initial_value(property);
     let values = consume_a_list_of_component_values(tokenize_for_parser(initial.as_bytes())).ok()?;
     match parse_css_value(context, property, &values) {
@@ -3958,7 +4002,7 @@ fn parse_initial_longhand(context: &ParseContext, property: u16) -> Option<Style
     }
 }
 
-fn shorthand_value(property: u16, sub_properties: Vec<u16>, values: Vec<StyleValueData>) -> StyleValueData {
+pub(crate) fn shorthand_value(property: u16, sub_properties: Vec<u16>, values: Vec<StyleValueData>) -> StyleValueData {
     retained_shorthand_value(
         property,
         sub_properties,
@@ -4488,6 +4532,38 @@ fn parse_container_shorthand(context: &ParseContext, values: &[ComponentValue]) 
         property_id::CONTAINER,
         longhands_for_shorthand(property_id::CONTAINER).to_vec(),
         vec![(*name).clone(), container_type],
+    )))
+}
+
+// https://drafts.csswg.org/css-anchor-position-1/#position-try-prop
+// <'position-try-order'>? <'position-try-fallbacks'>
+fn parse_position_try_shorthand(context: &ParseContext, values: &[ComponentValue]) -> ParseOutcome {
+    let first = values.iter().position(|value| !value.is_whitespace());
+    let order_and_fallbacks = first.and_then(|first| {
+        let ParseOutcome::Parsed(order) =
+            parse_css_value(context, property_id::POSITION_TRY_ORDER, &values[first..=first])
+        else {
+            return None;
+        };
+        Some(((*order).clone(), &values[first + 1..]))
+    });
+    // If <'position-try-order'> is omitted, it's set to the property's initial value.
+    let (order, fallback_values) = match order_and_fallbacks {
+        Some(parsed) => parsed,
+        None => match parse_initial_longhand(context, property_id::POSITION_TRY_ORDER) {
+            Some(order) => (order, values),
+            None => return ParseOutcome::Invalid,
+        },
+    };
+    let ParseOutcome::Parsed(fallbacks) =
+        parse_css_value(context, property_id::POSITION_TRY_FALLBACKS, fallback_values)
+    else {
+        return ParseOutcome::Invalid;
+    };
+    ParseOutcome::Parsed(shared_style_value(shorthand_value(
+        property_id::POSITION_TRY,
+        longhands_for_shorthand(property_id::POSITION_TRY).to_vec(),
+        vec![order, (*fallbacks).clone()],
     )))
 }
 
@@ -5901,6 +5977,9 @@ fn parse_css_value_after_substitution_scan(
         if property_id == property_id::CONTAINER {
             return parse_container_shorthand(context, values);
         }
+        if property_id == property_id::POSITION_TRY {
+            return parse_position_try_shorthand(context, values);
+        }
         let outcome = parse_place_shorthand(context, property_id, values);
         if !matches!(outcome, ParseOutcome::NotHandled) {
             return outcome;
@@ -6808,15 +6887,15 @@ mod tests {
             (property_id::FONT_VARIANT, "normal", 7),
             (property_id::FONT_VARIANT, "none", 7),
             (property_id::FONT_VARIANT, "small-caps oldstyle-nums ruby emoji", 7),
-            (property_id::FONT, "16px serif", 12),
+            (property_id::FONT, "16px serif", 13),
             (
                 property_id::FONT,
                 "italic small-caps 700 condensed 12px/1.5 'Example', serif",
-                12,
+                13,
             ),
-            (property_id::FONT, "normal normal 10pt sans-serif", 12),
-            (property_id::FONT, "oblique 45deg 24px Arial", 12),
-            (property_id::FONT, "16px initial simple", 12),
+            (property_id::FONT, "normal normal 10pt sans-serif", 13),
+            (property_id::FONT, "oblique 45deg 24px Arial", 13),
+            (property_id::FONT, "16px initial simple", 13),
         ] {
             let ParseOutcome::Parsed(value) = parse(property, source) else {
                 panic!("shorthand should parse: {source}");
@@ -7606,7 +7685,7 @@ mod tests {
         }
         assert!(matches!(
             parse(property_id::WIDTH, "calc(anchor-size(width) + 1px)"),
-            ParseOutcome::Invalid
+            ParseOutcome::Parsed(_)
         ));
     }
 

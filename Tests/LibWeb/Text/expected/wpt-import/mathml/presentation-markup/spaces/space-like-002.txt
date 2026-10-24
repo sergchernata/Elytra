@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	space-like maction
+Pass	space-like maction (no first child)
+Pass	non-space like maction (first child not space-like)
+Pass	space-like semantics
+Pass	space-like semantics (no first child)
+Pass	non-space like semantics (first child not space-like)

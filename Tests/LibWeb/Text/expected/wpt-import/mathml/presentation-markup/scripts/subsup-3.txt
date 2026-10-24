@@ -1,0 +1,10 @@
+Harness status: OK
+
+Found 5 tests
+
+5 Pass
+Pass	Alignment of the base on the baseline
+Pass	Dimensions of the scripted elements
+Pass	Vertical positions of scripts
+Pass	Horizontal alignment of scripts
+Pass	Horizontal positions of scripts

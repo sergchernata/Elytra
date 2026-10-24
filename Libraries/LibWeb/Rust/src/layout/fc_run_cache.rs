@@ -307,9 +307,39 @@ pub(crate) struct FcRunCacheArenaStore {
     inline_layout_damage: RefCell<Vec<InlineLayoutDamage>>,
     pending_sweep_slots: RefCell<Vec<u32>>,
     enrolled_for_sweep: RefCell<Vec<bool>>,
+    store_journals: RefCell<Vec<Vec<u32>>>,
 }
 
 impl FcRunCacheArenaStore {
+    pub(crate) fn begin_store_journal(&self) {
+        self.store_journals.borrow_mut().push(Vec::new());
+    }
+
+    pub(crate) fn end_store_journal(&self, keeps_stored_entries: bool) {
+        let slots = self.store_journals.borrow_mut().pop().expect("a store journal is open");
+        if keeps_stored_entries {
+            if let Some(enclosing) = self.store_journals.borrow_mut().last_mut() {
+                enclosing.extend(slots);
+            }
+            return;
+        }
+        for slot in slots {
+            self.remove_entry(slot);
+        }
+    }
+
+    pub(crate) fn remove_entries_stored_in_open_journal(&self, slots: impl IntoIterator<Item = u32>) {
+        let stored: HashSet<u32> = match self.store_journals.borrow().last() {
+            Some(journal) if !journal.is_empty() => journal.iter().copied().collect(),
+            _ => return,
+        };
+        for slot in slots {
+            if stored.contains(&slot) {
+                self.remove_entry(slot);
+            }
+        }
+    }
+
     fn enqueue_for_sweep(&self, slot: u32) {
         let mut enrolled = self.enrolled_for_sweep.borrow_mut();
         if enrolled.len() <= slot as usize {
@@ -453,6 +483,9 @@ impl FcRunCacheArenaStore {
             None => entries[slot as usize] = Some(std::sync::Arc::new(entry)),
         }
         drop(entries);
+        if let Some(journal) = self.store_journals.borrow_mut().last_mut() {
+            journal.push(slot);
+        }
         // NB: Invalidation can occur between probing a run and storing its result.
         self.enqueue_for_sweep(slot);
     }
@@ -519,54 +552,22 @@ impl FcRunCacheAttempt {
         callbacks: &LayoutPass<'_>,
         key: &FcRunCacheKey,
     ) -> Result<Self, std::sync::Arc<FcRunCacheEntry>> {
-        let fc_type = key.fc_type;
-        let input = &key.input;
         // A run this cache cannot describe still commits its subtree, so a stored entry would go on
         // describing paintables that run has replaced. Measurement runs commit nothing and leave it alone.
         let run_supersedes_stored_entry = layout_mode == LayoutMode::Normal && !purpose.is_measurement();
-        let drop_superseded_entry = || {
+        if purpose.is_measurement()
+            || !can_describe_run(
+                box_,
+                parent_grid_is_present,
+                layout_mode,
+                should_collect_devtools_layout_data,
+                callbacks,
+                key,
+            )
+        {
             if run_supersedes_stored_entry {
                 callbacks.arena().fc_run_cache_store().remove_entry(box_.slot_index());
             }
-        };
-        if layout_mode != LayoutMode::Normal
-            || purpose.is_measurement()
-            || should_collect_devtools_layout_data
-            || input.participation == ParticipationInParentFormattingContext::Root
-            || matches!(
-                fc_type,
-                formatting_context::FormattingContextType::InternalReplaced | formatting_context::FormattingContextType::InternalDummy
-            )
-            // The direct normal-layout path for an empty atomic block only sizes and snapshots its root.
-            // Replaying a stored output costs more than rebuilding it and retains an entry needlessly.
-            || (fc_type == formatting_context::FormattingContextType::Block
-                && input.participation == ParticipationInParentFormattingContext::AtomicInline
-                && callbacks.first_child(box_).is_invalid())
-        {
-            drop_superseded_entry();
-            return Ok(Self::Bypass);
-        }
-        if fc_type == formatting_context::FormattingContextType::Grid
-            && parent_grid_is_present
-            && grid_formatting_context::grid_template_declares_a_subgrid_axis(callbacks, box_)
-        {
-            drop_superseded_entry();
-            return Ok(Self::Bypass);
-        }
-        // Structural invariants behind this root-flag check, to re-verify if it is ever
-        // narrowed: anchor() applies only to absolutely positioned boxes and every abspos
-        // box is the root of its own spawned run, so the flag on the run root covers every
-        // anchor consumer; anchor eligibility is resolved from used values of the same
-        // pass under the anchor lookup's containing-block guard, never from a previous
-        // pass; scroll compensation compares chains that converge at the run root and
-        // registers scroll-shift side effects a replay would skip; and anchor-size()
-        // resolves to None today, so inset properties are the only anchor dependency a
-        // run can have.
-        if node_facts::has_flag(
-            NodeFacts::new(callbacks, box_).data(),
-            NodeFlag::InsetsUseAnchorFunctions,
-        ) {
-            drop_superseded_entry();
             return Ok(Self::Bypass);
         }
         let store = callbacks.arena().fc_run_cache_store();
@@ -665,6 +666,68 @@ impl FcRunCacheAttempt {
         };
         store.store(box_.slot_index(), entry);
     }
+}
+
+pub(super) fn can_describe_run(
+    box_: Node,
+    parent_grid_is_present: bool,
+    layout_mode: LayoutMode,
+    should_collect_devtools_layout_data: bool,
+    callbacks: &LayoutPass<'_>,
+    key: &FcRunCacheKey,
+) -> bool {
+    layout_mode == LayoutMode::Normal
+        && can_describe_run_in_any_layout_mode(
+            box_,
+            parent_grid_is_present,
+            should_collect_devtools_layout_data,
+            callbacks,
+            key,
+        )
+}
+
+pub(super) fn can_describe_run_in_any_layout_mode(
+    box_: Node,
+    parent_grid_is_present: bool,
+    should_collect_devtools_layout_data: bool,
+    callbacks: &LayoutPass<'_>,
+    key: &FcRunCacheKey,
+) -> bool {
+    let fc_type = key.fc_type;
+    let input = &key.input;
+    if should_collect_devtools_layout_data
+        || input.participation == ParticipationInParentFormattingContext::Root
+        || matches!(
+            fc_type,
+            formatting_context::FormattingContextType::InternalReplaced | formatting_context::FormattingContextType::InternalDummy
+        )
+        // The direct normal-layout path for an empty atomic block only sizes and snapshots its root.
+        // Replaying a stored output costs more than rebuilding it and retains an entry needlessly.
+        || (fc_type == formatting_context::FormattingContextType::Block
+            && input.participation == ParticipationInParentFormattingContext::AtomicInline
+            && callbacks.first_child(box_).is_invalid())
+    {
+        return false;
+    }
+    if fc_type == formatting_context::FormattingContextType::Grid
+        && parent_grid_is_present
+        && grid_formatting_context::grid_template_declares_a_subgrid_axis(callbacks, box_)
+    {
+        return false;
+    }
+    // Structural invariants behind this root-flag check, to re-verify if it is ever
+    // narrowed: anchor() applies only to absolutely positioned boxes and every abspos
+    // box is the root of its own spawned run, so the flag on the run root covers every
+    // anchor consumer; anchor eligibility is resolved from used values of the same
+    // pass under the anchor lookup's containing-block guard, never from a previous
+    // pass; scroll compensation compares chains that converge at the run root and
+    // registers scroll-shift side effects a replay would skip; and anchor-size()
+    // resolves to None today, so inset properties are the only anchor dependency a
+    // run can have.
+    !node_facts::has_flag(
+        NodeFacts::new(callbacks, box_).data(),
+        NodeFlag::InsetsUseAnchorFunctions,
+    )
 }
 
 /// Stores the entry a committing run replayed from an uncommitted one as an ordinary entry for the key it was probed

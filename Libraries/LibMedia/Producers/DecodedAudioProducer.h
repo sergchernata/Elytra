@@ -96,7 +96,7 @@ private:
         void dispatch_error(DecoderError&&);
         void flush_decoder();
         DecoderErrorOr<void> retrieve_next_block(AudioBlock&);
-        bool handle_seek();
+        void handle_seek();
         void resolve_seek(u32 seek_id);
         bool seek_to_resubmit_if_decoder_lost_its_state(DecoderError const&);
         bool seek_to_replace_decoder_if_it_cannot_decode_the_stream(DecoderError const&);
@@ -126,7 +126,11 @@ private:
         };
 
         void note_consumer_activity_while_locked() const;
-        void wait_for_queue_space_or_auto_suspend_while_locked();
+        enum class WaitResult : u8 {
+            ContinueDecoding,
+            ExitDecodeLoop,
+        };
+        WaitResult wait_for_queue_space_while_locked();
         void dispatch_read_blocked_change(ReadBlocked blocked);
 
         Core::EventLoop& m_main_thread_event_loop;
@@ -143,8 +147,6 @@ private:
         AudioDecoderSelection m_decoder_that_failed_due_to_missing_features;
         Optional<CodedFrame> m_frame_awaiting_decoder_replacement;
         OwnPtr<AudioDecoder> m_decoder;
-        bool m_decoder_needs_keyframe_next_seek { false };
-        bool m_decoder_needs_codec_configuration_next_seek { true };
         NonnullOwnPtr<Audio::AudioConverter> m_converter;
         i64 m_last_output_frame { NumericLimits<i64>::min() };
 
@@ -155,16 +157,21 @@ private:
         ReadBlockedChangeHandler m_read_blocked_change_handler;
         PipelineStatus m_current_halting_status { PipelineStatus::Pending };
 
+        enum class SeekReason : u8 {
+            Normal,
+            DecoderResetNeeded,
+        };
+
         u32 m_last_processed_seek_id { 0 };
         Atomic<u32> m_seek_id { 0 };
         AK::Duration m_seek_timestamp;
+        SeekReason m_seek_reason { SeekReason::Normal };
 
         SynchronizedWakeHandler m_wake_handler;
         mutable bool m_downstream_needs_wake { true };
 
         AK::Duration const m_auto_suspend_idle_timeout;
         mutable MonotonicTime m_last_consumer_activity { MonotonicTime::now() };
-        bool m_auto_suspended { false };
         mutable bool m_auto_suspend_requested { false };
     };
 

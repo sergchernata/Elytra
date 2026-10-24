@@ -38,7 +38,6 @@ ALLOWED_REALM_MENTIONS = {
     "Animations": (5, 14, "animation callbacks/events and CSS value materialization still pass spec-selected realms"),
     "CSS": (7, 19, "CSS Typed OM, parser-facing reification, and style-value JS materialization"),
     "Clipboard": (4, 16, "clipboard item/data callbacks still materialize JS values in caller-selected realms"),
-    "Compression": (4, 8, "compression streams still use realms for stream/chunk conversion plumbing"),
     "ContentSecurityPolicy": (4, 14, "CSP violation/report objects and callbacks still materialize JS-facing values"),
     "CookieStore": (2, 19, "cookie-store async callbacks and promise/value materialization still thread realms"),
     "Crypto": (8, 383, "WebCrypto algorithms still use realms for buffer/key/promise materialization"),
@@ -48,7 +47,7 @@ ALLOWED_REALM_MENTIONS = {
         62,
         "Fetch bodies, headers, requests, responses, and controllers still materialize JS values/streams; the body receiver's delivery and close tasks carry the realm its stream is enqueued and closed in",
     ),
-    "FileAPI": (6, 11, "File/Blob/FileReader algorithms still create streams, buffers, and events in selected realms"),
+    "FileAPI": (4, 11, "File/Blob/FileReader algorithms still create streams, buffers, and events in selected realms"),
     "HTML": (
         64,
         200,
@@ -67,11 +66,7 @@ ALLOWED_REALM_MENTIONS = {
         41,
         "service worker jobs, caches, and container promises still materialize results in selected realms",
     ),
-    "Streams": (
-        34,
-        212,
-        "Streams algorithms still use realms for controller/read/write operations and chunk conversion",
-    ),
+    "Streams": (5, 14, "the C++ facade of the Rust streams creates streams and promises in caller-selected realms"),
     "TrustedTypes": (2, 9, "Trusted Types policy factory operations still use selected realms"),
     "WebAssembly": (
         15,

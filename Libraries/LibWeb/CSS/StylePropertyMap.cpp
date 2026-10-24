@@ -66,7 +66,7 @@ static NonnullRefPtr<StyleValueList> style_value_list_for_property(StyleValueVec
 static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_representation(JS::VM& vm, PropertyNameAndID const& property, Variant<GC::Ref<CSSStyleValue>, Utf16String> const& value)
 {
     // To create an internal representation, given a string property and a string or CSSStyleValue value:
-    return value.visit(
+    auto internal_representation = TRY(value.visit(
         [&property](GC::Ref<CSSStyleValue> const& css_style_value) {
             return css_style_value->create_an_internal_representation(property, CSSStyleValue::PerformTypeCheck::Yes);
         },
@@ -78,7 +78,17 @@ static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_r
             auto result = TRY(CSSStyleValue::parse_a_css_style_value(vm, property.name(), css_text, CSSStyleValue::ParseMultiple::No));
             // AD-HOC: Result is a CSSStyleValue but we want an internal representation, so... convert it again I guess?
             return result.get<GC::Ref<CSSStyleValue>>()->create_an_internal_representation(property, CSSStyleValue::PerformTypeCheck::Yes);
-        });
+        }));
+
+    // AD-HOC: Our parser represents a text-indent that is just a length-percentage as a text-indent value, and style
+    //         computation expects that.
+    if (property.id() == PropertyID::TextIndent
+        && (internal_representation->is_length() || internal_representation->is_percentage() || internal_representation->is_calculated())) {
+        return StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_create_text_indent(
+            StyleValueFFI::rust_style_value_retain(internal_representation->rust_style_value_data()), false, false));
+    }
+
+    return internal_representation;
 }
 
 static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> normalize_overflow_clip_margin_internal_representation(
@@ -197,34 +207,52 @@ WebIDL::ExceptionOr<void> StylePropertyMap::set(Utf16FlyString property_name, Re
         if (value->is_unresolved() || value->is_pending_substitution() || value->is_guaranteed_invalid() || value->is_css_wide_keyword())
             return false;
 
-        // Some "list-valued" properties have possible values that are not lists, and those should not be wrapped.
-        if (property.id() == PropertyID::BackdropFilter && value->to_keyword() == Keyword::None)
-            return false;
-
-        if (first_is_one_of(property.id(), PropertyID::CounterIncrement, PropertyID::CounterReset, PropertyID::CounterSet) && value->to_keyword() == Keyword::None)
-            return false;
-
-        if (property.id() == PropertyID::Filter && value->to_keyword() == Keyword::None)
-            return false;
-
-        if (first_is_one_of(property.id(), PropertyID::FontFeatureSettings, PropertyID::FontVariationSettings) && value->to_keyword() == Keyword::Normal)
-            return false;
-
-        if (property.id() == PropertyID::Quotes && first_is_one_of(value->to_keyword(), Keyword::Auto, Keyword::None, Keyword::MatchParent))
-            return false;
-
-        if (property.id() == PropertyID::TransitionProperty && value->to_keyword() == Keyword::None)
-            return false;
-
-        if (property.id() == PropertyID::WillChange && value->to_keyword() == Keyword::Auto)
-            return false;
-
         return true;
+    };
+
+    // AD-HOC: A single keyword or identifier should be stored the way our parser stores it for the property. That is
+    //         either the keyword on its own, as for `box-shadow: none`, or a list with the identifier as its only
+    //         item, as for `container-name: foo`. So we parse it as a value of the property.
+    auto const parsed_identifier_value = [&](PropertyNameAndID const& property, NonnullRefPtr<StyleValue const> const& value) -> RefPtr<StyleValue const> {
+        if (property.is_custom_property())
+            return nullptr;
+        if (!value->is_custom_ident() && !(value->is_keyword() && !value->is_css_wide_keyword()))
+            return nullptr;
+        auto const parsing_params = props.owner_node().has_value()
+            ? Parser::ParsingParams { props.owner_node()->element().document() }
+            : Parser::ParsingParams {};
+        return parse_css_value(parsing_params, value->to_string(SerializationMode::Normal), property.id());
+    };
+
+    // AD-HOC: Our parser represents the track sizes of grid-auto-columns and grid-auto-rows as a single track size
+    //         list, and style computation expects that.
+    auto const grid_track_size_list = [](PropertyNameAndID const& property, StyleValueVector const& values) -> RefPtr<StyleValue const> {
+        if (!first_is_one_of(property.id(), PropertyID::GridAutoColumns, PropertyID::GridAutoRows))
+            return nullptr;
+        for (auto const& value : values) {
+            if (value->is_grid_track_size_list() || value->is_unresolved() || value->is_pending_substitution() || value->is_guaranteed_invalid() || value->is_css_wide_keyword())
+                return nullptr;
+        }
+        Vector<StyleValueFFI::StyleValueData const*> track_sizes;
+        track_sizes.ensure_capacity(values.size());
+        for (auto const& value : values)
+            track_sizes.unchecked_append(StyleValueFFI::rust_style_value_retain(value->rust_style_value_data()));
+        return StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_create_grid_track_size_list(track_sizes.data(), track_sizes.size()));
     };
 
     // 10. Set props[property] to values to set.
     // NOTE: The property is deleted then added back so that it gets put at the end of the ordered map, which gives the
     //       expected behavior in the face of shorthand properties.
+    if (values_to_set.size() == 1) {
+        if (auto parsed_value = parsed_identifier_value(property.value(), values_to_set.first())) {
+            TRY(props.set_property_style_value(property.value(), parsed_value.release_nonnull()));
+            return {};
+        }
+    }
+    if (auto track_size_list = grid_track_size_list(property.value(), values_to_set)) {
+        TRY(props.set_property_style_value(property.value(), track_size_list.release_nonnull()));
+        return {};
+    }
     if (values_to_set.size() == 1 && !should_wrap_value_in_list(property.value(), values_to_set.first())) {
         TRY(props.set_property_style_value(property.value(), values_to_set.take_first()));
     } else {

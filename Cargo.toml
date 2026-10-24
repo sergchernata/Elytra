@@ -2,6 +2,7 @@
 members = [
     "AK/Rust",
     "Libraries/LibCompositing/Rust",
+    "Libraries/LibCompress/Rust",
     "Libraries/LibGfx/Rust",
     "Libraries/LibImageDecoders/Rust",
     "Libraries/LibIPC/Rust",
@@ -17,6 +18,7 @@ members = [
     "Libraries/LibWasm/Engine",
     "Libraries/LibWasm/JIT",
     "Libraries/LibWasm/Module",
+    "Libraries/LibWebCommon/Rust",
     "Libraries/LibWeb/Bindings/Rust",
     "Libraries/LibWeb/ContentBlocker/Rust",
     "Libraries/LibWeb/Rust",

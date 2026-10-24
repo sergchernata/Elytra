@@ -1,0 +1,52 @@
+Harness status: OK
+
+Found 47 tests
+
+47 Pass
+Pass	Offsets for: none
+Pass	Offsets for: span-all
+Pass	Offsets for: span-all span-all
+Pass	Offsets for: top left
+Pass	Offsets for: top center
+Pass	Offsets for: top right
+Pass	Offsets for: center left
+Pass	Offsets for: center center
+Pass	Offsets for: center right
+Pass	Offsets for: bottom left
+Pass	Offsets for: bottom center
+Pass	Offsets for: bottom right
+Pass	Offsets for: start start
+Pass	Offsets for: start center
+Pass	Offsets for: start end
+Pass	Offsets for: center start
+Pass	Offsets for: center end
+Pass	Offsets for: end start
+Pass	Offsets for: end center
+Pass	Offsets for: end end
+Pass	Offsets for: self-start self-start
+Pass	Offsets for: self-start center
+Pass	Offsets for: self-start self-end
+Pass	Offsets for: center self-start
+Pass	Offsets for: center self-end
+Pass	Offsets for: self-end self-start
+Pass	Offsets for: self-end center
+Pass	Offsets for: self-end self-end
+Pass	Offsets for: y-start x-start
+Pass	Offsets for: y-start center
+Pass	Offsets for: y-start x-end
+Pass	Offsets for: center x-start
+Pass	Offsets for: center x-end
+Pass	Offsets for: y-end x-start
+Pass	Offsets for: y-end center
+Pass	Offsets for: y-end x-end
+Pass	Offsets for: self-y-start self-x-start
+Pass	Offsets for: self-y-start center
+Pass	Offsets for: self-y-start self-x-end
+Pass	Offsets for: center self-x-start
+Pass	Offsets for: center self-x-end
+Pass	Offsets for: self-y-end self-x-start
+Pass	Offsets for: self-y-end center
+Pass	Offsets for: self-y-end self-x-end
+Pass	Offsets for: span-self-y-start span-self-x-end
+Pass	Offsets for: span-bottom span-all
+Pass	Offsets for: span-all top

@@ -128,12 +128,21 @@ public:
     virtual bool supports_private_browsing_windows() const { return false; }
     virtual bool supports_client_side_window_decorations() const { return false; }
     virtual bool supports_picture_in_picture() const;
+
+    // What startup recovery does with the windows the last run left open. Only a frontend that shows the launch plan
+    // asks for more than None.
+    virtual SessionLaunchPolicy launch_restore_policy() const;
+
     // Returns true if the platform sends momentum scroll events after a touchpad flick.
     // If it does not, the compositor makes the fling.
     virtual bool platform_reports_scroll_momentum() const { return true; }
     // Returns true if a touchpad may pull a scroller past the edges of its scroll range, from where it springs back.
     // This needs the platform to say when the fingers lift from the touchpad, or the scroller would stay stretched.
     virtual bool platform_scrolls_elastically() const { return false; }
+    // Returns true if a press on a scrollbar track beside the thumb jumps to that spot, rather than paging toward it.
+    virtual bool platform_scrollbar_track_press_jumps() const { return false; }
+    // Tells the compositor of a change to what platform_scrollbar_track_press_jumps() returns.
+    void platform_scrollbar_track_press_behavior_changed();
     // The languages the user prefers, as the platform lists them (BCP 47 tags, most preferred first).
     virtual Vector<String> platform_preferred_languages() const { return {}; }
 
@@ -481,7 +490,7 @@ private:
     };
     void create_bookmark_menu_items(Optional<MenuData> = {});
 
-    Vector<BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const;
+    virtual Vector<BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const;
 
     virtual Vector<DevTools::TabDescription> tab_list() const override;
     virtual Vector<DevTools::CSSProperty> css_property_list() const override;
@@ -589,6 +598,7 @@ private:
     OwnPtr<Core::File> m_cpu_profiler_control_socket;
     bool m_cpu_profiler_claimed { false };
     Vector<int> m_cpu_profiler_signal_handlers;
+    Vector<int> m_session_signal_handlers;
     RequestServerOptions m_request_server_options;
     WebContentOptions m_web_content_options;
     RefPtr<FontService> m_font_service;

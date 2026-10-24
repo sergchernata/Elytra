@@ -11,6 +11,16 @@ use std::ptr::NonNull;
 
 use crate::geometry::{FloatPoint, FloatSize};
 
+mod arcs;
+mod curves;
+mod encoding;
+pub mod ffi;
+mod geometry;
+mod hit_test;
+mod measure;
+mod stroke;
+mod svg_text;
+
 unsafe extern "C" {
     fn ladybird_gfx_process_next_path_identity() -> u64;
     fn ladybird_gfx_path_destroy(path: *mut c_void);
@@ -28,7 +38,18 @@ unsafe extern "C" {
         context: *mut c_void,
     );
     fn ladybird_gfx_path_contains(path: *const c_void, x: f32, y: f32, winding_rule: i32) -> bool;
+    fn ladybird_gfx_path_stroke_to_fill(
+        path: *const c_void,
+        thickness: f32,
+        cap_style: i32,
+        join_style: i32,
+        miter_limit: f32,
+        dash_array: *const f32,
+        dash_count: usize,
+        dash_offset: f32,
+    ) -> *mut c_void;
     fn ladybird_gfx_path_length(path: *const c_void) -> f32;
+    fn ladybird_gfx_path_point_at_length(path: *const c_void, distance: f32, out: *mut f32) -> bool;
     fn ladybird_gfx_path_create_from_ops(kinds: *const u8, values: *const f32, count: usize) -> *mut c_void;
     fn ladybird_gfx_path_append_ops(path: *mut c_void, kinds: *const u8, values: *const f32, count: usize);
     fn ladybird_gfx_path_append_path(path: *mut c_void, other: *const c_void);
@@ -311,6 +332,17 @@ unsafe extern "C" fn append_to_string(context: *mut c_void, bytes: *const u8, le
     }
 }
 
+/// How a path is stroked, as `OwnedPath::stroke_to_fill()` takes it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StrokeStyle {
+    pub thickness: f32,
+    pub cap_style: crate::CapStyle,
+    pub join_style: crate::JoinStyle,
+    pub miter_limit: f32,
+    pub dash_array: Vec<f32>,
+    pub dash_offset: f32,
+}
+
 /// The sole owner of a heap-allocated `Gfx::Path`, destroying it on drop.
 pub struct OwnedPath {
     raw: NonNull<c_void>,
@@ -318,8 +350,7 @@ pub struct OwnedPath {
 }
 
 // SAFETY: OwnedPath uniquely owns its Gfx::Path. Every operation on a shared reference is a const
-// query, which PathImplSkia makes safe to run concurrently by publishing its lazily built SkPath
-// with a compare-and-swap.
+// query, which only reads the path.
 unsafe impl Send for OwnedPath {}
 // SAFETY: See the Send implementation above.
 unsafe impl Sync for OwnedPath {}
@@ -411,6 +442,13 @@ impl OwnedPath {
         unsafe { ladybird_gfx_path_length(self.raw.as_ptr()) }
     }
 
+    /// The point at the given distance along the path, followed by the path's tangent there.
+    pub fn point_at_length(&self, distance: f32) -> Option<[f32; 4]> {
+        let mut out = [0.0f32; 4];
+        // SAFETY: The path is live for the duration of the call; the out-array holds four floats.
+        unsafe { ladybird_gfx_path_point_at_length(self.raw.as_ptr(), distance, out.as_mut_ptr()) }.then_some(out)
+    }
+
     pub fn copy_transformed(&self, affine_values: [f32; 6]) -> OwnedPath {
         // SAFETY: The path is live for the call; the result is a fresh heap-allocated Gfx::Path.
         unsafe {
@@ -468,6 +506,25 @@ impl OwnedPath {
     pub fn contains(&self, x: f32, y: f32, winding_rule: i32) -> bool {
         // SAFETY: The path is live for the duration of the call.
         unsafe { ladybird_gfx_path_contains(self.raw.as_ptr(), x, y, winding_rule) }
+    }
+
+    /// The outline of the area that stroking this path with the given style covers, as a path to fill with the
+    /// nonzero winding rule.
+    pub fn stroke_to_fill(&self, style: &StrokeStyle) -> OwnedPath {
+        // SAFETY: The path and the dash array are live for the synchronous call, which returns a fresh heap-allocated
+        //         Gfx::Path.
+        unsafe {
+            OwnedPath::adopt(ladybird_gfx_path_stroke_to_fill(
+                self.raw.as_ptr(),
+                style.thickness,
+                style.cap_style as i32,
+                style.join_style as i32,
+                style.miter_limit,
+                style.dash_array.as_ptr(),
+                style.dash_array.len(),
+                style.dash_offset,
+            ))
+        }
     }
 
     pub fn to_svg_string(&self) -> String {

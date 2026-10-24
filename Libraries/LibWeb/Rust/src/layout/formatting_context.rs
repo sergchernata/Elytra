@@ -186,6 +186,35 @@ impl<'pass> MeasurementState<'pass> {
     }
 }
 
+pub(crate) fn run_fragmentainer(
+    outer: &FormattingContextRun,
+    purpose: LayoutPurpose,
+    input: LayoutInput,
+    fragmentainer: std::rc::Rc<fragmentation::FragmentainerContext>,
+) -> RunOutputs {
+    debug_assert_eq!(input.participation, ParticipationInParentFormattingContext::Root);
+    let box_ = outer.box_;
+    let root_containing_block = outer
+        .callbacks
+        .containing_block_for_child_run(box_, &input.participation);
+    execute_formatting_context_run(
+        purpose,
+        used_values::UsedValuesCellState::capture(outer.records.used_values(box_)),
+        box_,
+        root_containing_block,
+        None,
+        FormattingContextType::Block,
+        outer.layout_mode,
+        outer.should_collect_devtools_layout_data,
+        outer.callbacks,
+        input,
+        None,
+        None,
+        None,
+        Some(fragmentainer),
+    )
+}
+
 pub(super) fn cache_key(
     measured_at_inline_size: Option<CssPixels>,
     measured_at_block_size: Option<CssPixels>,
@@ -839,6 +868,7 @@ pub enum FormattingContextType {
     Grid,
     Table,
     Svg,
+    Math,
     ReplacedWithChildren,
     InternalReplaced,
     InternalDummy,
@@ -1074,6 +1104,7 @@ pub(crate) struct FormattingContextRun<'pass> {
     pub(crate) treat_block_axis_percentage_insets_as_auto_beyond_root: bool,
     pub(crate) fragments: Option<std::rc::Rc<fragment_tree::RunFragmentBuilder>>,
     pub(crate) previous_line_data: Option<std::sync::Arc<inline_content::InlineContent>>,
+    pub(crate) fragmentainer: Option<std::rc::Rc<fragmentation::FragmentainerContext>>,
 }
 
 impl<'pass> FormattingContextRun<'pass> {
@@ -1109,6 +1140,7 @@ enum FormattingContextImplementation<'pass> {
     Grid(Box<grid_formatting_context::GridFormattingContext<'pass>>),
     Table(Box<table_formatting_context::TableFormattingContext<'pass>>),
     Svg(Box<svg_formatting_context::SvgFormattingContext<'pass>>),
+    Math(Box<math_formatting_context::MathFormattingContext<'pass>>),
     ReplacedWithChildren,
     InternalReplaced,
     InternalDummy,
@@ -1162,9 +1194,18 @@ pub(crate) fn formatting_context_type_created_by_node_data(
     if display.is_some_and(|display| display.is_grid_inside()) {
         return Some(FormattingContextType::Grid);
     }
-    if display.is_some_and(|display| display.is_math_inside())
-        || node_facts::node_creates_block_formatting_context(data, style, parent_is_flex_or_grid_container)
-    {
+    // https://w3c.github.io/mathml-core/#new-display-math-value
+    // MathML elements with a computed display value equal to block math or inline math control box generation and
+    // layout according to their tag name.
+    // NB: A box with inline children is a token element, or holds no MathML children, and lays them out in a block
+    //     formatting context.
+    if display.is_some_and(|display| display.is_math_inside()) {
+        if node_facts::has_flag(data, NodeFlag::ChildrenAreInline) {
+            return Some(FormattingContextType::Block);
+        }
+        return Some(FormattingContextType::Math);
+    }
+    if node_facts::node_creates_block_formatting_context(data, style, parent_is_flex_or_grid_container) {
         return Some(FormattingContextType::Block);
     }
     if node_facts::has_flag(data, NodeFlag::ChildrenAreInline)
@@ -1186,11 +1227,15 @@ pub(crate) fn formatting_context_type_created_by_node_data(
 }
 
 pub(crate) fn formatting_context_type_created_by_box(facts: NodeFacts<'_>) -> Option<FormattingContextType> {
-    formatting_context_type_created_by_node_data(
+    let fc_type = formatting_context_type_created_by_node_data(
         facts.data(),
         facts.computed_values_view_if_styled(),
         facts.parent_is_flex_or_grid_container(),
-    )
+    );
+    if fc_type == Some(FormattingContextType::Math) && !facts.uses_math_layout() {
+        return Some(FormattingContextType::Block);
+    }
+    fc_type
 }
 
 fn create_formatting_context_implementation<'pass>(
@@ -1213,6 +1258,9 @@ fn create_formatting_context_implementation<'pass>(
         }
         FormattingContextType::Svg => {
             FormattingContextImplementation::Svg(Box::new(svg_formatting_context::SvgFormattingContext::new(run)))
+        }
+        FormattingContextType::Math => {
+            FormattingContextImplementation::Math(Box::new(math_formatting_context::MathFormattingContext::new(run)))
         }
         FormattingContextType::ReplacedWithChildren => FormattingContextImplementation::ReplacedWithChildren,
         FormattingContextType::InternalReplaced => FormattingContextImplementation::InternalReplaced,
@@ -1263,6 +1311,11 @@ pub(crate) fn independent_root_automatic_block_size(
         return automatic_content_block_size_of_completed_run.unwrap_or_default();
     }
     let style = StyleValues::for_node(callbacks, node);
+    // https://w3c.github.io/mathml-core/#layout-algorithms
+    // After calculating the line-ascent and line-descent of a math content box, its block size is set to their sum.
+    if style.display().is_math_inside() {
+        return automatic_content_block_size_of_completed_run.unwrap_or_default();
+    }
     if style.display().is_flex_inside()
         && let Some(automatic_content_block_size_reported_by_completed_run) =
             automatic_content_block_size_of_completed_run
@@ -1295,7 +1348,7 @@ fn flex_self_block_size_resolution_space(
         return None;
     }
     let style = sizing.style(node);
-    if !style.display().is_flex_inside() || !style.min_height().is_auto() {
+    if !style.display().is_flex_inside() || !crate::layout::sizing_context::is_plain_auto(style.min_height()) {
         return None;
     }
     if sizing.facts(node).document_in_quirks_mode() {
@@ -1440,7 +1493,7 @@ fn dimension_block_level_root(
     }
     let mut measured_content_block_size = None;
     if sizing.should_treat_block_size_as_auto(node, available_space, constraints)
-        && !style.min_height().is_auto()
+        && !crate::layout::sizing_context::is_plain_auto(style.min_height())
         && lays_out_content_against_min_block_size(NodeFacts::new(&run.callbacks, node), fc_type)
     {
         let content_block_size =
@@ -1466,7 +1519,9 @@ fn dimension_block_level_root(
 /// min-height only clamps its block size once its content is laid out, so measuring first would just lay out the
 /// whole subtree an extra time — on every layout. Form controls center their content within the clamped size, though.
 fn lays_out_content_against_min_block_size(facts: NodeFacts<'_>, fc_type: FormattingContextType) -> bool {
-    fc_type != FormattingContextType::Block || facts.uses_button_layout() || facts.is_primitive_text_input()
+    fc_type != FormattingContextType::Block
+        || facts.uses_button_layout()
+        || facts.lays_out_text_input_content_as_ordinary_box()
 }
 
 /// The content block size of a laid out box, for growing a block size transferred through its aspect ratio. Chrome
@@ -1668,6 +1723,22 @@ pub(super) fn run_formatting_context(
     }
     let root_cells = used_values::UsedValuesCellState::capture(parent_used);
     let cache_key = fc_run_cache::FcRunCacheKey::new(fc_type, input, root_cells);
+    let memoizes_measurement = purpose.is_measurement()
+        && callbacks.scratch().memoizes_measurements()
+        && fc_run_cache::can_describe_run_in_any_layout_mode(
+            box_,
+            parent_grid.is_some(),
+            should_collect_devtools_layout_data,
+            &callbacks,
+            &cache_key,
+        );
+    if memoizes_measurement
+        && let Some(outputs) = callbacks
+            .scratch()
+            .memoized_measurement(box_, purpose, layout_mode, &cache_key)
+    {
+        return absorb_run_outputs(parent_fragments, parent_used, box_, outputs, false);
+    }
     let cache_attempt = match fc_run_cache::FcRunCacheAttempt::probe(
         purpose,
         box_,
@@ -1727,7 +1798,13 @@ pub(super) fn run_formatting_context(
         parent_block,
         previous_line_data,
         table_inline_layout,
+        None,
     );
+    if memoizes_measurement {
+        callbacks
+            .scratch()
+            .memoize_measurement(box_, purpose, layout_mode, cache_key, &outputs);
+    }
     cache_attempt.conclude(&callbacks, box_, cache_key, &outputs);
     absorb_run_outputs(parent_fragments, parent_used, box_, outputs, false)
 }
@@ -1789,6 +1866,7 @@ fn execute_formatting_context_run(
     parent_block: Option<&block_formatting_context::BlockFormattingContext>,
     previous_line_data: Option<std::sync::Arc<inline_content::InlineContent>>,
     table_inline_layout: Option<table_formatting_context::TableInlineLayout>,
+    fragmentainer: Option<std::rc::Rc<fragmentation::FragmentainerContext>>,
 ) -> RunOutputs {
     assert!(!box_.is_invalid());
     let root_used = root_cells.materialize_record();
@@ -1816,6 +1894,7 @@ fn execute_formatting_context_run(
                     ))
                 }),
                 previous_line_data,
+                fragmentainer,
             };
             let run = &run;
             if let Some(table_inline_layout) = table_inline_layout {
@@ -1915,6 +1994,17 @@ fn execute_formatting_context_run(
                         context.run(run, body_input);
                         ChildLayoutResult::default()
                     }
+                    FormattingContextImplementation::Math(context) => {
+                        context.run(run, body_input);
+                        let baselines = context.derived_baselines_of_root_box();
+                        store_derived_baselines(run.records.used_values(run.box_), baselines);
+                        ChildLayoutResult {
+                            automatic_content_inline_size: context.automatic_content_inline_size(),
+                            automatic_content_block_size: context.automatic_content_block_size(),
+                            baselines,
+                            ..ChildLayoutResult::default()
+                        }
+                    }
                     FormattingContextImplementation::ReplacedWithChildren => {
                         replaced_with_children_formatting_context::layout_replaced_with_children(run, body_input)
                     }
@@ -1933,7 +2023,8 @@ fn execute_formatting_context_run(
             // Every formatting context reports its content sizes through ChildLayoutResult, so overriding here covers them all
             // rather than one context's root-height path.
             let containment_facts = NodeFacts::new(&run.callbacks, run.box_);
-            if containment_facts.node_has_size_containment() {
+            let lays_out_own_content = run.fragmentainer.is_none();
+            if lays_out_own_content && containment_facts.node_has_size_containment() {
                 let style = containment_facts.style();
                 // https://drafts.csswg.org/css-contain-2/#containment-size
                 // Giving an element size containment makes its principal box a size containment box and has the following
@@ -1950,7 +2041,7 @@ fn execute_formatting_context_run(
                 } else {
                     CssPixels::default()
                 };
-            } else if containment_facts.node_has_inline_size_containment() {
+            } else if lays_out_own_content && containment_facts.node_has_inline_size_containment() {
                 // https://drafts.csswg.org/css-contain-2/#containment-inline-size
                 // "This means the inline-axis intrinsic sizes of the principal box are determined as if the element had
                 //  no content."
@@ -2054,6 +2145,9 @@ fn execute_formatting_context_run(
                         context.parent_did_dimension();
                     }
                     FormattingContextImplementation::Grid(context) => {
+                        context.parent_did_dimension();
+                    }
+                    FormattingContextImplementation::Math(context) => {
                         context.parent_did_dimension();
                     }
                     FormattingContextImplementation::Svg(_) | FormattingContextImplementation::ReplacedWithChildren => {
@@ -2380,6 +2474,7 @@ pub(crate) fn run_table_cell_ahead_of_its_intrinsic_block_padding(
         None,
         previous_line_data,
         None,
+        None,
     );
     cache_attempt.conclude_uncommitted(&run.callbacks, cell, cache_key, &outputs);
     Some(outputs.result)
@@ -2653,6 +2748,7 @@ fn compute_root_layout(input: LayoutStageInput<'_>, should_collect_devtools_layo
             treat_block_axis_percentage_insets_as_auto_beyond_root: false,
             fragments: Some(entry_fragments.clone()),
             previous_line_data: None,
+            fragmentainer: None,
         };
 
         let mut root_for_layout = root;
@@ -2774,6 +2870,7 @@ fn compute_subtree_layout_fragments(input: LayoutStageInput<'_>, containing_bloc
                 treat_block_axis_percentage_insets_as_auto_beyond_root: false,
                 fragments: Some(entry_fragments.clone()),
                 previous_line_data: None,
+                fragmentainer: None,
             };
             if root_is_absolutely_positioned {
                 abspos_engine::AbsposEngine::for_run(&entry_run).replay(&entry_run, root);

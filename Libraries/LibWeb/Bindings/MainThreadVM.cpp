@@ -464,7 +464,7 @@ void initialize_main_thread_vm(HTML::AgentType type)
         auto resolve_function = JS::NativeFunction::create(realm, move(steps), 1, vm.names.resolve);
 
         // 5. Return « Record { [[Key]]: "url", [[Value]]: urlString }, Record { [[Key]]: "resolve", [[Value]]: resolveFunction } ».
-        HashMap<JS::PropertyKey, JS::Value> meta;
+        GC::RootHashMap<JS::PropertyKey, JS::Value> meta;
         meta.set("url"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(url_string)));
         meta.set("resolve"_utf16_fly_string, resolve_function);
 
@@ -730,7 +730,8 @@ JS::VM& main_thread_vm()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#creating-a-new-javascript-realm
-NonnullOwnPtr<JS::ExecutionContext> create_a_new_javascript_realm(JS::VM& vm, Function<GC::Ref<JS::Object>(JS::Realm&)> create_global_object, Function<GC::Ref<JS::Object>(JS::Realm&)> create_global_this_value)
+// NB: agent is given as its agent cluster's cross-origin isolation mode, which is all these steps read of it.
+NonnullOwnPtr<JS::ExecutionContext> create_a_new_javascript_realm(JS::VM& vm, HTML::CrossOriginIsolationMode agent_cluster_cross_origin_isolation_mode, Function<GC::Ref<JS::Object>(JS::Realm&)> create_global_object, Function<GC::Ref<JS::Object>(JS::Realm&)> create_global_this_value)
 {
     // 1. Perform InitializeHostDefinedRealm() with the provided customizations for creating the global object and the global this binding.
     // 2. Let realm execution context be the running JavaScript execution context.
@@ -740,15 +741,22 @@ NonnullOwnPtr<JS::ExecutionContext> create_a_new_javascript_realm(JS::VM& vm, Fu
     auto* popped_execution_context = vm.pop_execution_context();
     VERIFY(popped_execution_context == realm_execution_context.ptr());
 
-    // NO-OP: 4. Let realm be realm execution context's Realm component.
-    // NO-OP: 5. Set realm's agent to agent.
+    // 4. Let realm be realm execution context's Realm component.
+    auto& realm = *realm_execution_context->realm;
 
-    // FIXME: 6. If agent's agent cluster's cross-origin isolation mode is "none", then:
-    //          1. Let global be realm's global object.
-    //          2. Let status be ! global.[[Delete]]("SharedArrayBuffer").
-    //          3. Assert: status is true.
+    // 5. If agent's agent cluster's cross-origin isolation mode is "none":
+    if (agent_cluster_cross_origin_isolation_mode == HTML::CrossOriginIsolationMode::None) {
+        // 1. Let global be realm's global object.
+        auto& global = realm.global_object();
 
-    // 7. Return realm execution context.
+        // 2. Let status be ! global.[[Delete]]("SharedArrayBuffer").
+        auto status = MUST(global.internal_delete(vm.names.SharedArrayBuffer));
+
+        // 3. Assert: status is true.
+        VERIFY(status);
+    }
+
+    // 6. Return realm execution context.
     return realm_execution_context;
 }
 
@@ -780,6 +788,7 @@ GC::Ref<JS::Realm> create_a_simple_javascript_realm()
     GC::Ptr<JS::HostObject> global_this;
     auto execution_context = create_a_new_javascript_realm(
         vm,
+        HTML::CrossOriginIsolationMode::None,
         [&](JS::Realm& realm) -> GC::Ref<JS::Object> {
             window = HTML::Window::create();
             global_this = create_global_object_wrapper(realm, GC::Ref { *window });
@@ -869,6 +878,7 @@ GC::Ref<JS::Realm> create_a_principal_javascript_realm()
     GC::Ptr<JS::HostObject> global_this;
     auto execution_context = create_a_new_javascript_realm(
         main_thread_vm(),
+        HTML::CrossOriginIsolationMode::None,
         [&](JS::Realm& realm) -> GC::Ref<JS::Object> {
             window = HTML::Window::create();
             global_this = create_global_object_wrapper(realm, GC::Ref { *window });
@@ -886,7 +896,8 @@ GC::Ref<JS::Realm> create_a_principal_javascript_realm()
         nullptr,
         URL::about_blank(),
         URL::Origin::create_opaque(),
-        {});
+        {},
+        HTML::CrossOriginIsolationMode::None);
 
     auto& settings = principal_host_defined_environment_settings_object(*realm);
     main_thread_vm().push_execution_context(settings.realm_execution_context());

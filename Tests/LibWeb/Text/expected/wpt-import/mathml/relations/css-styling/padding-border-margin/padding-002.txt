@@ -1,0 +1,56 @@
+Harness status: OK
+
+Found 51 tests
+
+51 Pass
+Pass	Padding properties on a
+Pass	Padding properties on a (rtl)
+Pass	Padding properties on maction
+Pass	Padding properties on maction (rtl)
+Pass	Padding properties on menclose
+Pass	Padding properties on menclose (rtl)
+Pass	Padding properties on merror
+Pass	Padding properties on merror (rtl)
+Pass	Padding properties on mfrac
+Pass	Padding properties on mfrac (rtl)
+Pass	Padding properties on mi
+Pass	Padding properties on mi (rtl)
+Pass	Padding properties on mmultiscripts
+Pass	Padding properties on mmultiscripts (rtl)
+Pass	Padding properties on mn
+Pass	Padding properties on mn (rtl)
+Pass	Padding properties on mo
+Pass	Padding properties on mo (rtl)
+Pass	Padding properties on mover
+Pass	Padding properties on mover (rtl)
+Pass	Padding properties on mpadded
+Pass	Padding properties on mpadded (rtl)
+Pass	Padding properties on mphantom
+Pass	Padding properties on mphantom (rtl)
+Pass	Padding properties on mroot
+Pass	Padding properties on mroot (rtl)
+Pass	Padding properties on mrow
+Pass	Padding properties on mrow (rtl)
+Pass	Padding properties on ms
+Pass	Padding properties on ms (rtl)
+Pass	Padding properties on mspace
+Pass	Padding properties on msqrt
+Pass	Padding properties on msqrt (rtl)
+Pass	Padding properties on mstyle
+Pass	Padding properties on mstyle (rtl)
+Pass	Padding properties on msub
+Pass	Padding properties on msub (rtl)
+Pass	Padding properties on msubsup
+Pass	Padding properties on msubsup (rtl)
+Pass	Padding properties on msup
+Pass	Padding properties on msup (rtl)
+Pass	Padding properties on mtable
+Pass	Padding properties on mtable (rtl)
+Pass	Padding properties on mtext
+Pass	Padding properties on mtext (rtl)
+Pass	Padding properties on munder
+Pass	Padding properties on munder (rtl)
+Pass	Padding properties on munderover
+Pass	Padding properties on munderover (rtl)
+Pass	Padding properties on semantics
+Pass	Padding properties on semantics (rtl)

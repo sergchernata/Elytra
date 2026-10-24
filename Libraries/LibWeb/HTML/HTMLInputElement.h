@@ -92,6 +92,8 @@ public:
     virtual Utf16String form_value() const override { return value(); }
     virtual Optional<Utf16String> optional_value() const override;
     WebIDL::ExceptionOr<void> set_value(Utf16View);
+    Utf16String value_binding() const { return value(); }
+    WebIDL::ExceptionOr<void> set_value_binding(Utf16View);
 
     // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#concept-textarea/input-relevant-value
     virtual Utf16String relevant_value() const override;
@@ -159,6 +161,8 @@ public:
     WebIDL::ExceptionOr<void> set_value_as_date(Optional<double>);
     GC::Ptr<JS::Object> value_as_date_object(JS::Object& relevant_global_object) const;
     WebIDL::ExceptionOr<void> set_value_as_date_object(GC::Ptr<JS::Object>);
+
+    Color value_as_color() const;
 
     double value_as_number() const;
     WebIDL::ExceptionOr<void> set_value_as_number(double value);
@@ -352,6 +356,14 @@ private:
 
     // https://html.spec.whatwg.org/multipage/input.html#value-sanitization-algorithm
     Utf16String value_sanitization_algorithm(Utf16View) const;
+
+    enum class ColorSpaceState : u8 {
+        LimitedSRGB,
+        DisplayP3,
+    };
+    ColorSpaceState color_space_state() const;
+    Utf16String update_a_color_well_control_color(Utf16View element_value) const;
+    Utf16String serialize_a_color_well_control_color(CSS::StyleValue const&) const;
 
     enum class ValueAttributeMode {
         Value,

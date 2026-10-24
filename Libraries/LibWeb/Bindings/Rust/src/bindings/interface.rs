@@ -33,6 +33,7 @@ use crate::bindings::realm_data::wrapper_world_of;
 use crate::bindings::services::{
     web_bindings_ensure_web_constructor, web_bindings_ensure_web_prototype, web_bindings_realm_is_window,
     web_bindings_rejected_promise, web_bindings_rust_wrapper_for, web_bindings_set_rust_wrapper,
+    web_bindings_with_temporary_execution_context,
 };
 
 /// What an implementation can tell the bindings about its objects, as a C++ implementation object does by overriding
@@ -53,6 +54,18 @@ pub(crate) trait Wrappable {
     /// How much memory outside the heap the object owns, which LibGC asks for if OWNS_EXTERNAL_MEMORY is true.
     fn external_memory_size(&self) -> usize {
         0
+    }
+
+    /// Whether LibGC finalizes the object before it destroys it, which it does through finalize(), as it does a C++
+    /// implementation object that overrides Cell::finalize().
+    const FINALIZES: bool = false;
+
+    /// What the object does when LibGC finalizes it, while every cell that dies in the collection is still intact.
+    /// It must not allocate.
+    fn finalize(_object: Ref<Self>)
+    where
+        Self: Trace + Sized,
+    {
     }
 }
 
@@ -112,11 +125,27 @@ impl<T: Wrappable + Trace> ExternalMemorySize for Wrapped<T> {
 
 /// The class of the cells of the objects of an interface, which the generated bindings of the interface define once.
 pub(crate) const fn cell_class<T: Wrappable + Trace + 'static>(name: &'static str) -> EmbedderClass<Wrapped<T>> {
-    if T::OWNS_EXTERNAL_MEMORY {
+    let class = if T::OWNS_EXTERNAL_MEMORY {
         EmbedderClass::new_with_external_memory_size(name)
     } else {
         EmbedderClass::new(name)
+    };
+    if T::FINALIZES {
+        class.with_finalize(finalize_object::<T>)
+    } else {
+        class
     }
+}
+
+/// The finalize entry of the class of the cells of an interface whose implementation finalizes its objects.
+///
+/// # Safety
+///
+/// Only LibGC calls it, with a dead cell of the class.
+unsafe extern "C" fn finalize_object<T: Wrappable + Trace + 'static>(cell: *mut c_void) {
+    let cell = NonNull::new(cell.cast::<EmbedderCell<Wrapped<T>>>()).expect("LibGC passes a cell");
+    // SAFETY: LibGC passes a dead cell of the class, which stays intact while it finalizes.
+    T::finalize(unsafe { Gc::from_non_null(cell) });
 }
 
 /// Without the generated bindings, which a build of the crate on its own leaves out, nothing creates or wraps an
@@ -142,6 +171,25 @@ pub(crate) fn allocate<T: Interface>(vm: &Vm, implementation: T) -> Ref<T> {
             implementation,
         },
     )
+}
+
+/// What the constructor steps or the transfer-receiving steps of an interface create: the implementation of the new
+/// object, which the bindings allocate, or the new object itself, for steps that hand the object to something else
+/// before they finish, as the constructor of ReadableStream gives it to its controller.
+pub(crate) trait ConstructedObject<T: Interface> {
+    fn into_object(self, vm: &Vm) -> Ref<T>;
+}
+
+impl<T: Interface> ConstructedObject<T> for T {
+    fn into_object(self, vm: &Vm) -> Ref<T> {
+        allocate(vm, self)
+    }
+}
+
+impl<T: Interface> ConstructedObject<T> for Ref<T> {
+    fn into_object(self, _: &Vm) -> Ref<T> {
+        self
+    }
 }
 
 /// The object an attribute or an operation of an interface runs on, if it is a wrapper of the interface or of an
@@ -247,9 +295,13 @@ pub(crate) fn construct_wrapper<T: Interface>(
     vm: &Vm,
     realm: Gc<Realm>,
     prototype: Gc<Object>,
-    implementation: T,
+    object: impl ConstructedObject<T>,
 ) -> Gc<HostObject> {
-    let object = allocate(vm, implementation);
+    let object = object.into_object(vm);
+    assert!(
+        object.main_world_wrapper.get().is_none(),
+        "the constructor steps create no wrapper of the new object"
+    );
     let wrapper = create_wrapper(vm, realm, prototype, object);
     if wrapper_world_of(vm, realm).is_main_world() {
         object.main_world_wrapper.set(Some(wrapper));
@@ -315,6 +367,38 @@ pub(crate) unsafe fn cell_if_abi<T: Interface>(cell: *mut c_void) -> Option<Ref<
 pub(crate) fn realm_is_window(realm: Gc<Realm>) -> bool {
     // SAFETY: The realm is live.
     unsafe { web_bindings_realm_is_window(realm.as_ptr().cast()) }
+}
+
+/// Runs the steps while an execution context of the realm is on the stack, for steps that can run script but that do not
+/// run on behalf of script, as an HTML::TemporaryExecutionContext does for C++.
+pub(crate) fn with_temporary_execution_context<F: FnOnce() -> R, R>(realm: Gc<Realm>, steps: F) -> R {
+    run_with_temporary_execution_context(realm, false, steps)
+}
+
+/// Runs the steps as with_temporary_execution_context() does, with the realm prepared to run callbacks as well, as an
+/// HTML::TemporaryExecutionContext with CallbacksEnabled::Yes does for C++.
+pub(crate) fn with_temporary_execution_context_and_callbacks<F: FnOnce() -> R, R>(realm: Gc<Realm>, steps: F) -> R {
+    run_with_temporary_execution_context(realm, true, steps)
+}
+
+fn run_with_temporary_execution_context<F: FnOnce() -> R, R>(realm: Gc<Realm>, callbacks_enabled: bool, steps: F) -> R {
+    unsafe extern "C" fn run_steps<F: FnOnce() -> R, R>(context: *mut c_void) {
+        // SAFETY: The context is the steps and the slot for their result, which outlive the call.
+        let (steps, result) = unsafe { &mut *context.cast::<(Option<F>, Option<R>)>() };
+        *result = Some(steps.take().expect("LibWeb runs the steps once")());
+    }
+
+    let mut context = (Some(steps), None);
+    // SAFETY: The realm is live, and the context outlives the call, which runs the steps once.
+    unsafe {
+        web_bindings_with_temporary_execution_context(
+            realm.as_ptr().cast(),
+            callbacks_enabled,
+            (&raw mut context).cast(),
+            run_steps::<F, R>,
+        );
+    }
+    context.1.expect("LibWeb runs the steps")
 }
 
 /// What an operation that returns a promise type returns in place of throwing: a promise rejected with what its

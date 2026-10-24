@@ -156,13 +156,6 @@ class ClipboardItem;
 
 }
 
-namespace Web::Compression {
-
-class CompressionStream;
-class DecompressionStream;
-
-}
-
 namespace Web::ContentSecurityPolicy {
 
 class Policy;
@@ -287,6 +280,8 @@ class CSSNumericValue;
 class CSSPageRule;
 class CSSPageDescriptors;
 class CSSPerspective;
+class CSSPositionTryDescriptors;
+class CSSPositionTryRule;
 class CSSPropertyRule;
 class CSSRotate;
 class CSSRule;
@@ -363,7 +358,6 @@ class ScreenOrientation;
 class Selector;
 class ShadowStyleValue;
 class ShorthandStyleValue;
-class Size;
 class StringStyleValue;
 class StyleComputer;
 class StylePropertyMap;
@@ -554,12 +548,6 @@ class SpellCheckController;
 class SpellingMarkers;
 class UndoStep;
 enum class HistoryAction : u8;
-
-}
-
-namespace Web::Encoding {
-
-class TextEncoderStream;
 
 }
 
@@ -1099,23 +1087,11 @@ class SpeechSynthesisVoice;
 
 namespace Web::Streams {
 
-class ReadableByteStreamController;
 class ReadableStream;
-class ReadableStreamAsyncIterator;
-class ReadableStreamBYOBReader;
-class ReadableStreamBYOBRequest;
-class ReadableStreamDefaultController;
 class ReadableStreamDefaultReader;
-class ReadableStreamGenericReaderMixin;
-class ReadIntoRequest;
 class ReadRequest;
 class TransformStream;
-class TransformStreamDefaultController;
 class WritableStream;
-class WritableStreamDefaultController;
-class WritableStreamDefaultWriter;
-
-struct PullIntoDescriptor;
 
 }
 

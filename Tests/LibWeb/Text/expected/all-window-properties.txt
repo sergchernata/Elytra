@@ -76,6 +76,8 @@ CSSNumericValue
 CSSPageDescriptors
 CSSPageRule
 CSSPerspective
+CSSPositionTryDescriptors
+CSSPositionTryRule
 CSSPropertyRule
 CSSRotate
 CSSRule
@@ -366,6 +368,7 @@ PerformanceNavigationTiming
 PerformanceObserver
 PerformanceObserverEntryList
 PerformanceResourceTiming
+PerformanceServerTiming
 PerformanceTiming
 PeriodicWave
 PermissionStatus
@@ -490,7 +493,6 @@ ServiceWorkerContainer
 ServiceWorkerRegistration
 Set
 ShadowRoot
-SharedArrayBuffer
 SharedWorker
 SourceBuffer
 SourceBufferList

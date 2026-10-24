@@ -20,8 +20,6 @@ class GlyphRun;
 class ImageDecoder;
 struct FontPixelMetrics;
 
-class PainterSkia;
-class PaintingSurface;
 class Palette;
 class YUVData;
 class PaletteImpl;
@@ -29,11 +27,7 @@ class Path;
 class SharedImage;
 class SharedImageBuffer;
 class ShareableBitmap;
-class SkiaBackendContext;
 struct SystemTheme;
-
-template<typename T>
-class Triangle;
 
 template<typename T>
 class Point;
@@ -44,9 +38,6 @@ class Size;
 template<typename T>
 class Rect;
 
-template<typename T>
-class Quad;
-
 using IntRect = Rect<int>;
 using FloatRect = Rect<float>;
 
@@ -56,11 +47,8 @@ using FloatPoint = Point<float>;
 using IntSize = Size<int>;
 using FloatSize = Size<float>;
 
-using FloatQuad = Quad<float>;
-
 enum class BitmapFormat;
 enum class ColorRole;
-enum class TextAlignment;
 
 enum class MaskKind {
     Alpha,

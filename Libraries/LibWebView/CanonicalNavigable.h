@@ -126,6 +126,7 @@ public:
     NonnullOwnPtr<CanonicalNavigable> remove_child(CanonicalNavigable&);
     bool is_ancestor_of(CanonicalNavigable const&) const;
     bool allowed_by_sandboxing_to_navigate(CanonicalNavigable const& target, Web::InitiatorSourceSnapshot const& source_snapshot_params) const;
+    bool is_familiar_with(CanonicalNavigable const&) const;
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#snapshotting-target-snapshot-params
     Web::HTML::TargetSnapshotParams snapshot_target_snapshot_params() const;
     IterationDecision for_each_in_inclusive_subtree(Function<IterationDecision(CanonicalNavigable&)> const&);
@@ -192,6 +193,7 @@ public:
     bool active_document_has_cross_site_ancestor() const;
     // Whether the navigable's active session history entry is among its session history entries.
     bool has_session_history_entry_and_ready_for_navigation() const;
+    bool is_script_closable() const;
     void document_completely_finished_loading(CanonicalDocument&);
     void update_container_state(Web::HTML::ReplicatedContainerState);
 

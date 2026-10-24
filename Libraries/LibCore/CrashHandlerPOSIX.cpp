@@ -187,9 +187,17 @@ static u32 capture_native_stack(void* context)
     program_counter = registers.pc;
     frame_pointer = registers.regs[29];
     stack_pointer = registers.sp;
+#elif defined(AK_OS_LINUX) && ARCH(RISCV64)
+    auto const& registers = static_cast<ucontext_t*>(context)->uc_mcontext;
+    program_counter = registers.__gregs[REG_PC];
+    frame_pointer = registers.__gregs[REG_S0];
+    stack_pointer = registers.__gregs[REG_SP];
 #else
     (void)context;
 #endif
+
+    // On RISC-V, the frame pointer points just past the saved frame pointer and return address.
+    constexpr FlatPtr saved_frame_offset = ARCH(RISCV64) ? 2 * sizeof(FlatPtr) : 0;
 
     u32 frame_count = 0;
     [[maybe_unused]] bool has_binary_identity = false;
@@ -200,7 +208,7 @@ static u32 capture_native_stack(void* context)
         has_binary_identity |= frame.binary.size != 0;
         ++frame_count;
         FlatPtr saved_frame[2];
-        if (!frame_pointer || frame_pointer % alignof(FlatPtr) || !read_stack_frame(frame_pointer, saved_frame))
+        if (!frame_pointer || frame_pointer % alignof(FlatPtr) || !read_stack_frame(frame_pointer - saved_frame_offset, saved_frame))
             break;
         // Stacks grow downwards on the supported architectures. Bound both the
         // depth and each step, and stop at corrupt/cyclic frame chains.
@@ -242,7 +250,7 @@ static u32 capture_native_stack(void* context)
     return frame_count;
 }
 
-static void crash_signal_handler(int signal, siginfo_t* info, void* context)
+void CrashHandler::handle_fatal_signal(int signal, siginfo_t* info, void* context)
 {
     if (__atomic_exchange_n(&s_crashing, 1, __ATOMIC_RELAXED))
         _exit(128 + signal);
@@ -304,7 +312,7 @@ ErrorOr<void> CrashHandler::initialize(int fd)
     if (sigaltstack(&stack, nullptr) < 0)
         return Error::from_errno(errno);
     struct sigaction action {};
-    action.sa_sigaction = crash_signal_handler;
+    action.sa_sigaction = CrashHandler::handle_fatal_signal;
     sigfillset(&action.sa_mask);
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     for (int signal : { SIGSEGV, SIGBUS, SIGFPE, SIGABRT, SIGILL, SIGTRAP }) {

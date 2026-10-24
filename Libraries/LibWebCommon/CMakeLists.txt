@@ -5,7 +5,9 @@ set(SOURCES
     CSS/PreferredColorScheme.cpp
     CSS/StyleSheetIdentifier.cpp
     CSS/SystemColor.cpp
+    Fetch/Infrastructure/DataURL.cpp
     Fetch/Infrastructure/HTTP/Statuses.cpp
+    Fetch/Infrastructure/URL.cpp
     FileAPI/BlobURLStore.cpp
     FileAPI/SerializedBlobURLEntry.cpp
     Gamepad/GamepadSharedState.cpp
@@ -14,6 +16,7 @@ set(SOURCES
     HTML/AutoplayPolicy.cpp
     HTML/BroadcastChannelMessage.cpp
     HTML/BrowsingContext.cpp
+    HTML/CrossOrigin/OpenerPolicy.cpp
     HTML/CrossOrigin/OpenerPolicyEnforcement.cpp
     HTML/CrossProcessId.cpp
     HTML/EmbedderPolicy.cpp
@@ -44,6 +47,7 @@ set(SOURCES
     Loader/DownloadFilename.cpp
     Loader/SiteCompatibility.cpp
     MimeSniff/MimeType.cpp
+    MimeSniff/Resource.cpp
     Page/AsyncScrollNodeStableID.cpp
     Page/DragEvent.cpp
     Page/InputEvent.cpp
@@ -53,6 +57,7 @@ set(SOURCES
     Page/SpellingError.cpp
     PixelUnits.cpp
     ReferrerPolicy/ReferrerPolicy.cpp
+    SecureContexts/AbstractOperations.cpp
     StorageAPI/StorageEndpoint.cpp
     StorageAPI/StorageKey.cpp
     WebDriver/Capabilities.cpp
@@ -143,6 +148,13 @@ ladybird_lib(LibWebCommon webcommon EXPLICIT_SYMBOL_EXPORT)
 # NB: The enumerations of LibWeb's IDL modules are generated into LibWebCommon along with LibWeb's bindings.
 add_dependencies(LibWebCommon generate_bindings)
 target_link_libraries(LibWebCommon PRIVATE LibCore LibCrypto LibFileSystem LibGfx LibHTTP LibIPC LibRequests LibURL)
+
+import_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libwebcommon_rust FEATURES allocator FFI_HEADER RustFFI.h)
+target_link_libraries(LibWebCommon PRIVATE libwebcommon_rust)
+target_link_libraries(libwebcommon_rust INTERFACE LibUnicode LibRegex)
+get_target_property(_libwebcommon_rust_lib libwebcommon_rust IMPORTED_LOCATION)
+set_property(SOURCE Fetch/Infrastructure/DataURL.cpp MimeSniff/MimeType.cpp MimeSniff/Resource.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libwebcommon_rust_lib})
+test_rust_crate(MANIFEST_PATH Rust/Cargo.toml CRATE_NAME libwebcommon_rust)
 
 if (ENABLE_INSTALL_HEADERS)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/CSS/PropertyList.h" "${CMAKE_CURRENT_BINARY_DIR}/CSS/PseudoElement.h" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibWebCommon/CSS")

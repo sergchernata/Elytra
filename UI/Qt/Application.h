@@ -53,9 +53,14 @@ public:
     BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Tab* parent_tab = nullptr, Optional<WebView::CanonicalTraversable&> traversable = {}, ShowWindow = ShowWindow::Yes, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation = {});
     WindowConfiguration configuration_for_new_window() const;
 
+    // Opens the windows startup recovery kept open, and returns the frontmost one, if any.
+    BrowserWindow* restore_previous_session(WindowConfiguration const& frontmost_window_configuration);
+    void open_startup_tabs(BrowserWindow&, Vector<URL::URL> const&);
+    virtual WebView::SessionLaunchPolicy launch_restore_policy() const override;
+
     void open_new_tab();
     void open_new_window(WebView::IsPrivate);
-    void reopen_recently_closed_tab();
+    void reopen_recently_closed_tab(BrowserWindow* target_window);
     void open_file();
 
     void restart_private_browsing_session();
@@ -64,6 +69,7 @@ public:
     // Asks every window's pages if they may unload, one window at a time. Once all of them agree, it confirms stopping
     // the downloads and quits; if a page refuses or the downloads are kept, the quit is canceled and no window closes.
     void quit();
+    bool is_quit_in_progress() const { return m_quit_in_progress; }
     bool is_finishing_quit() const { return m_quit_is_finishing; }
     bool confirm_stop_active_downloads(QWidget* parent = nullptr);
 
@@ -108,6 +114,7 @@ public:
     QAction* quit_action();
 
 private:
+    void present_window(BrowserWindow&, WindowConfiguration const&, ShowWindow);
     explicit Application();
 
     void ask_next_window_to_close_for_private_session_restart();
@@ -131,7 +138,7 @@ private:
     virtual OwnPtr<WebView::PictureInPictureWindow> create_picture_in_picture_window(WebView::WebContentPage& requesting_page, WebView::CanonicalTraversable&, Gfx::IntSize video_size) override;
 
     virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
-    virtual Vector<WebView::ViewImplementation&> active_window_web_views() const override;
+    virtual Vector<WebView::BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const override;
     virtual Optional<WebView::ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const override;
 
     virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
@@ -173,6 +180,7 @@ private:
 
     virtual bool platform_reports_scroll_momentum() const override;
     virtual bool platform_scrolls_elastically() const override;
+    virtual bool platform_scrollbar_track_press_jumps() const override;
     virtual Vector<String> platform_preferred_languages() const override;
 
     virtual void update_tabs_display() const override;

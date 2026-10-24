@@ -268,6 +268,7 @@ GC::Ref<JS::Realm> create_test_principal_realm(JS::VM& vm)
     GC::Ptr<JS::HostObject> global_this;
     auto execution_context = Web::Bindings::create_a_new_javascript_realm(
         vm,
+        Web::HTML::CrossOriginIsolationMode::None,
         [&](JS::Realm& realm) -> GC::Ref<JS::Object> {
             window = Web::HTML::Window::create();
             global_this = Web::Bindings::create_global_object_wrapper(realm, GC::Ref { *window });
@@ -287,7 +288,8 @@ GC::Ref<JS::Realm> create_test_principal_realm(JS::VM& vm)
         nullptr,
         URL::about_blank(),
         origin,
-        {});
+        {},
+        Web::HTML::CrossOriginIsolationMode::None);
     return *realm;
 }
 
@@ -896,11 +898,11 @@ TEST_CASE(extension_world_hash_cache_scales)
 {
     auto vm = JS::VM::create();
     TestRealm extension_realm { *vm, Web::Bindings::WrapperWorld::Type::Extension };
-    Vector<GC::Ref<TestWrappable>> wrappables;
+    GC::RootVector<GC::Ref<TestWrappable>> wrappables;
     for (size_t i = 0; i < 512; ++i)
         wrappables.append(extension_realm.realm().create<TestWrappable>(extension_realm.realm()));
 
-    Vector<GC::Ref<JS::HostObject>> wrappers;
+    GC::RootVector<GC::Ref<JS::HostObject>> wrappers;
     for (auto wrappable : wrappables)
         wrappers.append(wrap_test_wrappable(extension_realm.realm(), wrappable));
 
@@ -913,7 +915,7 @@ TEST_CASE(wrapper_world_cache_reference_survives_growth)
     auto vm = JS::VM::create();
     TestRealm extension_realm { *vm, Web::Bindings::WrapperWorld::Type::Extension };
     Web::Bindings::WrapperWorldWeakValueCacheMap<TestWrappable, JS::HostObject> caches;
-    Vector<GC::Ref<TestWrappable>> keys;
+    GC::RootVector<GC::Ref<TestWrappable>> keys;
     for (size_t i = 0; i < 128; ++i)
         keys.append(extension_realm.realm().create<TestWrappable>(extension_realm.realm()));
 

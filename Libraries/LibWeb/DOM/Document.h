@@ -269,6 +269,7 @@ struct DocumentUnloadTimingInfo {
 enum class PolicyControlledFeature : u8 {
     Autoplay,
     Camera,
+    CrossOriginIsolated,
     EncryptedMedia,
     FocusWithoutUserActivation,
     Fullscreen,
@@ -1159,7 +1160,6 @@ public:
     void add_speculative_fetch_url(URL::URL url) { m_list_of_speculative_fetch_urls.set(move(url)); }
 
     void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserver&);
-    void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserver&);
     bool has_intersection_observation_targets() const;
 
     void register_resize_observer(Badge<ResizeObserver::ResizeObserver>, ResizeObserver::ResizeObserver&);
@@ -1227,7 +1227,7 @@ public:
     void dispatch_events_for_animation_if_necessary(GC::Ref<Animations::Animation>);
     void remove_replaced_animations();
 
-    WebIDL::ExceptionOr<Vector<GC::Ref<Animations::Animation>>> get_animations();
+    WebIDL::ExceptionOr<GC::RootVector<GC::Ref<Animations::Animation>>> get_animations();
     HashTable<GC::Ref<Animations::AnimationTimeline>> const& associated_animation_timelines() const { return m_associated_animation_timelines; }
     void begin_smil_time_container_once_loaded(SVG::SMILTimeContainer&);
     void schedule_svg_referenced_motion_path_update(SVG::SVGAnimateMotionElement&);
@@ -1406,7 +1406,7 @@ public:
 
     virtual Vector<Utf16FlyString> supported_property_names() const override;
     Vector<GC::Ref<DOM::Element>> const& potentially_named_elements() const { return m_potentially_named_elements; }
-    Vector<GC::Ref<DOM::Element>> named_elements_with_name(Utf16FlyString const&) const;
+    GC::RootVector<GC::Ref<DOM::Element>> named_elements_with_name(Utf16FlyString const&) const;
     static bool is_named_element_with_name(Element const&, Utf16FlyString const&);
 
     void gather_active_observations_at_depth(size_t depth);

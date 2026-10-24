@@ -312,6 +312,9 @@ bool WebContentPage::continue_navigation_population_in_selected_process(Web::HTM
     if (!navigation || !navigation->state.has<CanonicalNavigation::AcquiringResponseBody>())
         return false;
 
+    navigation->loader()->obtain_the_response_policies(*navigable);
+    navigation->loader()->check_the_responses_adherence_to_its_embedder_policy(*navigable);
+
     NonnullRefPtr history_entry = *navigation->history_entry;
     auto host_or_error = navigable->obtain_page_to_populate_document(history_entry, *navigation->loader(), *this);
     if (host_or_error.is_error()) {
@@ -798,6 +801,7 @@ void WebContentPage::did_create_child_frame(Web::HTML::CrossProcessId parent_fra
     }
 
     hosted_state.container.document_active_sandboxing_flag_set = container_document->active_sandboxing_flag_set();
+    hosted_state.container.document_embedder_policy = container_document->embedder_policy();
     traversable.adopt_nested_history_for_created_child(*parent_navigable, *container_document, frame_id);
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#create-a-new-child-navigable
@@ -1799,7 +1803,7 @@ void WebContentPage::nonchanging_navigable_history_state_updated(Web::HTML::Cros
     traversable().did_receive_nonchanging_navigable_history_state_updated(*this, operation_id, navigable_id);
 }
 
-void WebContentPage::did_request_close_of_traversable(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId source_navigable_id)
+void WebContentPage::did_request_close_of_traversable(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId source_navigable_id, Web::HTML::NavigationSourceSnapshot source_snapshot)
 {
     // window.close() from a document another process hosts: the process hosting the traversable's document runs the
     // rest of its steps.
@@ -1808,13 +1812,37 @@ void WebContentPage::did_request_close_of_traversable(Web::HTML::CrossProcessId 
 
     // The process closing it must host the navigable it closes from. The request comes through the page holding the
     // traversable's tab, which is not the source's when the two are different tabs.
-    if (!client().hosted_navigable(source_navigable_id).has_value())
+    Optional<CanonicalNavigable&> source;
+    RefPtr<WebContentPage> source_page;
+    client().for_each_page([&](WebContentPage& page) {
+        source = page.hosted_navigable(source_navigable_id);
+        if (!source.has_value())
+            return IterationDecision::Continue;
+        source_page = page;
+        return IterationDecision::Break;
+    });
+    if (!source.has_value())
+        return;
+
+    // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-window-close
+    // 6. If all the following are true:
+    //    - thisTraversable is script-closable;
+    //    - the incumbent global object's browsing context is familiar with browsingContext; and
+    //    - the incumbent global object's navigable is allowed by sandboxing to navigate thisTraversable, given sourceSnapshotParams,
+    // NB: The requesting process found these true. The UI process checks them again with the state it holds, including
+    //     the sandboxing flags of the incumbent global object's associated Document and the activation of the input it
+    //     delivered to the page hosting it.
+    Web::InitiatorSourceSnapshot source_snapshot_params {
+        .sandboxing_flags = source_snapshot.sandboxing_flags | source->active_document().active_sandboxing_flag_set(),
+        .has_transient_activation = source_snapshot.has_transient_activation && source_page->has_transient_user_activation(),
+    };
+    if (!traversable().is_script_closable() || !source->is_familiar_with(traversable()) || !source->allowed_by_sandboxing_to_navigate(traversable(), source_snapshot_params))
         return;
 
     auto endpoint = endpoint_hosting_navigable_represented_by(navigable_id);
     if (!endpoint)
         return;
-    endpoint->async_close_traversable_from_script(navigable_id, source_navigable_id);
+    endpoint->async_close_traversable_from_script(navigable_id);
 }
 
 void WebContentPage::did_inspect_dom_tree(String dom_tree)
@@ -2617,6 +2645,10 @@ Messages::WebContentClient::DidRequestNewWebViewResponse WebContentPage::did_req
             popup_sandboxing_flag_set |= sandboxing_flag_set;
     }
     traversable.active_browsing_context().set_popup_sandboxing_flag_set(popup_sandboxing_flag_set);
+
+    // 10. Set chosen's is created by web content to true.
+    if (!picture_in_picture_navigable.has_value())
+        traversable.set_is_created_by_web_content(true);
 
     auto new_page_id = Application::the().allocate_page_id();
     client().open_page_for_new_top_level_traversable(new_page_id, traversable);

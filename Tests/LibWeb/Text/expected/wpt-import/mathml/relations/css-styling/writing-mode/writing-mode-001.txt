@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Inheritance of CSS writing-mode and direction (id='horizontal-tb_rtl')
+Pass	Layout of mrow (id='horizontal-tb_rtl')

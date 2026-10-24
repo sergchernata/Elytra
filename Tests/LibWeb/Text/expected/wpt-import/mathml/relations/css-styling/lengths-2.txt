@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	Units
+Pass	Trimming of space
+Pass	Non-negative numbers
+Pass	Non-positive numbers
+Pass	Legacy namedspaces
+Pass	Legacy numbers

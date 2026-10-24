@@ -1,0 +1,14 @@
+Harness status: OK
+
+Found 9 tests
+
+9 Pass
+Pass	Empty mspace
+Pass	Different widths
+Pass	Different heights
+Pass	Different depths
+Pass	Various combinations of height, depth and width.
+Pass	Preferred width
+Pass	dynamic attributes (remove)
+Pass	dynamic attributes (attach)
+Pass	dynamic attributes (modify)

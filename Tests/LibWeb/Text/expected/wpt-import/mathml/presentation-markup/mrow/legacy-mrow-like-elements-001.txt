@@ -1,0 +1,21 @@
+Harness status: OK
+
+Found 16 tests
+
+16 Pass
+Pass	Element is laid out as an mrow with only first child displayed (id=semantics)
+Pass	Computed display of children (id=semantics)
+Pass	Element is laid out as an mrow with only first child displayed (id=semantics-annotations)
+Pass	Computed display of children (id=semantics-annotations)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction)
+Pass	Computed display of children (id=maction)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction-toggle)
+Pass	Computed display of children (id=maction-toggle)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction-toggle-selection)
+Pass	Computed display of children (id=maction-toggle-selection)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction-statusline)
+Pass	Computed display of children (id=maction-statusline)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction-tooltip)
+Pass	Computed display of children (id=maction-tooltip)
+Pass	Element is laid out as an mrow with only first child displayed (id=maction-input)
+Pass	Computed display of children (id=maction-input)

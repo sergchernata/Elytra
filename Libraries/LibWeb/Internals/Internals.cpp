@@ -116,6 +116,7 @@
 namespace Web::Internals {
 
 static u16 s_echo_server_port { 0 };
+static u16 s_https_echo_server_port { 0 };
 
 static Web::WheelDeltaPrecision wheel_delta_precision_from(bool precise)
 {
@@ -858,7 +859,7 @@ void Internals::wheel(GC::Ref<WebIDL::Promise> promise, double x, double y, doub
         return;
     }
 
-    Vector<GC::Ref<WebIDL::Promise>> scroll_promises;
+    GC::RootVector<GC::Ref<WebIDL::Promise>> scroll_promises;
     for (auto& navigable : HTML::all_local_navigables()) {
         if (&navigable->page() == &page && !navigable->has_been_destroyed())
             navigable->wait_for_wheel_scrolls(scroll_promises);
@@ -1526,6 +1527,16 @@ u16 Internals::get_echo_server_port()
 void Internals::set_echo_server_port(u16 const port)
 {
     s_echo_server_port = port;
+}
+
+u16 Internals::get_https_echo_server_port()
+{
+    return s_https_echo_server_port;
+}
+
+void Internals::set_https_echo_server_port(u16 const port)
+{
+    s_https_echo_server_port = port;
 }
 
 WebIDL::ExceptionOr<void> Internals::set_hsts_policy(Utf16String const& domain, u64 max_age, bool include_sub_domains)

@@ -23,7 +23,7 @@ use crate::css::css_string::CssString;
 use crate::css::css_tokenizer::ParserTokenKind;
 use crate::css::math_functions::{MathFunction, math_function_from_name};
 use crate::css::parser::component_value::{ComponentKind, ComponentValue};
-use crate::css::parser::positions_shapes_parser::parse_anchor_function;
+use crate::css::parser::positions_shapes_parser::{parse_anchor_function, parse_anchor_size_function};
 use crate::css::property_metadata::property_name;
 use crate::css::style_compute::LENGTH_UNIT_NAMES;
 use crate::css::style_value::{RetainedStyleValueData, StyleValueData};
@@ -44,6 +44,8 @@ pub(crate) struct CalcParserContext<'a> {
     pub property: u16,
     pub random_function_index: Option<&'a RandomFunctionIndex>,
     pub allowed_color_channels: u64,
+    /// Whether the calc-size() size keyword may appear, as in a calc-size() calculation.
+    pub allow_size_keyword: bool,
     pub allow_random_functions: bool,
     pub parse_context: Option<&'a ParseContext<'a>>,
 }
@@ -56,6 +58,7 @@ impl CalcParserContext<'_> {
             property: 0,
             random_function_index: None,
             allowed_color_channels: 0,
+            allow_size_keyword: false,
             allow_random_functions: false,
             parse_context: None,
         }
@@ -221,9 +224,8 @@ fn parse_non_math_function(
             numeric_type: CalcNumericType::default(),
         }));
     }
-    // NB: Only anchor() becomes a NonMathFunction calc leaf. anchor-size() remains a native
-    //     style value.
-    let parsed = parse_anchor_function(parse_context, context.property, value);
+    let parsed = parse_anchor_function(parse_context, context.property, value)
+        .or_else(|| parse_anchor_size_function(parse_context, context.property, value));
     let Some(parsed) = parsed else {
         return Err(CalcParseError::NotHandled);
     };
@@ -240,6 +242,9 @@ fn parse_calc_keyword(identifier: &[u16], context: CalcParserContext) -> Result<
         && context.allowed_color_channels & (1 << channel) != 0
     {
         return Ok(Arc::new(CalcNode::ChannelKeyword(channel)));
+    }
+    if context.allow_size_keyword && equals_ascii_case_insensitive(identifier, b"size") {
+        return Ok(Arc::new(CalcNode::SizeKeyword));
     }
     let value = if equals_ascii_case_insensitive(identifier, b"e") {
         std::f64::consts::E
@@ -783,6 +788,7 @@ mod tests {
             property: 1,
             random_function_index: Some(&random_function_index),
             allowed_color_channels: 0,
+            allow_size_keyword: false,
             allow_random_functions: true,
             parse_context: None,
         };

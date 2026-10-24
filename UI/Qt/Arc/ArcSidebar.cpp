@@ -1022,12 +1022,17 @@ void ArcSidebar::set_tab_node(Tab& tab, QString const& node)
 // tab's history (the tab's URL and its place in history update separately, in either order).
 static int history_index(Tab& tab)
 {
+    // A tab restored but not shown yet has no view (or history) until it's shown.
+    if (!tab.is_loaded())
+        return -1;
     auto& view = tab.view();
     return view.has_traversable() ? static_cast<int>(view.traversable().session_history().current_used_step_index()) : -1;
 }
 
 static QString url_at_history_index(Tab& tab, int index)
 {
+    if (!tab.is_loaded())
+        return {};
     auto& view = tab.view();
     if (!view.has_traversable() || index < 0)
         return {};
@@ -1087,8 +1092,8 @@ bool ArcSidebar::pinned_is_away(Tab& tab, QString const& pinned_url)
 
 QString ArcSidebar::url_of(Tab const& tab)
 {
-    auto const& url = tab.view().url();
-    return qstring_from_ak_string(url.serialize());
+    // Tab::url() also knows a restored tab's address before its view exists.
+    return qstring_from_ak_string(tab.url().serialize());
 }
 
 // As a page starts loading, its tab's title is its address until the page's own title arrives. Rows keep the title
@@ -1330,6 +1335,8 @@ Tab* ArcSidebar::take_spare_tab(QString const& profile)
 bool ArcSidebar::tab_is_in_profile(Tab const& tab, QString const& profile)
 {
     auto expected = session_for_profile(profile);
+    if (!tab.is_loaded())
+        return true; // Not shown yet: it takes the profile it's placed in when it loads.
     return &tab.view().session() == (expected ? expected.ptr() : &WebView::Application::default_session());
 }
 
@@ -1445,6 +1452,8 @@ static constexpr char const* CLOSING_PROPERTY = "arc_closing";
 
 bool ArcSidebar::should_open_picture_in_picture_leaving(Tab& tab)
 {
+    if (!tab.is_loaded())
+        return false;
     auto& view = tab.view();
     return !tab.property(CLOSING_PROPERTY).toBool() && m_tabs.index_of(&tab) >= 0
         && view.audio_play_state() == Web::HTML::AudioPlayState::Playing
@@ -1458,7 +1467,7 @@ void ArcSidebar::update_auto_picture_in_picture(Tab* previous, Tab& current)
         previous->setProperty(AUTO_PICTURE_IN_PICTURE_PROPERTY, true);
         previous->view().enter_picture_in_picture_for_playing_video();
     }
-    if (current.property(AUTO_PICTURE_IN_PICTURE_PROPERTY).toBool()) {
+    if (current.property(AUTO_PICTURE_IN_PICTURE_PROPERTY).toBool() && current.is_loaded()) {
         current.setProperty(AUTO_PICTURE_IN_PICTURE_PROPERTY, false);
         current.view().exit_picture_in_picture();
     }
@@ -1489,7 +1498,7 @@ void ArcSidebar::picture_in_picture_windows_changed()
 
 static bool is_playing_sound(Tab& tab)
 {
-    return tab.view().audio_play_state() == Web::HTML::AudioPlayState::Playing;
+    return tab.is_loaded() && tab.view().audio_play_state() == Web::HTML::AudioPlayState::Playing;
 }
 
 void ArcSidebar::update_mini_player()
@@ -2309,7 +2318,7 @@ void ArcSidebar::place_tabs_in_their_profiles()
         auto profile = profile_of_tab(*tab);
         auto expected = session_for_profile(profile);
         auto* expected_session = expected ? expected.ptr() : &WebView::Application::default_session();
-        if (&tab->view().session() == expected_session || tab->view().is_private() == WebView::IsPrivate::Yes || is_blank(*tab) || tab->property("arc_replaced").toBool())
+        if (!tab->is_loaded() || &tab->view().session() == expected_session || tab->view().is_private() == WebView::IsPrivate::Yes || is_blank(*tab) || tab->property("arc_replaced").toBool())
             continue;
 
         auto url = tab->view().url();

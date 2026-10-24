@@ -120,7 +120,7 @@ void Navigation::visit_edges(JS::Cell::Visitor& visitor)
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-navigation-entries
-Vector<GC::Ref<NavigationHistoryEntry>> Navigation::entries() const
+ReadonlySpan<GC::Ref<NavigationHistoryEntry>> Navigation::entries() const
 {
     // The entries() method steps are:
 
@@ -1165,6 +1165,10 @@ bool Navigation::inner_navigate_event_firing_algorithm(
     event_init.has_ua_visual_transition = false;
 
     // 16. Initialize event's sourceElement to sourceElement.
+    // AD-HOC: Do not expose an element from a cross-origin initiator to this document. All engines implement this.
+    //         See https://github.com/whatwg/html/pull/13090
+    if (source_element && !source_element->document().origin().is_same_origin_domain(document.origin()))
+        source_element = nullptr;
     event_init.source_element = source_element;
 
     // 18. Initialize event's signal to event's abort controller's signal.
@@ -1584,7 +1588,7 @@ void Navigation::update_the_navigation_api_entries_for_a_same_document_navigatio
     auto old_current_nhe = current_entry();
 
     // 3. Let disposedNHEs be a new empty list.
-    Vector<GC::Ref<NavigationHistoryEntry>> disposed_nhes;
+    GC::RootVector<GC::Ref<NavigationHistoryEntry>> disposed_nhes;
 
     // 4. If navigationType is "traverse", then:
     if (navigation_type == NavigationType::Traverse) {

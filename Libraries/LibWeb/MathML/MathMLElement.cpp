@@ -9,8 +9,9 @@
 #include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
-#include <LibWeb/HTML/Numbers.h>
+#include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
+#include <LibWeb/Layout/LayoutRustBridge.h>
 #include <LibWeb/MathML/AttributeNames.h>
 #include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/MathML/TagNames.h>
@@ -30,6 +31,28 @@ void MathMLElement::attribute_changed(Utf16FlyString const& local_name, Optional
 {
     Base::attribute_changed(local_name, old_value, value, namespace_);
     HTMLOrSVGOrMathMLElement::attribute_changed(local_name, old_value, value, namespace_);
+
+    // https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-attributes:concept-element-attributes-change-ext
+    // 1. If namespace is not null, or localName is not the name of an event handler content attribute on element, then return.
+    if (!namespace_.has_value() && local_name.view().starts_with(u"on"sv)) {
+#undef __ENUMERATE
+#define __ENUMERATE(attribute_name, event_name)                     \
+    if (local_name == HTML::AttributeNames::attribute_name) {       \
+        element_event_handler_attribute_changed(local_name, value); \
+    }
+        ENUMERATE_GLOBAL_EVENT_HANDLERS(__ENUMERATE)
+#undef __ENUMERATE
+    }
+
+    // NB: These attributes are read by the layout of the element's box.
+    if (old_value != value && !namespace_.has_value()
+        && local_name.is_one_of(AttributeNames::width, AttributeNames::height, AttributeNames::depth, AttributeNames::lspace, AttributeNames::rspace,
+            AttributeNames::voffset, AttributeNames::linethickness, AttributeNames::minsize, AttributeNames::maxsize, AttributeNames::form,
+            AttributeNames::stretchy, AttributeNames::symmetric, AttributeNames::largeop, AttributeNames::movablelimits, AttributeNames::accent,
+            AttributeNames::accentunder)) {
+        Layout::publish_math_attribute_facts(*this);
+        set_needs_layout_update(DOM::SetNeedsLayoutReason::MathMLAttributeChange);
+    }
 }
 
 WebIDL::ExceptionOr<void> MathMLElement::cloned(DOM::Node& node, bool clone_children) const
@@ -60,6 +83,8 @@ void MathMLElement::visit_edges(JS::Cell::Visitor& visitor)
 
 bool MathMLElement::is_presentational_hint(Utf16FlyString const& name) const
 {
+    if (local_name() == TagNames::mpadded && name == AttributeNames::width)
+        return true;
     return first_is_one_of(name, AttributeNames::dir, AttributeNames::mathcolor, AttributeNames::mathbackground,
         AttributeNames::mathsize, AttributeNames::displaystyle, AttributeNames::scriptlevel);
 }
@@ -67,6 +92,15 @@ bool MathMLElement::is_presentational_hint(Utf16FlyString const& name) const
 void MathMLElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
     Base::apply_presentational_hints(properties);
+    // https://w3c.github.io/mathml-core/#inner-box-and-requested-parameters
+    // If the width attribute is present, valid and not a percentage then that attribute is used as a presentational
+    // hint setting the element's width property to the corresponding value.
+    if (local_name() == TagNames::mpadded) {
+        if (auto width = attribute(AttributeNames::width); width.has_value()) {
+            if (auto value = parse_css_type(CSS::Parser::ParsingParams { document() }, width->utf16_view(), CSS::ValueType::Length))
+                properties.append({ .property_id = CSS::PropertyID::Width, .value = value.release_nonnull() });
+        }
+    }
     for_each_attribute([&](Utf16FlyString const& name, Utf16View value) {
         if (name == AttributeNames::dir) {
             // https://w3c.github.io/mathml-core/#attributes-common-to-html-and-mathml-elements
@@ -114,11 +148,14 @@ void MathMLElement::apply_presentational_hints(Vector<CSS::StyleProperty>& prope
             // In that case the user agent is expected to treat the scriptlevel attribute as a presentational hint
             // setting the element's math-depth property to the corresponding value. More precisely, +<U>, -<U> and <U>
             // are respectively mapped to add(<U>) add(<-U>) and <U>.
-            if (Optional<Utf16View> parsed_value = HTML::parse_integer_digits(value); parsed_value.has_value()) {
-                auto string_value = parsed_value.value();
-                if (auto integer_value = parsed_value->to_number<i32>(TrimWhitespace::No); integer_value.has_value()) {
+            // NB: The whole value has to be an optional sign followed by ASCII digits.
+            auto digits = value;
+            if (!digits.is_empty() && (digits.code_unit_at(0) == '+' || digits.code_unit_at(0) == '-'))
+                digits = digits.substring_view(1);
+            if (!digits.is_empty() && all_of(digits, [](u32 code_point) { return is_ascii_digit(code_point); })) {
+                if (auto integer_value = value.to_number<i32>(TrimWhitespace::No); integer_value.has_value()) {
                     auto style_value = [&]() -> NonnullRefPtr<CSS::StyleValue const> {
-                        if (string_value.code_unit_at(0) == '+' || string_value.code_unit_at(0) == '-')
+                        if (value.code_unit_at(0) == '+' || value.code_unit_at(0) == '-')
                             return CSS::FunctionStyleValue::create("add"_utf16_fly_string, CSS::IntegerStyleValue::create(integer_value.release_value()));
 
                         return CSS::IntegerStyleValue::create(integer_value.release_value());

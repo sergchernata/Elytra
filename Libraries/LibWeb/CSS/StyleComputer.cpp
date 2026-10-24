@@ -99,6 +99,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/Layout/LayoutRustBridge.h>
 #include <LibWeb/Layout/Node.h>
+#include <LibWeb/MathML/MathMLElement.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Page/RenderingStats.h>
@@ -263,6 +264,8 @@ void StyleComputer::register_style_node(StyleNodeID style_node_id, DOM::Node& no
     // had one published nothing.
     if (auto* svg_element = as_if<SVG::SVGElement>(node))
         Layout::publish_svg_attribute_facts(*svg_element);
+    else if (auto* mathml_element = as_if<MathML::MathMLElement>(node))
+        Layout::publish_math_attribute_facts(*mathml_element);
 }
 
 static void ensure_slot(auto& nodes, u32 index)
@@ -988,10 +991,10 @@ void StyleComputer::apply_animation_definitions(DOM::AbstractElement& abstract_e
     //     the animations this element holds, which it publishes. See match_existing_animations(). So are the
     //     keyframes each definition runs, from the `@keyframes` every style scope publishes.
 
-    auto existing_animations = *element_animations;
+    GC::RootVector<GC::Ref<CSSAnimation>> existing_animations { element_animations->span() };
     Vector<bool> existing_animation_was_claimed;
     existing_animation_was_claimed.resize(existing_animations.size());
-    Vector<GC::Ref<CSSAnimation>> new_animations;
+    GC::RootVector<GC::Ref<CSSAnimation>> new_animations;
 
     for (size_t i = animation_definitions.size(); i-- > 0;) {
         auto const& definition = animation_definitions[i];
@@ -1239,8 +1242,8 @@ RefPtr<ComputedStyleWorkingSet> StyleComputer::start_needed_transitions(Layout::
         return StyleValue::adopt_rust_style_value_data(StyleValueFFI::rust_style_value_retain(value));
     };
 
-    Vector<GC::Ref<Animations::KeyframeEffect>> newly_started_transition_effects;
-    HashTable<Animations::KeyframeEffect*> replaced_transition_effects;
+    GC::RootVector<GC::Ref<Animations::KeyframeEffect>> newly_started_transition_effects;
+    GC::RootHashTable<Animations::KeyframeEffect*> replaced_transition_effects;
     auto on_actions = [&](ReadonlySpan<StyleValueFFI::FfiTransitionAction> actions) {
         for (auto const& action : actions) {
             auto property_id = static_cast<PropertyID>(action.property_id);
@@ -1933,6 +1936,7 @@ ComputationContext StyleComputer::make_computation_context_for_property(Layout::
     case PropertyID::FontKerning:
     case PropertyID::FontOpticalSizing:
     case PropertyID::FontSize:
+    case PropertyID::FontSizeAdjust:
     case PropertyID::FontStyle:
     case PropertyID::FontVariantAlternates:
     case PropertyID::FontVariantCaps:
@@ -2071,7 +2075,7 @@ void StyleComputer::publish_sampled_animation_overlays(Layout::BegunRead const& 
         GC::Ref<DOM::Document const> document;
         TreeScopeID tree_scope;
     };
-    Vector<OverlayFont, 1> fonts;
+    GC::ConservativeVector<OverlayFont, 1> fonts;
     Vector<StyleEngineFFI::FfiAnimationOverlayPublicationInput, 1> inputs;
     fonts.ensure_capacity(overlays.size());
     inputs.ensure_capacity(overlays.size());

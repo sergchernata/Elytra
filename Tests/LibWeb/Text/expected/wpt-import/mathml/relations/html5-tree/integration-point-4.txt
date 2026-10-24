@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	mspace layout in SVG foreignObject
+Pass	mfrac layout in SVG foreignObject

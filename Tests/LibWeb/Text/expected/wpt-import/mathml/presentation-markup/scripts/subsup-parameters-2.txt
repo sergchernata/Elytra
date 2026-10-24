@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 3 tests
+
+1 Pass
+2 Fail
+Pass	Null Italic Correction
+Fail	NonNull Italic Correction (MathGlyphVariantRecord)
+Fail	NonNull Italic Correction (GlyphAssembly)

@@ -1,0 +1,44 @@
+Harness status: OK
+
+Found 39 tests
+
+39 Pass
+Pass	The document root element should be focusable.
+Pass	rect should not be focusable.
+Pass	svg should not be focusable.
+Pass	a should not be focusable.
+Pass	a[href] should be focusable.
+Pass	iframe should be focusable.
+Pass	audio[controls] should be focusable.
+Pass	video[controls] should be focusable.
+Pass	canvas[tabindex] should be focusable.
+Pass	circle[tabindex] should be focusable.
+Pass	ellipse[tabindex] should be focusable.
+Pass	foreignObject[tabindex] should be focusable.
+Pass	g[tabindex] should be focusable.
+Pass	image[tabindex] should be focusable.
+Pass	line[tabindex] should be focusable.
+Pass	mesh[tabindex] should be focusable.
+Pass	path[tabindex] should be focusable.
+Pass	polygon[tabindex] should be focusable.
+Pass	rect[tabindex] should be focusable.
+Pass	svg[tabindex] should be focusable.
+Pass	switch[tabindex] should be focusable.
+Pass	text[tabindex] should be focusable.
+Pass	textPath[tabindex] should be focusable.
+Pass	tspan[tabindex] should be focusable.
+Pass	unknown[tabindex] should be focusable.
+Pass	use[tabindex] should be focusable.
+Pass	clipPath[tabindex] should not be focusable.
+Pass	defs[tabindex] should not be focusable.
+Pass	desc[tabindex] should not be focusable.
+Pass	linearGradient[tabindex] should not be focusable.
+Pass	marker[tabindex] should not be focusable.
+Pass	mask[tabindex] should not be focusable.
+Pass	metadata[tabindex] should not be focusable.
+Pass	pattern[tabindex] should not be focusable.
+Pass	radialGradient[tabindex] should not be focusable.
+Pass	script[tabindex] should not be focusable.
+Pass	style[tabindex] should not be focusable.
+Pass	title[tabindex] should not be focusable.
+Pass	symbol[tabindex] should not be focusable.

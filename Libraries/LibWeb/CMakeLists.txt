@@ -38,8 +38,6 @@ set(SOURCES
     Compositor/CompositorHost.cpp
     Compositor/NavigablePresenter.cpp
     Compositor/RenderClock.cpp
-    Compression/CompressionStream.cpp
-    Compression/DecompressionStream.cpp
     ContentSecurityPolicy/BlockingAlgorithms.cpp
     ContentSecurityPolicy/Directives/BaseUriDirective.cpp
     ContentSecurityPolicy/Directives/ChildSourceDirective.cpp
@@ -137,6 +135,8 @@ set(SOURCES
     CSS/CSSPageRule.cpp
     CSS/CSSPageDescriptors.cpp
     CSS/CSSPerspective.cpp
+    CSS/CSSPositionTryDescriptors.cpp
+    CSS/CSSPositionTryRule.cpp
     CSS/CSSPropertyRule.cpp
     CSS/CSSRotate.cpp
     CSS/CSSRule.cpp
@@ -357,10 +357,6 @@ set(SOURCES
     Editing/StyledMarkupSerializer.cpp
     Editing/VisiblePosition.cpp
     Editing/ReplaceSelection.cpp
-    Encoding/TextDecoderCommon.cpp
-    Encoding/TextDecoderStream.cpp
-    Encoding/TextEncoderCommon.cpp
-    Encoding/TextEncoderStream.cpp
     EncryptedMediaExtensions/Algorithms.cpp
     EncryptedMediaExtensions/MediaKeySystemAccess.cpp
     EntriesAPI/FileSystemEntry.cpp
@@ -395,7 +391,6 @@ set(SOURCES
     Fetch/Infrastructure/PortBlocking.cpp
     Fetch/Infrastructure/PreflightCache.cpp
     Fetch/Infrastructure/Task.cpp
-    Fetch/Infrastructure/URL.cpp
     Fetch/Request.cpp
     Fetch/Response.cpp
     FileAPI/Blob.cpp
@@ -766,7 +761,6 @@ set(SOURCES
     MediaSourceExtensions/MediaSourceHandle.cpp
     MediaSourceExtensions/SourceBuffer.cpp
     MediaSourceExtensions/SourceBufferList.cpp
-    MimeSniff/Resource.cpp
     MixedContent/AbstractOperations.cpp
     Namespace.cpp
     NavigationTiming/EntryNames.cpp
@@ -821,10 +815,10 @@ set(SOURCES
     ResizeObserver/ResizeObserverEntry.cpp
     ResizeObserver/ResizeObserverSize.cpp
     ResourceTiming/PerformanceResourceTiming.cpp
-    SecureContexts/AbstractOperations.cpp
     Selection/Selection.cpp
     Selection/CaretNavigation.cpp
     Selection/SelectionModifier.cpp
+    ServerTiming/PerformanceServerTiming.cpp
     ServiceWorker/Cache.cpp
     ServiceWorker/CacheStorage.cpp
     ServiceWorker/EventNames.cpp
@@ -852,26 +846,8 @@ set(SOURCES
     StorageAPI/StorageKey.cpp
     StorageAPI/StorageManager.cpp
     StorageAPI/StorageShelf.cpp
-    Streams/AbstractOperations.cpp
-    Streams/GenericTransformStream.cpp
-    Streams/ReadableByteStreamController.cpp
     Streams/ReadableStream.cpp
-    Streams/ReadableStreamAsyncIterator.cpp
-    Streams/ReadableStreamBYOBReader.cpp
-    Streams/ReadableStreamBYOBRequest.cpp
-    Streams/ReadableStreamDefaultController.cpp
-    Streams/ReadableStreamDefaultReader.cpp
-    Streams/ReadableStreamGenericReader.cpp
-    Streams/ReadableStreamOperations.cpp
-    Streams/ReadableStreamPipeTo.cpp
-    Streams/ReadableStreamTee.cpp
     Streams/TransformStream.cpp
-    Streams/TransformStreamDefaultController.cpp
-    Streams/TransformStreamOperations.cpp
-    Streams/WritableStream.cpp
-    Streams/WritableStreamDefaultController.cpp
-    Streams/WritableStreamDefaultWriter.cpp
-    Streams/WritableStreamOperations.cpp
     SVG/AttributeNames.cpp
     SVG/AttributeParsing.cpp
     SVG/Path.cpp
@@ -1136,7 +1112,7 @@ target_sources(LibWeb PRIVATE $<TARGET_OBJECTS:LibJSObjects>)
 target_compile_definitions(LibWeb PRIVATE LibJS_EXPORTS)
 target_link_libraries(LibWeb PUBLIC LibCompositing LibWebCommon LibJSHeaders)
 
-target_link_libraries(LibWeb PRIVATE LibCore LibCompress LibCrypto LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibAudio LibMedia LibMediaClient LibWasm LibXML LibURL LibTLS LibRequests LibGC LibImageDecoderClient LibThreading LibXml2::LibXml2)
+target_link_libraries(LibWeb PRIVATE LibCore LibCrypto LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibAudio LibMedia LibMediaClient LibWasm LibXML LibURL LibTLS LibRequests LibGC LibImageDecoderClient LibThreading LibXml2::LibXml2)
 
 # LibWeb still includes ANGLE's GLES headers for WebGL constants and types, but
 # the actual GL entry points live in the Compositor. Copy only ANGLE's compile

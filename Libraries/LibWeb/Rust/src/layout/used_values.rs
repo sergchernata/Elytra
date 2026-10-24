@@ -244,6 +244,7 @@ pub(crate) struct UsedValuesRareData {
     pub(crate) svg: CommittedSvgFacts,
     pub(crate) grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
     pub(crate) flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
+    pub(crate) multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
     pub(crate) used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
     pub(crate) collapsed_table_borders: Option<std::sync::Arc<table_formatting_context::OwnedCollapsedTableBorders>>,
     pub(crate) abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
@@ -257,6 +258,7 @@ impl UsedValuesRareData {
             svg,
             grid_layout_data,
             flex_layout_data,
+            multicol_layout_data,
             used_grid_tracks,
             collapsed_table_borders,
             abspos_layout_inputs,
@@ -270,6 +272,7 @@ impl UsedValuesRareData {
             && svg == CommittedSvgFacts::default()
             && grid_layout_data.is_none()
             && flex_layout_data.is_none()
+            && multicol_layout_data.is_none()
             && used_grid_tracks.is_none()
             && collapsed_table_borders.is_none()
         {
@@ -288,6 +291,9 @@ impl UsedValuesRareData {
         }
         if let Some(data) = flex_layout_data {
             rare.flex_layout_data = Some(data);
+        }
+        if let Some(data) = multicol_layout_data {
+            rare.multicol_layout_data = Some(data);
         }
         if let Some(tracks) = used_grid_tracks {
             rare.used_grid_tracks = Some(tracks);
@@ -371,6 +377,8 @@ pub(crate) struct UsedValues {
 
     pub(crate) line_data: RefCell<LineDataState>,
     pub(crate) rare_data: LazyRefCell<UsedValuesRareData>,
+    /// The anchor-size() resolutions of an absolutely positioned box, set once as the abspos engine places it.
+    pub(crate) anchor_resolved_values: std::cell::OnceCell<Box<style_values::AnchorResolvedValues>>,
     pub(crate) held_committed_fragment: fragment_tree::HeldCommittedFragmentCell,
 }
 
@@ -422,6 +430,7 @@ impl Default for UsedValues {
             has_descendant_that_depends_on_percentage_block_size: Cell::new(false),
             line_data: RefCell::new(LineDataState::Empty),
             rare_data: LazyRefCell::new(),
+            anchor_resolved_values: std::cell::OnceCell::new(),
             held_committed_fragment: fragment_tree::HeldCommittedFragmentCell::default(),
         }
     }
@@ -971,6 +980,39 @@ pub(crate) fn create_used_values(
             return None;
         }
 
+        // https://drafts.csswg.org/css-sizing-3/#stretch-fit-sizing
+        // NB: A stretch size is definite where percentages resolve to a definite value, and sizes the margin box to
+        //     fill the containing block exactly, treating auto margins as zero.
+        if size.is_stretch() && size.calc_size().is_none() {
+            if !containing_block_has_definite_size(axis) {
+                return None;
+            }
+            let inline_basis = percentage_basis_inline_size.unwrap_or_default();
+            let margins_borders_and_padding = match axis {
+                Axis::Inline => {
+                    style.margin_left().to_px(inline_basis)
+                        + style.border_left_width()
+                        + style.padding_left().to_px(inline_basis)
+                        + style.padding_right().to_px(inline_basis)
+                        + style.border_right_width()
+                        + style.margin_right().to_px(inline_basis)
+                }
+                Axis::Block => {
+                    let (margin_top, margin_bottom) =
+                        crate::layout::sizing_context::stretch_fit_block_margins(callbacks, node, inline_basis);
+                    margin_top
+                        + style.border_top_width()
+                        + style.padding_top().to_px(inline_basis)
+                        + style.padding_bottom().to_px(inline_basis)
+                        + style.border_bottom_width()
+                        + margin_bottom
+                }
+            };
+            return Some(clamp_to_max_dimension_value(
+                (containing_block_size_for_axis(axis) - margins_borders_and_padding)
+                    .max(crate::layout::CssPixels::default()),
+            ));
+        }
         if !size.is_length_percentage() {
             return None;
         }

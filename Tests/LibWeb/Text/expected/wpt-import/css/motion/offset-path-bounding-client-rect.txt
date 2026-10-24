@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Bounding client rect for #blue
+Pass	Bounding client rect for #purple

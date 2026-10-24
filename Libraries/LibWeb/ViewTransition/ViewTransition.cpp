@@ -27,6 +27,12 @@
 
 namespace Web::ViewTransition {
 
+static bool has_more_than_one_box_fragment(Layout::BegunRead const& read, DOM::Element const& element)
+{
+    auto const* layout_node = element.layout_node(read);
+    return layout_node && Painting::has_committed_box(*layout_node) && Painting::box_fragment_count(*layout_node) > 1;
+}
+
 CSS::RustStyleValueHandle make_translation_transform(CSSPixels x, CSSPixels y)
 {
     CSS::StyleValueFFI::StyleValueData const* values[] = {
@@ -244,7 +250,7 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
     auto used_transition_names = AK::OrderedHashTable<Utf16FlyString>();
 
     // 4. Let captureElements be a new list of elements.
-    auto capture_elements = AK::Vector<DOM::Element&>();
+    GC::RootVector<GC::Ref<DOM::Element>> capture_elements;
 
     // 5. If the snapshot containing block size exceeds an implementation-defined maximum, then return failure.
     auto snapshot_containing_block = document.navigable()->snapshot_containing_block();
@@ -260,12 +266,13 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
     auto result = document.document_element()->for_each_in_inclusive_subtree_of_type<DOM::Element>([&](auto& element) {
         // NOTE: Step 1 is handled at the end of this function.
 
-        // 2. If element has more than one box fragment, then continue.
-        // FIXME: Implement this once we have fragments.
-
         // OPTIMIZATION: Continue early if the element is not rendered, so we don't have to ensure the computed
         //               properties are up to date.
         if (element.not_rendered(read))
+            return TraversalDecision::Continue;
+
+        // 2. If element has more than one box fragment, then continue.
+        if (has_more_than_one_box_fragment(read, element))
             return TraversalDecision::Continue;
 
         // 3. Let transitionName be the element’s document-scoped view transition name.
@@ -278,7 +285,7 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
         // 5. If usedTransitionNames contains transitionName, then:
         if (used_transition_names.contains(transition_name.value())) {
             // 1. For each element in captureElements:
-            for (auto& element : capture_elements)
+            for (DOM::Element& element : capture_elements)
                 // 1. Set element’s captured in a view transition to false.
                 element.set_captured_in_a_view_transition(false);
 
@@ -305,7 +312,7 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
         return Error::from_string_literal("Cannot include multiple elements with the same view-transition-name in a view transition.");
 
     // 8. For each element in captureElements:
-    for (auto& element : capture_elements) {
+    for (DOM::Element& element : capture_elements) {
         // 1. Let capture be a new captured element struct.
         auto capture = GC::Heap::the().allocate<CapturedElement>();
 
@@ -355,7 +362,7 @@ ErrorOr<void> ViewTransition::capture_the_old_state()
     }
 
     // 9. For each element in captureElements:
-    for (auto& element : capture_elements) {
+    for (DOM::Element& element : capture_elements) {
         // 1. Set element’s captured in a view transition to false.
         element.set_captured_in_a_view_transition(false);
     }
@@ -399,7 +406,8 @@ ErrorOr<void> ViewTransition::capture_the_new_state()
             return TraversalDecision::Continue;
 
         // 4. If element has more than one box fragment, then continue.
-        // FIXME: Implement this once we have fragments
+        if (has_more_than_one_box_fragment(read, element))
+            return TraversalDecision::Continue;
 
         // 5. If usedTransitionNames contains transitionName, then return failure.
         if (used_transition_names.contains(transition_name.value()))
@@ -891,9 +899,10 @@ ErrorOr<void> ViewTransition::update_pseudo_element_styles()
             }
 
             //    - capturedElement has more than one box fragment.
-            // FIXME: Implement this once we have fragments.
             // FIXME: capturedElement would not have box fragments. Update this once the spec issue for that has been resolved:
             //        https://github.com/w3c/csswg-drafts/issues/11991
+            if (has_more_than_one_box_fragment(read, *captured_element->new_element))
+                return Error::from_string_literal("capturedElement has more than one box fragment.");
 
             // NOTE: Other rendering constraints are enforced via capturedElement’s new element being
             //       captured in a view transition.

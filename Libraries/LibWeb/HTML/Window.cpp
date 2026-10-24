@@ -399,7 +399,6 @@ void Window::finalize()
 {
     Base::finalize();
     WindowOrWorkerGlobalScopeMixin::finalize();
-    all_windows().remove(*this);
 }
 
 Window::~Window() = default;
@@ -1079,7 +1078,7 @@ GC::Ptr<LocalNavigable> Window::navigable() const
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewer-plugin-objects
-Vector<GC::Ref<Plugin>> Window::pdf_viewer_plugin_objects()
+ReadonlySpan<GC::Ref<Plugin>> Window::pdf_viewer_plugin_objects()
 {
     // Each Window object has a PDF viewer plugin objects list. If the user agent's PDF viewer supported is false, then it is the empty list.
     // Otherwise, it is a list containing five Plugin objects, whose names are, respectively:
@@ -1105,7 +1104,7 @@ Vector<GC::Ref<Plugin>> Window::pdf_viewer_plugin_objects()
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewer-mime-type-objects
-Vector<GC::Ref<MimeType>> Window::pdf_viewer_mime_type_objects()
+ReadonlySpan<GC::Ref<MimeType>> Window::pdf_viewer_mime_type_objects()
 {
     // Each Window object has a PDF viewer mime type objects list. If the user agent's PDF viewer supported is false, then it is the empty list.
     // Otherwise, it is a list containing two MimeType objects, whose types are, respectively:
@@ -1228,10 +1227,12 @@ void Window::close()
     // 4. Let browsingContext be thisTraversable's active browsing context.
     // NB: Familiarity is checked on the navigables whose active browsing contexts these are.
 
-    // 5. Let sourceSnapshotParams be the result of snapshotting source snapshot params given thisTraversable's active document.
-    auto source_snapshot_params = snapshot_source_snapshot_params(traversable->active_document());
-
     auto& incumbent_global_object = HTML::incumbent_window();
+
+    // 5. Let sourceSnapshotParams be the result of snapshotting source snapshot params given the incumbent global object's
+    //    associated Document.
+    auto source_snapshot_params = snapshot_source_snapshot_params(incumbent_global_object.associated_document());
+
     auto incumbent_navigable = incumbent_global_object.navigable();
     if (!incumbent_navigable)
         return;
@@ -2282,7 +2283,7 @@ GC::Ref<CustomElementRegistry> Window::custom_elements()
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#document-tree-child-navigable-target-name-property-set
-OrderedHashMap<Utf16FlyString, GC::Ref<Navigable>> Window::document_tree_child_navigable_target_name_property_set()
+GC::OrderedRootHashMap<Utf16FlyString, GC::Ref<Navigable>> Window::document_tree_child_navigable_target_name_property_set()
 {
     // The document-tree child navigable target name property set of a Window object window is the return value of running these steps:
 
@@ -2290,7 +2291,7 @@ OrderedHashMap<Utf16FlyString, GC::Ref<Navigable>> Window::document_tree_child_n
     auto children = associated_document().document_tree_child_navigables();
 
     // 2. Let firstNamedChildren be an empty ordered set.
-    OrderedHashMap<Utf16FlyString, GC::Ref<Navigable>> first_named_children;
+    GC::OrderedRootHashMap<Utf16FlyString, GC::Ref<Navigable>> first_named_children;
 
     // 3. For each navigable of children:
     for (auto const& navigable : children) {
@@ -2311,7 +2312,7 @@ OrderedHashMap<Utf16FlyString, GC::Ref<Navigable>> Window::document_tree_child_n
     }
 
     // 4. Let names be an empty ordered set.
-    OrderedHashMap<Utf16FlyString, GC::Ref<Navigable>> names;
+    GC::OrderedRootHashMap<Utf16FlyString, GC::Ref<Navigable>> names;
 
     // 5. For each navigable of firstNamedChildren:
     for (auto const& [name, navigable] : first_named_children) {

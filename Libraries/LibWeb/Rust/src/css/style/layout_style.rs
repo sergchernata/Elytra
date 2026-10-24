@@ -40,6 +40,7 @@ pub(crate) struct AnonymousStyleOverrides {
     pub inline_block_wrapper: bool,
     pub overflow_x: u8,
     pub overflow_y: u8,
+    pub columns_from_parent: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -245,7 +246,32 @@ impl LayoutStyle {
             target.z_index = box_values.z_index;
             target.vertical_align = box_values.vertical_align.clone();
         });
+        let misc_reset = source.group::<MiscResetValues>();
+        self.edit::<MiscResetValues>(|target| {
+            target.column_span = misc_reset.column_span;
+            target.break_before = misc_reset.break_before;
+            target.break_after = misc_reset.break_after;
+            target.break_inside = misc_reset.break_inside;
+        });
         self.copy_table_properties(source);
+    }
+
+    pub(crate) fn copy_column_properties(&mut self, source: &Self) {
+        let box_values = source.group::<BoxValues>();
+        self.edit::<BoxValues>(|target| {
+            target.column_count = box_values.column_count;
+            target.column_count_has_value = box_values.column_count_has_value;
+            target.column_width = box_values.column_width.clone();
+        });
+        let misc_reset = source.group::<MiscResetValues>();
+        self.edit::<MiscResetValues>(|target| {
+            target.column_fill = misc_reset.column_fill;
+            target.column_rule_style = misc_reset.column_rule_style;
+            target.column_rule_width = misc_reset.column_rule_width;
+            target.column_rule_color = misc_reset.column_rule_color;
+        });
+        let alignment = source.group::<AlignmentValues>();
+        self.edit::<AlignmentValues>(|target| target.column_gap = alignment.column_gap.clone());
     }
 
     fn copy_table_properties(&mut self, source: &Self) {
@@ -391,6 +417,9 @@ impl LayoutStyle {
                     value: ComputedStyleValueHandle::empty(),
                 }
             });
+        }
+        if overrides.columns_from_parent {
+            style.copy_column_properties(&Self::from_record(engine, parent));
         }
         if kind == AnonymousStyleKind::ButtonContentBox {
             style.edit::<SizingValues>(|values| {

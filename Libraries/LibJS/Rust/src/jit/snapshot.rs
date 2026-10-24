@@ -36,6 +36,7 @@ use crate::gc::class::Extends;
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::{CellHeader, Gc};
 use crate::layout::environment::DeclarativeEnvironment;
+use crate::layout::execution_context::ExecutionContext;
 use crate::layout::function_object::{
     DirectGetterFunction, EcmascriptFunctionObject, FunctionObject, RawNativeFunction,
 };
@@ -99,7 +100,10 @@ struct SnapshotBuilder<'vm> {
     cells: Vec<Gc<CellHeader>>,
     entries: Vec<Entry>,
     indices: HashMap<InlinedFunction, u32>,
-    compiled_function: Gc<EcmascriptFunctionObject>,
+    /// The function the compiled executable runs, or `None` for the top-level code of a script or of a module.
+    compiled_function: Option<Gc<EcmascriptFunctionObject>>,
+    /// The words the compiled executable's frames start with (see `FunctionFrameFields`).
+    compiled_function_fields: FunctionFrameFields,
     /// The closure templates of the compiled executable, until its snapshot takes them. Only the compiled function
     /// allocates closures itself.
     closure_templates: Vec<Option<ClosureTemplateSnapshot>>,
@@ -107,6 +111,8 @@ struct SnapshotBuilder<'vm> {
     lexical_environment_templates: Vec<Option<LexicalEnvironmentTemplateSnapshot>>,
     /// The environment templates of the direct calls of the executable whose snapshot is being made.
     environment_templates: Vec<EnvironmentTemplateSnapshot>,
+    /// The bound arguments of the call feedback of the executable whose snapshot is being made.
+    bound_arguments: Vec<u64>,
     /// For the constructors among the inlining candidates, by index: the shape of the `this` value their inlined
     /// constructs create, whose entries their megamorphic caches describe.
     construct_this_shapes: HashMap<u32, Gc<Shape>>,
@@ -336,6 +342,13 @@ fn function_frame_fields(function: Gc<EcmascriptFunctionObject>) -> FunctionFram
         environment: word_of(function, offset_of!(EcmascriptFunctionObject, environment)),
         private_environment: word_of(function, offset_of!(EcmascriptFunctionObject, private_environment)),
     }
+}
+
+/// The words of the `[[ScriptOrModule]]` of a frame, like `function_frame_fields()` has them of a function.
+fn script_or_module_words(frame: &ExecutionContext) -> [u64; 2] {
+    let address = core::ptr::from_ref(&frame.script_or_module).cast::<u64>();
+    // SAFETY: The field is two words.
+    unsafe { [address.read_unaligned(), address.add(1).read_unaligned()] }
 }
 
 /// The words at `offset` of a cell.
@@ -703,37 +716,44 @@ impl SnapshotBuilder<'_> {
     /// Describes how the single callee of a call site forwarded its calls, if the snapshot can describe it.
     fn forwarded_call(&mut self, call: &CallFeedback, caller: &Entry) -> Option<ForwardedCallSnapshot> {
         let target = call.forwarded_target()?;
+        let forwarding = match call.forwarding.get() {
+            forwarding if forwarding == CallFeedbackForwarding::Apply as u8 => Forwarding::Apply,
+            forwarding if forwarding == CallFeedbackForwarding::Call as u8 => Forwarding::Call,
+            forwarding if forwarding == CallFeedbackForwarding::Bound as u8 => Forwarding::Bound,
+            forwarding if forwarding == CallFeedbackForwarding::Callback as u8 => Forwarding::Callback,
+            _ => return None,
+        };
+        let bound = match forwarding {
+            Forwarding::Bound => Some(call.target()?.downcast::<BoundFunction>()?),
+            _ => None,
+        };
         let mut snapshot = ForwardedCallSnapshot {
-            forwarding: match call.forwarding.get() {
-                forwarding if forwarding == CallFeedbackForwarding::Apply as u8 => Forwarding::Apply,
-                forwarding if forwarding == CallFeedbackForwarding::Call as u8 => Forwarding::Call,
-                forwarding if forwarding == CallFeedbackForwarding::Bound as u8 => Forwarding::Bound,
-                forwarding if forwarding == CallFeedbackForwarding::Callback as u8 => Forwarding::Callback,
-                _ => return None,
-            },
+            forwarding,
             target: self.cell(target),
             target_intrinsic: intrinsic_of(self.vm, Some(target)),
             argument_count: u32::from(call.forwarded_argument_count.get()),
-            inline_executable: None,
+            inline_executable: match bound {
+                Some(bound) if bound.bound_arguments().len() > ForwardedCallSnapshot::MAX_INLINED_BOUND_ARGUMENTS => {
+                    None
+                }
+                _ => self.inline_executable_index(Some(target), caller),
+            },
             bound_this: 0,
-            bound_arguments: [0; 4],
+            bound_arguments_start: 0,
             bound_argument_count: 0,
         };
-        if snapshot.forwarding == Forwarding::Bound {
-            let bound = call.target()?.downcast::<BoundFunction>()?;
-            let bound_argument_count = bound.bound_arguments_count();
-            if bound_argument_count > snapshot.bound_arguments.len() {
-                return None;
-            }
+        // NB: Only calls of inlining candidates use the bound values.
+        if let Some(bound) = bound
+            && snapshot.inline_executable.is_some()
+        {
             // NB: The bound function, which the code checks the callee against and so embeds, keeps its bound values
             //     alive.
+            let bound_arguments = bound.bound_arguments();
             snapshot.bound_this = bound.bound_this().0;
-            for index in 0..bound_argument_count {
-                snapshot.bound_arguments[index] = bound.bound_argument(index).0;
-            }
-            snapshot.bound_argument_count = bound_argument_count as u8;
+            snapshot.bound_arguments_start = u32::try_from(self.bound_arguments.len()).ok()?;
+            snapshot.bound_argument_count = u32::try_from(bound_arguments.len()).ok()?;
+            self.bound_arguments.extend(bound_arguments.iter().map(|value| value.0));
         }
-        snapshot.inline_executable = self.inline_executable_index(Some(target), caller);
         Some(snapshot)
     }
 
@@ -906,7 +926,7 @@ impl SnapshotBuilder<'_> {
         let Entry { executable, realm, .. } = *entry;
         // NB: Builtins never create arguments objects.
         let arguments_function = match entry.function {
-            None => Some(self.compiled_function),
+            None => self.compiled_function,
             Some(InlinedFunction::Ecmascript(function)) => Some(function),
             Some(InlinedFunction::Builtin(_)) => None,
         };
@@ -932,6 +952,7 @@ impl SnapshotBuilder<'_> {
             value: feedback.value.iter().map(core::cell::Cell::get).collect(),
             call,
             keyed,
+            bound_arguments: core::mem::take(&mut self.bound_arguments),
         };
 
         let construct_this_shape = entry
@@ -998,7 +1019,7 @@ impl SnapshotBuilder<'_> {
                 Some(InlinedFunction::Ecmascript(function)) => Some(function_frame_fields(function)),
                 // NB: The compiled function's script tells which inlined calls
                 //     run in it.
-                None => Some(function_frame_fields(self.compiled_function)),
+                None => Some(self.compiled_function_fields),
                 Some(InlinedFunction::Builtin(_)) => None,
             },
             environment: match entry.function {
@@ -1179,18 +1200,30 @@ fn captured_binding_accesses(executable: &Executable) -> CapturedBindingAccesses
     }
 }
 
-/// Captures the snapshot of a compile job for `executable`, whose frames run `function`. `osr_pc` is the loop back
-/// edge whose tier-up budget ran out, if a loop triggered the compile.
+/// Captures the snapshot of a compile job for `executable`, whose frames run `function` in `realm`, or the top-level
+/// code of a script or of a module without one, in the running frame. `osr_pc` is the loop back edge whose tier-up
+/// budget ran out, if a loop triggered the compile.
 pub fn capture_snapshot(
     vm: &Vm,
     executable: Gc<Executable>,
-    function: Gc<EcmascriptFunctionObject>,
+    function: Option<Gc<EcmascriptFunctionObject>>,
+    realm: Gc<Realm>,
     osr_pc: Option<u32>,
 ) -> CapturedSnapshot {
-    let realm = function.realm().expect("an ECMAScript function has a realm");
+    let compiled_function_fields = match function {
+        Some(function) => function_frame_fields(function),
+        None => FunctionFrameFields {
+            script_or_module: script_or_module_words(vm.running_execution_context_ref()),
+            ..FunctionFrameFields::default()
+        },
+    };
     // NB: These allocate (and so may collect garbage), which they do before anything is captured.
     let allocation = allocation_infos(vm, realm);
-    let closure_templates = closure_templates(vm, executable, function);
+    // NB: Closures that top-level code creates have its environments, which the code does not know.
+    let closure_templates = match function {
+        Some(function) => closure_templates(vm, executable, function),
+        None => (0..executable.shared_function_data_count()).map(|_| None).collect(),
+    };
     let closure_samples = closure_templates
         .iter()
         .map(|template| template.as_ref().map(|(sample, _)| *sample))
@@ -1206,8 +1239,10 @@ pub fn capture_snapshot(
         }],
         indices: HashMap::new(),
         compiled_function: function,
+        compiled_function_fields,
         closure_templates: Vec::new(),
         environment_templates: Vec::new(),
+        bound_arguments: Vec::new(),
         lexical_environment_templates: Vec::new(),
         construct_this_shapes: HashMap::new(),
     };

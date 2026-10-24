@@ -12,7 +12,7 @@
 #include <LibWeb/ContentSecurityPolicy/Directives/Directive.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
-#include <LibWeb/Fetch/Infrastructure/URL.h>
+#include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/MessageEvent.h>
@@ -26,6 +26,7 @@
 #include <LibWeb/HTML/WorkerNavigator.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/ServiceWorker/ServiceWorkerGlobalScope.h>
+#include <LibWebCommon/Fetch/Infrastructure/URL.h>
 
 namespace Web::HTML {
 
@@ -170,15 +171,18 @@ ENUMERATE_WORKER_GLOBAL_SCOPE_EVENT_HANDLERS(__ENUMERATE)
 
 GC::Ref<CSS::FontFaceSet> WorkerGlobalScope::fonts()
 {
-    if (!m_fonts)
+    if (!m_fonts) {
         m_fonts = CSS::FontFaceSet::create(relevant_settings_object(*this));
+        // A worker has no document to wait for, so its font source is never pending on the environment.
+        m_fonts->set_is_pending_on_the_environment(false);
+    }
     return *m_fonts;
 }
 
 CSS::FontComputer& WorkerGlobalScope::font_computer()
 {
     if (!m_font_computer)
-        m_font_computer = heap().allocate<CSS::FontComputer>();
+        m_font_computer = heap().allocate<CSS::FontComputer>(relevant_settings_object(*this));
     return *m_font_computer;
 }
 
@@ -195,15 +199,53 @@ void WorkerGlobalScope::initialize_policy_container(GC::Ref<Fetch::Infrastructur
 {
     // 1. If workerGlobalScope's url is local but its scheme is not "blob":
     if (m_url.has_value() && Fetch::Infrastructure::is_local_url(m_url.value()) && m_url->scheme() != "blob"sv) {
-        // FIXME: 1. Assert: workerGlobalScope's owner set's size is 1.
-        // FIXME: 2. Set workerGlobalScope's policy container to a clone of workerGlobalScope's owner set[0]'s relevant settings object's policy container.
-        dbgln("FIXME: WorkerGlobalScope::initialize_policy_container: Clone owner's policy container for local, non-blob URL.");
+        // 1. Assert: workerGlobalScope's owner set's size is 1.
+        VERIFY(m_owner_set.size() == 1);
+
+        // 2. Set workerGlobalScope's policy container to a clone of workerGlobalScope's owner set[0]'s relevant
+        //    settings object's policy container.
+        auto const& owner_policy_container = m_owner_set.first().visit([](auto const& owner) -> SerializedPolicyContainer const& {
+            return owner.relevant_settings_object_policy_container;
+        });
+        m_policy_container = create_a_policy_container_from_serialized_policy_container(owner_policy_container);
         return;
     }
 
     // 2. Otherwise, set workerGlobalScope's policy container to the result of creating a policy container from a fetch
     //    response given response and environment.
     m_policy_container = create_a_policy_container_from_a_fetch_response(response, environment);
+}
+
+// https://html.spec.whatwg.org/multipage/browsers.html#check-a-global-object's-embedder-policy
+// NB: response is only used for violation reports, which are not queued.
+bool WorkerGlobalScope::check_embedder_policy(EnvironmentSettingsObject const& owner) const
+{
+    // 1. If workerGlobalScope is not a DedicatedWorkerGlobalScope object, then return true.
+    if (!is<DedicatedWorkerGlobalScope>(*this))
+        return true;
+
+    // 2. Let policy be workerGlobalScope's embedder policy.
+    // AD-HOC: Nothing sets workerGlobalScope's embedder policy. This reads its policy container's embedder policy
+    //         instead. See https://github.com/whatwg/html/issues/11316.
+    auto const& policy = policy_container()->embedder_policy;
+
+    // 3. Let ownerPolicy be owner's policy container's embedder policy.
+    auto const& owner_policy = owner.policy_container()->embedder_policy;
+
+    // FIXME: 4. If ownerPolicy's report-only value is compatible with cross-origin isolation and policy's value is
+    //           not, then queue a cross-origin embedder policy inheritance violation with response, "worker
+    //           initialization", ownerPolicy's report-only reporting endpoint, "reporting", and owner.
+
+    // 5. If ownerPolicy's value is not compatible with cross-origin isolation or policy's value is compatible with
+    //    cross-origin isolation, then return true.
+    if (!is_compatible_with_cross_origin_isolation(owner_policy.value) || is_compatible_with_cross_origin_isolation(policy.value))
+        return true;
+
+    // FIXME: 6. Queue a cross-origin embedder policy inheritance violation with response, "worker initialization",
+    //           ownerPolicy's reporting endpoint, "enforce", and owner.
+
+    // 7. Return false.
+    return false;
 }
 
 // https://w3c.github.io/webappsec-csp/#run-global-object-csp-initialization

@@ -49,7 +49,8 @@
     "self-start",
     "start",
     "stretch",
-    "unsafe"
+    "unsafe",
+    "anchor-center"
   ],
   "anchor-side": [
     "inside",
@@ -577,6 +578,10 @@
     "show",
     "hide"
   ],
+  "field-sizing": [
+    "fixed",
+    "content"
+  ],
   "fill-rule": [
     "nonzero",
     "evenodd"
@@ -614,6 +619,13 @@
   "font-optical-sizing": [
     "auto",
     "none"
+  ],
+  "font-size-adjust-metric": [
+    "ex-height",
+    "cap-height",
+    "ch-width",
+    "ic-width",
+    "ic-height"
   ],
   "font-smoothing": [
     "auto",
@@ -673,6 +685,11 @@
     "extra-expanded",
     "ultra-expanded"
   ],
+  "forced-color-adjust": [
+    "auto",
+    "none",
+    "preserve-parent-color"
+  ],
   "generic-font-family": [
     "serif",
     "sans-serif",
@@ -704,6 +721,10 @@
     "smooth",
     "optimizespeed",
     "optimizequality"
+  ],
+  "interpolate-size": [
+    "numeric-only",
+    "allow-keywords"
   ],
   "isolation": [
     "auto",
@@ -755,7 +776,8 @@
     "stretch",
     "unsafe",
     "left",
-    "right"
+    "right",
+    "anchor-center"
   ],
   "line-style": [
     "none",
@@ -883,6 +905,14 @@
   ],
   "pointer-events": [
     "auto",
+    "bounding-box",
+    "visiblepainted",
+    "visiblefill",
+    "visiblestroke",
+    "visible",
+    "painted",
+    "fill",
+    "stroke",
     "all",
     "none"
   ],
@@ -1214,7 +1244,9 @@
   "try-tactic": [
     "flip-block",
     "flip-inline",
-    "flip-start"
+    "flip-start",
+    "flip-x",
+    "flip-y"
   ],
   "unicode-bidi": [
     "bidi-override",

@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	Border properties on mrow
+Pass	Border properties on mrow (rtl)
+Pass	Border properties on mrow (shorthand)
+Pass	Border properties on mrow (logical)
+Pass	Border properties on mrow (logical, rtl)
+Pass	Border properties on mrow (logical, shorthand)

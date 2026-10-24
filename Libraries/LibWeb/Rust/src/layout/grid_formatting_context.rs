@@ -17,6 +17,8 @@ pub(crate) enum Alignment {
     Baseline,
     SelfStart,
     SelfEnd,
+    Left,
+    Right,
     Safe,
     Unsafe,
     SpaceBetween,
@@ -29,8 +31,10 @@ pub(crate) fn inline_item_alignment(justify_self_value: u8, container_justify_it
         justify_self::AUTO => match container_justify_items {
             justify_items::BASELINE => Alignment::Baseline,
             justify_items::CENTER => Alignment::Center,
-            justify_items::END | justify_items::FLEX_END | justify_items::RIGHT => Alignment::End,
-            justify_items::FLEX_START | justify_items::START | justify_items::LEFT => Alignment::Start,
+            justify_items::END | justify_items::FLEX_END => Alignment::End,
+            justify_items::FLEX_START | justify_items::START => Alignment::Start,
+            justify_items::LEFT => Alignment::Left,
+            justify_items::RIGHT => Alignment::Right,
             justify_items::NORMAL | justify_items::LEGACY => Alignment::Normal,
             justify_items::SAFE => Alignment::Safe,
             justify_items::SELF_END => Alignment::SelfEnd,
@@ -41,8 +45,10 @@ pub(crate) fn inline_item_alignment(justify_self_value: u8, container_justify_it
         },
         justify_self::BASELINE => Alignment::Baseline,
         justify_self::CENTER => Alignment::Center,
-        justify_self::END | justify_self::FLEX_END | justify_self::RIGHT => Alignment::End,
-        justify_self::FLEX_START | justify_self::START | justify_self::LEFT => Alignment::Start,
+        justify_self::END | justify_self::FLEX_END => Alignment::End,
+        justify_self::FLEX_START | justify_self::START => Alignment::Start,
+        justify_self::LEFT => Alignment::Left,
+        justify_self::RIGHT => Alignment::Right,
         justify_self::NORMAL => Alignment::Normal,
         justify_self::SAFE => Alignment::Safe,
         justify_self::SELF_END => Alignment::SelfEnd,
@@ -85,8 +91,10 @@ pub(crate) fn block_item_alignment(align_self_value: u8, container_align_items: 
 pub(crate) fn inline_content_alignment(value: u8) -> Alignment {
     match value {
         justify_content::NORMAL => Alignment::Normal,
-        justify_content::START | justify_content::FLEX_START | justify_content::LEFT => Alignment::Start,
-        justify_content::END | justify_content::FLEX_END | justify_content::RIGHT => Alignment::End,
+        justify_content::START | justify_content::FLEX_START => Alignment::Start,
+        justify_content::END | justify_content::FLEX_END => Alignment::End,
+        justify_content::LEFT => Alignment::Left,
+        justify_content::RIGHT => Alignment::Right,
         justify_content::CENTER => Alignment::Center,
         justify_content::SPACE_BETWEEN => Alignment::SpaceBetween,
         justify_content::SPACE_AROUND => Alignment::SpaceAround,
@@ -260,7 +268,9 @@ fn grid_track_breadth_view(breadth: &ComputedGridTrackBreadth) -> GridTrackBread
         ComputedSizeKind::MinContent => GridTrackBreadth::MinContent,
         ComputedSizeKind::MaxContent => GridTrackBreadth::MaxContent,
         ComputedSizeKind::FitContent => GridTrackBreadth::FitContent(&breadth.size),
-        ComputedSizeKind::None => unreachable!("grid track sizes cannot be none"),
+        ComputedSizeKind::Stretch | ComputedSizeKind::None => {
+            unreachable!("grid track sizes cannot be stretch or none")
+        }
     }
 }
 
@@ -404,111 +414,178 @@ fn is_span(placement: ComputedGridPlacement) -> bool {
 }
 
 fn clamped_line_number(placement: ComputedGridPlacement) -> Option<i32> {
-    placement
-        .has_line_number
-        .then(|| placement.line_number.clamp(-MAX_GRID_LINE_NUMBER, MAX_GRID_LINE_NUMBER))
+    placement.has_line_number.then(|| match placement.line_number {
+        // AD-HOC: A calc() that resolves to 0 is not rejected at parse time as a literal 0 is, but no grid line has the
+        //         number 0. Treat it as 1.
+        0 => 1,
+        number => number.clamp(-MAX_GRID_LINE_NUMBER, MAX_GRID_LINE_NUMBER),
+    })
 }
 
 fn clamped_span(placement: ComputedGridPlacement) -> usize {
     placement.line_number.clamp(1, MAX_GRID_LINE_NUMBER) as usize
 }
 
-/// Resolves one axis exactly as `GridFormattingContext::resolve_grid_position`.
-/// Names are pre-interned in F1, including the area `-start`/`-end` aliases.
+/// The lines of one axis that carry names a placement can refer to: the explicit grid's lines, the first of which is
+/// line 0. Every implicit line, before or after them, is assumed to have every name.
+#[derive(Clone, Copy)]
+pub(crate) struct ExplicitGridLines<'a> {
+    lines: &'a [Vec<LineName>],
+}
+
+impl<'a> ExplicitGridLines<'a> {
+    pub(crate) fn new(lines: &'a [Vec<LineName>]) -> Self {
+        Self { lines }
+    }
+
+    fn last_line(self) -> i32 {
+        self.lines.len() as i32 - 1
+    }
+
+    fn lines_named(self, name_raw: usize) -> impl DoubleEndedIterator<Item = i32> + 'a {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(move |(_, names)| names.iter().any(|name| name.raw == name_raw))
+            .map(|(index, _)| index as i32)
+    }
+
+    // https://drafts.csswg.org/css-grid-2/#grid-placement-int
+    // Contributes the Nth grid line to the grid item’s placement. If a negative integer is given, it instead counts in
+    // reverse, starting from the end edge of the explicit grid. If a name is given as a <custom-ident>, only lines
+    // with that name are counted. If not enough lines with that name exist, all implicit grid lines are assumed to
+    // have that name for the purpose of finding this position.
+    fn nth_line(self, n: i32, name_raw: Option<usize>) -> i32 {
+        let Some(name_raw) = name_raw else {
+            return if n > 0 { n - 1 } else { self.last_line() + 1 + n };
+        };
+        let wanted = n.unsigned_abs() as usize;
+        let named: Vec<i32> = self.lines_named(name_raw).collect();
+        if n > 0 {
+            named
+                .get(wanted - 1)
+                .copied()
+                .unwrap_or_else(|| self.last_line().saturating_add((wanted - named.len()) as i32))
+        } else {
+            named
+                .len()
+                .checked_sub(wanted)
+                .map(|index| named[index])
+                .unwrap_or_else(|| -((wanted - named.len()) as i32))
+        }
+    }
+
+    // https://drafts.csswg.org/css-grid-2/#grid-placement-span-int
+    // Contributes a grid span to the grid item’s placement such that the corresponding edge of the grid item’s grid
+    // area is N lines from its opposite edge in the corresponding direction. [...] If a name is given as a
+    // <custom-ident>, only lines with that name are counted. If not enough lines with that name exist, all implicit
+    // grid lines on the side of the explicit grid corresponding to the search direction are assumed to have that name
+    // for the purpose of counting this span.
+    fn line_spanned_from(self, from: i32, n: usize, name_raw: Option<usize>, endward: bool) -> i32 {
+        let n = n.min(MAX_GRID_LINE_NUMBER as usize) as i32;
+        let Some(name_raw) = name_raw else {
+            return if endward {
+                from.saturating_add(n)
+            } else {
+                from.saturating_sub(n)
+            };
+        };
+        let candidates: Vec<i32> = if endward {
+            self.lines_named(name_raw).filter(|&line| line > from).collect()
+        } else {
+            self.lines_named(name_raw).rev().filter(|&line| line < from).collect()
+        };
+        if let Some(&line) = candidates.get(n as usize - 1) {
+            return line;
+        }
+        let missing = n - candidates.len() as i32;
+        if endward {
+            from.max(self.last_line()).saturating_add(missing)
+        } else {
+            from.min(0).saturating_sub(missing)
+        }
+    }
+
+    fn resolve_line(self, placement: ComputedGridPlacement, placement_names: &[usize], is_start: bool) -> i32 {
+        let name = placement
+            .has_name
+            .then(|| placement_names.get(placement.name_index as usize).copied())
+            .flatten();
+        let Some(n) = clamped_line_number(placement) else {
+            // https://drafts.csswg.org/css-grid-2/#grid-placement-slot
+            // First attempt to match the grid area’s edge to a named grid area: if there is a grid line whose line name
+            // is <custom-ident>-start (for grid-*-start) / <custom-ident>-end (for grid-*-end), contributes the first
+            // such line to the grid item’s placement.
+            let area_edge_name = placement_names
+                .get(if is_start {
+                    placement.implicit_start_name_index
+                } else {
+                    placement.implicit_end_name_index
+                } as usize)
+                .copied();
+            if let Some(line) = area_edge_name.and_then(|name| self.lines_named(name).next()) {
+                return line;
+            }
+            // Otherwise, treat this as if the integer 1 had been specified along with the <custom-ident>.
+            return self.nth_line(1, name);
+        };
+        self.nth_line(n, name)
+    }
+}
+
+/// Resolves the placement of one axis in which at least one of the placement properties is a line, to lines
+/// numbered from the explicit grid's first line, which is line 0. `automatic_span` is the automatic grid span used when
+/// only one of the placement properties is a line, which is 1 unless the item is subgridded in this axis.
 pub(crate) fn resolve_placement_position(
     placement_start: ComputedGridPlacement,
     placement_end: ComputedGridPlacement,
     placement_names: &[usize],
-    lines: &[Vec<LineName>],
-    explicit_line_count: usize,
-    occupation_track_count: usize,
+    lines: ExplicitGridLines<'_>,
+    automatic_span: Option<usize>,
 ) -> ResolvedPlacementPosition {
-    let start_line_number = clamped_line_number(placement_start);
-    let end_line_number = clamped_line_number(placement_end);
-    let mut result = ResolvedPlacementPosition {
-        start: 0,
-        end: 0,
-        span: 1,
+    let automatic_span = automatic_span.unwrap_or(1).max(1) as i32;
+    let span_name = |placement: ComputedGridPlacement| {
+        placement
+            .has_name
+            .then(|| placement_names.get(placement.name_index as usize).copied())
+            .flatten()
     };
-
-    if let Some(number) = start_line_number {
-        result.start = if number > 0 {
-            number - 1
+    let (mut start, mut end) = if is_positioned(placement_start) {
+        let start = lines.resolve_line(placement_start, placement_names, true);
+        let end = if is_positioned(placement_end) {
+            lines.resolve_line(placement_end, placement_names, false)
+        } else if is_span(placement_end) {
+            lines.line_spanned_from(start, clamped_span(placement_end), span_name(placement_end), true)
         } else {
-            explicit_line_count as i32 + number
+            start.saturating_add(automatic_span)
         };
-    }
-    if let Some(number) = end_line_number {
-        result.end = number - 1;
-    }
-    if result.end < 0 {
-        result.end = occupation_track_count as i32 + result.end + 2;
-    }
-
-    // FIXME: If a name is given as a <custom-ident>, only lines with that name are counted. If not enough lines with
-    //        that name exist, all implicit grid lines on the side of the explicit grid corresponding to the search
-    //        direction are assumed to have that name for the purpose of counting this span.
-    if is_span(placement_end) {
-        result.span = clamped_span(placement_end);
-    }
-    if is_span(placement_start) {
-        result.span = clamped_span(placement_start);
-        result.start = result.end - result.span as i32;
-        // FIXME: Remove me once have implemented spans overflowing into negative indexes, e.g., grid-row: span 2 / 1
-        result.start = result.start.max(0);
-    }
-
-    if placement_end.has_name {
-        let number = end_line_number.unwrap_or(1);
-        result.end = placement_names
-            .get(placement_end.implicit_end_name_index as usize)
-            .and_then(|name| nth_named_line(lines, *name, number))
-            .or_else(|| {
-                placement_names
-                    .get(placement_end.name_index as usize)
-                    .and_then(|name| nth_named_line(lines, *name, number))
-            })
-            .unwrap_or(explicit_line_count as i32);
-        if !placement_start.has_line_number {
-            result.start = result.end - 1;
-        }
-    }
-
-    if placement_start.has_name {
-        let number = start_line_number.unwrap_or(1);
-        result.start = placement_names
-            .get(placement_start.implicit_start_name_index as usize)
-            .and_then(|name| nth_named_line(lines, *name, number))
-            .or_else(|| {
-                placement_names
-                    .get(placement_start.name_index as usize)
-                    .and_then(|name| nth_named_line(lines, *name, number))
-            })
-            .unwrap_or(explicit_line_count as i32);
-    }
-
-    if !is_positioned(placement_start) && is_positioned(placement_end) && !is_span(placement_end) {
-        result.start = result.end - result.span as i32;
-    }
-
-    if is_positioned(placement_start) && is_positioned(placement_end) {
-        if result.start > result.end {
-            std::mem::swap(&mut result.start, &mut result.end);
-        }
-        if result.start != result.end {
-            result.span = (result.end - result.start) as usize;
+        (start, end)
+    } else {
+        let end = lines.resolve_line(placement_end, placement_names, false);
+        let start = if is_span(placement_start) {
+            lines.line_spanned_from(end, clamped_span(placement_start), span_name(placement_start), false)
         } else {
-            result.span = 1;
-            result.end = result.start + 1;
-        }
+            end.saturating_sub(automatic_span)
+        };
+        (start, end)
+    };
+    // https://drafts.csswg.org/css-grid-2/#grid-placement-errors
+    // If the placement for a grid item contains two lines, and the start line is further end-ward than the end line,
+    // swap the two lines. If the start line is equal to the end line, remove the end line.
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
     }
-
-    // If the placement contains two spans, remove the one contributed by the end grid-placement
-    // property.
-    if is_span(placement_start) && is_span(placement_end) {
-        result.span = clamped_span(placement_start);
+    if start == end {
+        end = start.saturating_add(1);
     }
-    result
+    // https://drafts.csswg.org/css-grid/#overlarge-grids
+    start = start.clamp(-MAX_GRID_LINE_NUMBER, MAX_GRID_LINE_NUMBER - 1);
+    end = end.clamp(start + 1, MAX_GRID_LINE_NUMBER);
+    ResolvedPlacementPosition {
+        start,
+        end,
+        span: (end - start) as usize,
+    }
 }
 
 pub(crate) fn resolve_placement_span(
@@ -516,11 +593,18 @@ pub(crate) fn resolve_placement_span(
     placement_end: ComputedGridPlacement,
     automatic_subgrid_span: Option<usize>,
 ) -> usize {
-    if is_span(placement_start) {
-        return clamped_span(placement_start);
-    }
-    if is_span(placement_end) {
-        return clamped_span(placement_end);
+    // https://drafts.csswg.org/css-grid-2/#grid-placement-errors
+    // If the placement contains two spans, remove the one contributed by the end grid-placement property.
+    // If the placement contains only a span for a named line, replace it with a span of 1.
+    let span = if is_span(placement_start) {
+        Some(placement_start)
+    } else if is_span(placement_end) {
+        Some(placement_end)
+    } else {
+        None
+    };
+    if let Some(span) = span {
+        return if span.has_name { 1 } else { clamped_span(span) };
     }
     if !(is_positioned(placement_start) && is_positioned(placement_end))
         && let Some(span) = automatic_subgrid_span
@@ -632,43 +716,18 @@ impl OccupationGrid {
         false
     }
 
-    fn find_unoccupied_grid_area(
-        &self,
-        flow: AutoFlowAxis,
-        column: &mut i32,
-        row: &mut i32,
-        column_span: usize,
-        row_span: usize,
-    ) {
-        match flow {
-            AutoFlowAxis::Row => {
-                // Row-flow: columns are the inner (minor) axis, rows are the outer (major) axis.
-                while *row <= self.max_row_index {
-                    while *column <= self.max_column_index {
-                        let minor_axis_fits = *column + column_span as i32 - 1 <= self.max_column_index;
-                        if minor_axis_fits && !self.is_area_occupied(*column, *row, column_span, row_span) {
-                            return;
-                        }
-                        *column += 1;
-                    }
-                    *row += 1;
-                    *column = self.min_column_index;
+    fn find_unoccupied_grid_area(&self, column: &mut i32, row: &mut i32, column_span: usize, row_span: usize) {
+        // Columns are the inner (minor) axis, rows are the outer (major) axis.
+        while *row <= self.max_row_index {
+            while *column <= self.max_column_index {
+                let minor_axis_fits = *column + column_span as i32 - 1 <= self.max_column_index;
+                if minor_axis_fits && !self.is_area_occupied(*column, *row, column_span, row_span) {
+                    return;
                 }
+                *column += 1;
             }
-            AutoFlowAxis::Column => {
-                // Column-flow: rows are the inner (minor) axis, columns are the outer (major) axis.
-                while *column <= self.max_column_index {
-                    while *row <= self.max_row_index {
-                        let minor_axis_fits = *row + row_span as i32 - 1 <= self.max_row_index;
-                        if minor_axis_fits && !self.is_area_occupied(*column, *row, column_span, row_span) {
-                            return;
-                        }
-                        *row += 1;
-                    }
-                    *column += 1;
-                    *row = self.min_row_index;
-                }
-            }
+            *row += 1;
+            *column = self.min_column_index;
         }
     }
 }
@@ -694,6 +753,45 @@ pub(crate) fn place_items_with_grid(
     explicit_column_count: usize,
     explicit_row_count: usize,
     flow: AutoFlowAxis,
+    dense: bool,
+) -> PlacementResult {
+    if flow == AutoFlowAxis::Row {
+        return place_items_in_row_flow(items, explicit_column_count, explicit_row_count, dense);
+    }
+    // NB: The algorithm for grid-auto-flow: column is the one for rows with the two axes swapped, so place the items
+    //     of a transposed grid in rows and transpose the result back.
+    let transposed = items
+        .iter()
+        .map(|item| PlacementInput {
+            row: item.column,
+            column: item.row,
+            ..*item
+        })
+        .collect::<Vec<_>>();
+    let result = place_items_in_row_flow(&transposed, explicit_row_count, explicit_column_count, dense);
+    PlacementResult {
+        items: result
+            .items
+            .into_iter()
+            .map(|item| PlacedItem {
+                id: item.id,
+                row: item.column,
+                row_span: item.column_span,
+                column: item.row,
+                column_span: item.row_span,
+            })
+            .collect(),
+        column_count: result.row_count,
+        row_count: result.column_count,
+        explicit_column_start: result.explicit_row_start,
+        explicit_row_start: result.explicit_column_start,
+    }
+}
+
+fn place_items_in_row_flow(
+    items: &[PlacementInput],
+    explicit_column_count: usize,
+    explicit_row_count: usize,
     dense: bool,
 ) -> PlacementResult {
     // https://drafts.csswg.org/css-grid/#overview-placement
@@ -724,8 +822,17 @@ pub(crate) fn place_items_with_grid(
         }
     }
 
-    // 2. Position items locked to a row.
     // 2. Process the items locked to a given row.
+    //    For each grid item with a definite row position (that is, the grid-row-start and grid-row-end properties
+    //    define a definite grid position), in order-modified document order:
+    //    "sparse" packing (default behavior)
+    //        Set the column-start line of its placement to the earliest (smallest positive index) line index that
+    //        ensures this item’s grid area will not overlap any occupied grid cells and that is past any grid items
+    //        previously placed in this row by this step.
+    //    "dense" packing (dense specified)
+    //        Set the column-start line of its placement to the earliest (smallest positive index) line index that
+    //        ensures this item’s grid area will not overlap any occupied grid cells.
+    let mut row_cursors = HashMap::<i32, i32>::default();
     for &index in &ordered_indices {
         if !remaining[index] {
             continue;
@@ -738,7 +845,11 @@ pub(crate) fn place_items_with_grid(
             continue;
         }
 
-        let mut column = 0;
+        let mut column = if dense {
+            0
+        } else {
+            row_cursors.get(&row).copied().unwrap_or(0)
+        };
         let mut found = false;
         while column <= grid.max_column_index {
             if !grid.is_area_occupied(column, row, item.column.span, item.row.span) {
@@ -750,6 +861,7 @@ pub(crate) fn place_items_with_grid(
         if !found {
             column = grid.max_column_index + 1;
         }
+        row_cursors.insert(row, column + item.column.span as i32);
         record(&mut grid, &mut output, item, row, column);
         remaining[index] = false;
     }
@@ -772,29 +884,16 @@ pub(crate) fn place_items_with_grid(
     // 3.3. If the largest column span among all the items without a definite column position is larger
     // than the width of the implicit grid, add columns to the end of the implicit grid to accommodate
     // that column span.
-    // NB: For column flow the whole algorithm is transposed, so these steps widen the row axis instead.
     for &index in &ordered_indices {
         if !remaining[index] {
             continue;
         }
         let item = items[index];
-        match flow {
-            AutoFlowAxis::Row => {
-                if let Some(column) = item.column.start {
-                    grid.min_column_index = grid.min_column_index.min(column);
-                    grid.max_column_index = grid.max_column_index.max(column + item.column.span as i32 - 1);
-                } else {
-                    grid.max_column_index = grid.max_column_index.max(item.column.span as i32 - 1);
-                }
-            }
-            AutoFlowAxis::Column => {
-                if let Some(row) = item.row.start {
-                    grid.min_row_index = grid.min_row_index.min(row);
-                    grid.max_row_index = grid.max_row_index.max(row + item.row.span as i32 - 1);
-                } else {
-                    grid.max_row_index = grid.max_row_index.max(item.row.span as i32 - 1);
-                }
-            }
+        if let Some(column) = item.column.start {
+            grid.min_column_index = grid.min_column_index.min(column);
+            grid.max_column_index = grid.max_column_index.max(column + item.column.span as i32 - 1);
+        } else {
+            grid.max_column_index = grid.max_column_index.max(item.column.span as i32 - 1);
         }
     }
 
@@ -802,8 +901,9 @@ pub(crate) fn place_items_with_grid(
     // 4. Position the remaining grid items.
     // For each grid item that hasn't been positioned by the previous steps, in order-modified document
     // order:
-    let mut cursor_column = 0;
-    let mut cursor_row = 0;
+    // Initially the auto-placement cursor is set to the start-most row and column lines in the implicit grid.
+    let mut cursor_column = grid.min_column_index;
+    let mut cursor_row = grid.min_row_index;
     for &index in &ordered_indices {
         if !remaining[index] {
             continue;
@@ -845,26 +945,16 @@ pub(crate) fn place_items_with_grid(
             // area does not overlap any occupied grid cells, or the cursor's column position, plus the item's
             // column span, overflow the number of columns in the implicit grid, as determined earlier in this
             // algorithm.
-            grid.find_unoccupied_grid_area(
-                flow,
-                &mut cursor_column,
-                &mut cursor_row,
-                item.column.span,
-                item.row.span,
-            );
+            grid.find_unoccupied_grid_area(&mut cursor_column, &mut cursor_row, item.column.span, item.row.span);
             // 4.1.2.2. If a non-overlapping position was found in the previous step, set the item's row-start
             // and column-start lines to the cursor's position. Otherwise, increment the auto-placement cursor's
             // row position (creating new rows in the implicit grid as necessary), set its column position to the
             // start-most column line in the implicit grid, and return to the previous step.
             let column = cursor_column;
             let row = cursor_row;
-            // NB: The cursor's major-axis position must stay at the item's start line, so that subsequent items
-            //     keep packing into the same row (or column, for column flow) before moving on. Only advance the
-            //     minor-axis position past the item.
-            match flow {
-                AutoFlowAxis::Row => cursor_column += item.column.span as i32,
-                AutoFlowAxis::Column => cursor_row += item.row.span as i32,
-            }
+            // NB: The cursor's row position must stay at the item's start line, so that subsequent items keep packing
+            //     into the same row before moving on. Only advance the column position past the item.
+            cursor_column += item.column.span as i32;
             record(&mut grid, &mut output, item, row, column);
         }
     }
@@ -1009,6 +1099,11 @@ pub(crate) struct GridFormattingContext<'pass> {
     // Set once the rows are sized, so that the columns can be resolved again with percentage heights resolved against
     // them.
     use_row_sizes_for_column_percentages: bool,
+    // Whether the grid's columns run vertically and its rows horizontally, as they do in a vertical writing mode.
+    grid_axes_are_transposed: bool,
+    // Whether the Column and Row axes run from right to left and from bottom to top, respectively.
+    columns_are_reversed: bool,
+    rows_are_reversed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1042,6 +1137,8 @@ struct ParentGridData<'pass> {
     rows: Vec<Track<'pass>>,
     column_gaps: Vec<Track<'pass>>,
     row_gaps: Vec<Track<'pass>>,
+    column_tracks_are_reversed: bool,
+    row_tracks_are_reversed: bool,
 }
 
 impl<'pass> ParentGridData<'pass> {
@@ -1058,6 +1155,8 @@ impl<'pass> ParentGridData<'pass> {
             rows: parent.rows.clone(),
             column_gaps: parent.column_gaps.clone(),
             row_gaps: parent.row_gaps.clone(),
+            column_tracks_are_reversed: parent.tracks_are_reversed(Axis::Column),
+            row_tracks_are_reversed: parent.tracks_are_reversed(Axis::Row),
         }
     }
 }
@@ -1074,6 +1173,7 @@ impl<'pass> GridFormattingContext<'pass> {
     pub(crate) fn new(run: &FormattingContextRun<'pass>, parent_grid: Option<&GridFormattingContext<'pass>>) -> Self {
         let grid_container = run.box_;
         let parent_grid = parent_grid.filter(|_| grid_template_declares_a_subgrid_axis(&run.callbacks, grid_container));
+        let container_style = StyleValues::for_node(&run.callbacks, grid_container);
         Self {
             run: FormattingContextRun {
                 previous_line_data: None,
@@ -1104,6 +1204,17 @@ impl<'pass> GridFormattingContext<'pass> {
             row_alignment_container_size: CssPixels::default(),
             use_row_alignment_container_size: false,
             use_row_sizes_for_column_percentages: false,
+            grid_axes_are_transposed: container_style.writing_mode() != writing_mode::HORIZONTAL_TB,
+            columns_are_reversed: !geometry::start_is_left_or_top(
+                container_style.writing_mode(),
+                container_style.direction(),
+                true,
+            ),
+            rows_are_reversed: !geometry::start_is_left_or_top(
+                container_style.writing_mode(),
+                container_style.direction(),
+                false,
+            ),
         }
     }
 
@@ -1169,6 +1280,30 @@ impl<'pass> GridFormattingContext<'pass> {
         ComputedValuesView::new(&self.run.callbacks.style_payloads(node).groups).grid_values()
     }
 
+    /// Picks whichever of the per-grid-axis values (as in grid-template-columns and grid-template-rows) belongs to the
+    /// given physical axis.
+    // https://drafts.csswg.org/css-grid-2/#grid-concepts
+    // NB: The grid's columns follow the grid container's inline axis and its rows its block axis. This formatting
+    //     context lays out its Column axis horizontally and its Row axis vertically, so in a vertical writing mode
+    //     the grid's columns are laid out along the Row axis and its rows along the Column axis.
+    fn select_grid_axis<T>(&self, axis: Axis, column: T, row: T) -> T {
+        if self.grid_axes_are_transposed {
+            axis.select(row, column)
+        } else {
+            axis.select(column, row)
+        }
+    }
+
+    /// Picks whichever of the per-grid-axis values of a grid item that is itself a grid container belongs to the given
+    /// physical axis, following the item's own writing mode, as select_grid_axis() does for the grid container.
+    fn select_item_grid_axis<T>(&self, item: Node, axis: Axis, column: T, row: T) -> T {
+        if self.style(item).writing_mode() != writing_mode::HORIZONTAL_TB {
+            axis.select(row, column)
+        } else {
+            axis.select(column, row)
+        }
+    }
+
     fn sizing(&self) -> sizing_context::SizingContext<'pass> {
         sizing_context::SizingContext::new(self.run.purpose, self.run.records, self.run.callbacks)
     }
@@ -1189,7 +1324,7 @@ impl<'pass> GridFormattingContext<'pass> {
         // a subgrid.
         // FIXME: Also reject subgrid here when the grid container is forced to
         // establish an independent formatting context.
-        let list = axis.select(grid_style.template_columns, grid_style.template_rows);
+        let list = self.select_grid_axis(axis, grid_style.template_columns, grid_style.template_rows);
         list.is_subgrid && self.parent_grid_placement().is_some()
     }
 
@@ -1209,7 +1344,7 @@ impl<'pass> GridFormattingContext<'pass> {
 
     fn axis_gap_value(&self, axis: Axis) -> &'pass ComputedGap {
         let style = self.style(self.run.box_);
-        axis.select(style.column_gap(), style.row_gap())
+        self.select_grid_axis(axis, style.column_gap(), style.row_gap())
     }
 
     fn parent_gap_size_for_subgrid(&self, axis: Axis) -> CssPixels {
@@ -1408,6 +1543,33 @@ impl<'pass> GridFormattingContext<'pass> {
         // content box of its grid container taking gap into account; if any number of repetitions would
         // overflow, then 1 repetition.
         let available = self.axis_available(axis);
+        let maximum_size = match available {
+            AvailableSize::Definite(size) => Some(size),
+            _ => self.grid_container_maximum_size(axis),
+        };
+        let minimum_size = || {
+            let style = self.style(self.run.box_);
+            let minimum = axis.select(style.min_width(), style.min_height());
+            if crate::layout::sizing_context::is_plain_auto(minimum) || minimum.is_intrinsic_sizing_constraint() {
+                return None;
+            }
+            Some(self.sizing().calculate_inner_size_for_property(
+                self.run.box_,
+                axis.sizing_axis(),
+                axis.select(SizingProperty::MinWidth, SizingProperty::MinHeight),
+                self.container_available_space(),
+                self.layout_input.unwrap().containing_block_constraints,
+            ))
+        };
+        let Some((available_size, round_up)) = maximum_size
+            .map(|size| (size, false))
+            .or_else(|| minimum_size().map(|size| (size, true)))
+        else {
+            // Otherwise, the specified track list repeats only once.
+            return 1;
+        };
+        // NB: Percentages resolve against the size that the repetitions fill.
+        let available = AvailableSize::Definite(available_size);
         // For this purpose, each track is treated as its max track sizing function if that is definite or
         // else its min track sizing function if that is definite. If both are definite, floor the max track
         // sizing function by the min track sizing function. If neither are definite, the number of
@@ -1436,9 +1598,7 @@ impl<'pass> GridFormattingContext<'pass> {
         }
         let gap = self.resolved_gap(axis, available);
         let denominator = repeated_size + gap * repeated.tracks.len();
-        if let AvailableSize::Definite(available_size) = available
-            && denominator > CssPixels::default()
-        {
+        if denominator > CssPixels::default() {
             // The repetitions must not cause the grid to overflow, so the definite contribution of
             // the tracks outside the auto repeat is subtracted first. Expanding the template with
             // zero auto repetitions expands fixed repeat(N, ...) entries fully while the auto
@@ -1463,18 +1623,22 @@ impl<'pass> GridFormattingContext<'pass> {
             }
             // NOTE: Gap size is added to free space to compensate for the fact that the last track does not have a gap
             // If any number of repetitions would overflow, then 1 repetition.
-            let leftover = available_size + gap - rest_size - gap * rest.tracks.len();
-            return ((leftover.raw_value() as i64 / denominator.raw_value() as i64).max(1)) as usize;
+            // Otherwise, if the grid container has a definite minimum size in the relevant axis, the number of
+            // repetitions is the smallest possible positive integer that fulfills that minimum requirement.
+            let leftover = (available_size + gap - rest_size - gap * rest.tracks.len()).raw_value() as i64;
+            let denominator = denominator.raw_value() as i64;
+            let count = if round_up {
+                (leftover.max(0) + denominator - 1) / denominator
+            } else {
+                leftover / denominator
+            };
+            return count.clamp(1, MAX_GRID_LINE_NUMBER as i64) as usize;
         }
-        // FIXME: Otherwise, if the grid container has a definite minimum size in the relevant axis, the number of
-        //        repetitions is the smallest possible positive integer that fulfills that minimum requirement.
-        //
-        // Otherwise, the specified track list repeats only once.
         1
     }
 
     fn expand_axis(&self, axis: Axis, grid_style: &'pass GridValues) -> ExpandedTrackList<'pass> {
-        let list = axis.select(grid_style.template_columns, grid_style.template_rows);
+        let list = self.select_grid_axis(axis, grid_style.template_columns, grid_style.template_rows);
         let source = TrackListSource::from_grid_style(grid_style);
         if self.is_subgridded(axis, grid_style) {
             let parent_item = self.parent_grid_placement().unwrap();
@@ -1502,9 +1666,14 @@ impl<'pass> GridFormattingContext<'pass> {
             self.is_subgridded(Axis::Column, grid_style),
             self.is_subgridded(Axis::Row, grid_style),
         );
+        let (column_lines, row_lines) = if self.grid_axes_are_transposed {
+            (&mut rows.lines, &mut columns.lines)
+        } else {
+            (&mut columns.lines, &mut rows.lines)
+        };
         add_template_area_lines(
-            &mut columns.lines,
-            &mut rows.lines,
+            column_lines,
+            row_lines,
             grid_style.areas.as_slice(),
             grid_style.names.raws(),
         );
@@ -1525,16 +1694,19 @@ impl<'pass> GridFormattingContext<'pass> {
     ) -> ResolvedAxisPlacement {
         let start_is_auto = start.kind != crate::layout::ComputedGridPlacementKind::Line as u8;
         let end_is_auto = end.kind != crate::layout::ComputedGridPlacementKind::Line as u8;
-        let lines = self.axis_lines(axis);
-        let explicit_lines = self.explicit_line_count(axis);
-        let explicit_tracks = lines.len().saturating_sub(1);
         if start_is_auto && end_is_auto {
             return ResolvedAxisPlacement {
                 start: None,
                 span: resolve_placement_span(start, end, automatic_subgrid_span_value),
             };
         }
-        let resolved = resolve_placement_position(start, end, placement_names, lines, explicit_lines, explicit_tracks);
+        let resolved = resolve_placement_position(
+            start,
+            end,
+            placement_names,
+            self.explicit_grid_lines(axis),
+            automatic_subgrid_span_value,
+        );
         ResolvedAxisPlacement {
             start: Some(resolved.start),
             span: resolved.span,
@@ -1589,27 +1761,47 @@ impl<'pass> GridFormattingContext<'pass> {
                         .set_node_flag(child, NodeFlag::IsGridItem, true);
                     let child_grid_style = self.grid_style(child);
                     let source = TrackListSource::from_grid_style(child_grid_style);
-                    let column_subgrid_span = child_grid_style
-                        .template_columns
+                    let child_columns = self.select_item_grid_axis(
+                        child,
+                        Axis::Column,
+                        child_grid_style.template_columns,
+                        child_grid_style.template_rows,
+                    );
+                    let child_rows = self.select_item_grid_axis(
+                        child,
+                        Axis::Row,
+                        child_grid_style.template_columns,
+                        child_grid_style.template_rows,
+                    );
+                    let column_subgrid_span = child_columns
                         .is_subgrid
-                        .then(|| automatic_subgrid_span(source, child_grid_style.template_columns));
-                    let row_subgrid_span = child_grid_style
-                        .template_rows
+                        .then(|| automatic_subgrid_span(source, child_columns));
+                    let row_subgrid_span = child_rows
                         .is_subgrid
-                        .then(|| automatic_subgrid_span(source, child_grid_style.template_rows));
+                        .then(|| automatic_subgrid_span(source, child_rows));
+                    let (row_start, row_end) = self.select_grid_axis(
+                        Axis::Row,
+                        (child_grid_style.column_start, child_grid_style.column_end),
+                        (child_grid_style.row_start, child_grid_style.row_end),
+                    );
+                    let (column_start, column_end) = self.select_grid_axis(
+                        Axis::Column,
+                        (child_grid_style.column_start, child_grid_style.column_end),
+                        (child_grid_style.row_start, child_grid_style.row_end),
+                    );
                     inputs.push(PlacementInput {
                         id: nodes.len(),
                         order: self.style(child).order(),
                         row: self.axis_placements(
-                            child_grid_style.row_start,
-                            child_grid_style.row_end,
+                            row_start,
+                            row_end,
                             Axis::Row,
                             row_subgrid_span,
                             child_grid_style.names.raws(),
                         ),
                         column: self.axis_placements(
-                            child_grid_style.column_start,
-                            child_grid_style.column_end,
+                            column_start,
+                            column_end,
                             Axis::Column,
                             column_subgrid_span,
                             child_grid_style.names.raws(),
@@ -1630,7 +1822,7 @@ impl<'pass> GridFormattingContext<'pass> {
             &inputs,
             self.column_lines.len().saturating_sub(1),
             self.row_lines.len().saturating_sub(1),
-            if style.grid_auto_flow_row() {
+            if style.grid_auto_flow_row() != self.grid_axes_are_transposed {
                 AutoFlowAxis::Row
             } else {
                 AutoFlowAxis::Column
@@ -1669,7 +1861,16 @@ impl<'pass> GridFormattingContext<'pass> {
             let box_ = nodes[placed.id];
             let is_column_only_subgrid = self.facts(box_).display().is_grid_inside() && {
                 let grid_style = self.grid_style(box_);
-                grid_style.template_columns.is_subgrid && !grid_style.template_rows.is_subgrid
+                self.select_item_grid_axis(
+                    box_,
+                    Axis::Column,
+                    grid_style.template_columns,
+                    grid_style.template_rows,
+                )
+                .is_subgrid
+                    && !self
+                        .select_item_grid_axis(box_, Axis::Row, grid_style.template_columns, grid_style.template_rows)
+                        .is_subgrid
             };
             self.items.push(GridItem {
                 box_,
@@ -1695,7 +1896,7 @@ impl<'pass> GridFormattingContext<'pass> {
     }
 
     fn expanded_auto_tracks(&self, grid_style: &'pass GridValues, axis: Axis) -> Vec<TrackDefinition<'pass>> {
-        let list = axis.select(grid_style.auto_columns, grid_style.auto_rows);
+        let list = self.select_grid_axis(axis, grid_style.auto_columns, grid_style.auto_rows);
         expand_standalone(TrackListSource::from_grid_style(grid_style), list, |_index, _entry| 1).tracks
     }
 
@@ -1860,22 +2061,55 @@ impl<'pass> GridFormattingContext<'pass> {
         axis.select(self.explicit_column_line_count, self.explicit_row_line_count)
     }
 
+    fn explicit_start(&self, axis: Axis) -> usize {
+        axis.select(self.explicit_column_start, self.explicit_row_start)
+    }
+
+    /// The explicit grid's lines, which come after the implicit lines that items placed before it add.
+    fn explicit_grid_lines(&self, axis: Axis) -> ExplicitGridLines<'_> {
+        let lines = self.axis_lines(axis);
+        let start = self.explicit_start(axis).min(lines.len());
+        let end = start.saturating_add(self.explicit_line_count(axis)).min(lines.len());
+        ExplicitGridLines::new(&lines[start..end])
+    }
+
     fn content_alignment(&self, axis: Axis) -> Alignment {
         let style = self.style(self.run.box_);
-        axis.select(
+        let alignment = self.select_grid_axis(
+            axis,
             inline_content_alignment(style.justify_content()),
             block_content_alignment(style.align_content()),
-        )
+        );
+        match alignment {
+            Alignment::Left | Alignment::Right => self.resolve_left_or_right(axis, alignment),
+            _ => alignment,
+        }
     }
 
     fn container_padding_start(&self, axis: Axis) -> CssPixels {
         let used = self.container_used();
-        axis.select(used.padding_left.get(), used.padding_top.get())
+        let (left_or_top, right_or_bottom) = axis.select(
+            (used.padding_left.get(), used.padding_right.get()),
+            (used.padding_top.get(), used.padding_bottom.get()),
+        );
+        if self.tracks_are_reversed(axis) {
+            right_or_bottom
+        } else {
+            left_or_top
+        }
     }
 
     fn container_padding_end(&self, axis: Axis) -> CssPixels {
         let used = self.container_used();
-        axis.select(used.padding_right.get(), used.padding_bottom.get())
+        let (left_or_top, right_or_bottom) = axis.select(
+            (used.padding_left.get(), used.padding_right.get()),
+            (used.padding_top.get(), used.padding_bottom.get()),
+        );
+        if self.tracks_are_reversed(axis) {
+            left_or_top
+        } else {
+            right_or_bottom
+        }
     }
 
     fn interleaved_tracks(&self, axis: Axis) -> Vec<Track<'pass>> {
@@ -2506,7 +2740,20 @@ impl<'pass> GridFormattingContext<'pass> {
         )
     }
 
+    /// Whether the grid container's maximum size in an axis is a calc-size() of an intrinsic sizing keyword that
+    /// cannot resolve while the grid measures its intrinsic size, which that keyword would measure again.
+    fn maximum_size_is_unresolvable_during_measurement(&self, axis: Axis) -> bool {
+        let style = self.style(self.run.box_);
+        let maximum = axis.select(style.max_width(), style.max_height());
+        self.run.layout_mode == LayoutMode::IntrinsicSizing
+            && maximum.calc_size().is_some()
+            && maximum.is_intrinsic_sizing_constraint()
+    }
+
     fn grid_container_maximum_size(&self, axis: Axis) -> Option<CssPixels> {
+        if self.maximum_size_is_unresolvable_during_measurement(axis) {
+            return None;
+        }
         let space = self.container_available_space();
         let available = axis.select(space.inline_size, space.block_size);
         let constraints = self.layout_input.unwrap().containing_block_constraints;
@@ -2536,7 +2783,9 @@ impl<'pass> GridFormattingContext<'pass> {
             !computed_values.max_height().is_auto()
         };
 
-        if should_treat_grid_container_maximum_size_as_none {
+        if should_treat_grid_container_maximum_size_as_none
+            || self.maximum_size_is_unresolvable_during_measurement(axis)
+        {
             return None;
         }
         Some(self.calculate_grid_container_maximum_size(axis))
@@ -2622,7 +2871,9 @@ impl<'pass> GridFormattingContext<'pass> {
             return false;
         }
         let grid_style = self.grid_style(item.box_);
-        axis.select(
+        self.select_item_grid_axis(
+            item.box_,
+            axis,
             grid_style.template_columns.is_subgrid,
             grid_style.template_rows.is_subgrid,
         )
@@ -2647,8 +2898,11 @@ impl<'pass> GridFormattingContext<'pass> {
         // subgrids.
         //
         // NB: Scrollbar gutters are not represented in UsedValues yet.
+        let position = item.position(axis);
+        let span = item.span(axis);
+        let track_count = self.axis_tracks(axis).len() as i32;
         let used = self.container_used();
-        let (start, end) = if axis.is_column() {
+        let (left_or_top, right_or_bottom) = if axis.is_column() {
             (
                 used.margin_left.get() + used.border_left.get() + used.padding_left.get(),
                 used.padding_right.get() + used.border_right.get() + used.margin_right.get(),
@@ -2659,19 +2913,46 @@ impl<'pass> GridFormattingContext<'pass> {
                 used.padding_bottom.get() + used.border_bottom.get() + used.margin_bottom.get(),
             )
         };
-        if item.position(axis) == 0 {
-            if axis.is_column() {
-                item.extra_margin_left += start + container_as_parent_grid_item.extra_margin_left;
-            } else {
-                item.extra_margin_top += start + container_as_parent_grid_item.extra_margin_top;
-            }
+        let parent = container_as_parent_grid_item;
+        let (item_left_or_top, item_right_or_bottom, parent_left_or_top, parent_right_or_bottom) = if axis.is_column() {
+            (
+                &mut item.extra_margin_left,
+                &mut item.extra_margin_right,
+                parent.extra_margin_left,
+                parent.extra_margin_right,
+            )
+        } else {
+            (
+                &mut item.extra_margin_top,
+                &mut item.extra_margin_bottom,
+                parent.extra_margin_top,
+                parent.extra_margin_bottom,
+            )
+        };
+        let (start, end, item_start, item_end, parent_start, parent_end) = if self.tracks_are_reversed(axis) {
+            (
+                right_or_bottom,
+                left_or_top,
+                item_right_or_bottom,
+                item_left_or_top,
+                parent_right_or_bottom,
+                parent_left_or_top,
+            )
+        } else {
+            (
+                left_or_top,
+                right_or_bottom,
+                item_left_or_top,
+                item_right_or_bottom,
+                parent_left_or_top,
+                parent_right_or_bottom,
+            )
+        };
+        if position == 0 {
+            *item_start += start + parent_start;
         }
-        if item.position(axis) + item.span(axis) as i32 == self.axis_tracks(axis).len() as i32 {
-            if axis.is_column() {
-                item.extra_margin_right += end + container_as_parent_grid_item.extra_margin_right;
-            } else {
-                item.extra_margin_bottom += end + container_as_parent_grid_item.extra_margin_bottom;
-            }
+        if position + span as i32 == track_count {
+            *item_end += end + parent_end;
         }
     }
 
@@ -2712,6 +2993,7 @@ impl<'pass> GridFormattingContext<'pass> {
                     treat_block_axis_percentage_insets_as_auto_beyond_root: false,
                     fragments: None,
                     previous_line_data: None,
+                    fragmentainer: None,
                 };
                 let mut context = GridFormattingContext::new(&scratch_run, Some(self));
                 measure(&mut context, &scratch_run)
@@ -2917,7 +3199,8 @@ impl<'pass> GridFormattingContext<'pass> {
         let mut tracks = self.interleaved_tracks(axis);
         let mut contributions = self.item_contributions_to_track_sizing(axis);
         let style = self.style(self.run.box_);
-        let distribution_stretches = axis.select(
+        let distribution_stretches = self.select_grid_axis(
+            axis,
             matches!(
                 style.justify_content(),
                 justify_content::NORMAL | justify_content::STRETCH
@@ -2938,8 +3221,15 @@ impl<'pass> GridFormattingContext<'pass> {
     }
 
     fn resolve_item_metrics(&mut self, axis: Axis) {
+        self.resolve_metrics_of_items_where(axis, |_| true);
+    }
+
+    fn resolve_metrics_of_items_where(&mut self, axis: Axis, filter: impl Fn(GridItem) -> bool) {
         for item_index in 0..self.items.len() {
             let item = self.items[item_index];
+            if !filter(item) {
+                continue;
+            }
             let style = self.style(item.box_);
             let inline_basis = self.containing_block_size(item, Axis::Column);
             let extra_margin = self.subgrid_gap_extra_margin(axis, self.axis_available(axis));
@@ -2947,22 +3237,23 @@ impl<'pass> GridFormattingContext<'pass> {
             let item_end = item_start + item.span(axis) as i32;
             let track_count = self.axis_tracks(axis).len() as i32;
             let used = self.used(item);
-            if axis.is_column() {
+            let (left_or_top, right_or_bottom) = if axis.is_column() {
                 used.resolve_horizontal_box_model(&style, inline_basis);
-                if item_start > 0 {
-                    used.margin_left.set(used.margin_left.get() + extra_margin);
-                }
-                if item_end < track_count {
-                    used.margin_right.set(used.margin_right.get() + extra_margin);
-                }
+                (&used.margin_left, &used.margin_right)
             } else {
                 used.resolve_vertical_box_model(&style, inline_basis);
-                if item_start > 0 {
-                    used.margin_top.set(used.margin_top.get() + extra_margin);
-                }
-                if item_end < track_count {
-                    used.margin_bottom.set(used.margin_bottom.get() + extra_margin);
-                }
+                (&used.margin_top, &used.margin_bottom)
+            };
+            let (start_margin, end_margin) = if self.tracks_are_reversed(axis) {
+                (right_or_bottom, left_or_top)
+            } else {
+                (left_or_top, right_or_bottom)
+            };
+            if item_start > 0 {
+                start_margin.set(start_margin.get() + extra_margin);
+            }
+            if item_end < track_count {
+                end_margin.set(end_margin.get() + extra_margin);
             }
         }
     }
@@ -2970,10 +3261,106 @@ impl<'pass> GridFormattingContext<'pass> {
     fn item_alignment_for_node(&self, node: Node, axis: Axis) -> Alignment {
         let item_style = self.style(node);
         let container_style = self.style(self.run.box_);
-        axis.select(
+        let alignment = self.select_grid_axis(
+            axis,
             inline_item_alignment(item_style.justify_self(), container_style.justify_items()),
             block_item_alignment(item_style.align_self(), container_style.align_items()),
-        )
+        );
+        match alignment {
+            // https://drafts.csswg.org/css-align-3/#valdef-self-position-self-start
+            // self-start: Aligns the alignment subject to be flush with the edge of the alignment container
+            // corresponding to the alignment subject’s start side in the appropriate axis.
+            // self-end: Aligns the alignment subject to be flush with the edge of the alignment container
+            // corresponding to the alignment subject’s end side in the appropriate axis.
+            Alignment::SelfStart | Alignment::SelfEnd => {
+                let horizontal = axis.is_column();
+                let item_start_is_left_or_top =
+                    geometry::start_is_left_or_top(item_style.writing_mode(), item_style.direction(), horizontal);
+                let shares_start_side = item_start_is_left_or_top == self.axis_start_is_left_or_top(axis);
+                if shares_start_side == (alignment == Alignment::SelfStart) {
+                    Alignment::Start
+                } else {
+                    Alignment::End
+                }
+            }
+            Alignment::Left | Alignment::Right => self.resolve_left_or_right(axis, alignment),
+            _ => alignment,
+        }
+    }
+
+    /// The item's alignment in the given axis, where Start and End are the left/top and right/bottom sides of its grid
+    /// area, as the item's margins, borders and padding are laid out.
+    fn item_physical_alignment_for_node(&self, node: Node, axis: Axis) -> Alignment {
+        let alignment = self.item_alignment_for_node(node, axis);
+        if !self.axis_is_reversed(axis) {
+            return alignment;
+        }
+        match alignment {
+            Alignment::Start | Alignment::Baseline => Alignment::End,
+            Alignment::End => Alignment::Start,
+            _ => alignment,
+        }
+    }
+
+    /// An item that is not stretched by normal or stretch alignment is aligned to the start of its grid area, which
+    /// is at the physical end of a reversed axis.
+    fn alignment_for_unstretched_size(&self, axis: Axis, alignment: Alignment, stretches: bool) -> Alignment {
+        if !stretches && self.axis_is_reversed(axis) && matches!(alignment, Alignment::Normal | Alignment::Stretch) {
+            return Alignment::End;
+        }
+        alignment
+    }
+
+    // https://drafts.csswg.org/css-align-3/#valdef-justify-self-left
+    // left: Aligns the alignment subject to be flush with the alignment container’s line-left or physical left edge,
+    // whichever is in the appropriate axis.
+    // right: Aligns the alignment subject to be flush with the alignment container’s line-right or physical right
+    // edge, whichever is in the appropriate axis.
+    fn resolve_left_or_right(&self, axis: Axis, alignment: Alignment) -> Alignment {
+        // NB: The Row axis of a grid container in a vertical writing mode is its inline axis, whose line-left side is
+        //     the top, except in sideways-lr, where it is the bottom.
+        let line_left_is_left_or_top =
+            axis.is_column() || self.style(self.run.box_).writing_mode() != writing_mode::SIDEWAYS_LR;
+        let aligns_to_left_or_top = (alignment == Alignment::Left) == line_left_is_left_or_top;
+        if self.axis_start_is_left_or_top(axis) == aligns_to_left_or_top {
+            Alignment::Start
+        } else {
+            Alignment::End
+        }
+    }
+
+    /// Whether the grid container's start side in the given axis is its left (columns) or top (rows) side.
+    fn axis_start_is_left_or_top(&self, axis: Axis) -> bool {
+        !self.axis_is_reversed(axis)
+    }
+
+    /// Whether the given axis runs from right to left or from bottom to top, as the inline axis of a horizontal grid
+    /// container with an rtl direction and the block axis of a vertical-rl grid container do.
+    fn axis_is_reversed(&self, axis: Axis) -> bool {
+        axis.select(self.columns_are_reversed, self.rows_are_reversed)
+    }
+
+    /// Whether the tracks of the given axis start at its right or bottom side. The grid is laid out from the side its
+    /// tracks start at, and its positions in that axis are mirrored at the end. This is the case in a reversed axis,
+    /// except that a subgridded axis keeps the track order of its parent grid.
+    // FIXME: A subgrid whose axis runs in the opposite direction of its parent grid's should number its lines in its
+    //        own direction, from the other end of the parent's tracks.
+    fn tracks_are_reversed(&self, axis: Axis) -> bool {
+        if self.container_is_subgridded(axis)
+            && let Some(parent) = self.parent_grid()
+        {
+            return axis.select(parent.column_tracks_are_reversed, parent.row_tracks_are_reversed);
+        }
+        self.axis_is_reversed(axis)
+    }
+
+    /// Maps an offset and size along the given axis, measured from the content edge the grid container's tracks start
+    /// at in that axis, to a physical offset from its left or top content edge.
+    fn physical_offset(&self, axis: Axis, offset: CssPixels, size: CssPixels) -> CssPixels {
+        if !self.tracks_are_reversed(axis) {
+            return offset;
+        }
+        self.grid_container_alignment_size(axis) - offset - size
     }
 
     // https://drafts.csswg.org/css-grid-2/#grid-items
@@ -3001,7 +3388,7 @@ impl<'pass> GridFormattingContext<'pass> {
     }
 
     fn item_alignment(&self, item: GridItem, axis: Axis) -> Alignment {
-        self.item_alignment_for_node(item.box_, axis)
+        self.item_physical_alignment_for_node(item.box_, axis)
     }
 
     fn item_margin_box_start(&self, item: GridItem, axis: Axis) -> CssPixels {
@@ -3107,7 +3494,7 @@ impl<'pass> GridFormattingContext<'pass> {
                 area_constraints,
             ));
         }
-        if !wrapper_style.min_width().is_auto() {
+        if !crate::layout::sizing_context::is_plain_auto(wrapper_style.min_width()) {
             wrapper_size = wrapper_size.max(sizing.calculate_inner_size_for_property(
                 item.box_,
                 SizingAxis::Inline,
@@ -3128,13 +3515,20 @@ impl<'pass> GridFormattingContext<'pass> {
             base_margin_end + item.extra_margin_right,
             wrapper_style.margin_left().is_auto(),
             wrapper_style.margin_right().is_auto(),
-            alignment,
+            self.alignment_for_unstretched_size(Axis::Column, alignment, false),
         )
     }
 
     fn resolve_item_sizes(&mut self, axis: Axis) {
+        self.resolve_sizes_of_items_where(axis, |_| true);
+    }
+
+    fn resolve_sizes_of_items_where(&mut self, axis: Axis, filter: impl Fn(GridItem) -> bool) {
         for item_index in 0..self.items.len() {
             let item = self.items[item_index];
+            if !filter(item) {
+                continue;
+            }
             // https://drafts.csswg.org/css-grid-1/#grid-item-sizing
             // A grid item is sized within the containing block defined by its grid area.
             let containing = self.containing_block_size(item, axis);
@@ -3283,10 +3677,25 @@ impl<'pass> GridFormattingContext<'pass> {
                     used_margin_end,
                     start_auto,
                     end_auto,
-                    alignment,
+                    self.alignment_for_unstretched_size(axis, alignment, size_is_auto && !facts.is_replaced_box()),
                 )
             };
             let mut resolved = resolve_alignment(size, preferred.is_auto());
+            // https://drafts.csswg.org/css-values-5/#resolving-calc-size
+            // NB: A calc-size() with an auto basis resolves against the size auto gives the item, stretched or not.
+            if preferred.is_auto() && preferred.calc_size().is_some() {
+                let size = self.sizing().resolve_calc_size(
+                    item.box_,
+                    axis.sizing_axis(),
+                    preferred,
+                    resolved.size,
+                    axis.select(
+                        constraints.percentage_basis_inline_size,
+                        constraints.percentage_basis_block_size,
+                    ),
+                );
+                resolved = resolve_alignment(size, false);
+            }
 
             let maximum_is_none = if axis.is_column() {
                 self.sizing()
@@ -3358,7 +3767,7 @@ impl<'pass> GridFormattingContext<'pass> {
         }
         if self.use_row_alignment_container_size {
             let style = self.style(self.run.box_);
-            if !style.min_height().is_auto() {
+            if !crate::layout::sizing_context::is_plain_auto(style.min_height()) {
                 return self
                     .row_alignment_container_size
                     .max(self.container_used().content_block_size.get());
@@ -3372,7 +3781,8 @@ impl<'pass> GridFormattingContext<'pass> {
         }
     }
 
-    fn resolve_track_spacing(&mut self, axis: Axis) {
+    /// Returns whether content distribution made the gutters wider than the gap.
+    fn resolve_track_spacing(&mut self, axis: Axis) -> bool {
         let container = self.grid_container_alignment_size(axis);
         let track_sum = self
             .axis_tracks(axis)
@@ -3387,6 +3797,7 @@ impl<'pass> GridFormattingContext<'pass> {
         for (gap, collapse) in gaps.iter_mut().zip(collapsed) {
             gap.base_size = if collapse { CssPixels::default() } else { size };
         }
+        gap_count > 0 && size > minimum
     }
 
     fn used_container_block_size_for_second_row_layout(&self) -> CssPixels {
@@ -3406,7 +3817,7 @@ impl<'pass> GridFormattingContext<'pass> {
                 constraints,
             ));
         }
-        if !style.min_height().is_auto() {
+        if !crate::layout::sizing_context::is_plain_auto(style.min_height()) {
             block_size = block_size.max(sizing.calculate_inner_size_for_property(
                 self.run.box_,
                 SizingAxis::Block,
@@ -3432,8 +3843,8 @@ impl<'pass> GridFormattingContext<'pass> {
         let (block_offset, block_size) = self.axis_grid_area(Axis::Row, Some((item.row, item.row_span)));
         geometry::LogicalRect {
             offset: geometry::LogicalOffset {
-                inline_offset,
-                block_offset,
+                inline_offset: self.physical_offset(Axis::Column, inline_offset, inline_size),
+                block_offset: self.physical_offset(Axis::Row, block_offset, block_size),
             },
             size: geometry::LogicalSize {
                 inline_size,
@@ -3480,29 +3891,34 @@ impl<'pass> GridFormattingContext<'pass> {
         end: ComputedGridPlacement,
         placement_names: &[usize],
     ) -> (CssPixels, CssPixels) {
-        let lines = self.axis_lines(axis);
-        let explicit_lines = self.explicit_line_count(axis);
-        let resolved = resolve_placement_position(
-            start,
-            end,
-            placement_names,
-            lines,
-            explicit_lines,
-            lines.len().saturating_sub(1),
-        );
-        let is_auto_positioned =
-            |placement: ComputedGridPlacement| placement.kind != crate::layout::ComputedGridPlacementKind::Line as u8;
-        let mut rect = self.axis_grid_area(
-            axis,
-            (!(is_auto_positioned(start) && is_auto_positioned(end))).then_some((resolved.start, resolved.span)),
-        );
-
-        let start_is_augmented =
-            is_auto_positioned(start) && end.kind == crate::layout::ComputedGridPlacementKind::Line as u8;
-        let end_is_augmented =
-            is_auto_positioned(end) && start.kind == crate::layout::ComputedGridPlacementKind::Line as u8;
-        if !start_is_augmented && !end_is_augmented {
-            return rect;
+        let is_line = |placement: ComputedGridPlacement| is_positioned(placement);
+        if !is_line(start) && !is_line(end) {
+            return self.axis_grid_area(axis, None);
+        }
+        let resolved = resolve_placement_position(start, end, placement_names, self.explicit_grid_lines(axis), None);
+        // https://drafts.csswg.org/css-grid-2/#abspos-items
+        // If a grid-placement property refers to a non-existent line either by explicitly specifying such a line or by
+        // spanning outside of the existing implicit grid, it is instead treated as specifying auto (instead of
+        // creating new implicit grid lines).
+        let line_count = self.axis_lines(axis).len() as i32;
+        let existing_line = |line: i32| {
+            let line = line.saturating_add(self.explicit_start(axis) as i32);
+            (0..line_count).contains(&line).then_some(line)
+        };
+        let start_line = if is_line(start) || is_line(end) && is_span(start) {
+            existing_line(resolved.start)
+        } else {
+            None
+        };
+        let end_line = if is_line(end) || is_line(start) && is_span(end) {
+            existing_line(resolved.end)
+        } else {
+            None
+        };
+        if let (Some(start_line), Some(end_line)) = (start_line, end_line)
+            && start_line < self.axis_tracks(axis).len() as i32
+        {
+            return self.axis_grid_area(axis, Some((start_line, (end_line - start_line) as usize)));
         }
 
         // Instead of auto-placement, an auto value for a grid-placement property contributes a special line to the placement whose position
@@ -3540,21 +3956,13 @@ impl<'pass> GridFormattingContext<'pass> {
                 offset
             }
         };
-        let start_offset = if start_is_augmented {
-            augmented_edge(true)
-        } else {
-            explicit_line_position(resolved.start, false)
-        };
-        let end_offset = if end_is_augmented {
-            augmented_edge(false)
-        } else {
-            explicit_line_position(resolved.end, true)
-        };
-        rect = (start_offset, end_offset - start_offset);
-        rect
+        let start_offset = start_line.map_or_else(|| augmented_edge(true), |line| explicit_line_position(line, false));
+        let end_offset = end_line.map_or_else(|| augmented_edge(false), |line| explicit_line_position(line, true));
+        (start_offset, end_offset - start_offset)
     }
 
     fn layout_items(&mut self, run: &FormattingContextRun<'pass>) {
+        let mut baseline_aligned_items = Vec::new();
         for item_index in 0..self.items.len() {
             let item = self.items[item_index];
             let area = self.grid_area(item);
@@ -3584,7 +3992,7 @@ impl<'pass> GridFormattingContext<'pass> {
                         && !facts.is_replaced_box()
                         && !facts.uses_button_layout()
                         && !(self.style(item.box_).display().is_grid_inside()
-                            && self.grid_style(item.box_).template_rows.is_subgrid)
+                            && self.grid_item_is_subgridded(item, Axis::Row))
                 };
                 let used = self.used(item);
                 used.has_definite_inline_size.set(true);
@@ -3653,12 +4061,110 @@ impl<'pass> GridFormattingContext<'pass> {
             // Resolve relative-position insets before placement seals the
             // item's committed metrics.
             abspos_engine::compute_inset_native(run, item.box_, area.size.inline_size, area.size.block_size);
+            if self.item_participates_in_row_baseline_alignment(item) {
+                // NB: Baseline-aligned items are placed once every item in their baseline-sharing group is laid out.
+                baseline_aligned_items.push((item_index, offset));
+                continue;
+            }
             formatting_context::place_child(&self.run, item.box_, offset, None);
         }
+        self.place_baseline_aligned_items(&baseline_aligned_items);
         self.derived_baselines_of_root_box = DerivedBaselines {
             first: self.baseline_of_items(formatting_context::BaselineSet::First),
             last: self.baseline_of_items(formatting_context::BaselineSet::Last),
         };
+    }
+
+    // NB: Only the vertical Row axis aligns items by their baselines, using the horizontal baselines of items in a
+    //     horizontal writing mode, while items in other writing modes synthesize theirs.
+    // FIXME: Align items by their baselines in the horizontal Column axis and in a reversed Row axis, align by last
+    //        baselines, and shim baseline-aligned items for track sizing.
+    fn item_participates_in_row_baseline_alignment(&self, item: GridItem) -> bool {
+        if self.rows_are_reversed || self.item_alignment(item, Axis::Row) != Alignment::Baseline {
+            return false;
+        }
+        // https://drafts.csswg.org/css-grid-2/#auto-margins
+        // Auto margins in either axis absorb positive free space prior to alignment via the box alignment properties,
+        // thereby disabling the effects of any self-alignment properties in that axis.
+        let style = self.style(item.box_);
+        if style.margin_top().is_auto() || style.margin_bottom().is_auto() {
+            return false;
+        }
+        // https://drafts.csswg.org/css-grid-2/#row-align
+        // If baseline alignment is specified on a grid item whose size in that axis depends on the size of an
+        // intrinsically-sized track (whose size is therefore dependent on both the item’s size and baseline alignment,
+        // creating a cyclic dependency), that item does not participate in baseline alignment, and instead uses its
+        // fallback alignment as if that were originally specified. For this purpose, <flex> track sizes count as
+        // “intrinsically-sized” when the grid container has an indefinite size in the relevant axis.
+        let size_depends_on_tracks = self.item_preferred_size(item, Axis::Row).contains_percentage()
+            || style.min_height().contains_percentage()
+            || style.max_height().contains_percentage();
+        if !size_depends_on_tracks {
+            return true;
+        }
+        let available = self.axis_available(Axis::Row);
+        let container_size_is_definite =
+            matches!(self.container_available_space().block_size, AvailableSize::Definite(_));
+        let start = item.row.max(0) as usize;
+        let end = start.saturating_add(item.row_span).min(self.rows.len());
+        !self.rows[start.min(end)..end].iter().any(|track| {
+            track.min_sizing.is_intrinsic(available)
+                || track.max_sizing.is_intrinsic(available)
+                || (!container_size_is_definite && track.max_sizing.flex_factor().is_some())
+        })
+    }
+
+    /// The distance from the start of the item's grid area to its alignment baseline, as the item is laid out at the
+    /// start of its area.
+    fn item_row_baseline(&self, item: GridItem) -> CssPixels {
+        let used = self.used(item);
+        let collapsed = used.uses_collapsing_borders_model.get();
+        let distance_from_margin_box_top =
+            if self.style(item.box_).writing_mode() == writing_mode::HORIZONTAL_TB && used.has_first_baseline.get() {
+                formatting_context::box_baseline(
+                    &self.run.callbacks,
+                    item.box_,
+                    used,
+                    formatting_context::BaselineSet::First,
+                )
+            } else {
+                // https://drafts.csswg.org/css-align-3/#synthesize-baseline
+                // NB: The alphabetic baseline is synthesized from the line-under edge of the border box.
+                used.margin_box_top(collapsed) + used.content_block_size.get() + used.border_box_bottom(collapsed)
+            };
+        item.extra_margin_top + distance_from_margin_box_top
+    }
+
+    // https://drafts.csswg.org/css-align-3/#align-by-baseline
+    // Given a set of alignment subjects and their baselines that all belong to a single baseline-sharing group, the
+    // alignment subjects are baseline-aligned as follows:
+    // [...]
+    // Position the aligned baseline-sharing group within the alignment container according to its fallback alignment.
+    // NB: The fallback alignment is start, so the item with the largest distance from the start of its grid area to its
+    //     baseline is placed at the start of its area, and the other items are moved down to line up with it.
+    fn place_baseline_aligned_items(&self, items: &[(usize, FfiCssPixelPoint)]) {
+        if items.is_empty() {
+            return;
+        }
+        // https://drafts.csswg.org/css-align-3/#baseline-sharing-group
+        // (For example, grid items with align-self: baseline are baseline-aligning along the grid’s block axis, and
+        // therefore participate with other items in their row.)
+        // [...] a table cell spanning three rows participates in first-baseline alignment with the table cells in the
+        // first row that it spans [...]
+        let mut shared_baselines = HashMap::<i32, CssPixels>::default();
+        for &(item_index, _) in items {
+            let item = self.items[item_index];
+            let baseline = self.item_row_baseline(item);
+            shared_baselines
+                .entry(item.row)
+                .and_modify(|shared| *shared = (*shared).max(baseline))
+                .or_insert(baseline);
+        }
+        for &(item_index, mut offset) in items {
+            let item = self.items[item_index];
+            offset.y += shared_baselines[&item.row] - self.item_row_baseline(item);
+            formatting_context::place_child(&self.run, item.box_, offset, None);
+        }
     }
 
     // https://drafts.csswg.org/css-grid-2/#grid-baselines
@@ -3730,12 +4236,16 @@ impl<'pass> GridFormattingContext<'pass> {
                 self.track_sum(axis),
             )
         };
+        let column_axis = self.select_grid_axis(Axis::Column, Axis::Column, Axis::Row);
         let tracks = OwnedUsedGridTracks {
-            columns: self.used_track_list_data(Axis::Column, self.is_subgridded(Axis::Column, grid_style)),
-            rows: self.used_track_list_data(Axis::Row, self.is_subgridded(Axis::Row, grid_style)),
+            columns: self.used_track_list_data(column_axis, self.is_subgridded(column_axis, grid_style)),
+            rows: self.used_track_list_data(
+                column_axis.opposite(),
+                self.is_subgridded(column_axis.opposite(), grid_style),
+            ),
             grid_area: CssPixelRect::new(
-                start(Axis::Column),
-                start(Axis::Row),
+                self.physical_offset(Axis::Column, start(Axis::Column), self.track_sum(Axis::Column)),
+                self.physical_offset(Axis::Row, start(Axis::Row), self.track_sum(Axis::Row)),
                 self.track_sum(Axis::Column),
                 self.track_sum(Axis::Row),
             ),
@@ -3821,8 +4331,9 @@ impl<'pass> GridFormattingContext<'pass> {
                 tracks: serialized_tracks,
             }
         };
-        let columns = serialize(Axis::Column);
-        let rows = serialize(Axis::Row);
+        let column_axis = self.select_grid_axis(Axis::Column, Axis::Column, Axis::Row);
+        let columns = serialize(column_axis);
+        let rows = serialize(column_axis.opposite());
         let name_raws = grid_style.names.raws();
         let areas = grid_style
             .areas
@@ -3913,8 +4424,8 @@ impl<'pass> GridFormattingContext<'pass> {
             self.use_row_alignment_container_size = true;
         }
         self.re_resolve_columns_with_row_sizes();
-        self.resolve_track_spacing(Axis::Column);
-        self.resolve_track_spacing(Axis::Row);
+        let columns_were_distributed = self.resolve_track_spacing(Axis::Column);
+        let rows_were_distributed = self.resolve_track_spacing(Axis::Row);
 
         if available.inline_size.is_intrinsic_sizing_constraint()
             || available.block_size.is_intrinsic_sizing_constraint()
@@ -3931,6 +4442,20 @@ impl<'pass> GridFormattingContext<'pass> {
                 self.container_used().set_content_block_size(size);
             }
             return;
+        }
+
+        // https://drafts.csswg.org/css-align-3/#distribution-grid
+        // The grid tracks in the appropriate axis, with any spacing inserted between tracks added to the relevant
+        // gutters, and treating collapsed gutters as a single opportunity for space insertion.
+        // NB: Distributed space widens the grid areas of items that span gutters, so size and align those items again
+        //     within their final grid areas.
+        if columns_were_distributed {
+            self.resolve_metrics_of_items_where(Axis::Column, |item| item.column_span > 1);
+            self.resolve_sizes_of_items_where(Axis::Column, |item| item.column_span > 1);
+        }
+        if rows_were_distributed {
+            self.resolve_metrics_of_items_where(Axis::Row, |item| item.row_span > 1);
+            self.resolve_sizes_of_items_where(Axis::Row, |item| item.row_span > 1);
         }
 
         self.layout_items(run);
@@ -3998,19 +4523,28 @@ impl<'pass> GridFormattingContext<'pass> {
         }
     }
 
+    /// The physical alignment of an absolutely positioned item in its grid area. Normal and stretch alignment do not
+    /// stretch such an item, so they align it to the start of its area, as for an unstretched in-flow item.
+    fn abspos_item_alignment(&self, node: Node, axis: Axis) -> Alignment {
+        self.alignment_for_unstretched_size(axis, self.item_physical_alignment_for_node(node, axis), false)
+    }
+
     // https://www.w3.org/TR/css-grid-2/#abspos-items
     pub(crate) fn abspos_containing_block_info(&self, node: Node) -> abspos_inputs::AbsposContainingBlockInfo {
         let grid_style = self.grid_style(node);
         let name_raws = grid_style.names.raws();
-        let (block_offset, block_size) =
-            self.absolute_axis_grid_area(Axis::Row, grid_style.row_start, grid_style.row_end, name_raws);
+        let columns = (grid_style.column_start, grid_style.column_end);
+        let rows = (grid_style.row_start, grid_style.row_end);
+        let (row_start, row_end) = self.select_grid_axis(Axis::Row, columns, rows);
+        let (column_start, column_end) = self.select_grid_axis(Axis::Column, columns, rows);
+        let (block_offset, block_size) = self.absolute_axis_grid_area(Axis::Row, row_start, row_end, name_raws);
         let (inline_offset, inline_size) =
-            self.absolute_axis_grid_area(Axis::Column, grid_style.column_start, grid_style.column_end, name_raws);
+            self.absolute_axis_grid_area(Axis::Column, column_start, column_end, name_raws);
         abspos_inputs::AbsposContainingBlockInfo {
             rect: geometry::LogicalRect {
                 offset: geometry::LogicalOffset {
-                    inline_offset,
-                    block_offset,
+                    inline_offset: self.physical_offset(Axis::Column, inline_offset, inline_size),
+                    block_offset: self.physical_offset(Axis::Row, block_offset, block_size),
                 },
                 size: geometry::LogicalSize {
                     inline_size,
@@ -4019,9 +4553,10 @@ impl<'pass> GridFormattingContext<'pass> {
             },
             inline_axis_mode: abspos_inputs::AbsposAxisMode::InsetFromRect,
             block_axis_mode: abspos_inputs::AbsposAxisMode::InsetFromRect,
-            inline_alignment: Some(abspos_alignment(self.item_alignment_for_node(node, Axis::Column))),
-            block_alignment: Some(abspos_alignment(self.item_alignment_for_node(node, Axis::Row))),
+            inline_alignment: Some(abspos_alignment(self.abspos_item_alignment(node, Axis::Column))),
+            block_alignment: Some(abspos_alignment(self.abspos_item_alignment(node, Axis::Row))),
             derives_from_own_computed_values: true,
+            is_position_area: false,
         }
     }
 }
@@ -4030,7 +4565,7 @@ fn abspos_alignment(alignment: Alignment) -> AbsposAlignment {
     match alignment {
         Alignment::Baseline => AbsposAlignment::Baseline,
         Alignment::Center => AbsposAlignment::Center,
-        Alignment::End => AbsposAlignment::End,
+        Alignment::End | Alignment::Right => AbsposAlignment::End,
         Alignment::Normal => AbsposAlignment::Normal,
         Alignment::Safe => AbsposAlignment::Safe,
         Alignment::SelfEnd => AbsposAlignment::SelfEnd,
@@ -4038,7 +4573,7 @@ fn abspos_alignment(alignment: Alignment) -> AbsposAlignment {
         Alignment::SpaceAround => AbsposAlignment::SpaceAround,
         Alignment::SpaceBetween => AbsposAlignment::SpaceBetween,
         Alignment::SpaceEvenly => AbsposAlignment::SpaceEvenly,
-        Alignment::Start => AbsposAlignment::Start,
+        Alignment::Start | Alignment::Left => AbsposAlignment::Start,
         Alignment::Stretch => AbsposAlignment::Stretch,
         Alignment::Unsafe => AbsposAlignment::Unsafe,
     }
@@ -5131,31 +5666,6 @@ pub(crate) fn add_template_area_lines(
             false,
         ));
     }
-}
-
-pub(crate) fn nth_named_line(lines: &[Vec<LineName>], name_raw: usize, nth_line: i32) -> Option<i32> {
-    // FIXME: If not enough lines with the name exist, all implicit grid lines on the side
-    // of the explicit grid corresponding to the search direction are assumed to have that name for the purpose of counting this span.
-    // Source: https://drafts.csswg.org/css-grid/#line-placement
-    let mut remaining = if nth_line < 0 {
-        lines.len().wrapping_add_signed(nth_line as isize)
-    } else {
-        nth_line.saturating_sub(1) as usize
-    };
-    for (line_index, names) in lines.iter().enumerate() {
-        for name in names {
-            if name.raw != name_raw {
-                continue;
-            }
-            if remaining == 0 {
-                // https://drafts.csswg.org/css-grid/#line-placement
-                // Contributes the nth grid line to the grid item’s placement.
-                return Some(line_index as i32);
-            }
-            remaining = remaining.wrapping_sub(1);
-        }
-    }
-    None
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -12,11 +12,12 @@
 #include <AK/Optional.h>
 #include <AK/OwnPtr.h>
 #include <AK/RefCounted.h>
+#include <Compositor/CanvasSurfaceRegistry.h>
 #include <Compositor/ContextState.h>
 #include <Compositor/DisplayListPlayerSkia.h>
+#include <Compositor/SkiaBackendContext.h>
 #include <Compositor/VSyncScheduler.h>
 #include <LibCompositing/DisplayList/AccumulatedVisualContext.h>
-#include <LibCompositing/DisplayList/CanvasSurfaceRegistry.h>
 #include <LibCompositing/DisplayList/DisplayList.h>
 #include <LibCompositing/DisplayList/DisplayListResourceStorage.h>
 #include <LibCompositing/Forward.h>
@@ -28,7 +29,6 @@
 #include <LibGfx/ShareableBitmap.h>
 #include <LibGfx/SharedImage.h>
 #include <LibGfx/Size.h>
-#include <LibGfx/SkiaBackendContext.h>
 #include <LibMedia/Forward.h>
 #include <LibMedia/Sinks/DisplayingVideoSink.h>
 #include <LibMedia/VideoSinkHandle.h>
@@ -65,6 +65,7 @@ public:
     virtual void pointer_moved(Web::CompositorContextId, Web::DevicePixelPoint, u32 /* buttons */, bool /* scrolled_since_frame */, u64 /* input_event_id */) { }
     virtual void pointer_left(Web::CompositorContextId, u64 /* input_event_id */) { }
     virtual void async_scroll_updates(Web::CompositorContextId, Compositing::PendingAsyncScrollUpdates const&) = 0;
+    virtual void overlay_scrollbar_visibilities_changed(Vector<Web::OverlayScrollbarVisibility> const&) { }
     virtual void create_video_edge(Media::VideoSinkHandle) = 0;
     virtual void release_video_edge(Media::VideoSinkHandle) = 0;
     virtual void video_sink_presented_frame(Media::VideoSinkHandle, RefPtr<Media::VideoFrame>, Media::DisplayingVideoSinkFrameCounts) { }
@@ -88,6 +89,8 @@ public:
     struct PresentationCapabilities {
         bool synthesizes_scroll_momentum { false };
         bool scrolls_elastically { false };
+        // Whether a press on a scrollbar track beside the thumb jumps there rather than paging toward it.
+        bool scrollbar_track_press_jumps { false };
         // LUID of the GPU adapter the presentation can present shared GPU textures on, if any.
         Optional<u64> gpu_presentation_adapter_luid;
     };
@@ -101,8 +104,8 @@ public:
     void destroy_contexts_for_web_content_client(CompositorStateWebContentClient&);
 
     RefPtr<Gfx::SkiaBackendContext> skia_backend_context() const { return m_skia_backend_context; }
-    Compositing::CanvasSurfaceRegistry& canvas_surface_registry() { return m_canvas_surface_registry; }
-    Compositing::CanvasSurfaceRegistry const& canvas_surface_registry() const { return m_canvas_surface_registry; }
+    CanvasSurfaceRegistry& canvas_surface_registry() { return m_canvas_surface_registry; }
+    CanvasSurfaceRegistry const& canvas_surface_registry() const { return m_canvas_surface_registry; }
 
     void create_context(Web::CompositorContextId, Optional<u64> page_id, CompositorStateWebContentClient&);
     void destroy_context(Web::CompositorContextId);
@@ -141,6 +144,7 @@ public:
     bool request_screenshot(Web::CompositorContextId, Gfx::ShareableBitmap&);
     void presented_bitmap_ready_to_paint(Web::CompositorContextId, i32 bitmap_id);
     void set_client_gpu_presentation_capability(CompositorStateClient&, bool supported, u64 adapter_luid);
+    void set_scrollbar_track_press_jumps(CompositorStateClient&, bool jumps);
     String scroll_state_for_testing(Web::CompositorContextId, Web::AsyncScrollNodeStableID stretched_scroller) const;
     Optional<Compositing::FirstWheelStepRouteForTesting> route_first_wheel_step_for_testing(Web::CompositorContextId, Gfx::FloatPoint position, Gfx::FloatPoint delta_in_css_pixels);
     void begin_input_trace_for_testing(Web::CompositorContextId);
@@ -205,7 +209,7 @@ private:
     double display_refresh_rate_for_context(ContextState const&) const;
     void clear_parent_context(ContextState&);
     CompositedContextResolver resolver_for(Web::CompositorContextId parent_context_id);
-    Compositing::CompositedContextSurface resolve_composited_context(Web::CompositorContextId parent_context_id, Web::CompositorContextId child_context_id, Gfx::FloatRect destination_rect, Gfx::FloatMatrix4x4 const& canvas_transform);
+    CompositedContextSurface resolve_composited_context(Web::CompositorContextId parent_context_id, Web::CompositorContextId child_context_id, Gfx::FloatRect destination_rect, Gfx::FloatMatrix4x4 const& canvas_transform);
     void schedule_backing_store_shrink(Web::CompositorContextId, ContextState&);
     void shrink_backing_stores_after_resize(Web::CompositorContextId);
     void resize_backing_stores_if_needed(Web::CompositorContextId, ContextState&);
@@ -279,7 +283,7 @@ private:
 
     DoublyLinkedList<PendingAsyncPresent> m_pending_async_presents;
     RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
-    Compositing::CanvasSurfaceRegistry m_canvas_surface_registry;
+    CanvasSurfaceRegistry m_canvas_surface_registry;
     OwnPtr<DisplayListPlayerSkia> m_display_list_player;
     HashMap<Optional<u64>, OwnPtr<VSyncScheduler>> m_vsync_schedulers_by_display;
     RefPtr<Core::Timer> m_gpu_completion_timer;

@@ -6,16 +6,16 @@
 
 #include <AK/Span.h>
 #include <Compositor/FontSkia.h>
+#include <Compositor/PaintingSurface.h>
 #include <Compositor/PictureInPictureControls.h>
+#include <Compositor/SkiaUtils.h>
 #include <LibCompositing/UIOverlays.h>
 #include <LibGfx/Font/Font.h>
 #include <LibGfx/Font/FontDatabase.h>
-#include <LibGfx/PaintingSurface.h>
-#include <LibGfx/SkiaUtils.h>
+#include <core/SkBlurTypes.h>
 #include <core/SkCanvas.h>
 #include <core/SkFont.h>
 #include <core/SkFontMetrics.h>
-#include <core/SkBlurTypes.h>
 #include <core/SkMaskFilter.h>
 #include <core/SkPaint.h>
 #include <core/SkPathBuilder.h>

@@ -13,10 +13,14 @@
 #include <LibWeb/Bindings/RustSerialization.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
+#include <LibWeb/WebIDL/AbstractOperations.h>
+#include <LibWeb/WebIDL/CallbackType.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOrUtils.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -86,7 +90,12 @@ void* web_bindings_wrapper_world(void* realm, bool* is_main_world);
 JSObject* web_bindings_rust_wrapper_for(void* realm, void* cell);
 void web_bindings_set_rust_wrapper(void* realm, void* cell, JSObject* wrapper);
 JSObject* web_bindings_rejected_promise(void* current_realm, JSValue this_value, JSValue reason);
+void web_bindings_queue_a_microtask(void* realm, JSObject* function);
+void* web_bindings_create_callback_function(JSObject* callable, bool returns_promise);
+JSCompletion web_bindings_invoke_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments);
+void* web_bindings_invoke_promise_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments);
 bool web_bindings_realm_is_window(void* realm);
+void web_bindings_with_temporary_execution_context(void* realm, bool callbacks_enabled, void* context, void (*steps)(void*));
 bool web_bindings_object_implements_interface(JSObject* object, u16 interface_name);
 JSObject* web_bindings_create_dom_exception(void* realm, ReadonlyBytes name, FlatPtr message);
 bool web_bindings_extract_an_origin(JSObject* object, void* ctx, void (*on_origin)(void*, URL::FFI::FfiOrigin const*));
@@ -94,10 +103,15 @@ JSCompletion web_bindings_serialize_value(RustSerializationWriter*, JSValue);
 void web_bindings_serialize_u32(RustSerializationWriter*, u32);
 void web_bindings_serialize_f64(RustSerializationWriter*, double);
 void web_bindings_serialize_bool(RustSerializationWriter*, bool);
+void web_bindings_serialize_i64(RustSerializationWriter*, i64);
+void web_bindings_serialize_utf16_string(RustSerializationWriter*, FlatPtr string);
+void web_bindings_serialize_bytes(RustSerializationWriter*, ReadonlyBytes);
 JSCompletion web_bindings_deserialize_value(RustSerializationReader*);
 JSCompletion web_bindings_deserialize_u32(RustSerializationReader*, u32* out_value);
 JSCompletion web_bindings_deserialize_f64(RustSerializationReader*, double* out_value);
 JSCompletion web_bindings_deserialize_bool(RustSerializationReader*, bool* out_value);
+JSCompletion web_bindings_deserialize_i64(RustSerializationReader*, i64* out_value);
+JSCompletion web_bindings_deserialize_utf16_string(RustSerializationReader*, FlatPtr* out_string);
 void web_bindings_serialize_inline_object_header(RustSerializationWriter*, u16 interface_name);
 JSCompletion web_bindings_deserialize_inline_object_header(RustSerializationReader*, u16 interface_name);
 
@@ -124,6 +138,12 @@ void web_bindings_set_rust_wrapper(void* realm, void* cell, JSObject* wrapper)
 bool web_bindings_realm_is_window(void* realm)
 {
     return HTML::window_from_global_object(static_cast<JS::Realm*>(realm)->global_object());
+}
+
+void web_bindings_with_temporary_execution_context(void* realm, bool callbacks_enabled, void* context, void (*steps)(void*))
+{
+    HTML::TemporaryExecutionContext execution_context { *static_cast<JS::Realm*>(realm), callbacks_enabled ? HTML::TemporaryExecutionContext::CallbacksEnabled::Yes : HTML::TemporaryExecutionContext::CallbacksEnabled::No };
+    steps(context);
 }
 
 bool web_bindings_object_implements_interface(JSObject* object, u16 interface_name)
@@ -186,6 +206,21 @@ void web_bindings_serialize_bool(RustSerializationWriter* writer, bool value)
     writer->serialized.encode(value);
 }
 
+void web_bindings_serialize_i64(RustSerializationWriter* writer, i64 value)
+{
+    writer->serialized.encode(value);
+}
+
+void web_bindings_serialize_utf16_string(RustSerializationWriter* writer, FlatPtr string)
+{
+    writer->serialized.encode(Utf16String::from_raw(string));
+}
+
+void web_bindings_serialize_bytes(RustSerializationWriter* writer, ReadonlyBytes bytes)
+{
+    writer->serialized.encode(bytes);
+}
+
 // StructuredDeserialize of a value that the serialized form of an object holds, https://html.spec.whatwg.org/multipage/structured-data.html#sub-deserialization
 JSCompletion web_bindings_deserialize_value(RustSerializationReader* reader)
 {
@@ -205,6 +240,19 @@ JSCompletion web_bindings_deserialize_f64(RustSerializationReader* reader, doubl
 JSCompletion web_bindings_deserialize_bool(RustSerializationReader* reader, bool* out_value)
 {
     return deserialize_plain_value(reader, out_value);
+}
+
+JSCompletion web_bindings_deserialize_i64(RustSerializationReader* reader, i64* out_value)
+{
+    return deserialize_plain_value(reader, out_value);
+}
+
+JSCompletion web_bindings_deserialize_utf16_string(RustSerializationReader* reader, FlatPtr* out_string)
+{
+    Utf16String string;
+    auto result = deserialize_plain_value(reader, &string);
+    *out_string = move(string).into_raw();
+    return result;
 }
 
 // The record of a serializable object of the interface as StructuredSerializeInternal starts it, for an object that
@@ -245,6 +293,50 @@ JSObject* web_bindings_rejected_promise(void* current_realm, JSValue this_value,
     auto& promise_realm = this_value_realm(realm, promise_realm_this_value);
     auto promise = WebIDL::create_rejected_promise(promise_realm, JS::HostABI::value_from_abi(reason));
     return JS::HostABI::object_to_abi(promise->promise().ptr());
+}
+
+void web_bindings_queue_a_microtask(void* realm, JSObject* function)
+{
+    GC::Ref<JS::Realm> js_realm = *static_cast<JS::Realm*>(realm);
+    GC::Ref<JS::FunctionObject> steps = as<JS::FunctionObject>(*JS::HostABI::object_from_abi(function));
+    HTML::queue_a_microtask(nullptr, GC::create_function(GC::Heap::the(), [js_realm, steps] {
+        HTML::TemporaryExecutionContext execution_context { js_realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+        MUST(JS::call(steps->vm(), *steps, JS::js_undefined()));
+    }));
+}
+
+void* web_bindings_create_callback_function(JSObject* callable, bool returns_promise)
+{
+    auto& object = *JS::HostABI::object_from_abi(callable);
+    return GC::Heap::the().allocate<WebIDL::CallbackType>(object, HTML::incumbent_settings_object(), returns_promise ? WebIDL::OperationReturnsPromise::Yes : WebIDL::OperationReturnsPromise::No).ptr();
+}
+
+static GC::RootVector<JS::Value> callback_arguments(ReadonlySpan<JSValue> arguments)
+{
+    GC::RootVector<JS::Value> values;
+    values.ensure_capacity(arguments.size());
+    for (auto argument : arguments)
+        values.unchecked_append(JS::HostABI::value_from_abi(argument));
+    return values;
+}
+
+JSCompletion web_bindings_invoke_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments)
+{
+    Optional<JS::Value> this_argument;
+    if (has_this_value)
+        this_argument = JS::HostABI::value_from_abi(this_value);
+    auto completion = WebIDL::invoke_callback(*static_cast<WebIDL::CallbackType*>(callback), this_argument, callback_arguments(arguments));
+    if (completion.is_error())
+        return JS::HostABI::throw_completion_to_abi(completion.value());
+    return JS::HostABI::normal_completion_to_abi(JS::HostABI::value_to_abi(completion.value()));
+}
+
+void* web_bindings_invoke_promise_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments)
+{
+    Optional<JS::Value> this_argument;
+    if (has_this_value)
+        this_argument = JS::HostABI::value_from_abi(this_value);
+    return WebIDL::invoke_promise_callback(*static_cast<WebIDL::CallbackType*>(callback), this_argument, callback_arguments(arguments)).ptr();
 }
 }
 

@@ -1,0 +1,14 @@
+Harness status: OK
+
+Found 9 tests
+
+9 Pass
+Pass	Filling an empty mtable element
+Pass	Filling empty mtr elements
+Pass	Filling empty mtd elements
+Pass	Filling an empty mtr element
+Pass	Filling an empty mtd element
+Pass	Adding missing elements
+Pass	Removing a row
+Pass	Removing a column
+Pass	Removing extra elements

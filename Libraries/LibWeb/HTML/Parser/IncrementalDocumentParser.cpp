@@ -12,6 +12,9 @@
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/Parser/HTMLEncodingDetection.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Parser/IncrementalDocumentParser.h>
@@ -25,16 +28,18 @@ static Utf16String utf16_string_from_standardized_encoding_label(StringView labe
     return Utf16String::from_ascii_without_validation(label.bytes());
 }
 
-GC::Ref<IncrementalDocumentParser> IncrementalDocumentParser::create(GC::Ref<DOM::Document> document, GC::Ref<Fetch::Infrastructure::Body> body, URL::URL url, Optional<MimeSniff::MimeType> mime_type)
+GC::Ref<IncrementalDocumentParser> IncrementalDocumentParser::create(GC::Ref<DOM::Document> document, Fetch::Infrastructure::Response const& response, GC::Ptr<DOM::Document> container_document)
 {
-    return GC::Heap::the().allocate<IncrementalDocumentParser>(document, body, move(url), move(mime_type));
+    return GC::Heap::the().allocate<IncrementalDocumentParser>(document, response, container_document);
 }
 
-IncrementalDocumentParser::IncrementalDocumentParser(GC::Ref<DOM::Document> document, GC::Ref<Fetch::Infrastructure::Body> body, URL::URL url, Optional<MimeSniff::MimeType> mime_type)
+IncrementalDocumentParser::IncrementalDocumentParser(GC::Ref<DOM::Document> document, Fetch::Infrastructure::Response const& response, GC::Ptr<DOM::Document> container_document)
     : m_document(document)
-    , m_body(body)
-    , m_url(move(url))
-    , m_mime_type(move(mime_type))
+    , m_container_document(container_document)
+    , m_body(response.body())
+    , m_url(response.url().value())
+    , m_mime_type(Fetch::Infrastructure::extract_mime_type(response.header_list()))
+    , m_response_header_list(response.header_list())
 {
 }
 
@@ -42,6 +47,7 @@ void IncrementalDocumentParser::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_document);
+    visitor.visit(m_container_document);
     visitor.visit(m_body);
     visitor.visit(m_parser);
 }
@@ -80,7 +86,7 @@ void IncrementalDocumentParser::initialize_parser(ReadonlyBytes sniff_bytes)
     if (m_document->has_encoding()) {
         standardized_encoding = TextCodec::get_standardized_encoding(m_document->encoding().value());
     } else {
-        auto [encoding, confidence] = run_encoding_sniffing_algorithm(m_document, sniff_bytes, m_mime_type);
+        auto [encoding, confidence] = run_encoding_sniffing_algorithm(m_document, sniff_bytes, m_mime_type, m_container_document);
         standardized_encoding = TextCodec::get_standardized_encoding(encoding);
         encoding_confidence = confidence;
     }
@@ -180,6 +186,20 @@ void IncrementalDocumentParser::process_body_chunk(ByteBuffer bytes)
         m_input_bytes.append(bytes);
 
     feed_parser();
+    process_link_headers_after_first_task();
+}
+
+void IncrementalDocumentParser::process_link_headers_after_first_task()
+{
+    if (!m_response_header_list)
+        return;
+
+    // https://html.spec.whatwg.org/multipage/document-lifecycle.html#read-html
+    // The first task that the networking task source places on the task queue while fetching runs must process link
+    // headers given document, navigationParams's response, and "media", after the task has been processed by the HTML
+    // parser.
+    auto response_header_list = m_response_header_list.release_nonnull();
+    HTMLLinkElement::process_link_headers(m_document, response_header_list, m_url, HTMLLinkElement::LinkHeaderPhase::Media);
 }
 
 static size_t encoding_independent_prefix_length(ReadonlyBytes bytes)
@@ -262,6 +282,7 @@ void IncrementalDocumentParser::process_end_of_body()
     // Bytes held back for a still-possible encoding declaration are fed first; the implied EOF character waits for
     // them in finish_body().
     feed_parser();
+    process_link_headers_after_first_task();
 }
 
 void IncrementalDocumentParser::finish_body()
@@ -393,7 +414,6 @@ void IncrementalDocumentParser::pump()
     if (m_parser->stopped())
         return;
 
-    // FIXME: Process link headers (read-html step 3, third paragraph) after the first parser pass.
     if (m_parser->tokenizer().is_input_stream_closed()) {
         m_parser->run_until_completion();
         return;

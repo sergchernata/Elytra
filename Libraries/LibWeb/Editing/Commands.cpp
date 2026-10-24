@@ -100,7 +100,7 @@ bool command_create_link_action(DOM::Document& document, Utf16View value)
 
     // 2. For each editable a element that has an href attribute and is an ancestor of some node effectively contained
     //    in the active range, set that a element's href attribute to value.
-    HashTable<DOM::Node*> visited_ancestors;
+    GC::RootHashTable<DOM::Node*> visited_ancestors;
     auto set_value_for_ancestor_anchors = [&](GC::Ref<DOM::Node> node) {
         node->for_each_ancestor([&](GC::Ref<DOM::Node> ancestor) {
             if (visited_ancestors.contains(ancestor.ptr()))
@@ -260,7 +260,7 @@ bool command_delete_action(DOM::Document& document, Utf16View)
     if (offset == 0 && node->index() == 0
         && node_element.local_name().is_one_of(HTML::TagNames::li, HTML::TagNames::dt, HTML::TagNames::dd)) {
         // 1. Let items be a list of all lis that are ancestors of node.
-        Vector<GC::Ref<DOM::Node>> items;
+        GC::RootVector<GC::Ref<DOM::Node>> items;
         node->for_each_ancestor([&items](GC::Ref<DOM::Node> ancestor) {
             if (is<HTML::HTMLLIElement>(*ancestor))
                 items.append(ancestor);
@@ -355,7 +355,7 @@ bool command_delete_action(DOM::Document& document, Utf16View)
             auto new_range = block_extend_a_range(DOM::Range::create(*node, 0, *node, 0));
 
             // 2. Let node list be a list of nodes, initially empty.
-            Vector<GC::Ref<DOM::Node>> node_list;
+            GC::RootVector<GC::Ref<DOM::Node>> node_list;
 
             // 3. For each node current node contained in new range, append current node to node list if
             //    the last member of node list (if any) is not an ancestor of current node, and current
@@ -699,7 +699,7 @@ bool command_format_block_action(DOM::Document& document, Utf16View value)
     auto new_range = block_extend_a_range(*active_range(document));
 
     // 5. Let node list be an empty list of nodes.
-    Vector<GC::Ref<DOM::Node>> node_list;
+    GC::RootVector<GC::Ref<DOM::Node>> node_list;
 
     // 6. For each node node contained in new range, append node to node list if it is editable, the last member of
     //    original node list (if any) is not an ancestor of node, node is either a non-list single-line container or an
@@ -756,7 +756,7 @@ bool command_format_block_action(DOM::Document& document, Utf16View value)
 
     // 10. While node list is not empty:
     while (!node_list.is_empty()) {
-        Vector<GC::Ref<DOM::Node>> sublist;
+        GC::RootVector<GC::Ref<DOM::Node>> sublist;
 
         // 1. If the first member of node list is a single-line container:
         if (is_single_line_container(node_list.first())) {
@@ -835,7 +835,7 @@ bool command_format_block_indeterminate(DOM::Document const& document)
     auto new_range = block_extend_a_range(*range);
 
     // 3. Let node list be all visible editable nodes that are contained in new range and have no children.
-    Vector<GC::Ref<DOM::Node>> node_list;
+    GC::RootVector<GC::Ref<DOM::Node>> node_list;
     new_range->for_each_contained([&](GC::Ref<DOM::Node> node) {
         if (is_visible_node(node) && node->is_editable() && !node->has_children())
             node_list.append(node);
@@ -1132,7 +1132,7 @@ bool command_forward_delete_action(DOM::Document& document, Utf16View)
 bool command_indent_action(DOM::Document& document, Utf16View)
 {
     // 1. Let items be a list of all lis that are inclusive ancestors of the active range's start and/or end node.
-    Vector<GC::Ref<DOM::Node>> items;
+    GC::RootVector<GC::Ref<DOM::Node>> items;
     auto add_all_lis = [&items](GC::Ref<DOM::Node> node) {
         node->for_each_inclusive_ancestor([&items](GC::Ref<DOM::Node> ancestor) {
             if (is<HTML::HTMLLIElement>(*ancestor) && !items.contains_slow(ancestor))
@@ -1152,7 +1152,7 @@ bool command_indent_action(DOM::Document& document, Utf16View)
     auto new_range = block_extend_a_range(*active_range(document));
 
     // 4. Let node list be a list of nodes, initially empty.
-    Vector<GC::Ref<DOM::Node>> node_list;
+    GC::RootVector<GC::Ref<DOM::Node>> node_list;
 
     // 5. For each node node contained in new range, if node is editable and is an allowed child of "div" or "ol" and if
     //    the last member of node list (if any) is not an ancestor of node, append node to node list.
@@ -1185,7 +1185,7 @@ bool command_indent_action(DOM::Document& document, Utf16View)
     // 7. While node list is not empty:
     while (!node_list.is_empty()) {
         // 1. Let sublist be a list of nodes, initially empty.
-        Vector<GC::Ref<DOM::Node>> sublist;
+        GC::RootVector<GC::Ref<DOM::Node>> sublist;
 
         // 2. Remove the first member of node list and append it to sublist.
         sublist.append(node_list.take_first());
@@ -1449,6 +1449,9 @@ bool command_insert_linebreak_action(DOM::Document& document, Utf16View)
                 MUST(selection.collapse(start_node->parent(), start_node->index() + 1));
                 auto br = MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML));
                 MUST(insert_node_into_range(*active_range(document), br));
+
+                // NB: Inserting the br made the selection span it. Collapse it again after the newline.
+                MUST(selection.collapse(start_node, text_node->length()));
             }
             return true;
         }
@@ -1456,6 +1459,20 @@ bool command_insert_linebreak_action(DOM::Document& document, Utf16View)
             && as<HTML::HTMLElement>(*editing_host).content_editable_state() == HTML::ContentEditableState::PlaintextOnly) {
             auto text = document.create_text_node("\n"_utf16);
             MUST(insert_node_into_range(*active_range(document), text));
+            MUST(selection.collapse(text, 1));
+            return true;
+        }
+
+        // INTEROP: At an element boundary, insert the newline in a new Text node. If nothing follows it in its parent,
+        //          also insert a <br> after it, so that the new line is visible.
+        if (is<DOM::Element>(*start_node)) {
+            auto text = document.create_text_node("\n"_utf16);
+            MUST(insert_node_into_range(range, text));
+            MUST(selection.collapse(text->parent(), text->index() + 1));
+            if (!text->next_sibling()) {
+                auto br = MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML));
+                MUST(insert_node_into_range(*active_range(document), br));
+            }
             MUST(selection.collapse(text, 1));
             return true;
         }
@@ -1476,7 +1493,7 @@ bool command_insert_linebreak_action(DOM::Document& document, Utf16View)
     //     result, then call insertNode(extra br) on the active range.
     if (is_collapsed_line_break(br)) {
         auto extra_br = MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML));
-        MUST(insert_node_into_range(range, extra_br));
+        MUST(insert_node_into_range(*active_range(document), extra_br));
 
         // INTEROP: The range insertion leaves the range spanning extra br; Chromium keeps the caret collapsed
         //          between the two line breaks.
@@ -1587,6 +1604,15 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
 
     // 11. If container is not editable or not in the same editing host as node or is not a single-line container:
     if (!container->is_editable() || !is_in_same_editing_host(*container, *node) || !is_single_line_container(*container)) {
+        // INTEROP: Browsers do not create a new paragraph in an editing host that is inline-level, or that cannot
+        //          contain the default single-line container, such as a span. They insert a line break instead.
+        if (auto editing_host = node->editing_host()) {
+            auto display = resolved_display(*editing_host);
+            if ((display.has_value() && display->is_inline_outside())
+                || !is_allowed_child_of_node(document.default_single_line_container_name(), GC::Ref { *editing_host }))
+                return command_insert_linebreak_action(document, {});
+        }
+
         // 1. Let tag be the default single-line container name.
         auto tag = document.default_single_line_container_name();
 
@@ -1594,7 +1620,7 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
         auto new_range = block_extend_a_range(active_range);
 
         // 3. Let node list be a list of nodes, initially empty.
-        Vector<GC::Ref<DOM::Node>> node_list;
+        GC::RootVector<GC::Ref<DOM::Node>> node_list;
 
         // 4. Append to node list the first node in tree order that is contained in new range and is an allowed child of
         //    "p", if any.
@@ -1718,6 +1744,37 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
     //     length of container).
     auto new_line_range = DOM::Range::create(active_range->start_container(), active_range->start_offset(), *container, container->length());
 
+    // INTEROP: Browsers keep the inline formatting of the caret in a line that the split leaves empty. They give it
+    //          clones of the inline ancestors of the caret that change its formatting, with its line break inside
+    //          them. They do not do this if the caret is in a link. Collect these ancestors here, before the split
+    //          moves the caret.
+    GC::RootVector<GC::Ref<DOM::Element>> inline_ancestors_to_clone;
+    for (GC::Ptr<DOM::Node> ancestor = active_range->start_container(); ancestor && ancestor != container; ancestor = ancestor->parent()) {
+        if (is<HTML::HTMLAnchorElement>(*ancestor)) {
+            inline_ancestors_to_clone.clear();
+            break;
+        }
+        auto* element = as_if<HTML::HTMLElement>(*ancestor);
+        if (element && is_inline_node(*element) && element_changes_formatting(*element))
+            inline_ancestors_to_clone.prepend(*element);
+    }
+    auto append_line_break = [&](DOM::Node& parent, GC::Ptr<DOM::Node> line_break) -> GC::Ref<DOM::Node> {
+        GC::Ref<DOM::Node> innermost = parent;
+        for (auto ancestor : inline_ancestors_to_clone) {
+            auto clone = MUST(clone_node_for_editing(ancestor, false));
+            if (auto* clone_element = as_if<DOM::Element>(*clone)) {
+                EditingHistory::ProxyMutationScope mutation_scope { *clone };
+                clone_element->remove_attribute(HTML::AttributeNames::id);
+            }
+            MUST(append_node(clone, innermost));
+            innermost = clone;
+        }
+        if (!line_break)
+            line_break = MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML));
+        MUST(append_node(*line_break, innermost));
+        return innermost;
+    };
+
     // 15. While new line range's start offset is zero and its start node is not a prohibited paragraph child, set its
     //     start to (parent of start node, index of start node).
     GC::Ptr<DOM::Node> start_container = new_line_range->start_container();
@@ -1738,7 +1795,7 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
     // 17. Let end of line be true if new line range contains either nothing or a single br, and false otherwise.
     auto end_of_line = new_line_range->collapsed()
         || ((new_line_range->start_container() == new_line_range->end_container() && new_line_range->start_offset() == new_line_range->end_offset() - 1)
-            && is<HTML::HTMLBRElement>(*new_line_range->start_container()));
+            && is<HTML::HTMLBRElement>(new_line_range->start_container()->child_at_index(new_line_range->start_offset())));
 
     auto& container_element = as<DOM::Element>(*container);
     auto new_container_name = [&] -> Utf16FlyString {
@@ -1816,7 +1873,7 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
                 clone_element->remove_attribute(HTML::AttributeNames::id);
             }
             insert_node_before(clone, parent, start_node->next_sibling());
-            Vector<GC::Ref<DOM::Node>> children_to_move;
+            GC::RootVector<GC::Ref<DOM::Node>> children_to_move;
             for (auto* child = start_node->child_at_index(start_offset); child; child = child->next_sibling())
                 children_to_move.append(*child);
             for (auto child_to_move : children_to_move)
@@ -1825,11 +1882,21 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
         start_offset = index + 1;
         start_node = parent;
     }
-    Vector<GC::Ref<DOM::Node>> nodes_to_move;
+    GC::RootVector<GC::Ref<DOM::Node>> nodes_to_move;
     for (auto* child = container->child_at_index(start_offset); child; child = child->next_sibling())
         nodes_to_move.append(*child);
     for (auto node_to_move : nodes_to_move)
         MUST(append_node(node_to_move, *new_container));
+
+    // INTEROP: Splitting an inline-level container does not start a new line. Browsers wrap the new container, and
+    //          sometimes also container, in a new div in this case. Do this for both of them.
+    if (auto display = resolved_display(*container); display.has_value() && display->is_inline_outside()) {
+        for (GC::Ref<DOM::Node> node : { GC::Ref<DOM::Node> { *container }, GC::Ref<DOM::Node> { *new_container } }) {
+            auto wrapper = MUST(DOM::create_element(document, HTML::TagNames::div, Namespace::HTML));
+            insert_node_before(wrapper, *node->parent(), node);
+            MUST(append_node(node, wrapper));
+        }
+    }
 
     // 30. While container's lastChild is a prohibited paragraph child, set container to its lastChild.
     while (container->last_child() && is_prohibited_paragraph_child(*container->last_child()))
@@ -1843,16 +1910,22 @@ bool command_insert_paragraph_action(DOM::Document& document, Utf16View)
 
     // 32. If container has no visible children, call createElement("br") on the context object, and append the result
     //     as the last child of container.
+    // NB: See the INTEROP note at step 14 for the inline ancestors that the br is placed in.
     if (!has_visible_children(*container))
-        MUST(append_node(MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML)), *container));
+        append_line_break(*container, {});
 
     // 33. If new container has no visible children, call createElement("br") on the context object, and append the
     //     result as the last child of new container.
-    if (!has_visible_children(*new_container))
-        MUST(append_node(MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML)), *new_container));
+    // NB: See the INTEROP note at step 14 for the inline ancestors that the br is placed in. If new container only
+    //     contains the br that ended the line, that br is moved into them.
+    GC::Ref<DOM::Node> caret_container = *new_container;
+    auto only_child_is_line_break = !inline_ancestors_to_clone.is_empty() && new_container->child_count() == 1
+        && is<HTML::HTMLBRElement>(new_container->first_child());
+    if (!has_visible_children(*new_container) || (end_of_line && only_child_is_line_break))
+        caret_container = append_line_break(*new_container, only_child_is_line_break ? new_container->first_child() : nullptr);
 
     // 34. Call collapse(new container, 0) on the context object's selection.
-    MUST(document.get_selection()->collapse(new_container, 0));
+    MUST(document.get_selection()->collapse(caret_container, 0));
 
     // 35. Return true
     return true;
@@ -2121,7 +2194,7 @@ static bool justify_indeterminate(DOM::Document const& document, JustifyAlignmen
 
     // Return true if among visible editable nodes that are contained in the result and have no children, at least one
     // has alignment value "[alignment]" and at least one does not. Otherwise return false.
-    Vector<GC::Ref<DOM::Node>> matching_nodes;
+    GC::RootVector<GC::Ref<DOM::Node>> matching_nodes;
     range->for_each_contained([&matching_nodes](GC::Ref<DOM::Node> node) {
         if (is_visible_node(node) && node->is_editable() && !node->has_children())
             matching_nodes.append(node);
@@ -2147,7 +2220,7 @@ static bool justify_state(DOM::Document const& document, JustifyAlignment alignm
 
     // Return true if there is at least one visible editable node that is contained in the result and has no children,
     // and all such nodes have alignment value "[alignment]". Otherwise return false.
-    Vector<GC::Ref<DOM::Node>> matching_nodes;
+    GC::RootVector<GC::Ref<DOM::Node>> matching_nodes;
     range->for_each_contained([&matching_nodes](GC::Ref<DOM::Node> node) {
         if (is_visible_node(node) && node->is_editable() && !node->has_children())
             matching_nodes.append(node);
@@ -2294,7 +2367,7 @@ Utf16String command_justify_right_value(DOM::Document const& document)
 bool command_outdent_action(DOM::Document& document, Utf16View)
 {
     // 1. Let items be a list of all lis that are inclusive ancestors of the active range's start and/or end node.
-    Vector<GC::Ref<DOM::Node>> items;
+    GC::RootVector<GC::Ref<DOM::Node>> items;
     auto add_all_lis = [&items](GC::Ref<DOM::Node> node) {
         node->for_each_inclusive_ancestor([&items](GC::Ref<DOM::Node> ancestor) {
             if (is<HTML::HTMLLIElement>(*ancestor) && !items.contains_slow(ancestor))
@@ -2314,7 +2387,7 @@ bool command_outdent_action(DOM::Document& document, Utf16View)
     auto new_range = block_extend_a_range(*active_range(document));
 
     // 4. Let node list be a list of nodes, initially empty.
-    Vector<GC::Ref<DOM::Node>> node_list;
+    GC::RootVector<GC::Ref<DOM::Node>> node_list;
 
     // 5. For each node node contained in new range, append node to node list if the last member of node list (if any)
     //    is not an ancestor of node; node is editable; and either node has no editable descendants, or is an ol or ul,
@@ -2353,7 +2426,7 @@ bool command_outdent_action(DOM::Document& document, Utf16View)
             break;
 
         // 3. Let sublist be a list of nodes, initially empty.
-        Vector<GC::Ref<DOM::Node>> sublist;
+        GC::RootVector<GC::Ref<DOM::Node>> sublist;
 
         // 4. Remove the first member of node list and append it to sublist.
         sublist.append(node_list.take_first());
@@ -2397,7 +2470,7 @@ bool command_redo_action(DOM::Document& document, Utf16View)
 bool command_remove_format_action(DOM::Document& document, Utf16View)
 {
     // 1. Let elements to remove be a list of every removeFormat candidate effectively contained in the active range.
-    Vector<GC::Ref<DOM::Element>> elements_to_remove;
+    GC::RootVector<GC::Ref<DOM::Element>> elements_to_remove;
     for_each_node_effectively_contained_in_range(active_range(document), [&](GC::Ref<DOM::Node> descendant) {
         if (is_remove_format_candidate(descendant))
             elements_to_remove.append(static_cast<DOM::Element&>(*descendant));
@@ -2433,7 +2506,7 @@ bool command_remove_format_action(DOM::Document& document, Utf16View)
         MUST(split_text(static_cast<DOM::Text&>(*end.node), end.offset));
 
     // 5. Let node list consist of all editable nodes effectively contained in the active range.
-    Vector<GC::Ref<DOM::Node>> node_list;
+    GC::RootVector<GC::Ref<DOM::Node>> node_list;
     for_each_node_effectively_contained_in_range(active_range(document), [&](GC::Ref<DOM::Node> descendant) {
         if (descendant->is_editable())
             node_list.append(descendant);
@@ -2678,7 +2751,7 @@ bool command_unlink_action(DOM::Document& document, Utf16View)
 {
     // 1. Let hyperlinks be a list of every a element that has an href attribute and is contained in the active range or
     //    is an ancestor of one of its boundary points.
-    Vector<GC::Ref<DOM::Element>> hyperlinks;
+    GC::RootVector<GC::Ref<DOM::Element>> hyperlinks;
     if (auto range = active_range(document)) {
         auto node_matches = [](GC::Ref<DOM::Node> node) {
             return is<HTML::HTMLAnchorElement>(*node)
@@ -2923,15 +2996,6 @@ static auto const& command_definitions()
             .action = command_outdent_action,
             .preserves_overrides = true,
             .mapped_value = "formatOutdent"_utf16_fly_string,
-        },
-        // AD-HOC: This is a Ladybird-specific formatting command that is not part of the spec. It has no action and as
-        //         such, it's not supported in userland (yet). The relevant CSS property `white-space` is used to indicate
-        //         that if this style value is found during editing commands, it is recorded and restored where necessary.
-        //         This is used to keep things like <div style="white-space: pre">..</div> intact when a selection is
-        //         deleted, for example.
-        CommandDefinition {
-            .command = CommandNames::preserveWhitespace,
-            .relevant_css_property = CSS::PropertyID::WhiteSpace,
         },
         // https://w3c.github.io/editing/docs/execCommand/#the-redo-command
         CommandDefinition {

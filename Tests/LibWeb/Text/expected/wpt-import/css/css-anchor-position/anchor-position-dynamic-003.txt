@@ -1,0 +1,15 @@
+Harness status: OK
+
+Found 10 tests
+
+10 Pass
+Pass	.target 1
+Pass	.target 2
+Pass	.target 3
+Pass	.target 4
+Pass	.target 5
+Pass	.after .target 6
+Pass	.after .target 7
+Pass	.after .target 8
+Pass	.after .target 9
+Pass	.after .target 10

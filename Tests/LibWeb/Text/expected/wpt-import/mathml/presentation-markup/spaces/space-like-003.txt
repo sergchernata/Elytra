@@ -1,0 +1,20 @@
+Harness status: OK
+
+Found 15 tests
+
+15 Pass
+Pass	mroot is not space-like
+Pass	mfrac is not space-like
+Pass	mi is not space-like
+Pass	mmultiscripts is not space-like
+Pass	mn is not space-like
+Pass	mo is not space-like
+Pass	mover is not space-like
+Pass	munder is not space-like
+Pass	ms is not space-like
+Pass	munderover is not space-like
+Pass	msup is not space-like
+Pass	msub is not space-like
+Pass	msubsup is not space-like
+Pass	msqrt is not space-like
+Pass	mtable is not space-like

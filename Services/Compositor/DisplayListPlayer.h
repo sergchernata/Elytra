@@ -10,6 +10,7 @@
 #include <AK/HashMap.h>
 #include <AK/RefPtr.h>
 #include <AK/Span.h>
+#include <Compositor/Forward.h>
 #include <LibCompositing/DisplayList/AccumulatedVisualContext.h>
 #include <LibCompositing/DisplayList/DisplayList.h>
 #include <LibCompositing/DisplayList/DisplayListCommand.h>
@@ -24,7 +25,7 @@ class DisplayListPlayer {
 public:
     virtual ~DisplayListPlayer() = default;
 
-    void execute(Compositing::DisplayList const&, Compositing::AccumulatedVisualContextTree const&, Compositing::DisplayListResourceStorage const&, Compositing::ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>, Compositing::OwnedCanvasSurfaces const* = nullptr);
+    void execute(Compositing::DisplayList const&, Compositing::AccumulatedVisualContextTree const&, Compositing::DisplayListResourceStorage const&, Compositing::ScrollStateSnapshot const&, RefPtr<Gfx::PaintingSurface>, OwnedCanvasSurfaces const* = nullptr);
     virtual void flush(Gfx::PaintingSurface&) = 0;
 
 protected:
@@ -32,7 +33,7 @@ protected:
     Compositing::DisplayList const& active_display_list() const { return *m_active_display_list; }
     Compositing::AccumulatedVisualContextTree const& active_visual_context_tree() const { return *m_active_visual_context_tree; }
     Compositing::DisplayListResourceStorage const& resource_storage() const { return *m_resource_storage; }
-    Compositing::OwnedCanvasSurfaces const* canvas_surfaces() const { return m_canvas_surfaces; }
+    OwnedCanvasSurfaces const* canvas_surfaces() const { return m_canvas_surfaces; }
     ReadonlyBytes inline_data(Compositing::DisplayListDataSpan span) const
     {
         VERIFY(static_cast<size_t>(span.offset) + span.size <= m_current_command_payload.size());
@@ -69,7 +70,9 @@ private:
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
 
     virtual void push_clip(Compositing::ReplayClip const&) = 0;
-    virtual void push_clip_path(Gfx::Path const&, Gfx::WindingRule) = 0;
+    // A path stays the same for as long as it has its identity.
+    virtual void push_clip_path(Gfx::Path const&, u64 path_identity, Gfx::WindingRule) = 0;
+    virtual void push_clip_path_bytes(ReadonlyBytes, Gfx::WindingRule) = 0;
     virtual void push_transform(Gfx::AffineTransform const&) = 0;
     virtual void push_layer(Compositing::ReplayLayer const&) = 0;
     virtual void push_mask(Compositing::ReplayMask const&, Compositing::ReplayLayer const* backdrop) = 0;
@@ -80,7 +83,7 @@ private:
     Compositing::DisplayList const* m_active_display_list { nullptr };
     Compositing::AccumulatedVisualContextTree const* m_active_visual_context_tree { nullptr };
     Compositing::DisplayListResourceStorage const* m_resource_storage { nullptr };
-    Compositing::OwnedCanvasSurfaces const* m_canvas_surfaces { nullptr };
+    OwnedCanvasSurfaces const* m_canvas_surfaces { nullptr };
     RefPtr<Gfx::PaintingSurface> m_surface;
     ReadonlyBytes m_current_command_payload;
     Compositing::ScrollStateSnapshot const* m_active_scroll_state { nullptr };

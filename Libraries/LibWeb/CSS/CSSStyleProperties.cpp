@@ -37,6 +37,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/Layout/Box.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/RenderDocument.h>
 #include <LibWeb/Page/Page.h>
@@ -326,30 +327,6 @@ static NonnullRefPtr<StyleValue const> style_value_for_transform_origin(Transfor
     if (auto z_offset = offset_in_px(transform_origin.z, 0); z_offset != 0)
         offsets.append(LengthStyleValue::create(Length::make_px(z_offset)));
     return StyleValueList::create(move(offsets), StyleValueList::Separator::Space, StyleValueList::Collapsible::No);
-}
-
-static NonnullRefPtr<StyleValue const> style_value_for_size(Size const& size)
-{
-    if (size.is_none())
-        return KeywordStyleValue::create(Keyword::None);
-    if (size.is_percentage())
-        return PercentageStyleValue::create(size.percentage());
-    if (size.is_length())
-        return LengthStyleValue::create(size.length());
-    if (size.is_auto())
-        return KeywordStyleValue::create(Keyword::Auto);
-    if (size.is_calculated())
-        return size.calculated();
-    if (size.is_min_content())
-        return KeywordStyleValue::create(Keyword::MinContent);
-    if (size.is_max_content())
-        return KeywordStyleValue::create(Keyword::MaxContent);
-    if (size.is_fit_content()) {
-        if (auto available_space = size.fit_content_available_space(); available_space.has_value())
-            return FunctionStyleValue::create("fit-content"_utf16_fly_string, style_value_for_length_percentage(available_space.release_value()));
-        return KeywordStyleValue::create(Keyword::FitContent);
-    }
-    TODO();
 }
 
 static RefPtr<StyleValue const> style_value_for_shadow(ShadowStyleValue::ShadowType shadow_type, ReadonlySpan<ShadowData> shadow_data)
@@ -669,7 +646,7 @@ static void ensure_pseudo_element_style_for_cssom(Layout::BegunRead const& read,
     // A highlight pseudo-element inherits from its parent element's, which is only kept current near an active
     // highlight, so the chain is computed outermost first.
     if (is_highlight_pseudo_element(*pseudo_element)) {
-        Vector<DOM::AbstractElement> ancestors;
+        GC::ConservativeVector<DOM::AbstractElement> ancestors;
         for (auto ancestor = abstract_element.element().element_to_inherit_style_from({}); ancestor; ancestor = ancestor->element_to_inherit_style_from({}))
             ancestors.append({ *ancestor, pseudo_element });
         for (auto& ancestor : ancestors.in_reverse())
@@ -764,6 +741,7 @@ Optional<RefPtr<StyleValue const>> CSSStyleProperties::resolved_value_read_from_
     case PropertyID::FontWeight:
     case PropertyID::TextAlign:
     case PropertyID::TextDecorationLine:
+    case PropertyID::TextWrapMode:
     case PropertyID::WhiteSpaceCollapse:
         break;
     default:
@@ -1030,7 +1008,18 @@ static RefPtr<StyleValue const> resolve_color_style_value(StyleValue const& styl
         }
     }
 
+    // NB: A computed color-mix() is still a mix only where it reads currentcolor, which the used value resolves.
+    if (color_resolution_style.has_value() && style_value.is_color()) {
+        auto ffi_color_resolution_style = color_resolution_style->to_ffi();
+        if (auto const* resolved = StyleValueFFI::rust_color_mix_resolved_value(style_value.rust_style_value_data(), &ffi_color_resolution_style))
+            return StyleValue::adopt_rust_style_value_data(static_cast<StyleValueFFI::StyleValueData const*>(resolved));
+    }
+
     if (style_value.is_color_function() && as<ColorFunctionStyleValue>(style_value).serializes_as_color_function())
+        return style_value;
+    // https://drafts.csswg.org/css-color-4/#css-serialization-of-srgb
+    // NB: An sRGB value with missing components serializes them as none, which the used color cannot represent.
+    if (style_value.is_color_function() && StyleValueFFI::rust_color_function_has_missing_component(style_value.rust_style_value_data()))
         return style_value;
     if (style_value.is_color()) {
         auto& color_style_value = static_cast<ColorStyleValue const&>(style_value);
@@ -1067,18 +1056,64 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
     auto& element = owner_node()->element();
     auto pseudo_element = owner_node()->pseudo_element();
 
-    auto used_value_for_inset = [&layout_node, used_value_for_property](LengthPercentageOrAuto const& start_side, LengthPercentageOrAuto const& end_side, Function<CSSPixels(Layout::Node const&)>&& used_value_getter) -> Optional<CSSPixels> {
-        if (!layout_node.is_positioned())
-            return {};
+    // https://drafts.csswg.org/cssom/#resolved-value-special-case-property-like-top
+    enum class InsetAxis : u8 {
+        Horizontal,
+        Vertical,
+    };
+    auto resolved_value_for_inset = [&layout_node](LengthPercentageOrAuto const& side, LengthPercentageOrAuto const& opposite_side, InsetAxis axis, Function<CSSPixels(Layout::Node const&)>&& used_value_getter) -> NonnullRefPtr<StyleValue const> {
+        auto computed_value = [&] { return style_value_for_length_percentage_or_auto(side); };
 
-        // FIXME: Support getting the used value when position is sticky.
-        if (layout_node.is_sticky_position())
-            return {};
+        auto display = layout_node.display();
+        if (!layout_node.is_positioned() || display.is_none() || display.is_contents() || !Painting::has_committed_box(layout_node))
+            return computed_value();
 
-        if (!start_side.is_percentage() && !start_side.is_calculated() && !start_side.is_auto() && !end_side.is_auto())
-            return {};
+        // NB: The used value of a fixed length is the length itself. Taking it from the computed value keeps
+        //     the precision that layout units would lose. Layout saturates lengths beyond the range of layout
+        //     units, so those are reported as saturated.
+        if (side.is_length()) {
+            auto pixels = side.length().absolute_length_to_px_without_rounding();
+            if (pixels >= CSSPixels::min_integer_value && pixels <= CSSPixels::max_integer_value)
+                return computed_value();
+            return LengthStyleValue::create(Length::make_px(CSSPixels::nearest_value_for(pixels)));
+        }
 
-        return used_value_for_property(move(used_value_getter));
+        auto absolutized_against = [&](CSSPixels percentage_basis) -> NonnullRefPtr<StyleValue const> {
+            auto const& length_percentage = side.length_percentage();
+            if (length_percentage.is_percentage())
+                return LengthStyleValue::create(Length::make_px(percentage_basis.to_double() * length_percentage.percentage().as_fraction()));
+            return LengthStyleValue::create(Length::make_px(length_percentage.resolved(percentage_basis).absolute_length_to_px_without_rounding()));
+        };
+        auto size_in_axis = [axis](CSSPixelSize size) { return axis == InsetAxis::Horizontal ? size.width() : size.height(); };
+
+        // https://drafts.csswg.org/css-position/#insets
+        // For sticky positioned boxes, the inset is instead relative to the relevant scrollport's size.
+        if (layout_node.is_sticky_position()) {
+            // NB: Sticky positioning leaves an auto inset unconstrained, so its used value stays auto.
+            if (side.is_auto())
+                return computed_value();
+            // NB: This uses the same scrollport size as the sticky constraints: the content box of the nearest
+            //     scroll container, or of the viewport.
+            Layout::Box const* scroll_container = layout_node.containing_block();
+            while (scroll_container && !scroll_container->is_scroll_container())
+                scroll_container = scroll_container->containing_block();
+            if (!scroll_container || !Painting::has_committed_box(*scroll_container))
+                return computed_value();
+            return absolutized_against(size_in_axis(Painting::content_size(*scroll_container)));
+        }
+
+        // https://drafts.csswg.org/css-position/#relpos-insets
+        // If neither is auto, the position is over-constrained;
+        // NB: The resolved value is then the computed value, absolutized against the containing block.
+        // INTEROP: Percentages are absolutized rather than serialized as-is, to match other browsers.
+        if (layout_node.position() == Positioning::Relative && !side.is_auto() && !opposite_side.is_auto()) {
+            auto const* containing_block = layout_node.containing_block();
+            if (!containing_block || !Painting::has_committed_box(*containing_block))
+                return computed_value();
+            return absolutized_against(size_in_axis(Painting::content_size(*containing_block)));
+        }
+
+        return LengthStyleValue::create(Length::make_px(used_value_getter(layout_node)));
     };
 
     auto get_computed_value = [&element, pseudo_element](PropertyID property_id) -> NonnullRefPtr<StyleValue const> {
@@ -1199,8 +1234,8 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             [](auto const& box_layout_node) { return Painting::content_height(box_layout_node); },
             [](auto const& box_layout_node) { return Painting::unbroken_border_box_size(box_layout_node).height(); });
         if (maybe_used_height.has_value())
-            return style_value_for_size(Size::make_px(maybe_used_height.release_value()));
-        return style_value_for_size(layout_node.height());
+            return LengthStyleValue::create(Length::make_px(maybe_used_height.release_value()));
+        return get_computed_value(property_id);
     }
     case PropertyID::MarginBottom:
         if (auto maybe_used_value = used_value_for_property([](auto const& box_layout_node) { return Painting::box_model(box_layout_node).margin.bottom; }); maybe_used_value.has_value())
@@ -1239,8 +1274,8 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             [](auto const& box_layout_node) { return Painting::content_width(box_layout_node); },
             [](auto const& box_layout_node) { return Painting::unbroken_border_box_size(box_layout_node).width(); });
         if (maybe_used_width.has_value())
-            return style_value_for_size(Size::make_px(maybe_used_width.release_value()));
-        return style_value_for_size(layout_node.width());
+            return LengthStyleValue::create(Length::make_px(maybe_used_width.release_value()));
+        return get_computed_value(property_id);
     }
 
         // -> bottom
@@ -1257,30 +1292,19 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         //    Otherwise the resolved value is the computed value.
     case PropertyID::Bottom: {
         auto inset = layout_node.inset();
-        if (auto maybe_used_value = used_value_for_inset(inset.bottom(), inset.top(), [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.bottom; }); maybe_used_value.has_value())
-            return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
-
-        return style_value_for_length_percentage_or_auto(inset.bottom());
+        return resolved_value_for_inset(inset.bottom(), inset.top(), InsetAxis::Vertical, [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.bottom; });
     }
     case PropertyID::Left: {
         auto inset = layout_node.inset();
-        if (auto maybe_used_value = used_value_for_inset(inset.left(), inset.right(), [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.left; }); maybe_used_value.has_value())
-            return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
-        return style_value_for_length_percentage_or_auto(inset.left());
+        return resolved_value_for_inset(inset.left(), inset.right(), InsetAxis::Horizontal, [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.left; });
     }
     case PropertyID::Right: {
         auto inset = layout_node.inset();
-        if (auto maybe_used_value = used_value_for_inset(inset.right(), inset.left(), [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.right; }); maybe_used_value.has_value())
-            return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
-
-        return style_value_for_length_percentage_or_auto(inset.right());
+        return resolved_value_for_inset(inset.right(), inset.left(), InsetAxis::Horizontal, [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.right; });
     }
     case PropertyID::Top: {
         auto inset = layout_node.inset();
-        if (auto maybe_used_value = used_value_for_inset(inset.top(), inset.bottom(), [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.top; }); maybe_used_value.has_value())
-            return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
-
-        return style_value_for_length_percentage_or_auto(inset.top());
+        return resolved_value_for_inset(inset.top(), inset.bottom(), InsetAxis::Vertical, [](auto const& box_layout_node) { return Painting::box_model(box_layout_node).inset.top; });
     }
 
         // -> A resolved value special case property defined in another specification
@@ -1380,6 +1404,24 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         }
         return style_value_for_transform_origin(layout_node.transform_origin(), reference_box);
     }
+    case PropertyID::PerspectiveOrigin: {
+        // https://drafts.csswg.org/css-transforms-2/#perspective-origin-property
+        // The perspective-origin property is a resolved value special case property like height. [CSSOM]
+        Optional<CSSPixelRect> reference_box;
+        if (auto display = layout_node.display(); !display.is_none() && !display.is_contents()) {
+            if (Painting::has_committed_box(layout_node))
+                reference_box = Painting::transform_reference_box(layout_node);
+        }
+        if (!reference_box.has_value())
+            return get_computed_value(property_id);
+        auto const& transform_values = layout_node.style_group<ComputedValues::TransformValues>();
+        TransformOrigin perspective_origin {
+            LengthPercentage::view(transform_values.perspective_origin_x),
+            LengthPercentage::view(transform_values.perspective_origin_y),
+            Length::make_px(0),
+        };
+        return style_value_for_transform_origin(perspective_origin, reference_box);
+    }
     case PropertyID::AnimationDuration: {
         // https://drafts.csswg.org/css-animations-2/#animation-duration
         // For backwards-compatibility with Level 1, when the computed value of animation-timeline is auto (i.e. only
@@ -1408,13 +1450,13 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         // https://drafts.csswg.org/css-backgrounds/#border-width
         // NB: We do this adjustment when assigning to ComputedValues, so read from there.
     case PropertyID::BorderBottomWidth:
-        return style_value_for_size(Size::make_px(layout_node.border_bottom().width));
+        return LengthStyleValue::create(Length::make_px(layout_node.border_bottom().width));
     case PropertyID::BorderLeftWidth:
-        return style_value_for_size(Size::make_px(layout_node.border_left().width));
+        return LengthStyleValue::create(Length::make_px(layout_node.border_left().width));
     case PropertyID::BorderRightWidth:
-        return style_value_for_size(Size::make_px(layout_node.border_right().width));
+        return LengthStyleValue::create(Length::make_px(layout_node.border_right().width));
     case PropertyID::BorderTopWidth:
-        return style_value_for_size(Size::make_px(layout_node.border_top().width));
+        return LengthStyleValue::create(Length::make_px(layout_node.border_top().width));
 
         // -> Any other property
         //    The resolved value is the computed value.
@@ -1861,7 +1903,11 @@ void CSSStyleProperties::set_declarations_from_text(Utf16View css_text)
     auto parsing_params = owner_node().has_value()
         ? Parser::ParsingParams(owner_node()->element().document())
         : Parser::ParsingParams();
-    parsing_params.rule_context.append(Parser::RuleContext::Style);
+    // NB: The declarations of an @position-try rule only accept some properties, which its rule context filters for.
+    if (auto rule = parent_rule(); rule && rule->type() == CSSRule::Type::PositionTry)
+        parsing_params.rule_context.append(Parser::RuleContext::AtPositionTry);
+    else
+        parsing_params.rule_context.append(Parser::RuleContext::Style);
 
     m_declarations.replace(parse_css_property_declaration_block(parsing_params, css_text));
 }
