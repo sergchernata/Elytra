@@ -115,6 +115,13 @@ bool pinned_tab_is_away(QString const& pinned_url, QString const& tab_url)
     return tab_shows_a_page(tab_url) && !pinned_urls_match(pinned_url, tab_url);
 }
 
+bool pinned_tab_is_away(QString const& pinned_url, QString const& tab_url, QString const& home)
+{
+    if (!pinned_tab_is_away(pinned_url, tab_url))
+        return false;
+    return home.isEmpty() || !pinned_urls_match(home, tab_url);
+}
+
 QString pinned_row_title(QString const& custom_title, QString const& saved_title, QString const& live_title, QString const& pinned_url, QString const& tab_url)
 {
     // A title of only spaces isn't one.

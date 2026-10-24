@@ -163,6 +163,7 @@ private:
     void each_space_keeps_its_scroll_position();
     void favorites_update_in_place();
     void pinned_tab_away_back_and_separate();
+    void a_pinned_tab_that_redirects_isnt_away();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -430,6 +431,56 @@ void SelfTest::favorites_update_in_place()
     SpaceStore::the().remove_favorite(id);
     settle(200);
     check(s().m_favorite_buttons.size() == 2, "removing it removes the tile");
+}
+
+// Sites send their front page somewhere else as it loads: the pinned tab that lands there isn't "away" (no "|" or
+// Back to Pinned URL) until it leaves that page.
+void SelfTest::a_pinned_tab_that_redirects_isnt_away()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty()) {
+        check(false, "the test pages are served (run-arc-self-test.sh sets ARC_SELF_TEST_HTTP_PORT)");
+        return;
+    }
+    auto base = QString("http://localhost:%1/").arg(port);
+    s().switch_to_space(m_alpha);
+    settle(200);
+    auto node = SpaceStore::the().add_pinned_tab(m_alpha, {}, -1, base + "redirects.html", "Redirects");
+    rebuild_now();
+    auto away = [&] { return row_for_node(node).data(NavigatedAwayRole).toBool(); };
+    bool ever_away = false;
+    auto connection = connect(s().m_model, &QAbstractItemModel::dataChanged, this, [&] { ever_away |= away(); });
+
+    s().open_or_activate_node(node);
+    QPointer<Tab> tab = s().tab_for_node(node);
+    check(wait_until([&] { return tab && tab->title() == "Landed" && !tab->is_loading(); }, 5000), "the pinned page redirects as it loads");
+    settle(2500); // Past the landing's grace period.
+    disconnect(connection);
+    check(!ever_away && !away(), "and the page it lands on isn't away from the pinned URL");
+
+    if (tab)
+        tab->navigate(ak_url_from_qurl(QUrl(base + "elsewhere.html")));
+    check(wait_until([&] { return away(); }, 5000), "leaving it is");
+
+    s().back_to_pinned_url(node);
+    check(wait_until([&] { return tab && tab->title() == "Landed"; }, 5000), "Back to Pinned URL lands there again");
+    settle(2500);
+    check(!away(), "and isn't away");
+
+    // Its home is saved with the session, so it survives a restart.
+    s().save_session();
+    check(wait_until([&] {
+        for (auto const& entry : SpaceStore::the().session()) {
+            if (entry.node_id == node)
+                return entry.home.endsWith("landed.html?session=1");
+        }
+        return false;
+    }, 4000), "where it landed is saved with the session");
+
+    if (tab)
+        s().close_tab(*tab);
+    SpaceStore::the().remove_node(node);
+    rebuild_now();
 }
 
 void SelfTest::pinned_tab_away_back_and_separate()
@@ -1349,6 +1400,7 @@ int SelfTest::run()
     each_space_keeps_its_scroll_position();
     favorites_update_in_place();
     pinned_tab_away_back_and_separate();
+    a_pinned_tab_that_redirects_isnt_away();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();

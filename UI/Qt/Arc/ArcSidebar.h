@@ -135,6 +135,9 @@ private:
     void step_space(int delta);
     void copy_current_url(bool as_markdown);
     void fill_from_one_password();
+    void begin_pinned_landing(Tab&);
+    bool pinned_is_away(Tab&, QString const& pinned_url);
+    void settle_pinned_landing(Tab&, bool loaded);
     void choose_one_password_login(QList<OnePassword::Login> const&, QPointer<Tab>, QString const& origin);
     void fill_one_password_login(QString const& id, QPointer<Tab>, QString const& origin);
     void new_tab_from_clipboard();

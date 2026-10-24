@@ -10,8 +10,8 @@ PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/ladybird-arc-self-test.XXXXXX")"
 # whichever port is free. A stand-in `op` answers with canned logins.
 python3 -c '
 import http.server, functools, sys
+http.server.SimpleHTTPRequestHandler.log_message = lambda *args: None
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
-handler.log_message = lambda *args: None
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
 open(sys.argv[2], "w").write(str(server.server_address[1]))
 server.serve_forever()

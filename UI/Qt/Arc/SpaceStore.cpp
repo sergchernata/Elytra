@@ -120,7 +120,7 @@ void SpaceStore::load()
 
     for (auto const& value : root["session"].toArray()) {
         auto object = value.toObject();
-        m_session.append({ object["url"].toString(), object["space"].toString(), object["node"].toString() });
+        m_session.append({ object["url"].toString(), object["space"].toString(), object["node"].toString(), object["home"].toString() });
     }
 
     m_last_active_space_id = root["activeSpace"].toString();
@@ -175,8 +175,12 @@ void SpaceStore::write_now()
     root["favorites"] = favorites;
 
     QJsonArray session;
-    for (auto const& entry : m_session)
-        session.append(QJsonObject { { "url", entry.url }, { "space", entry.space_id }, { "node", entry.node_id } });
+    for (auto const& entry : m_session) {
+        QJsonObject object { { "url", entry.url }, { "space", entry.space_id }, { "node", entry.node_id } };
+        if (!entry.home.isEmpty())
+            object["home"] = entry.home;
+        session.append(object);
+    }
     root["session"] = session;
 
     QSaveFile file(m_path);

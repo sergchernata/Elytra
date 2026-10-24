@@ -9,6 +9,7 @@
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <LibURL/Parser.h>
+#include <LibWebView/SessionHistory.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
@@ -77,6 +78,10 @@ static constexpr char const* BLANK_PROPERTY = "arc_blank";
 static constexpr int UPDATE_BUTTON_HEIGHT = 40;
 static constexpr int SPARE_TAB_DELAY_MS = 1200;
 static constexpr char const* NODE_PROPERTY = "arc_node";
+static constexpr char const* PINNED_HOME_PROPERTY = "arc_pinned_home";       // See begin_pinned_landing().
+static constexpr char const* PINNED_LANDING_PROPERTY = "arc_pinned_landing"; // Still landing: its home isn't settled.
+static constexpr char const* LANDING_FROM_STEP_PROPERTY = "arc_landing_from_step";
+static constexpr char const* LANDING_STEP_PROPERTY = "arc_landing_step";
 static constexpr auto FAVORITE_PREFIX = "fav:";
 static constexpr int ExpandedRole = Qt::UserRole + 20;
 static constexpr int FAVORITE_TILE_HEIGHT = 54;
@@ -933,7 +938,83 @@ Tab* ArcSidebar::tab_for_node(QString const& node_id) const
 QString ArcSidebar::space_of(Tab const& tab) { return tab.property(SPACE_PROPERTY).toString(); }
 QString ArcSidebar::node_of(Tab const& tab) { return tab.property(NODE_PROPERTY).toString(); }
 void ArcSidebar::set_tab_space(Tab& tab, QString const& space) { tab.setProperty(SPACE_PROPERTY, space); }
-void ArcSidebar::set_tab_node(Tab& tab, QString const& node) { tab.setProperty(NODE_PROPERTY, node); }
+void ArcSidebar::set_tab_node(Tab& tab, QString const& node)
+{
+    if (tab.property(NODE_PROPERTY).toString() != node)
+        tab.setProperty(PINNED_HOME_PROPERTY, QString());
+    tab.setProperty(NODE_PROPERTY, node);
+}
+
+// A pinned tab opening its pinned URL lands where the site sends it (example.com redirects to example.com/home):
+// that page is its home, not "away" (no "|" or Back to Pinned URL), until it leaves it.
+//
+// Redirects replace the tab's history entry; following a link, typing an address or going back moves to another.
+// So the landing is the history entry the pinned URL opened in, and its home is that entry's page, read from the
+// tab's history (the tab's URL and its place in history update separately, in either order).
+static int history_index(Tab& tab)
+{
+    auto& view = tab.view();
+    return view.has_traversable() ? static_cast<int>(view.traversable().session_history().current_used_step_index()) : -1;
+}
+
+static QString url_at_history_index(Tab& tab, int index)
+{
+    auto& view = tab.view();
+    if (!view.has_traversable() || index < 0)
+        return {};
+    auto const& history = view.traversable().session_history();
+    auto steps = history.used_steps();
+    if (index >= static_cast<int>(steps.size()))
+        return {};
+    // The top-level entry shown at a step is the latest one at or before it.
+    Optional<URL::URL> url;
+    i32 best = -1;
+    for (auto const& entry : history.entries()) {
+        if (entry.step <= steps[index] && entry.step > best) {
+            best = entry.step;
+            url = WebView::display_url_for_session_history_entry(entry);
+        }
+    }
+    return url.has_value() ? qstring_from_ak_string(url->serialize()) : QString();
+}
+
+void ArcSidebar::begin_pinned_landing(Tab& tab)
+{
+    tab.setProperty(PINNED_HOME_PROPERTY, QString());
+    tab.setProperty(PINNED_LANDING_PROPERTY, true);
+    tab.setProperty(LANDING_FROM_STEP_PROPERTY, history_index(tab));
+    tab.setProperty(LANDING_STEP_PROPERTY, -2);
+}
+
+// The landing's entry, once the pinned URL has opened in one: its first new entry, or (when it replaced the one it
+// started in) the one it's in after its first load.
+void ArcSidebar::settle_pinned_landing(Tab& tab, bool loaded)
+{
+    if (!tab.property(PINNED_LANDING_PROPERTY).toBool() || tab.property(LANDING_STEP_PROPERTY).toInt() != -2)
+        return;
+    auto index = history_index(tab);
+    if (index != tab.property(LANDING_FROM_STEP_PROPERTY).toInt() || (loaded && tab_shows_a_page(url_of(tab))))
+        tab.setProperty(LANDING_STEP_PROPERTY, index);
+}
+
+bool ArcSidebar::pinned_is_away(Tab& tab, QString const& pinned_url)
+{
+    auto url = url_of(tab);
+    if (tab.property(PINNED_LANDING_PROPERTY).toBool()) {
+        settle_pinned_landing(tab, false);
+        auto landing = tab.property(LANDING_STEP_PROPERTY).toInt();
+        if (landing == -2)
+            return false;
+        auto home = url_at_history_index(tab, landing);
+        if (tab_shows_a_page(home) && !pinned_urls_match(pinned_url, home))
+            tab.setProperty(PINNED_HOME_PROPERTY, home);
+        if (history_index(tab) == landing)
+            return false;
+        // It moved on to another entry: its home is settled.
+        tab.setProperty(PINNED_LANDING_PROPERTY, false);
+    }
+    return pinned_tab_is_away(pinned_url, url, tab.property(PINNED_HOME_PROPERTY).toString());
+}
 
 QString ArcSidebar::url_of(Tab const& tab)
 {
@@ -980,7 +1061,9 @@ void ArcSidebar::watch_tab(Tab& tab)
         }
         refresh(); // Navigations: a pinned tab may have left its URL.
     });
-    connect(&tab, &Tab::loading_finished, this, [this, refresh] {
+    connect(&tab, &Tab::loading_finished, this, [this, guarded, refresh] {
+        if (guarded)
+            settle_pinned_landing(*guarded, true);
         refresh();
         save_session();
     });
@@ -1014,6 +1097,7 @@ void ArcSidebar::restore_session_assignments()
                     set_tab_space(*tab, {});
                 } else if (store.node(entry.node_id)) {
                     set_tab_node(*tab, entry.node_id);
+                    tab->setProperty(PINNED_HOME_PROPERTY, entry.home);
                 }
             }
             break;
@@ -1042,7 +1126,7 @@ void ArcSidebar::save_session()
                     continue;
                 for (auto* tab : sidebar->tabs()) {
                     if (tab != sidebar->m_spare_tab && !tab->property(BLANK_PROPERTY).toBool())
-                        entries.append({ url_of(*tab), space_of(*tab), node_of(*tab) });
+                        entries.append({ url_of(*tab), space_of(*tab), node_of(*tab), tab->property(PINNED_HOME_PROPERTY).toString() });
                 }
             }
             SpaceStore::the().set_session(std::move(entries));
@@ -1153,8 +1237,10 @@ void ArcSidebar::back_to_pinned_url(QString const& node_id)
     auto* tab = tab_for_node(node_id);
     if (!node || !tab)
         return;
-    if (auto url = parse_stored_url(node->url); url.has_value())
+    if (auto url = parse_stored_url(node->url); url.has_value()) {
+        begin_pinned_landing(*tab);
         tab->navigate(*url);
+    }
     activate(*tab);
 }
 
@@ -1173,8 +1259,10 @@ void ArcSidebar::separate_from_pinned_tab(QString const& node_id)
         separated = &m_window->new_tab_from_url(tab->view().url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_tab(*tab));
     }
     set_tab_space(*separated, space);
-    if (auto url = parse_stored_url(node->url); url.has_value())
+    if (auto url = parse_stored_url(node->url); url.has_value()) {
+        begin_pinned_landing(*tab);
         tab->navigate(*url);
+    }
     schedule_rebuild();
 }
 
@@ -1322,6 +1410,7 @@ void ArcSidebar::open_or_activate_node(QString const& node_id)
     if (!tab)
         return;
     set_tab_node(*tab, node_id);
+    begin_pinned_landing(*tab);
     schedule_rebuild();
 }
 
@@ -1895,6 +1984,7 @@ void ArcSidebar::place_tabs_in_their_profiles()
         auto was_current = m_window->current_tab() == tab;
         auto space = space_of(*tab);
         auto node = node_of(*tab);
+        auto home = tab->property(PINNED_HOME_PROPERTY);
         set_tab_node(*tab, {}); // So the reopened tab is the one bound to the node.
         // Reopen it once: its close can wait on the page (a "leave page?" prompt), and until then every rebuild would
         // reopen it again.
@@ -1907,6 +1997,7 @@ void ArcSidebar::place_tabs_in_their_profiles()
         }
         set_tab_space(*reopened, space);
         set_tab_node(*reopened, node);
+        reopened->setProperty(PINNED_HOME_PROPERTY, home);
         if (auto old_index = m_tabs.index_of(tab); old_index >= 0)
             m_window->request_to_close_tab(old_index);
     }
@@ -2145,7 +2236,7 @@ void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& no
             item->setIcon(icon_for(tab_shows_a_page(tab_url) ? tab_url : node.url, tab_shows_a_page(tab_url) ? tab : nullptr));
             item->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
             item->setData(tab != nullptr, IsLoadedRole);
-            item->setData(pinned_tab_is_away(node.url, tab_url), NavigatedAwayRole);
+            item->setData(tab && pinned_is_away(*tab, node.url), NavigatedAwayRole);
             item->setData(QVariant::fromValue(reinterpret_cast<quintptr>(tab)), TabRole);
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
         }
@@ -2354,7 +2445,7 @@ void ArcSidebar::update_tab_rows(Tab& tab)
                     return;
                 }
             }
-            auto away = pinned && pinned_tab_is_away(pinned->url, url_of(tab));
+            auto away = pinned && pinned_is_away(tab, pinned->url);
             if (item.data(NavigatedAwayRole).toBool() != away)
                 item.setData(away, NavigatedAwayRole);
         } else {
@@ -3344,6 +3435,7 @@ void ArcSidebar::show_tree_menu(QPoint const& position)
                 if (!tab)
                     return;
                 SpaceStore::the().set_node_url(node_id, url_of(*tab));
+                tab->setProperty(PINNED_HOME_PROPERTY, QString());
                 update_tab_rows(*tab);
             });
         }

@@ -48,6 +48,11 @@ TEST_CASE(away_needs_a_real_page)
     for (auto const* url : { "", "about:blank", "about:newtab", "about:srcdoc" })
         EXPECT(!pinned_tab_is_away("https://example.com/", url));
     EXPECT(pinned_tab_is_away("https://example.com/", "https://example.com/other"));
+    // Where the pinned URL redirected to is home too: away only once the tab leaves it.
+    EXPECT(!pinned_tab_is_away("https://example.com/", "https://example.com/home?session=1", "https://example.com/home?session=1"));
+    EXPECT(!pinned_tab_is_away("https://example.com/", "https://example.com/", "https://example.com/home"));
+    EXPECT(pinned_tab_is_away("https://example.com/", "https://example.com/other", "https://example.com/home"));
+    EXPECT(pinned_tab_is_away("https://example.com/", "https://example.com/other", ""));
     EXPECT(pinned_tab_is_away("https://example.com/", "file:///tmp/x.html"));
 }
 

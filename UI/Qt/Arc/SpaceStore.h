@@ -48,6 +48,7 @@ struct SessionEntry {
     QString url;
     QString space_id;
     QString node_id; // Pinned node or favorite the tab was showing, if any.
+    QString home {}; // Pinned tabs: the page it landed on from its pinned URL (after the site's redirects).
 };
 
 struct Space {
