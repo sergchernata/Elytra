@@ -35,4 +35,21 @@ bool is_partial_download_name(QString const& name)
     return name.startsWith('.');
 }
 
+static constexpr int SHELF_ROW_RISE_MS = 220;   // Each row's own rise.
+static constexpr int SHELF_ROW_STAGGER_MS = 35; // Between one row starting and the next.
+static constexpr qreal SHELF_ROW_RISE_PX = 10;
+
+ShelfRowMotion shelf_row_motion(int row, qreal elapsed_ms)
+{
+    auto t = qBound<qreal>(0, (elapsed_ms - row * SHELF_ROW_STAGGER_MS) / SHELF_ROW_RISE_MS, 1);
+    // Ease out (cubic): quick to start, settling gently into place.
+    auto eased = 1 - (1 - t) * (1 - t) * (1 - t);
+    return { SHELF_ROW_RISE_PX * (1 - eased), eased };
+}
+
+int shelf_rows_duration_ms(int rows)
+{
+    return SHELF_ROW_RISE_MS + qMax(0, rows - 1) * SHELF_ROW_STAGGER_MS;
+}
+
 }

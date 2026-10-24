@@ -549,6 +549,40 @@ TEST_CASE(downloads_shelf_skips_unfinished_and_hidden_files)
         EXPECT(!is_partial_download_name(name));
 }
 
+// Opening the shelf, its rows rise into place one after another from the button up, like an accordion.
+TEST_CASE(downloads_shelf_rows_rise_in_one_after_another)
+{
+    // Before it starts, each row waits below its place, unseen; once its turn is over it's in place.
+    for (int row = 0; row < 6; ++row) {
+        auto start = shelf_row_motion(row, 0);
+        EXPECT(start.offset > 0);
+        EXPECT_EQ(start.opacity, 0.0);
+        auto end = shelf_row_motion(row, shelf_rows_duration_ms(6));
+        EXPECT_EQ(end.offset, 0.0);
+        EXPECT_EQ(end.opacity, 1.0);
+    }
+    // The nearest the button (the newest, row 0) goes first; each next row a little later.
+    for (int ms = 10; ms < shelf_rows_duration_ms(6); ms += 10) {
+        for (int row = 1; row < 6; ++row) {
+            EXPECT(shelf_row_motion(row - 1, ms).offset <= shelf_row_motion(row, ms).offset);
+            EXPECT(shelf_row_motion(row - 1, ms).opacity >= shelf_row_motion(row, ms).opacity);
+        }
+    }
+    // Each row only ever moves toward its place and grows clearer.
+    for (int row = 0; row < 6; ++row) {
+        auto previous = shelf_row_motion(row, 0);
+        for (int ms = 5; ms <= shelf_rows_duration_ms(6); ms += 5) {
+            auto now = shelf_row_motion(row, ms);
+            EXPECT(now.offset <= previous.offset);
+            EXPECT(now.opacity >= previous.opacity);
+            previous = now;
+        }
+    }
+    // And it's quick: the whole shelf is in place well within half a second.
+    EXPECT(shelf_rows_duration_ms(6) <= 450);
+    EXPECT(shelf_rows_duration_ms(1) < shelf_rows_duration_ms(6));
+}
+
 // --- The slide between spaces ---------------------------------------------------------------------------------------
 
 namespace {

@@ -56,7 +56,6 @@
 #include <QScopeGuard>
 #include <QMouseEvent>
 #include <QWindow>
-#include <QGraphicsOpacityEffect>
 #include <QApplication>
 #include <QParallelAnimationGroup>
 #include <QPropertyAnimation>
@@ -324,13 +323,11 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_shelf = new DownloadsShelf(m_panel);
     m_shelf->hide();
     m_shelf->installEventFilter(this);
-    m_shelf_opacity = new QGraphicsOpacityEffect(m_shelf);
-    m_shelf_opacity->setOpacity(0);
-    m_shelf->setGraphicsEffect(m_shelf_opacity);
+    m_shelf->set_opacity(0);
     m_shelf_position_animation = new QPropertyAnimation(m_shelf, "pos", this);
     m_shelf_position_animation->setDuration(SHELF_ANIMATION_MS);
     m_shelf_position_animation->setEasingCurve(QEasingCurve::InOutCubic);
-    m_shelf_opacity_animation = new QPropertyAnimation(m_shelf_opacity, "opacity", this);
+    m_shelf_opacity_animation = new QPropertyAnimation(m_shelf, "opacity", this);
     m_shelf_opacity_animation->setDuration(SHELF_ANIMATION_MS);
     m_shelf_opacity_animation->setEasingCurve(QEasingCurve::InOutCubic);
     m_shelf_animation = new QParallelAnimationGroup(this);
@@ -2384,10 +2381,13 @@ void ArcSidebar::show_shelf()
     m_shelf_animation->stop();
     m_shelf_position_animation->setStartValue(end + QPoint(0, SHELF_SLIDE_DISTANCE));
     m_shelf_position_animation->setEndValue(end);
-    m_shelf_opacity_animation->setStartValue(m_shelf->isVisible() ? m_shelf_opacity->opacity() : 0.0);
+    m_shelf_opacity_animation->setStartValue(m_shelf->isVisible() ? m_shelf->opacity() : 0.0);
     m_shelf_opacity_animation->setEndValue(1.0);
     m_shelf_animation->setDirection(QAbstractAnimation::Forward);
     m_shelf_hiding = false;
+    // Its rows rise in one by one as it opens (not again while it's already showing).
+    if (!m_shelf->isVisible() || m_shelf->opacity() < 0.5)
+        m_shelf->reveal_rows();
     m_shelf->move(end + QPoint(0, SHELF_SLIDE_DISTANCE));
     m_shelf->raise();
     m_shelf->show();
@@ -2404,7 +2404,7 @@ void ArcSidebar::hide_shelf()
     m_shelf_animation->stop();
     m_shelf_position_animation->setStartValue(start);
     m_shelf_position_animation->setEndValue(start + QPoint(0, SHELF_SLIDE_DISTANCE / 2));
-    m_shelf_opacity_animation->setStartValue(m_shelf_opacity->opacity());
+    m_shelf_opacity_animation->setStartValue(m_shelf->opacity());
     m_shelf_opacity_animation->setEndValue(0.0);
     m_shelf_animation->start();
 }

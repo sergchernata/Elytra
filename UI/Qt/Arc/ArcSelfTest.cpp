@@ -14,6 +14,7 @@
 #include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
+#include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 #include <UI/Qt/Arc/SymbolButton.h>
@@ -168,6 +169,7 @@ private:
     void opening_a_folder_leaves_the_list_alone_while_it_slides();
     void favorites_never_overlap_when_they_change();
     void closing_a_tab_returns_to_the_one_before();
+    void downloads_shelf_rows_rise_in();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -649,6 +651,24 @@ void SelfTest::closing_a_tab_returns_to_the_one_before()
     if (b)
         s().close_tab(*b);
     settle(300);
+}
+
+// The downloads shelf rises out of the bottom bar, its rows one after another, painted (no graphics effect, which
+// renders it offscreen and darkens it).
+void SelfTest::downloads_shelf_rows_rise_in()
+{
+    auto* shelf = m_sidebar.m_shelf;
+    s().show_shelf();
+    if (shelf->is_empty()) {
+        check(true, "the downloads shelf has nothing to show (empty Downloads folder)");
+        return;
+    }
+    check(shelf->isVisible() && !shelf->graphicsEffect(), "the downloads shelf opens, painted directly");
+    check(shelf->m_rows_elapsed_ms < 50, "its rows start below their places");
+    check(wait_until([&] { return shelf->m_rows_elapsed_ms >= shelf_rows_duration_ms(static_cast<int>(shelf->m_items.size())) && shelf->opacity() == 1.0; }, 2000),
+        "and rise into them");
+    s().hide_shelf();
+    check(wait_until([&] { return !shelf->isVisible(); }, 2000), "it closes");
 }
 
 void SelfTest::pinned_tab_away_back_and_separate()
@@ -1572,6 +1592,7 @@ int SelfTest::run()
     opening_a_folder_leaves_the_list_alone_while_it_slides();
     favorites_never_overlap_when_they_change();
     closing_a_tab_returns_to_the_one_before();
+    downloads_shelf_rows_rise_in();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();

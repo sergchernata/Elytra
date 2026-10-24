@@ -29,7 +29,6 @@ class QWheelEvent;
 class QLabel;
 class QTimer;
 class QToolButton;
-class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QParallelAnimationGroup;
 class QVariantAnimation;
@@ -304,7 +303,6 @@ private:
     class SymbolButton* m_space_menu_button { nullptr };
     bool m_header_hovered { false };
     QSet<QString> m_collapsed_spaces;
-    class QGraphicsOpacityEffect* m_shelf_opacity { nullptr };
     class QPropertyAnimation* m_shelf_position_animation { nullptr };
     class QPropertyAnimation* m_shelf_opacity_animation { nullptr };
     class QParallelAnimationGroup* m_shelf_animation { nullptr };

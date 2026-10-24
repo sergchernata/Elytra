@@ -29,6 +29,7 @@
 #include <QSet>
 #include <QStandardPaths>
 #include <QUrl>
+#include <QVariantAnimation>
 
 namespace Ladybird::Arc {
 
@@ -48,6 +49,31 @@ DownloadsShelf::DownloadsShelf(QWidget* parent)
     m_folder_watcher = new QFileSystemWatcher(this);
     m_folder_watcher->addPath(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
     connect(m_folder_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_folder_changed = true; });
+
+    m_rows_animation = new QVariantAnimation(this);
+    m_rows_animation->setStartValue(0.0);
+    connect(m_rows_animation, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) {
+        m_rows_elapsed_ms = value.toReal();
+        update();
+    });
+}
+
+void DownloadsShelf::set_opacity(qreal opacity)
+{
+    if (qFuzzyCompare(m_opacity, opacity))
+        return;
+    m_opacity = opacity;
+    update();
+}
+
+void DownloadsShelf::reveal_rows()
+{
+    auto duration = shelf_rows_duration_ms(static_cast<int>(m_items.size()));
+    m_rows_animation->stop();
+    m_rows_animation->setDuration(duration);
+    m_rows_animation->setEndValue(static_cast<qreal>(duration));
+    m_rows_elapsed_ms = 0;
+    m_rows_animation->start();
 }
 
 void DownloadsShelf::refresh()
@@ -139,6 +165,7 @@ void DownloadsShelf::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
+    painter.setOpacity(m_opacity);
 
     // Fade from clear to the sidebar color, so the rows above appear to dissolve.
     auto background = ChromeStyle::chrome_background(palette());
@@ -157,6 +184,12 @@ void DownloadsShelf::paintEvent(QPaintEvent*)
 
     for (int i = 0; i < m_items.size(); ++i) {
         auto const& item = m_items[i];
+        auto motion = shelf_row_motion(i, m_rows_elapsed_ms);
+        if (motion.opacity <= 0)
+            continue;
+        painter.save();
+        painter.setOpacity(m_opacity * motion.opacity);
+        painter.translate(0, motion.offset);
         auto row = row_rect(i);
 
         if (i == m_hovered_row) {
@@ -197,6 +230,7 @@ void DownloadsShelf::paintEvent(QPaintEvent*)
             painter.setBrush(ChromeStyle::chrome_accent());
             painter.drawRoundedRect(QRectF(bar.left(), bar.top(), bar.width() * item.percent / 100.0, bar.height()), 1.5, 1.5);
         }
+        painter.restore();
     }
 }
 
