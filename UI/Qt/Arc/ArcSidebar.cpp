@@ -15,6 +15,7 @@
 #include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
+#include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
@@ -534,6 +535,9 @@ bool ArcSidebar::run_shortcut(ArcShortcut const& shortcut)
     case ArcCommand::PreviousSpace:
         step_space(-1);
         return true;
+    case ArcCommand::FillFromOnePassword:
+        fill_from_one_password();
+        return true;
     case ArcCommand::SidebarItem: {
         auto items = sidebar_items();
         if (items.isEmpty())
@@ -644,6 +648,87 @@ void ArcSidebar::copy_current_url(bool as_markdown)
         QGuiApplication::clipboard()->setText(url);
         Toast::show_in(*m_window, "Copied URL", "link");
     }
+}
+
+// --- Fill from 1Password (Cmd+\\) ----------------------------------------------------------------------------------
+//
+// The logins saved for the current site come from 1Password's `op` tool (see OnePassword.h). One fills straight away;
+// several open a menu to choose from. The page is filled only if it's still on the origin the login was chosen for.
+
+void ArcSidebar::fill_from_one_password()
+{
+    QPointer<Tab> tab = m_window ? m_window->current_tab() : nullptr;
+    if (!tab || is_blank(*tab))
+        return;
+    auto page = QUrl(url_of(*tab));
+    if (!OnePassword::can_fill(page)) {
+        Toast::show_in(*m_window, "1Password fills only secure (https) pages", "key");
+        return;
+    }
+    auto origin = OnePassword::origin_of(page);
+    if (!m_one_password)
+        m_one_password = new OnePassword::Runner(this);
+    QPointer<ArcSidebar> self = this;
+    m_one_password->list_logins(
+        [self, tab, page, origin](QList<OnePassword::Login> logins) {
+            if (!self || !self->m_window || !tab)
+                return;
+            auto matches = OnePassword::logins_for(logins, page);
+            if (matches.isEmpty()) {
+                Toast::show_in(*self->m_window, QString("No 1Password logins for %1").arg(page.host()), "key");
+                return;
+            }
+            if (matches.size() == 1) {
+                self->fill_one_password_login(matches.first().id, tab, origin);
+                return;
+            }
+            self->choose_one_password_login(matches, tab, origin);
+        },
+        [self](QString message) {
+            if (self && self->m_window)
+                Toast::show_in(*self->m_window, message, "key");
+        });
+}
+
+void ArcSidebar::choose_one_password_login(QList<OnePassword::Login> const& logins, QPointer<Tab> tab, QString const& origin)
+{
+    if (!tab)
+        return;
+    auto* menu = new QMenu(this);
+    menu->setObjectName("ArcOnePasswordMenu");
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    menu->addSection("Fill from 1Password");
+    for (auto const& login : logins) {
+        auto text = login.username.isEmpty() ? login.title : QString("%1  —  %2").arg(login.title, login.username);
+        auto* action = menu->addAction(text);
+        auto id = login.id;
+        connect(action, &QAction::triggered, this, [this, id, tab, origin] { fill_one_password_login(id, tab, origin); });
+    }
+    menu->setActiveAction(menu->actions().value(1));
+    // At the top of the page, where sign-in forms usually are.
+    auto& view = tab->view();
+    menu->popup(view.mapToGlobal(QPoint(view.width() / 2 - menu->sizeHint().width() / 2, 12)));
+}
+
+void ArcSidebar::fill_one_password_login(QString const& id, QPointer<Tab> tab, QString const& origin)
+{
+    QPointer<ArcSidebar> self = this;
+    if (!m_one_password)
+        m_one_password = new OnePassword::Runner(this);
+    m_one_password->get_credentials(id,
+        [self, tab, origin](OnePassword::Credentials credentials) {
+            // The tab may have moved on while 1Password asked for Touch ID; its script checks the origin again.
+            auto same_page = tab && OnePassword::origin_of(QUrl(url_of(*tab))) == origin;
+            if (same_page)
+                tab->view().run_javascript(ak_string_from_qstring(OnePassword::fill_script(origin, credentials)));
+            credentials.password.fill(QChar(0));
+            if (self && self->m_window)
+                Toast::show_in(*self->m_window, same_page ? "Filled from 1Password" : "The page changed, so nothing was filled", "key");
+        },
+        [self](QString message) {
+            if (self && self->m_window)
+                Toast::show_in(*self->m_window, message, "key");
+        });
 }
 
 // Whatever is on the clipboard, as if typed into the command bar: a URL opens, anything else is searched for.

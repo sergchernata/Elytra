@@ -1,0 +1,5 @@
+<!doctype html>
+<title>Username first</title>
+<!-- Sign-in pages that ask for the email first, and the password on the next page. -->
+<form><input id="email" type="email" name="identifier"><button>Next</button></form>
+<script>email.addEventListener("input", () => document.title = `${email.value}|`);</script>

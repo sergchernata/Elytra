@@ -1,0 +1,17 @@
+<!doctype html>
+<title>Login</title>
+<!-- The title shows what the fields hold, so the self-test can see a fill land (and that the page saw input events). -->
+<form>
+  <input type="text" name="search" placeholder="Search">
+</form>
+<form>
+  <input id="user" type="text" name="login" autocomplete="username">
+  <input id="password" type="password" name="password" autocomplete="current-password">
+  <button>Sign in</button>
+</form>
+<form><input type="password" autocomplete="new-password" placeholder="Not this one"></form>
+<script>
+  const show = () => document.title = `${user.value}|${password.value}`;
+  user.addEventListener("input", show);
+  password.addEventListener("input", show);
+</script>

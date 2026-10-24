@@ -27,6 +27,7 @@ enum class ArcCommand {
     NextSpace,           // Cmd+Option+Right
     PreviousSpace,       // Cmd+Option+Left
     SidebarItem,         // Cmd+1 to Cmd+8: that item (favorites first, then the list); Cmd+9: the last
+    FillFromOnePassword, // Cmd+\ (as in 1Password's own extension)
 };
 
 struct ArcShortcut {

@@ -32,6 +32,8 @@ Optional<ArcShortcut> arc_shortcut_for(int key, Qt::KeyboardModifiers modifiers)
             return ArcShortcut { ArcCommand::NextTab };
         case Qt::Key_PageUp:
             return ArcShortcut { ArcCommand::PreviousTab };
+        case Qt::Key_Backslash:
+            return ArcShortcut { ArcCommand::FillFromOnePassword };
         default:
             break;
         }

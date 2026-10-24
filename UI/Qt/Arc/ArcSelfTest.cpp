@@ -11,6 +11,7 @@
 #include <UI/Qt/Arc/ArcSelfTest.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
@@ -32,6 +33,7 @@
 #include <QKeyEvent>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMenu>
 #include <QScrollBar>
 #include <QSet>
 #include <QThread>
@@ -184,6 +186,7 @@ private:
     };
     ChromeTiles chrome_tiles_ignoring_the_tint(bool fade_step);
     void every_chrome_surface_takes_the_space_color();
+    void fills_from_one_password();
 
     // Sends a key the way Qt does for a shortcut: the override first (claimed if Arc handles the key), then the press.
     // Returns whether the override was claimed, i.e. upstream's action for the same key didn't fire.
@@ -1243,6 +1246,97 @@ void SelfTest::duplicate_and_close_tabs_below()
     settle(200);
 }
 
+// Fill from 1Password, against a stand-in `op` (fake-op.sh) and login pages served over http on this computer.
+void SelfTest::fills_from_one_password()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty()) {
+        check(false, "the login pages are served (run-arc-self-test.sh sets ARC_SELF_TEST_HTTP_PORT)");
+        return;
+    }
+    auto toast_text = [&] {
+        auto* toast = Toast::current_in(window());
+        return toast ? toast->text() : QString();
+    };
+    auto open = [&](QString const& url, QString const& title) -> QPointer<Tab> {
+        QPointer<Tab> tab = s().open_tab(url);
+        wait_until([&] { return tab && !tab->is_loading() && tab->title() == title; }, 5000);
+        if (tab)
+            s().activate(*tab);
+        settle(100);
+        return tab;
+    };
+    auto title_becomes = [&](QPointer<Tab> const& tab, QString const& title) {
+        return wait_until([&] { return tab && tab->title() == title; }, 5000);
+    };
+
+    // One login for the site: it fills straight away, the username into the sign-in form's field (not the search
+    // field in the form before it) and the password into the current-password field, as typing would.
+    auto solo = open(QString("http://localhost:%1/login.html").arg(port), "Login");
+    s().fill_from_one_password();
+    check(title_becomes(solo, "solo@example.com|pa\"ss'1"), "one login for the site fills the sign-in form", solo ? solo->title() : QString());
+    check(wait_until([&] { return toast_text() == "Filled from 1Password"; }, 2000), "and says so", toast_text());
+
+    // A sign-in page that asks for the email first gets just the username.
+    auto first_step = open(QString("http://localhost:%1/username-first.html").arg(port), "Username first");
+    s().fill_from_one_password();
+    check(title_becomes(first_step, "solo@example.com|"), "a page asking for the email first gets the username", first_step ? first_step->title() : QString());
+
+    // Several logins: a menu to choose from, best matches first.
+    auto several = open(QString("http://127.0.0.1:%1/login.html").arg(port), "Login");
+    s().fill_from_one_password();
+    QPointer<QMenu> menu;
+    wait_until([&] {
+        menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        return menu && menu->objectName() == "ArcOnePasswordMenu";
+    }, 5000);
+    QStringList choices;
+    QAction* second = nullptr;
+    if (menu) {
+        for (auto* action : menu->actions()) {
+            if (action->isSeparator())
+                continue;
+            choices.append(action->text());
+            if (action->text().startsWith("Second"))
+                second = action;
+        }
+    }
+    check(choices.size() == 2 && choices[0].startsWith("First") && second, "several logins for the site open a menu of them",
+        choices.join(", "));
+    if (second) {
+        second->trigger();
+        menu->close();
+    }
+    check(title_becomes(several, "second@example.com|two"), "and the chosen one fills", several ? several->title() : QString());
+
+    // The page moved on (to another origin) before the login arrived: nothing is filled.
+    auto moved = open(QString("http://localhost:%1/login.html").arg(port), "Login");
+    if (moved)
+        s().fill_one_password_login("solo", moved, "http://example.com");
+    check(wait_until([&] { return toast_text() == "The page changed, so nothing was filled"; }, 3000), "a page that moved on isn't filled", toast_text());
+    settle(200);
+    check(moved && moved->title() == "Login", "and keeps its fields empty");
+
+    // Not over http(s): nothing to ask 1Password.
+    auto insecure = open(page("Plain", "<input type=password>"), "Plain");
+    s().fill_from_one_password();
+    check(wait_until([&] { return toast_text() == "1Password fills only secure (https) pages"; }, 2000), "insecure pages aren't filled", toast_text());
+
+    // 1Password's errors come back as a toast.
+    if (solo)
+        s().activate(*solo);
+    qputenv("FAKE_OP_MODE", "dismissed");
+    s().fill_from_one_password();
+    check(wait_until([&] { return toast_text() == "1Password: cancelled"; }, 3000), "a dismissed Touch ID prompt says it was cancelled", toast_text());
+    qunsetenv("FAKE_OP_MODE");
+
+    for (auto const& tab : { solo, first_step, several, moved, insecure }) {
+        if (tab)
+            s().close_tab(*tab);
+    }
+    settle(300);
+}
+
 int SelfTest::run()
 {
     seed();
@@ -1273,6 +1367,7 @@ int SelfTest::run()
     the_slide_and_color_fade_run_smoothly();
     switching_spaces_keeps_the_switcher_in_place();
     every_chrome_surface_takes_the_space_color();
+    fills_from_one_password();
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

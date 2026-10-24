@@ -43,6 +43,10 @@ class TabWidget;
 namespace Arc {
 
 class SymbolButton;
+namespace OnePassword {
+class Runner;
+struct Login;
+}
 
 // While alive, keeps the sidebar slid out (when hidden) even though the pointer is over a menu or dialog.
 // Construct it around menu.exec() and modal dialogs opened from the sidebar.
@@ -130,6 +134,9 @@ private:
     void step_tab(int delta);
     void step_space(int delta);
     void copy_current_url(bool as_markdown);
+    void fill_from_one_password();
+    void choose_one_password_login(QList<OnePassword::Login> const&, QPointer<Tab>, QString const& origin);
+    void fill_one_password_login(QString const& id, QPointer<Tab>, QString const& origin);
     void new_tab_from_clipboard();
     void toggle_current_pin();
     void duplicate_tab(Tab&);
@@ -308,6 +315,7 @@ private:
     QHBoxLayout* m_switcher_layout { nullptr };
     QList<QPointer<SymbolButton>> m_space_buttons;
     QStringList m_switcher_key;
+    OnePassword::Runner* m_one_password { nullptr };
 
     bool m_rebuild_pending { false };
     qreal m_swipe_distance { 0 };
