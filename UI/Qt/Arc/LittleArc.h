@@ -22,6 +22,10 @@ namespace Ladybird::Arc {
 BrowserWindow& open_little_arc(Optional<URL::URL> const& = {});
 bool is_little_arc(BrowserWindow const&);
 
+// A page's popup (a sign-in window, say) gets Little Arc's slim bar, without "Open in": back and the page's address,
+// over the page, with no tab list or bookmarks.
+void give_popup_slim_chrome(BrowserWindow&);
+
 // Cmd+Option+N from any app (macOS); elsewhere a no-op, and the shortcut works while Ladybird is in front.
 void register_little_arc_hot_key();
 

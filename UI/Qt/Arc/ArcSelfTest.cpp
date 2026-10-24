@@ -1059,9 +1059,16 @@ void SelfTest::little_arc_opens_a_page_and_moves_it_into_a_space()
     // Only its bar and the page: the page fills the window's width, with nothing of the tab column over it.
     if (little && tab) {
         auto& view = tab->view();
-        auto left = view.mapTo(little.data(), QPoint(0, 0)).x();
-        check(left <= 4 && view.width() >= little->width() - 8, "its page fills the window (inside its frame)",
-            QString("page at x %1, %2 wide in %3").arg(left).arg(view.width()).arg(little->width()));
+        auto page = QRect(view.mapTo(little.data(), QPoint(0, 0)), view.size());
+        auto left = page.left();
+        auto right = little->width() - 1 - page.right();
+        auto bottom = little->height() - 1 - page.bottom();
+        check(left > 0 && left == right && left == bottom, "its page fills the window, with the same inset on each side",
+            QString("left %1, right %2, bottom %3").arg(left).arg(right).arg(bottom));
+        auto* little_bar = little->findChild<QWidget*>("ArcLittleArcBar");
+        auto* address = little_bar ? little_bar->findChild<AddressBar*>() : nullptr;
+        check(address && address->isVisible() && address->window() == little.data() && address->parts().host.startsWith("localhost"),
+            "and its bar shows the page's address, as the browser window's does", address ? address->url().toString() : QString("none"));
         bool covered = false;
         for (auto* widget : little->findChildren<QWidget*>()) {
             if (!widget->isVisible() || widget == &view || view.isAncestorOf(widget) || widget->isAncestorOf(&view) || widget->objectName() == "ArcLittleArcBar"
@@ -1350,7 +1357,7 @@ void SelfTest::popups_close_themselves()
     BrowserWindow* popup = nullptr;
     wait_until([&] {
         for (auto* candidate : browser_windows()) {
-            if (candidate->is_popup_window())
+            if (candidate->is_popup_window() && !is_little_arc(*candidate))
                 popup = candidate;
         }
         return popup != nullptr;
@@ -1359,6 +1366,20 @@ void SelfTest::popups_close_themselves()
     if (!popup)
         return;
     check(!ArcSidebar::for_window(*popup), "popups get no sidebar");
+    {
+        QString detail;
+        auto shows_address_bar = wait_until([&] {
+            auto* tab = popup->current_tab();
+            auto* bar = popup->findChild<QWidget*>("ArcLittleArcBar");
+            auto* address = bar ? bar->findChild<AddressBar*>() : nullptr;
+            auto* tabs = popup->findChild<TabWidget*>();
+            auto toolbar_shown = tab && tab->toolbar_container() && tab->toolbar_container()->isVisible();
+            detail = QString("bar %1 address '%2' toolbar shown %3").arg(bar && bar->isVisible()).arg(address ? address->url().toString() : QString()).arg(toolbar_shown);
+            return tab && tabs && loaded(*tab) && bar && bar->isVisible() && address && address->isVisible() && !address->url().isEmpty() && !toolbar_shown;
+        },
+            5000);
+        check(shows_address_bar, "a popup gets Little Arc's slim bar with Arc's address bar, and no toolbar or tab list", detail);
+    }
     QPointer<BrowserWindow> guarded = popup;
     if (auto* tab = popup->current_tab()) {
         wait_until([&] { return loaded(*tab); });

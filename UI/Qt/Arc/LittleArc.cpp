@@ -7,6 +7,7 @@
 #include <AK/Platform.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
+#include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <LibWebView/Menu.h>
 #include <UI/Qt/Arc/LittleArc.h>
@@ -82,9 +83,16 @@ static QString most_recent_space()
 
 class LittleArcBar final : public QWidget {
 public:
-    explicit LittleArcBar(BrowserWindow& window)
+    // A popup's bar is the same, without "Open in": a popup belongs to the page that opened it.
+    enum class Kind : u8 {
+        LittleArc,
+        Popup,
+    };
+
+    explicit LittleArcBar(BrowserWindow& window, Kind kind = Kind::LittleArc)
         : QWidget(&window)
         , m_window(&window)
+        , m_kind(kind)
     {
         setObjectName("ArcLittleArcBar");
         setFixedHeight(BAR_HEIGHT);
@@ -102,12 +110,14 @@ public:
         });
         layout->addWidget(m_back);
 
-        m_title = new QLabel(this);
-        m_title->setObjectName("ArcLittleArcTitle");
-        m_title->setTextFormat(Qt::PlainText);
-        m_title->setMinimumWidth(40);
-        m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        layout->addWidget(m_title, 1);
+        // The page's address, as in the browser window's toolbar: click it to edit it in the command bar.
+        m_address = new AddressBar(this);
+        m_address->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        connect(m_address, &AddressBar::edit_requested, this, [this] {
+            if (m_window)
+                CommandBar::toggle_for(*m_window, CommandBar::Mode::EditCurrentTab, current_tab());
+        });
+        layout->addWidget(m_address, 1, Qt::AlignVCenter);
 
         m_open_in = new QPushButton(this);
         m_open_in->setObjectName("ArcLittleArcOpenIn");
@@ -130,6 +140,11 @@ public:
         });
         layout->addWidget(m_choose);
 
+        if (kind == Kind::Popup) {
+            m_open_in->hide();
+            m_choose->hide();
+        }
+
         restyle();
         update_contents();
     }
@@ -146,17 +161,13 @@ public:
     {
         auto* tab = current_tab();
         auto url = tab ? QUrl(qstring_from_ak_string(tab->view().url().serialize())) : QUrl();
-        auto title = tab ? tab->title() : QString();
-        auto host = url.host();
-        if (host.startsWith("www."))
-            host = host.mid(4);
-        if (title.isEmpty() || title == url.toString())
-            title = host;
-        auto text = host.isEmpty() || title == host ? title : QString("%1  ·  %2").arg(title, host);
-        if (m_title->text() != text)
-            m_title->setText(text);
+        if (url.toString() == "about:blank")
+            url = QUrl();
+        m_address->set_url(url);
         m_back->setEnabled(tab && tab->view().navigate_back_action().enabled());
 
+        if (m_kind == Kind::Popup)
+            return;
         auto label = QString("Open in %1").arg(space_title(most_recent_space()));
         if (m_open_in->text() != label)
             m_open_in->setText(label);
@@ -183,10 +194,6 @@ private:
     {
         auto dark = ChromeStyle::is_dark(palette());
         auto text = ChromeStyle::chrome_text(palette());
-        auto muted = ChromeStyle::chrome_muted_text(palette());
-        auto title_style = QString("QLabel#ArcLittleArcTitle { color: %1; font-size: 13px; }").arg(muted.name());
-        if (m_title->styleSheet() != title_style)
-            m_title->setStyleSheet(title_style);
         auto button_style = QString("QPushButton#ArcLittleArcOpenIn { color: %1; background: %2; border: none; border-radius: 7px;"
                                     " padding: 4px 10px; font-size: 12px; font-weight: 500; }"
                                     "QPushButton#ArcLittleArcOpenIn:hover { background: %3; }")
@@ -196,8 +203,9 @@ private:
     }
 
     QPointer<BrowserWindow> m_window;
+    Kind m_kind { Kind::LittleArc };
     SymbolButton* m_back { nullptr };
-    QLabel* m_title { nullptr };
+    AddressBar* m_address { nullptr };
     QPushButton* m_open_in { nullptr };
     SymbolButton* m_choose { nullptr };
 };
@@ -247,6 +255,29 @@ BrowserWindow& open_little_arc(Optional<URL::URL> const& url)
         });
     }
     return window;
+}
+
+void give_popup_slim_chrome(BrowserWindow& popup)
+{
+    if (is_little_arc(popup) || popup.findChild<QWidget*>("ArcLittleArcBar"))
+        return;
+    auto* tabs = popup.findChild<TabWidget*>();
+    if (!tabs)
+        return;
+    auto* bar = new LittleArcBar(popup, LittleArcBar::Kind::Popup);
+    tabs->set_minimal_chrome_bar(bar);
+    QPointer<LittleArcBar> guarded_bar = bar;
+    auto watch_current = [guarded_bar, window = QPointer<BrowserWindow>(&popup)] {
+        if (!guarded_bar || !window)
+            return;
+        if (auto* tab = window->current_tab(); tab && !tab->property("arc_popup_bar_watched").toBool()) {
+            tab->setProperty("arc_popup_bar_watched", true);
+            guarded_bar->watch(*tab);
+        }
+        guarded_bar->update_contents();
+    };
+    QObject::connect(tabs, &TabWidget::tabs_changed, bar, watch_current);
+    watch_current();
 }
 
 bool move_little_arc_to_space(BrowserWindow& little_arc, QString space_id)

@@ -19,6 +19,7 @@
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/OnePassword.h>
 #include <UI/Qt/Arc/SidebarWidgets.h>
+#include <UI/Qt/Arc/LittleArc.h>
 #include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
@@ -175,8 +176,10 @@ void ArcSidebar::attach(BrowserWindow& window)
     if (for_window(window))
         return;
     // A popup (e.g. a sign-in window) is the page's, not a browsing window: no spaces, and window.close() closes it.
-    if (window.is_popup_window())
+    if (window.is_popup_window()) {
+        give_popup_slim_chrome(window);
         return;
+    }
     auto* tabs = window.findChild<TabWidget*>();
     if (!tabs)
         return;

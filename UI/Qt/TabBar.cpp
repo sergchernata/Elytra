@@ -2131,6 +2131,11 @@ void TabWidget::set_minimal_chrome_bar(QWidget* bar)
     if (bar)
         bar->setParent(this);
     rebuild_layout();
+#ifdef AK_OS_MACOS
+    // Tabs opened before the bar framed their pages for the tab sidebar.
+    for (int index = 0; index < m_stacked_widget->count(); ++index)
+        update_web_view_frame(*tab(index));
+#endif
 }
 
 void TabWidget::set_vertical_sidebar_widget(QWidget* widget)
@@ -2905,8 +2910,8 @@ void TabWidget::update_tab_chrome_visibility()
 void TabWidget::update_web_view_frame(Tab& tab)
 {
     Optional<WebView::VerticalTabsPosition> sidebar_position;
-    if (m_minimal_chrome_bar) { // Fork hook (Arc): Little Arc's page has no tabs beside it.
-        tab.update_web_view_frame(false, {});
+    if (m_minimal_chrome_bar) { // Fork hook (Arc): Little Arc's page has no tabs beside it: the same inset all round.
+        tab.update_web_view_frame(true, {});
         return;
     }
     if (m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal)
