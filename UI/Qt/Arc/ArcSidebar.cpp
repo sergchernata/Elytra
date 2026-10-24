@@ -2209,9 +2209,12 @@ void ArcSidebar::rebuild_favorites()
     // Rebuilding the tiles empties the grid for a moment, which resizes the list below it and can move its scroll
     // position. Only rebuild when the tiles themselves change; otherwise update them in place.
     if (ids != m_favorite_ids || style != m_favorite_style || m_favorite_buttons.size() != ids.size()) {
+        // Hidden now, not when they're deleted: until then they'd show under the new tiles.
         while (auto* item = m_favorites_layout->takeAt(0)) {
-            if (auto* widget = item->widget())
+            if (auto* widget = item->widget()) {
+                widget->hide();
                 widget->deleteLater();
+            }
             delete item;
         }
         m_favorite_buttons.clear();
@@ -2241,6 +2244,12 @@ void ArcSidebar::rebuild_favorites()
 
             m_favorites_layout->addWidget(button, i / columns, i % columns);
             m_favorite_buttons.append(button);
+        }
+        // Shown and placed now, rather than on a later turn of the event loop at a default position.
+        if (m_favorites->isVisible()) {
+            for (auto const& button : m_favorite_buttons)
+                button->show();
+            m_favorites_layout->activate();
         }
     }
 

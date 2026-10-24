@@ -38,6 +38,7 @@
 #include <QSet>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <cstdio>
@@ -165,6 +166,7 @@ private:
     void pinned_tab_away_back_and_separate();
     void a_pinned_tab_that_redirects_isnt_away();
     void opening_a_folder_leaves_the_list_alone_while_it_slides();
+    void favorites_never_overlap_when_they_change();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -558,6 +560,52 @@ void SelfTest::opening_a_folder_leaves_the_list_alone_while_it_slides()
     check(changes.isEmpty() && !rebuilt, "and nothing rebuilds or changes the list while it slides open", changes.join("; "));
 
     SpaceStore::the().remove_node(folder);
+    rebuild_now();
+}
+
+// Favorites that change are rebuilt: the old tiles go at once and the new ones show in their places straight away,
+// never on top of each other.
+void SelfTest::favorites_never_overlap_when_they_change()
+{
+    s().switch_to_space(m_alpha);
+    settle(200);
+    auto tiles_overlap = [&] {
+        QList<QRect> shown;
+        for (auto* tile : m_sidebar.m_favorites->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly)) {
+            if (!tile->isVisible())
+                continue;
+            for (auto const& other : shown) {
+                if (other.intersects(tile->geometry()))
+                    return true;
+            }
+            shown.append(tile->geometry());
+        }
+        return false;
+    };
+    auto tiles_shown = [&] {
+        int count = 0;
+        for (auto* tile : m_sidebar.m_favorites->findChildren<QToolButton*>(QString(), Qt::FindDirectChildrenOnly))
+            count += tile->isVisible();
+        return count;
+    };
+
+    auto before = SpaceStore::the().favorites_for_profile(s().current_profile()).size();
+    auto added = SpaceStore::the().add_favorite(page("Overlap"), "Overlap", 0, s().current_profile());
+    s().rebuild_favorites();
+    check(!tiles_overlap() && tiles_shown() == before + 1, "a new favorite's tiles show at once, side by side",
+        QString("%1 shown").arg(tiles_shown()));
+    bool ever_overlapped = false;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 300) {
+        ever_overlapped |= tiles_overlap();
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    check(!ever_overlapped, "and never on top of each other");
+
+    SpaceStore::the().remove_favorite(added);
+    s().rebuild_favorites();
+    check(!tiles_overlap() && tiles_shown() == before, "removing one leaves the rest side by side", QString("%1 shown").arg(tiles_shown()));
     rebuild_now();
 }
 
@@ -1480,6 +1528,7 @@ int SelfTest::run()
     pinned_tab_away_back_and_separate();
     a_pinned_tab_that_redirects_isnt_away();
     opening_a_folder_leaves_the_list_alone_while_it_slides();
+    favorites_never_overlap_when_they_change();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
