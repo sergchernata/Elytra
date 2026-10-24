@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibCompositing/PictureInPictureControls.h>
 #include <LibURL/Parser.h>
 #include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/Settings.h>
@@ -270,8 +271,23 @@ static void run_picture_in_picture_dev_aid()
         send_dev_mouse(view, QEvent::MouseButtonPress, center);
         send_dev_mouse(view, QEvent::MouseButtonRelease, center);
         QTimer::singleShot(1500, [guarded_window] {
-            if (guarded_window)
-                guarded_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+            if (!guarded_window)
+                return;
+            // ARC_DEV_PIP_LEAVE=space leaves for another space (adding one if there's only one), not a new tab.
+            if (qEnvironmentVariable("ARC_DEV_PIP_LEAVE") == "space") {
+                if (auto* sidebar = ArcSidebar::for_window(*guarded_window)) {
+                    if (SpaceStore::the().spaces().size() < 2)
+                        SpaceStore::the().add_space("Dev Space", "sf:star", QColor("#9b7fd4"));
+                    for (auto const& space : SpaceStore::the().spaces()) {
+                        if (space.id != sidebar->current_space_id()) {
+                            sidebar->switch_to_space(space.id);
+                            break;
+                        }
+                    }
+                }
+                return;
+            }
+            guarded_window->new_tab_from_url(URL::about_blank(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
         });
     });
 
@@ -290,6 +306,24 @@ static void run_picture_in_picture_dev_aid()
                 send_dev_mouse(*view, QEvent::MouseButtonPress, click);
                 send_dev_mouse(*view, QEvent::MouseButtonRelease, click);
             }
+        });
+    }
+    // ARC_DEV_PIP_MINIMIZE=<ms>: clicks the window's Minimize then.
+    if (auto delay = qEnvironmentVariableIntValue("ARC_DEV_PIP_MINIMIZE"); delay > 0) {
+        QTimer::singleShot(delay, [] {
+            auto* view = dev_picture_in_picture_view();
+            if (!view)
+                return;
+            auto dpr = view->devicePixelRatioF();
+            auto geometry = Compositing::picture_in_picture_controls_geometry({ qRound(view->width() * dpr), qRound(view->height() * dpr) }, dpr);
+            auto center = QPointF(geometry.minimize_button.center().x() / dpr, geometry.minimize_button.center().y() / dpr);
+            send_dev_mouse(*view, QEvent::MouseMove, center);
+            QTimer::singleShot(300, [center] {
+                if (auto* view = dev_picture_in_picture_view()) {
+                    send_dev_mouse(*view, QEvent::MouseButtonPress, center);
+                    send_dev_mouse(*view, QEvent::MouseButtonRelease, center);
+                }
+            });
         });
     }
     if (qEnvironmentVariableIsSet("ARC_DEV_MINI_PLAYER_REVEAL")) {

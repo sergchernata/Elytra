@@ -188,6 +188,8 @@ private:
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
     void minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
     void back_to_tab_returns_to_the_tabs_space_and_profile();
+    void minimizing_in_another_space_shows_the_player_there();
+    void switching_back_to_a_space_shows_what_it_showed_last();
     void picture_in_picture_is_round_and_its_buttons_hold_steady();
     void window_buttons_look_inactive_everywhere();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
@@ -931,6 +933,103 @@ void SelfTest::minimizing_picture_in_picture_moves_the_video_to_the_sidebar_play
         s().close_tab(*video);
     if (other)
         s().close_tab(*other);
+    settle(300);
+}
+
+// As in Arc: switching back to a space shows what it showed last, whether a Today tab, a pinned tab or a favorite, and
+// even once that tab has closed (as after a restart).
+void SelfTest::switching_back_to_a_space_shows_what_it_showed_last()
+{
+    auto round_trip = [&] {
+        s().switch_to_space(m_beta);
+        settle(400);
+        s().switch_to_space(m_alpha);
+        settle(400);
+        return window().current_tab();
+    };
+    s().switch_to_space(m_alpha);
+    settle(200);
+
+    // A Today tab, though it isn't the newest.
+    QPointer<Tab> older = s().open_tab(page("Space memory older"));
+    QPointer<Tab> newer = s().open_tab(page("Space memory newer"));
+    wait_until([&] { return older && newer && loaded(*older) && loaded(*newer); });
+    s().activate(*older);
+    settle(200);
+    check(round_trip() == older.data(), "switching back to a space shows the Today tab it showed last, not its newest");
+
+    // A pinned tab.
+    auto pinned = m_alpha_pinned.value(2);
+    s().open_or_activate_node(pinned);
+    QPointer<Tab> pinned_tab;
+    wait_until([&] { pinned_tab = s().tab_for_node(pinned); return pinned_tab && loaded(*pinned_tab); });
+    settle(200);
+    check(pinned_tab && round_trip() == pinned_tab.data(), "or the pinned tab it showed last");
+
+    // A favorite of the space's profile.
+    auto favorite = SpaceStore::the().favorites_for_profile(ArcSidebar::profile_of_space(m_alpha)).value(0).id;
+    s().open_or_activate_favorite(favorite);
+    QPointer<Tab> favorite_tab;
+    wait_until([&] {
+        favorite_tab = window().current_tab();
+        return favorite_tab && ArcSidebar::space_of(*favorite_tab).isEmpty() && loaded(*favorite_tab);
+    });
+    settle(200);
+    check(favorite_tab && round_trip() == favorite_tab.data(), "or the favorite it showed last");
+
+    // The pinned tab again, then closed while away: it opens again on the way back.
+    s().open_or_activate_node(pinned);
+    settle(400);
+    s().switch_to_space(m_beta);
+    settle(300);
+    if (auto* tab = s().tab_for_node(pinned))
+        s().close_tab(*tab);
+    settle(300);
+    s().m_last_tab_in_space.clear(); // As after a restart.
+    s().switch_to_space(m_alpha);
+    check(wait_until([&] { return window().current_tab() && s().tab_for_node(pinned) == window().current_tab(); }, 3000),
+        "a pinned tab it showed last, since closed, opens again");
+
+    for (auto* tab : { older.data(), newer.data() }) {
+        if (tab)
+            s().close_tab(*tab);
+    }
+    settle(300);
+}
+
+// Minimize in another space than the video's: the player shows in the sidebar there.
+void SelfTest::minimizing_in_another_space_shows_the_player_there()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty())
+        return;
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> video = s().open_tab(QString("http://localhost:%1/video.html").arg(port));
+    if (!wait_until([&] { return video && !video->is_loading() && video->title() == "Video"; }, 5000)) {
+        check(false, "the video page loads (other space)");
+        return;
+    }
+    settle(300);
+    click_view_at(video->view(), QPointF(40, 40));
+    wait_until([&] { return video && video->title() == "Playing"; }, 5000);
+    s().switch_to_space(m_beta);
+    if (!wait_until([&] { return video && video->view().has_picture_in_picture_window() && picture_in_picture_view(); }, 5000)) {
+        check(false, "switching spaces opens Picture-in-Picture (other space)");
+        return;
+    }
+    settle(300);
+    click_picture_in_picture_control(Compositing::PictureInPictureControl::Minimize);
+    auto& player = *s().m_mini_player;
+    check(wait_until([&] { return video && !video->view().has_picture_in_picture_window() && player.isVisible() && player.isVisibleTo(s().m_panel); }, 5000),
+        "Minimize in another space shows the player in the sidebar there",
+        QString("space beta %1, window %2, player %3, title %4").arg(s().current_space_id() == m_beta).arg(video && video->view().has_picture_in_picture_window()).arg(player.isVisible()).arg(video ? video->title() : QString()));
+    check(s().current_space_id() == m_beta && video && video->title() == "Playing", "staying in that space, with the video playing on");
+
+    player.close_button()->click();
+    settle(300);
+    if (video)
+        s().close_tab(*video);
     settle(300);
 }
 
@@ -2235,6 +2334,8 @@ int SelfTest::run()
     leaving_a_playing_video_shows_it_in_picture_in_picture();
     minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
     back_to_tab_returns_to_the_tabs_space_and_profile();
+    minimizing_in_another_space_shows_the_player_there();
+    switching_back_to_a_space_shows_what_it_showed_last();
     picture_in_picture_is_round_and_its_buttons_hold_steady();
     window_buttons_look_inactive_everywhere();
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();

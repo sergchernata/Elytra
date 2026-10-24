@@ -147,6 +147,33 @@ TEST_CASE(state_survives_a_reload)
     EXPECT(store.favorites().first().title == "Ladybird");
 }
 
+// What each space showed last survives a restart, so switching back to it shows that again.
+TEST_CASE(each_spaces_last_item_survives_a_reload)
+{
+    QTemporaryDir directory;
+    QString home;
+    QString work;
+    QString gone;
+    QString pinned;
+    {
+        SpaceStore store(store_path(directory));
+        home = store.first_space_id();
+        work = store.add_space("Work", "sf:briefcase", QColor("#9b7fd4"));
+        gone = store.add_space("Gone", "sf:star", QColor("#5b8def"));
+        pinned = store.add_pinned_tab(home, {}, -1, "https://example.com/", "Example");
+        store.set_last_item_in_space(home, pinned);
+        store.set_last_item_in_space(work, "url:https://example.org/today");
+        store.set_last_item_in_space(gone, "url:https://example.net/");
+        store.remove_space(gone);
+        store.flush();
+    }
+
+    SpaceStore store(store_path(directory));
+    EXPECT(store.last_item_in_space(home) == pinned);
+    EXPECT(store.last_item_in_space(work) == "url:https://example.org/today");
+    EXPECT(store.last_item_in_space(gone).isEmpty());
+}
+
 TEST_CASE(the_old_house_emoji_icon_becomes_a_symbol)
 {
     QTemporaryDir directory;

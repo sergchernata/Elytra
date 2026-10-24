@@ -127,6 +127,10 @@ void SpaceStore::load()
     }
 
     m_last_active_space_id = root["activeSpace"].toString();
+    m_last_item_in_space.clear();
+    auto last_items = root["lastInSpace"].toObject();
+    for (auto it = last_items.begin(); it != last_items.end(); ++it)
+        m_last_item_in_space.insert(it.key(), it.value().toString());
 }
 
 void SpaceStore::flush()
@@ -159,6 +163,12 @@ void SpaceStore::write_now()
     QJsonObject root;
     root["version"] = FILE_VERSION;
     root["activeSpace"] = m_last_active_space_id;
+    QJsonObject last_items;
+    for (auto it = m_last_item_in_space.begin(); it != m_last_item_in_space.end(); ++it) {
+        if (space(it.key()))
+            last_items[it.key()] = it.value();
+    }
+    root["lastInSpace"] = last_items;
 
     QJsonArray spaces;
     for (auto const& space : m_spaces) {
@@ -237,6 +247,14 @@ Space* SpaceStore::mutable_space(QString const& id)
 QString SpaceStore::first_space_id() const
 {
     return m_spaces.isEmpty() ? QString() : m_spaces.first().id;
+}
+
+void SpaceStore::set_last_item_in_space(QString const& space_id, QString const& item)
+{
+    if (space_id.isEmpty() || m_last_item_in_space.value(space_id) == item)
+        return;
+    m_last_item_in_space.insert(space_id, item);
+    save_later(); // Bookkeeping, as the session is.
 }
 
 void SpaceStore::set_last_active_space_id(QString const& id)

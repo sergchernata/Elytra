@@ -8,6 +8,7 @@
 #pragma once
 
 #include <QColor>
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QString>
@@ -92,6 +93,10 @@ public:
     QString first_space_id() const;
     QString last_active_space_id() const { return m_last_active_space_id; }
     void set_last_active_space_id(QString const&);
+    // What each space showed last, to show again on switching back: a pinned tab's or favorite's node id, or "url:"
+    // and a Today tab's URL.
+    QString last_item_in_space(QString const& space_id) const { return m_last_item_in_space.value(space_id); }
+    void set_last_item_in_space(QString const& space_id, QString const& item);
 
     PinnedNode const* node(QString const& id) const;
     NodeLocation location_of(QString const& node_id) const;
@@ -163,6 +168,7 @@ private:
     QList<Favorite> m_favorites;
     QList<SessionEntry> m_session;
     QString m_last_active_space_id;
+    QHash<QString, QString> m_last_item_in_space;
     bool m_is_new_profile { false };
 };
 

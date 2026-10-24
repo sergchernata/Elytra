@@ -2076,16 +2076,40 @@ void ArcSidebar::switch_to_space(QString const& id)
     store.set_last_active_space_id(id);
     apply_profile_for_new_views(); // Before a new-tab page might open below.
 
-    // Show the tab last used in this space, else any of its tabs, else a fresh new-tab page.
+    // Show what this space showed last (its tab, or else that pinned tab or favorite opened again), else any of its
+    // tabs, else a fresh new-tab page.
+    auto shows_in_space = [&](Tab& tab) {
+        if (m_tabs.index_of(&tab) < 0 || tab.property(CLOSING_PROPERTY).toBool())
+            return false;
+        auto space = space_of(tab);
+        return space == id || (space.isEmpty() && is_favorite_node(node_of(tab)) && profile_of_tab(tab) == profile_of_space(id));
+    };
     Tab* target = m_last_tab_in_space.value(id);
-    if (target && (m_tabs.index_of(target) < 0 || space_of(*target) != id))
+    if (target && !shows_in_space(*target))
         target = nullptr;
+    QString node_to_open;
     if (!target) {
+        // After a restart, or once its tab has closed: what the store remembers.
+        auto item = store.last_item_in_space(id);
+        if (item.startsWith("url:")) {
+            auto url = item.mid(4);
+            for (auto* tab : today_tabs(id)) {
+                if (url_of(*tab) == url)
+                    target = tab;
+            }
+        } else if (!item.isEmpty()) {
+            if (auto* tab = tab_for_node(item); tab && shows_in_space(*tab))
+                target = tab;
+            else if ((is_favorite_node(item) && store.favorite(item.mid(4))) || (!is_favorite_node(item) && store.node(item)))
+                node_to_open = item;
+        }
+    }
+    if (!target && node_to_open.isEmpty()) {
         auto today = today_tabs(id);
         if (!today.isEmpty())
             target = today.last();
     }
-    if (!target) {
+    if (!target && node_to_open.isEmpty()) {
         for (auto* tab : tabs()) {
             if (space_of(*tab) == id) {
                 target = tab;
@@ -2097,6 +2121,11 @@ void ArcSidebar::switch_to_space(QString const& id)
     m_switching_space = true;
     if (target) {
         activate(*target);
+    } else if (!node_to_open.isEmpty()) {
+        if (is_favorite_node(node_to_open))
+            open_or_activate_favorite(node_to_open.mid(4));
+        else
+            open_or_activate_node(node_to_open);
     } else {
         auto& tab = m_window->new_tab_from_url(WebView::Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
         set_tab_space(tab, id);
@@ -2193,8 +2222,13 @@ void ArcSidebar::on_current_tab_changed(int index)
             }
         }
     }
-    if (!space.isEmpty())
-        m_last_tab_in_space[space] = tab;
+    // What this space shows, to show again on coming back to it: a favorite counts for the space it's shown in.
+    if (auto shown_space = space.isEmpty() ? m_space_id : space; !shown_space.isEmpty() && !is_blank(*tab)
+        && (!space.isEmpty() || profile_of_tab(*tab) == profile_of_space(shown_space))) {
+        m_last_tab_in_space[shown_space] = tab;
+        auto node = node_of(*tab);
+        SpaceStore::the().set_last_item_in_space(shown_space, node.isEmpty() ? "url:" + url_of(*tab) : node);
+    }
     QTimer::singleShot(0, this, [guarded = QPointer(this)] {
         if (guarded)
             guarded->close_stale_blank_tabs();
