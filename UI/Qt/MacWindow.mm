@@ -22,22 +22,92 @@
 
 #import <Cocoa/Cocoa.h>
 #import <CoreImage/CoreImage.h>
+#import <QuartzCore/QuartzCore.h>
 #import <UI/Qt/DictionaryLookup.h>
 #import <objc/runtime.h>
 
-// Fork hook (Arc): grey window buttons, as Arc's, in colour only while the pointer is over them (as AppKit shows an
-// inactive window's). A Core Image filter paints each button one flat grey, keeping its shape; hovering lifts it.
+// Fork hook (Arc): every window's buttons look as an inactive window's do (a faint dot with a glassy rim), in colour
+// only while the pointer is over them. AppKit has no setting for it: a Core Image filter hides each real button (it
+// still takes clicks) and a drawn dot sits over it; hovering lifts both.
+@interface LadybirdInactiveButtonLook : NSView
+- (void)setDark:(bool)dark;
+@end
+
+@implementation LadybirdInactiveButtonLook
+{
+    CAGradientLayer* m_rim;
+    CAShapeLayer* m_rim_mask;
+}
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (!self)
+        return nil;
+    self.wantsLayer = YES;
+    m_rim = [[CAGradientLayer alloc] init];
+    m_rim_mask = [[CAShapeLayer alloc] init];
+    m_rim_mask.fillColor = nil;
+    m_rim_mask.strokeColor = NSColor.blackColor.CGColor;
+    m_rim_mask.lineWidth = 1;
+    m_rim.mask = m_rim_mask;
+    [self.layer addSublayer:m_rim];
+    return self;
+}
+
+- (void)dealloc
+{
+    [m_rim release];
+    [m_rim_mask release];
+    [super dealloc];
+}
+
+// Clicks go to the real button underneath.
+- (NSView*)hitTest:(NSPoint)point
+{
+    (void)point;
+    return nil;
+}
+
+- (void)layout
+{
+    [super layout];
+    auto bounds = self.bounds;
+    self.layer.cornerRadius = bounds.size.width / 2;
+    m_rim.frame = bounds;
+    auto* path = CGPathCreateWithEllipseInRect(CGRectInset(bounds, 0.5, 0.5), nullptr);
+    m_rim_mask.path = path;
+    CGPathRelease(path);
+}
+
+- (void)setDark:(bool)dark
+{
+    // Sampled from AppKit's own inactive buttons: a faint fill, and a rim that catches the light at the top and bottom.
+    auto* tint = dark ? NSColor.whiteColor : NSColor.blackColor;
+    self.layer.backgroundColor = [tint colorWithAlphaComponent:dark ? 0.10 : 0.10].CGColor;
+    auto edge = [tint colorWithAlphaComponent:dark ? 0.19 : 0.14].CGColor;
+    auto side = [tint colorWithAlphaComponent:dark ? 0.03 : 0.04].CGColor;
+    m_rim.colors = @[ (id)edge, (id)side, (id)edge ];
+    m_rim.locations = @[ @0.0, @0.5, @1.0 ];
+    self.needsLayout = YES;
+}
+
+@end
+
 @interface LadybirdGreyWindowButtons : NSObject
 {
     NSWindow* m_window; // Weak: this lives as long as the window.
     NSButton* m_buttons[3];
-    CIFilter* m_filter;
+    LadybirdInactiveButtonLook* m_looks[3];
+    CIFilter* m_hide;
+    bool m_dark;
     bool m_hovered;
 }
 - (instancetype)initWithWindow:(NSWindow*)window;
-- (void)setTint:(CGFloat)white alpha:(CGFloat)alpha;
+- (void)setDark:(bool)dark;
 - (void)apply;
 - (void)findButtons;
+- (bool)looksInactive;
 @end
 
 @implementation LadybirdGreyWindowButtons
@@ -48,8 +118,22 @@
     if (!self)
         return nil;
     m_window = window;
+    m_hide = [[CIFilter filterWithName:@"CIColorMatrix"] retain];
+    [m_hide setDefaults];
+    [m_hide setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputAVector"];
     [self findButtons];
     return self;
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    for (auto* look : m_looks) {
+        [look removeFromSuperview];
+        [look release];
+    }
+    [m_hide release];
+    [super dealloc];
 }
 
 // AppKit can replace the buttons (when it lays the title bar out again), so they're looked up each time.
@@ -58,53 +142,80 @@
     NSWindowButton const kinds[] = { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton };
     for (int i = 0; i < 3; ++i) {
         auto* button = [m_window standardWindowButton:kinds[i]];
-        m_buttons[i] = button;
+        if (button != m_buttons[i]) {
+            if (m_buttons[i])
+                [[NSNotificationCenter defaultCenter] removeObserver:self name:NSViewFrameDidChangeNotification object:m_buttons[i]];
+            m_buttons[i] = button;
+            if (button) {
+                button.postsFrameChangedNotifications = YES;
+                [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(buttonMoved:) name:NSViewFrameDidChangeNotification object:button];
+            }
+        }
         if (!button)
             continue;
         button.wantsLayer = YES;
         bool tracked = false;
         for (NSTrackingArea* area in button.trackingAreas)
             tracked |= area.owner == self;
-        if (tracked)
-            continue;
-        auto* area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
-                                                  options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
-                                                    owner:self
-                                                 userInfo:nil];
-        [button addTrackingArea:area];
-        [area release];
+        if (!tracked) {
+            auto* area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                      options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                                        owner:self
+                                                     userInfo:nil];
+            [button addTrackingArea:area];
+            [area release];
+        }
+        if (!m_looks[i])
+            m_looks[i] = [[LadybirdInactiveButtonLook alloc] initWithFrame:button.frame];
+        if (m_looks[i].superview != button.superview || button.superview.subviews.lastObject != m_looks[i]) {
+            [m_looks[i] removeFromSuperview];
+            [button.superview addSubview:m_looks[i] positioned:NSWindowAbove relativeTo:nil];
+        }
+        m_looks[i].frame = button.frame;
     }
 }
 
-- (void)dealloc
+- (void)buttonMoved:(NSNotification*)notification
 {
-    [m_filter release];
-    [super dealloc];
+    for (int i = 0; i < 3; ++i) {
+        if (m_buttons[i] == notification.object && m_looks[i])
+            m_looks[i].frame = m_buttons[i].frame;
+    }
 }
 
-- (void)setTint:(CGFloat)white alpha:(CGFloat)alpha
+- (void)setDark:(bool)dark
 {
-    // Every button becomes `white` (0 black, 1 white) at `alpha`, keeping its round shape: as AppKit draws an inactive
-    // window's buttons, a translucent dot over the title bar.
-    [m_filter release];
-    m_filter = [[CIFilter filterWithName:@"CIColorMatrix"] retain];
-    [m_filter setDefaults];
-    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputRVector"];
-    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputGVector"];
-    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputBVector"];
-    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:alpha] forKey:@"inputAVector"];
-    [m_filter setValue:[CIVector vectorWithX:white Y:white Z:white W:0] forKey:@"inputBiasVector"];
+    m_dark = dark;
+    for (auto* look : m_looks)
+        [look setDark:dark];
     [self apply];
 }
 
 - (void)apply
 {
     [self findButtons];
-    for (auto* button : m_buttons) {
-        if (!button)
+    for (int i = 0; i < 3; ++i) {
+        if (!m_buttons[i])
             continue;
-        button.contentFilters = (m_hovered || !m_filter) ? @[] : @[ m_filter ];
+        m_buttons[i].contentFilters = m_hovered ? @[] : @[ m_hide ];
+        [m_looks[i] setDark:m_dark];
+        m_looks[i].hidden = m_hovered || m_buttons[i].hidden;
     }
+}
+
+// For the tests: each button hidden by the filter, with its drawn dot over it.
+- (bool)looksInactive
+{
+    [self findButtons];
+    for (int i = 0; i < 3; ++i) {
+        auto* button = m_buttons[i];
+        if (!button || button.hidden)
+            continue;
+        if (button.contentFilters.count != 1 || !m_looks[i] || m_looks[i].hidden || m_looks[i].superview != button.superview
+            || !NSEqualRects(m_looks[i].frame, button.frame) || !m_looks[i].layer.backgroundColor)
+            return false;
+    }
+    return m_buttons[0] != nil;
 }
 
 - (bool)pointerIsOverAButton
@@ -587,7 +698,16 @@ void set_appkit_window_buttons_grey(QWidget& widget, Gfx::Color tint)
         objc_setAssociatedObject(window, &s_grey_window_buttons_key, buttons, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [buttons release];
     }
-    [buttons setTint:(tint.red() > 127 ? 1.0 : 0.0) alpha:tint.alpha() / 255.0];
+    [buttons setDark:tint.red() > 127];
+}
+
+bool appkit_window_buttons_look_inactive(QWidget& widget)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (!view || !view.window)
+        return false;
+    auto* buttons = static_cast<LadybirdGreyWindowButtons*>(objc_getAssociatedObject(view.window, &s_grey_window_buttons_key));
+    return buttons && [buttons looksInactive];
 }
 
 void reapply_appkit_window_control_offsets(QWidget& widget)

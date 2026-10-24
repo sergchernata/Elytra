@@ -1017,3 +1017,37 @@ TEST_CASE(mini_player_shows_play_state_and_mute)
     player.set_icon({});
     EXPECT_EQ(player.icon_button()->symbol(), "globe");
 }
+
+// As in Arc: the drawn window buttons (shown while the sidebar floats) are faint grey dots, in colour when hovered.
+static int most_saturated(QImage const& image)
+{
+    int most = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            auto color = QColor::fromRgba(image.pixel(x, y));
+            // Nearly clear pixels (the dots' antialiased edges) have no colour to speak of.
+            if (color.alpha() >= 10)
+                most = qMax(most, color.hsvSaturation());
+        }
+    }
+    return most;
+}
+
+TEST_CASE(drawn_window_buttons_are_grey_until_hovered)
+{
+    TrafficLights lights(nullptr);
+    lights.set_metrics(14, 23);
+    lights.set_drawn(true);
+    lights.show();
+    // Grey even in the active window (they used to be in colour there).
+    lights.activateWindow();
+    QCoreApplication::processEvents();
+    EXPECT(lights.isActiveWindow());
+    QEvent leave(QEvent::Leave); // The pointer isn't over them.
+    QApplication::sendEvent(&lights, &leave);
+    EXPECT(most_saturated(render(lights)) < 40);
+
+    QEnterEvent enter(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5));
+    QApplication::sendEvent(&lights, &enter);
+    EXPECT(most_saturated(render(lights)) > 150);
+}

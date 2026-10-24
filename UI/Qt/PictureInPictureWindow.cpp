@@ -129,6 +129,8 @@ public:
         // Fork hook (Arc): rounded corners and a shadow. The window itself is clear, the page's layer is rounded, and
         // a rounded shape painted under it gives AppKit the outline to cast the shadow from.
         setAttribute(Qt::WA_TranslucentBackground);
+        m_view->setAttribute(Qt::WA_TranslucentBackground);
+        m_view->set_paints_chrome_behind_corners(false);
         m_view->set_has_rounded_corners(true);
 #endif
 

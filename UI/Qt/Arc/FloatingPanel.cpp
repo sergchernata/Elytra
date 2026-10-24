@@ -10,6 +10,7 @@
 
 #include <QEnterEvent>
 #include <QMouseEvent>
+#include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
 #include <QWindow>
@@ -76,16 +77,29 @@ void TrafficLights::paintEvent(QPaintEvent*)
     static QColor const edges[] = { QColor(0xe1, 0x46, 0x40), QColor(0xdf, 0xa1, 0x23), QColor(0x1a, 0xab, 0x29) };
     auto active = m_hovered;
     auto dark = ChromeStyle::is_dark(palette());
-    auto inactive = dark ? QColor(255, 255, 255, 28) : QColor(0, 0, 0, 36); // As the real ones (see ArcChrome.cpp).
+    auto inactive = dark ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 26); // As the real ones (see MacWindow.mm).
 
     for (int i = 0; i < 3; ++i) {
         auto rect = button_rect(i);
         auto fill = active ? colors[i] : inactive;
         if (m_pressed == i)
             fill = fill.darker(120);
-        painter.setPen(active ? QPen(edges[i], 0.6) : QPen(Qt::NoPen));
+        if (active) {
+            painter.setPen(QPen(edges[i], 0.6));
+        } else {
+            // A rim that catches the light at the top and bottom, as AppKit's inactive buttons have.
+            auto tint = dark ? QColor(255, 255, 255) : QColor(0, 0, 0);
+            QLinearGradient rim(rect.topLeft(), rect.bottomLeft());
+            auto edge = tint, side = tint;
+            edge.setAlphaF(dark ? 0.19 : 0.14);
+            side.setAlphaF(dark ? 0.03 : 0.04);
+            rim.setColorAt(0, edge);
+            rim.setColorAt(0.5, side);
+            rim.setColorAt(1, edge);
+            painter.setPen(QPen(QBrush(rim), 1));
+        }
         painter.setBrush(fill);
-        painter.drawEllipse(rect.adjusted(0.3, 0.3, -0.3, -0.3));
+        painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5));
 
         if (!m_hovered)
             continue;

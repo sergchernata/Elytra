@@ -30,6 +30,7 @@ void invalidate_appkit_window_shadow(QWidget&);
 // Fork hook (Arc): the window buttons as an inactive window's (`tint`: white or black, at its alpha), in colour while
 // the pointer is over them.
 void set_appkit_window_buttons_grey(QWidget&, Gfx::Color tint);
+bool appkit_window_buttons_look_inactive(QWidget&); // For the tests.
 void keep_appkit_window_visible_while_inactive(QWidget&);
 void ensure_appkit_window_is_exposed(QWidget&);
 void set_appkit_window_content_aspect_ratio(QWidget&, Gfx::IntSize);

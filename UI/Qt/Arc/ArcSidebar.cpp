@@ -279,7 +279,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_tree->setModel(m_model);
     layout->addWidget(m_tree, 1);
 
-    // The media player rests in this slot, and grows up over the list from it (see MiniPlayer.h).
+    // The media player's slot, at the bottom with the space buttons: it grows as the player slides open (see
+    // MiniPlayer.h).
     m_mini_player_slot = new QWidget(this);
     m_mini_player_slot->setFixedHeight(MiniPlayer::CONTROLS_HEIGHT);
     m_mini_player_slot->hide();
@@ -312,6 +313,13 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
             m_player_tab->view().enter_picture_in_picture_for_playing_video();
     });
     connect(m_mini_player, &MiniPlayer::dismiss, this, [this] { dismiss_mini_player(); });
+    connect(m_mini_player, &MiniPlayer::height_changed, this, [this](int height) {
+        if (m_mini_player_slot->height() == height && m_mini_player_slot->minimumHeight() == height)
+            return;
+        m_mini_player_slot->setFixedHeight(height);
+        m_panel->layout()->activate();
+        place_mini_player();
+    });
 
     // Arc's update notice: a pill above the bottom bar once a newer release is ready (see UpdateChecker).
     m_update_button = new QPushButton(this);

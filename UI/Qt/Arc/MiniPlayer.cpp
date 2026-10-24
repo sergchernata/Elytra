@@ -199,6 +199,10 @@ void MiniPlayer::set_reveal(qreal reveal)
 void MiniPlayer::place()
 {
     auto height = CONTROLS_HEIGHT + qRound(TITLE_HEIGHT * m_reveal);
+    if (height != m_requested_height) {
+        m_requested_height = height;
+        emit height_changed(height);
+    }
     auto geometry = QRect(m_slot.left(), m_slot.bottom() + 1 - height, m_slot.width(), height);
     if (geometry != this->geometry())
         setGeometry(geometry);

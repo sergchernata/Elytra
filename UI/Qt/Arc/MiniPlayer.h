@@ -3,8 +3,8 @@
  * previous, play or pause, next, and mute. Hovering it slides it up to show the title, with buttons to watch the video
  * in Picture-in-Picture again, and to stop it.
  *
- * It sits over the sidebar, growing upward from a slot that the sidebar keeps for it, so the list behind it doesn't
- * move as it opens.
+ * It sits in the sidebar's bottom bar, above the space buttons, and the bar grows with it as it slides open (the list
+ * above gives way), as in Arc.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -57,7 +57,8 @@ public:
     // Whether the page has a video to show in Picture-in-Picture.
     void set_can_picture_in_picture(bool);
 
-    // The slot it rests in, in its parent's coordinates; it grows upward from there.
+    // The slot it sits in, in its parent's coordinates; it keeps to the slot's bottom, and asks for the height it needs
+    // (height_changed()).
     void set_slot(QRect);
 
     qreal reveal() const { return m_reveal; }
@@ -80,6 +81,8 @@ signals:
     void toggle_mute();
     void picture_in_picture();
     void dismiss();
+    // The height it takes as it slides open or closed: the sidebar grows its slot to match, as Arc's bottom bar grows.
+    void height_changed(int);
 
 protected:
     virtual void paintEvent(QPaintEvent*) override;
@@ -93,6 +96,7 @@ private:
     void lay_out_children();
 
     QRect m_slot;
+    int m_requested_height { CONTROLS_HEIGHT };
     qreal m_reveal { 0 };
     QVariantAnimation* m_reveal_animation { nullptr };
     QString m_title;

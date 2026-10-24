@@ -1146,6 +1146,8 @@ void WebContentView::paintEvent(QPaintEvent*)
 void WebContentView::paintEvent(QPaintEvent*)
 {
     // The page layer has rounded corners, so the area outside them should match the chrome around this view.
+    if (!m_paints_chrome_behind_corners) // Fork hook (Arc)
+        return;
     QPainter painter(this);
     painter.fillRect(rect(), ChromeStyle::chrome_background(window()->palette()));
 }

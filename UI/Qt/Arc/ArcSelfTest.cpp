@@ -28,6 +28,7 @@
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
+#include <UI/Qt/MacWindow.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
 #include <UI/Qt/TabBar.h>
@@ -187,6 +188,8 @@ private:
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
     void minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
     void back_to_tab_returns_to_the_tabs_space_and_profile();
+    void picture_in_picture_is_round_and_its_buttons_hold_steady();
+    void window_buttons_look_inactive_everywhere();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
@@ -858,11 +861,16 @@ void SelfTest::minimizing_picture_in_picture_moves_the_video_to_the_sidebar_play
     check(player.title() == "Playing" && player.height() == MiniPlayer::CONTROLS_HEIGHT, "the player shows the tab's title, folded",
         QString("%1 %2").arg(player.title()).arg(player.height()));
     auto bottom = player.geometry().bottom();
+    auto list_bottom = s().m_tree->geometry().bottom();
     player.set_revealed(true);
     settle(MiniPlayer::REVEAL_MS + 150);
     check(player.height() == MiniPlayer::CONTROLS_HEIGHT + MiniPlayer::TITLE_HEIGHT && player.geometry().bottom() == bottom
             && player.close_button()->isVisible(),
         "hovering it slides it up from where it rests, showing its title row", QString::number(player.height()));
+    check(s().m_mini_player_slot->height() == player.height() && s().m_tree->geometry().bottom() == list_bottom - MiniPlayer::TITLE_HEIGHT
+            && player.geometry().bottom() < s().m_switcher->geometry().top(),
+        "the bottom bar grows with it, above the space buttons, and the list gives way",
+        QString("slot %1, list bottom %2 -> %3").arg(s().m_mini_player_slot->height()).arg(list_bottom).arg(s().m_tree->geometry().bottom()));
     player.set_revealed(false);
     settle(MiniPlayer::REVEAL_MS + 150);
     check(player.height() == MiniPlayer::CONTROLS_HEIGHT && !player.close_button()->isVisible(), "and back down");
@@ -1007,6 +1015,103 @@ void SelfTest::back_to_tab_returns_to_the_tabs_space_and_profile()
     settle(300);
     SpaceStore::the().remove_favorite(favorite);
     settle(300);
+}
+
+// The Picture-in-Picture window is round (nothing paints outside its rounded page), and its buttons hold still under
+// a resting pointer (a flicker was seen there once).
+void SelfTest::picture_in_picture_is_round_and_its_buttons_hold_steady()
+{
+    auto port = qEnvironmentVariable("ARC_SELF_TEST_HTTP_PORT");
+    if (port.isEmpty())
+        return;
+    s().switch_to_space(m_alpha);
+    settle(200);
+    QPointer<Tab> video = s().open_tab(QString("http://localhost:%1/video.html").arg(port));
+    QPointer<Tab> other = s().open_tab(page("Not the video, steady"));
+    if (!wait_until([&] { return video && other && !video->is_loading() && video->title() == "Video" && loaded(*other); }, 5000)) {
+        check(false, "the video page loads (steady)");
+        return;
+    }
+    s().activate(*video);
+    settle(300);
+    click_view_at(video->view(), QPointF(40, 40));
+    wait_until([&] { return video && video->title() == "Playing"; }, 5000);
+    s().activate(*other);
+    if (!wait_until([&] { return video && video->view().has_picture_in_picture_window() && picture_in_picture_view(); }, 5000)) {
+        check(false, "the video goes into Picture-in-Picture (steady)");
+        return;
+    }
+    settle(800);
+    auto* view = picture_in_picture_view();
+#if defined(AK_OS_MACOS)
+    // What the view paints itself, without a window background (the page is a layer above it).
+    QImage painted(view->size(), QImage::Format_ARGB32_Premultiplied);
+    painted.fill(Qt::transparent);
+    view->render(&painted, QPoint(), QRegion(), QWidget::DrawChildren);
+    auto corner = painted.pixelColor(0, 0);
+    check(view->window()->testAttribute(Qt::WA_TranslucentBackground) && !view->paints_chrome_behind_corners() && corner.alpha() == 0,
+        "the Picture-in-Picture window paints nothing outside its rounded page", QString("corner alpha %1").arg(corner.alpha()));
+#endif
+
+    // The pointer rests on the play button; the button's pixels shouldn't change while it does.
+    auto center = QPointF(view->width() / 2.0, view->height() / 2.0);
+    auto button_brightness = [&] {
+        auto image = view->visible_snapshot();
+        if (image.isNull())
+            return -1.0;
+        auto scale = image.width() / qreal(view->width());
+        auto box = QRect(qRound((center.x() - 20) * scale), qRound((center.y() - 20) * scale), qRound(40 * scale), qRound(40 * scale));
+        qreal sum = 0;
+        int count = 0;
+        for (int y = box.top(); y <= box.bottom(); y += 2) {
+            for (int x = box.left(); x <= box.right(); x += 2) {
+                sum += qGray(image.pixel(x, y));
+                ++count;
+            }
+        }
+        return count ? sum / count : -1.0;
+    };
+    // Paused, so only the controls could change what's there.
+    QMouseEvent move(QEvent::MouseMove, center, view->mapToGlobal(center), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(view, &move);
+    settle(600);
+    qreal lowest = 1000, highest = -1;
+    // A resting pointer: the same position now and then (as macOS sends while Ladybird is in the background).
+    for (int i = 0; i < 45; ++i) {
+        if (i % 4 == 0) {
+            QMouseEvent rest(QEvent::MouseMove, center, view->mapToGlobal(center), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(view, &rest);
+        }
+        settle(100);
+        auto brightness = button_brightness();
+        if (brightness < 0)
+            continue;
+        lowest = qMin(lowest, brightness);
+        highest = qMax(highest, brightness);
+    }
+    check(highest >= 0 && highest - lowest < 3, "its buttons hold steady under a resting pointer",
+        QString("brightness %1 to %2").arg(lowest).arg(highest));
+
+    if (video)
+        s().close_tab(*video);
+    if (other)
+        s().close_tab(*other);
+    settle(300);
+}
+
+// As in Arc: every window's buttons look as an inactive window's (a faint dot), in colour only under the pointer.
+void SelfTest::window_buttons_look_inactive_everywhere()
+{
+#if defined(AK_OS_MACOS)
+    check(appkit_window_buttons_look_inactive(window()), "the browser window's buttons are faint dots");
+    auto& little = open_little_arc(ak_url_from_qurl(QUrl(page("Little buttons"))));
+    QPointer<BrowserWindow> guarded = &little;
+    settle(600);
+    check(guarded && appkit_window_buttons_look_inactive(*guarded), "and Little Arc's");
+    if (guarded)
+        guarded->close();
+    settle(300);
+#endif
 }
 
 // As in Arc: the docked sidebar has its own toggle beside the window buttons, in place of the toolbar's.
@@ -1379,6 +1484,9 @@ void SelfTest::popups_close_themselves()
         },
             5000);
         check(shows_address_bar, "a popup gets Little Arc's slim bar with Arc's address bar, and no toolbar or tab list", detail);
+#if defined(AK_OS_MACOS)
+        check(appkit_window_buttons_look_inactive(*popup), "and its buttons are faint dots too");
+#endif
     }
     QPointer<BrowserWindow> guarded = popup;
     if (auto* tab = popup->current_tab()) {
@@ -2127,6 +2235,8 @@ int SelfTest::run()
     leaving_a_playing_video_shows_it_in_picture_in_picture();
     minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
     back_to_tab_returns_to_the_tabs_space_and_profile();
+    picture_in_picture_is_round_and_its_buttons_hold_steady();
+    window_buttons_look_inactive_everywhere();
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();

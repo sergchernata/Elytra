@@ -105,6 +105,10 @@ struct WebContentViewInitialState {
     WebView::ViewImplementation const* owner_view { nullptr };
 };
 
+namespace Arc {
+class SelfTest;
+}
+
 class WebContentView final
     : public WebContentViewBase
     , public WebView::ViewImplementation
@@ -169,6 +173,9 @@ public:
 
 #ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
     void set_has_rounded_corners(bool);
+    // Fork hook (Arc): whether the chrome's color shows outside the rounded corners (not in a window that's itself round).
+    void set_paints_chrome_behind_corners(bool paints) { m_paints_chrome_behind_corners = paints; }
+    bool paints_chrome_behind_corners() const { return m_paints_chrome_behind_corners; }
 #endif
 
     WebView::AccessibilityTreeManager const* accessibility_tree_manager() const { return m_accessibility_manager.ptr(); }
@@ -188,6 +195,7 @@ signals:
     void urls_dropped(QList<QUrl> const&);
 
 private:
+    bool m_paints_chrome_behind_corners { true }; // Fork hook (Arc)
     // ^WebView::ViewImplementation
     virtual void prepare_page_for_navigable(WebView::WebContentPage&) override;
     virtual Core::AnonymousBuffer system_theme() override;
@@ -262,6 +270,7 @@ private:
     QHash<i64, AccessibilityInterface*> m_accessibility_elements;
     friend class WebContentViewAccessible;
 #endif
+    friend class Arc::SelfTest; // Fork hook (Arc): the self-test samples what the page shows.
 
     OwnPtr<WebView::AccessibilityTreeManager> m_accessibility_manager;
     bool m_posted_initial_accessibility_focus { false };
