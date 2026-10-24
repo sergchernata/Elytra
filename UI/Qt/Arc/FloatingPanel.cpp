@@ -71,21 +71,19 @@ void TrafficLights::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    // macOS colors; grey when the window isn't active, unless hovered (as AppKit does).
+    // macOS colors under the pointer; grey otherwise, as Arc shows them (and as the real ones are, see ArcChrome.cpp).
     static QColor const colors[] = { QColor(0xff, 0x5f, 0x57), QColor(0xfe, 0xbc, 0x2e), QColor(0x28, 0xc8, 0x40) };
     static QColor const edges[] = { QColor(0xe1, 0x46, 0x40), QColor(0xdf, 0xa1, 0x23), QColor(0x1a, 0xab, 0x29) };
-    // Colored while the browser window is active (the floating panel itself never takes focus).
-    auto* target = property("arcBrowserWindow").value<QWidget*>();
-    auto active = (target ? target->isActiveWindow() : window()->isActiveWindow()) || m_hovered;
+    auto active = m_hovered;
     auto dark = ChromeStyle::is_dark(palette());
-    auto inactive = dark ? QColor(0x55, 0x58, 0x5e) : QColor(0xcd, 0xcd, 0xcd);
+    auto inactive = dark ? QColor(255, 255, 255, 28) : QColor(0, 0, 0, 36); // As the real ones (see ArcChrome.cpp).
 
     for (int i = 0; i < 3; ++i) {
         auto rect = button_rect(i);
         auto fill = active ? colors[i] : inactive;
         if (m_pressed == i)
             fill = fill.darker(120);
-        painter.setPen(QPen(active ? edges[i] : inactive.darker(110), 0.6));
+        painter.setPen(active ? QPen(edges[i], 0.6) : QPen(Qt::NoPen));
         painter.setBrush(fill);
         painter.drawEllipse(rect.adjusted(0.3, 0.3, -0.3, -0.3));
 

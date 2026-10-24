@@ -35,12 +35,12 @@
 using namespace Ladybird::Arc;
 
 // Bounding box of the visibly painted pixels, in logical coordinates.
-static QRectF painted_bounds(QImage const& image)
+static QRectF painted_bounds(QImage const& image, int minimum_alpha = 40)
 {
     int left = image.width(), top = image.height(), right = -1, bottom = -1;
     for (int y = 0; y < image.height(); ++y) {
         for (int x = 0; x < image.width(); ++x) {
-            if (qAlpha(image.pixel(x, y)) < 40)
+            if (qAlpha(image.pixel(x, y)) < minimum_alpha)
                 continue;
             left = qMin(left, x);
             right = qMax(right, x);
@@ -134,7 +134,8 @@ TEST_CASE(drawn_window_controls_follow_the_native_metrics)
 
     lights.set_drawn(true);
     EXPECT(!lights.testAttribute(Qt::WA_TransparentForMouseEvents));
-    EXPECT(!painted_bounds(render(lights)).isEmpty());
+    // Faint dots, as an inactive window's (see ArcChrome.cpp), until hovered.
+    EXPECT(!painted_bounds(render(lights), 10).isEmpty());
 }
 
 TEST_CASE(sidebar_rows_size_and_place_their_buttons)

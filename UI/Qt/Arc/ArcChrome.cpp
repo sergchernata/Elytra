@@ -20,6 +20,9 @@
 #include <UI/Qt/Arc/LittleArc.h>
 #include <UI/Qt/Arc/MiniPlayer.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/ChromeStyle.h>
+#include <UI/Qt/MacWindow.h>
+#include <LibGfx/Color.h>
 #include <UI/Qt/Tab.h>
 #include <UI/Qt/WebContentView.h>
 
@@ -33,6 +36,17 @@
 #include <QTimer>
 
 namespace Ladybird::Arc {
+
+// As in Arc, every window's buttons (close, minimize, zoom) are grey, in colour only under the pointer.
+static void grey_window_buttons([[maybe_unused]] BrowserWindow& window)
+{
+#if defined(AK_OS_MACOS)
+    // AppKit's look for an inactive window's buttons: a faint dot over the title bar.
+    auto tint = ChromeStyle::is_dark(window.palette()) ? Gfx::Color(255, 255, 255, 28) : Gfx::Color(0, 0, 0, 36);
+    set_appkit_window_buttons_grey(window, tint);
+#endif
+}
+
 
 // Arc keeps tabs in a sidebar. Turn upstream's vertical tabs on the first time a profile runs
 // with the Arc chrome; after that the user's own choice in Settings wins.
@@ -176,8 +190,15 @@ public:
             return false;
         }
         if (event->type() == QEvent::Show) {
-            if (auto* window = qobject_cast<BrowserWindow*>(watched))
+            if (auto* window = qobject_cast<BrowserWindow*>(watched)) {
                 ArcSidebar::attach(*window);
+                grey_window_buttons(*window);
+            }
+            return false;
+        }
+        if (event->type() == QEvent::PaletteChange || event->type() == QEvent::WindowActivate || event->type() == QEvent::WindowDeactivate) {
+            if (auto* window = qobject_cast<BrowserWindow*>(watched); window && window->isVisible())
+                grey_window_buttons(*window);
             return false;
         }
         if (event->type() != QEvent::ActionAdded)

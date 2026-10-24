@@ -21,8 +21,121 @@
 #include <UI/Qt/WebContentView.h>
 
 #import <Cocoa/Cocoa.h>
+#import <CoreImage/CoreImage.h>
 #import <UI/Qt/DictionaryLookup.h>
 #import <objc/runtime.h>
+
+// Fork hook (Arc): grey window buttons, as Arc's, in colour only while the pointer is over them (as AppKit shows an
+// inactive window's). A Core Image filter paints each button one flat grey, keeping its shape; hovering lifts it.
+@interface LadybirdGreyWindowButtons : NSObject
+{
+    NSWindow* m_window; // Weak: this lives as long as the window.
+    NSButton* m_buttons[3];
+    CIFilter* m_filter;
+    bool m_hovered;
+}
+- (instancetype)initWithWindow:(NSWindow*)window;
+- (void)setTint:(CGFloat)white alpha:(CGFloat)alpha;
+- (void)apply;
+- (void)findButtons;
+@end
+
+@implementation LadybirdGreyWindowButtons
+
+- (instancetype)initWithWindow:(NSWindow*)window
+{
+    self = [super init];
+    if (!self)
+        return nil;
+    m_window = window;
+    [self findButtons];
+    return self;
+}
+
+// AppKit can replace the buttons (when it lays the title bar out again), so they're looked up each time.
+- (void)findButtons
+{
+    NSWindowButton const kinds[] = { NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton };
+    for (int i = 0; i < 3; ++i) {
+        auto* button = [m_window standardWindowButton:kinds[i]];
+        m_buttons[i] = button;
+        if (!button)
+            continue;
+        button.wantsLayer = YES;
+        bool tracked = false;
+        for (NSTrackingArea* area in button.trackingAreas)
+            tracked |= area.owner == self;
+        if (tracked)
+            continue;
+        auto* area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                  options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                                    owner:self
+                                                 userInfo:nil];
+        [button addTrackingArea:area];
+        [area release];
+    }
+}
+
+- (void)dealloc
+{
+    [m_filter release];
+    [super dealloc];
+}
+
+- (void)setTint:(CGFloat)white alpha:(CGFloat)alpha
+{
+    // Every button becomes `white` (0 black, 1 white) at `alpha`, keeping its round shape: as AppKit draws an inactive
+    // window's buttons, a translucent dot over the title bar.
+    [m_filter release];
+    m_filter = [[CIFilter filterWithName:@"CIColorMatrix"] retain];
+    [m_filter setDefaults];
+    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputRVector"];
+    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputGVector"];
+    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:0] forKey:@"inputBVector"];
+    [m_filter setValue:[CIVector vectorWithX:0 Y:0 Z:0 W:alpha] forKey:@"inputAVector"];
+    [m_filter setValue:[CIVector vectorWithX:white Y:white Z:white W:0] forKey:@"inputBiasVector"];
+    [self apply];
+}
+
+- (void)apply
+{
+    [self findButtons];
+    for (auto* button : m_buttons) {
+        if (!button)
+            continue;
+        button.contentFilters = (m_hovered || !m_filter) ? @[] : @[ m_filter ];
+    }
+}
+
+- (bool)pointerIsOverAButton
+{
+    auto location = [NSEvent mouseLocation];
+    for (auto* button : m_buttons) {
+        if (!button || !button.window)
+            continue;
+        auto frame = [button.window convertRectToScreen:[button convertRect:button.bounds toView:nil]];
+        if (NSPointInRect(location, frame))
+            return true;
+    }
+    return false;
+}
+
+- (void)mouseEntered:(NSEvent*)event
+{
+    (void)event;
+    m_hovered = true;
+    [self apply];
+}
+
+- (void)mouseExited:(NSEvent*)event
+{
+    (void)event;
+    // Moving between buttons leaves one before entering the next.
+    m_hovered = [self pointerIsOverAButton];
+    [self apply];
+}
+
+@end
 
 @interface LadybirdWindowControlOffsetObserver : NSObject
 {
@@ -457,6 +570,24 @@ void offset_appkit_window_controls(QWidget& widget, int x_offset, int y_offset)
     auto* observer = [[LadybirdWindowControlOffsetObserver alloc] initWithWindow:window xOffset:x_offset yOffset:y_offset];
     objc_setAssociatedObject(window, &s_window_control_offset_observer_key, observer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [observer release];
+}
+
+static char s_grey_window_buttons_key;
+
+// Fork hook (Arc): see LadybirdGreyWindowButtons.
+void set_appkit_window_buttons_grey(QWidget& widget, Gfx::Color tint)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (!view || !view.window)
+        return;
+    auto* window = view.window;
+    auto* buttons = static_cast<LadybirdGreyWindowButtons*>(objc_getAssociatedObject(window, &s_grey_window_buttons_key));
+    if (!buttons) {
+        buttons = [[LadybirdGreyWindowButtons alloc] initWithWindow:window];
+        objc_setAssociatedObject(window, &s_grey_window_buttons_key, buttons, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [buttons release];
+    }
+    [buttons setTint:(tint.red() > 127 ? 1.0 : 0.0) alpha:tint.alpha() / 255.0];
 }
 
 void reapply_appkit_window_control_offsets(QWidget& widget)

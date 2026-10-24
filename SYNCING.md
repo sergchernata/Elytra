@@ -73,7 +73,7 @@ The window looks like Arc's, and its Minimize leaves the video playing with a pl
 | `Services/Compositor/PictureInPictureControls.cpp` | rewritten to paint Arc's frosted buttons, labels and caption |
 | `LibWebView/ViewImplementation.cpp` | Minimize's tooltip; the caption and font in `update_ui_overlays()` |
 | `UI/Qt/PictureInPictureWindow.cpp` | Minimize (`on_close(VideoKeepsPlaying::Yes)`), the caption, and on macOS a clear, shadowed window with a rounded page |
-| `UI/Qt/MacWindow.h/.mm` | `make_appkit_window_clear_with_shadow()`, `invalidate_appkit_window_shadow()` |
+| `UI/Qt/MacWindow.h/.mm` | `make_appkit_window_clear_with_shadow()`, `invalidate_appkit_window_shadow()`, and `set_appkit_window_buttons_grey()` (every window's buttons drawn as an inactive window's, in colour under the pointer) |
 | `LibWeb/HTML/MediaControls.html/.css/.cpp` | the player's skip buttons (`data-option="picture-in-picture-player"`), a rounded pause icon, and the `picture-in-picture-player` layout |
 | `LibWeb/Page/Page.h/.cpp`, `WebContentServer.ipc`, `ConnectionFromClient.h/.cpp` | `toggle_playing_media()` (pauses what plays, plays what it paused) |
 | `LibWebView/PictureInPictureManager.h/.cpp` | `on_windows_changed`, called as a window opens or closes |
