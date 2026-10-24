@@ -26,6 +26,8 @@
 #include <QTimer>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
+#include <QStyledItemDelegate>
+#include <QPainter>
 
 #include <cmath>
 
@@ -731,4 +733,139 @@ TEST_CASE(space_slide_pictures_are_opaque_with_the_window_background)
     }
     EXPECT(opaque);
     EXPECT(window_background);
+}
+
+// --- Opening a folder -----------------------------------------------------------------------------------------------
+
+namespace {
+
+QColor const FOLDER_CONTENTS(220, 30, 30);
+QColor const ROWS_BELOW(30, 30, 220);
+constexpr int CONTENTS_MARK_X = 6;
+constexpr int BELOW_MARK_X = 36;
+
+// Marks rows, as text would: a stripe at one place for the folder's contents, at another for the rows below it, and
+// nothing in between (that's where one could show through the other).
+class MarkingDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    virtual void paint(QPainter* painter, QStyleOptionViewItem const& option, QModelIndex const& index) const override
+    {
+        if (index.parent().isValid())
+            painter->fillRect(QRect(CONTENTS_MARK_X - 4, option.rect.top() + 4, 10, option.rect.height() - 8), FOLDER_CONTENTS);
+        else if (index.row() > 0)
+            painter->fillRect(QRect(BELOW_MARK_X - 4, option.rect.top() + 4, 10, option.rect.height() - 8), ROWS_BELOW);
+    }
+
+    virtual QSize sizeHint(QStyleOptionViewItem const&, QModelIndex const&) const override { return { 200, 30 }; }
+};
+
+}
+
+// The rows below a folder move down as it opens (and up as it closes), uncovering its contents where they'll stay: the
+// contents don't slide in from under the folder's row (that cut them off part-way through, as if seen through a gap),
+// and never show through the rows below.
+static void check_folder_animation(bool opening)
+{
+    QStandardItemModel model;
+    auto* folder = new QStandardItem("Folder");
+    folder->setData(static_cast<int>(RowKind::Folder), KindRole);
+    for (int i = 0; i < 6; ++i) {
+        auto* child = new QStandardItem(QString("Inside %1").arg(i));
+        child->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
+        folder->appendRow(child);
+    }
+    model.appendRow(folder);
+    for (int i = 0; i < 6; ++i) {
+        auto* row = new QStandardItem(QString("Below %1").arg(i));
+        row->setData(static_cast<int>(RowKind::PinnedTab), KindRole);
+        model.appendRow(row);
+    }
+
+    QWidget window;
+    window.resize(260, 400);
+    auto* tree = new SidebarTree(&window);
+    tree->setGeometry(window.rect());
+    MarkingDelegate delegate;
+    tree->setItemDelegate(&delegate);
+    tree->setModel(&model);
+    if (!opening)
+        tree->setExpanded(model.index(0, 0), true);
+    window.show();
+    QApplication::processEvents();
+
+    auto background = window.palette().color(QPalette::Window);
+    auto frame_now = [&] {
+        QImage frame(tree->viewport()->size(), QImage::Format_ARGB32);
+        frame.fill(background);
+        tree->viewport()->render(&frame, QPoint(), QRegion(), QWidget::DrawChildren);
+        return frame;
+    };
+    auto column = [](QImage const& frame, int x, QColor const& color) {
+        Vector<bool> marks;
+        for (int y = 0; y < frame.height(); ++y)
+            marks.append(frame.pixelColor(x, y) == color);
+        return marks;
+    };
+    auto open_frame = opening ? QImage() : frame_now();
+
+    Vector<QImage> frames;
+    tree->toggle_folder(model.index(0, 0));
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 700) {
+        frames.append(frame_now());
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(5);
+    }
+    EXPECT_EQ(tree->isExpanded(model.index(0, 0)), opening);
+    if (opening) {
+        // The contents' places, from the open list.
+        tree->setExpanded(model.index(0, 0), true);
+        QApplication::processEvents();
+        open_frame = frame_now();
+    }
+    auto contents_in_place = column(open_frame, CONTENTS_MARK_X, FOLDER_CONTENTS);
+
+    int moving_frames = 0;
+    int slid_frames = 0;
+    int see_through_frames = 0;
+    for (auto const& frame : frames) {
+        int below_top = -1;
+        for (int y = 0; y < frame.height() && below_top < 0; ++y) {
+            if (frame.pixelColor(BELOW_MARK_X, y) == ROWS_BELOW)
+                below_top = y;
+        }
+        auto contents = column(frame, CONTENTS_MARK_X, FOLDER_CONTENTS);
+        bool any_contents = false;
+        bool slid = false;
+        bool see_through = false;
+        for (int y = 0; y < frame.height(); ++y) {
+            any_contents |= contents[y];
+            if (below_top >= 0 && y >= below_top - 4) {
+                see_through |= contents[y];
+                continue;
+            }
+            // Above the rows below: the contents as they'll be (or were), uncovered, not moved.
+            slid |= contents[y] != contents_in_place[y];
+        }
+        if (any_contents && below_top >= 0 && contents != contents_in_place)
+            ++moving_frames;
+        slid_frames += slid;
+        see_through_frames += see_through;
+    }
+    EXPECT(moving_frames >= 3); // It animates.
+    EXPECT_EQ(slid_frames, 0);
+    EXPECT_EQ(see_through_frames, 0);
+}
+
+TEST_CASE(opening_a_folder_uncovers_its_rows_in_place)
+{
+    check_folder_animation(true);
+}
+
+TEST_CASE(closing_a_folder_covers_its_rows_in_place)
+{
+    check_folder_animation(false);
 }

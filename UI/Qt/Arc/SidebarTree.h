@@ -108,6 +108,11 @@ class SidebarTree final : public QTreeView {
 public:
     explicit SidebarTree(QWidget* parent);
 
+    // Opens or closes a folder's row, as Arc does: the rows below move down (or up), uncovering (or covering) its
+    // contents where they stay.
+    void toggle_folder(QModelIndex const&);
+    static constexpr int FOLDER_ANIMATION_MS = 220;
+
     SidebarDelegate& delegate() { return *m_delegate; }
     bool is_dragging() const { return state() == DraggingState; }
     void reset_drag_state() { setState(NoState); }
@@ -149,6 +154,7 @@ protected:
 
 private:
     bool m_rebuilding { false };
+    int height_of_contents(QModelIndex const& folder) const;
     DropPlace drop_place_for(QModelIndex const& target) const;
 
     SidebarDelegate* m_delegate { nullptr };

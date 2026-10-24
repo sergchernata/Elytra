@@ -474,6 +474,21 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         });
         timer->start();
     }
+    // And ARC_DEV_TOGGLE_FOLDERS=<ms> opens and closes the list's first folder on that interval.
+    if (auto interval = qEnvironmentVariableIntValue("ARC_DEV_TOGGLE_FOLDERS"); interval > 0) {
+        auto* timer = new QTimer(this);
+        timer->setInterval(interval);
+        connect(timer, &QTimer::timeout, this, [this] {
+            for (int row = 0; row < m_model->rowCount(); ++row) {
+                auto index = m_model->index(row, 0);
+                if (row_kind(index) == RowKind::Folder && !m_tree->isRowHidden(row, {})) {
+                    on_row_clicked(index);
+                    return;
+                }
+            }
+        });
+        timer->start();
+    }
 
     rebuild();
 }
@@ -3098,7 +3113,7 @@ void ArcSidebar::on_row_clicked(QModelIndex const& index)
         open_or_activate_node(index.data(IdRole).toString());
         break;
     case RowKind::Folder:
-        m_tree->setExpanded(index, !m_tree->isExpanded(index));
+        m_tree->toggle_folder(index);
         break;
     case RowKind::NewTab:
         if (m_window)

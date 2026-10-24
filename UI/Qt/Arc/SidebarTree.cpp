@@ -5,6 +5,7 @@
  */
 
 #include <UI/Qt/Arc/SidebarTree.h>
+#include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/ChromeStyle.h>
 
@@ -21,6 +22,7 @@
 #include <QPainterPath>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QVariantAnimation>
 
 #include <cmath>
 
@@ -489,7 +491,8 @@ SidebarTree::SidebarTree(QWidget* parent)
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setSelectionMode(QAbstractItemView::SingleSelection);
     setExpandsOnDoubleClick(false);
-    setAnimated(true);
+    // Folders animate their own way (see toggle_folder()); Qt slides their contents in from under their row.
+    setAnimated(false);
     setContextMenuPolicy(Qt::CustomContextMenu);
     setAttribute(Qt::WA_MacShowFocusRect, false);
 
@@ -520,13 +523,136 @@ SidebarTree::SidebarTree(QWidget* parent)
     });
 }
 
+// Over the list while a folder opens or closes: the list above the folder stays, its contents show in place as far as
+// the rows below have moved, and the rows below follow. Painted from two pictures, of the list open and closed.
+class FolderReveal final : public QWidget {
+public:
+    FolderReveal(QWidget& viewport, QPixmap open, QPixmap closed, int top, int height, bool opening)
+        : QWidget(&viewport)
+        , m_open(AK::move(open))
+        , m_closed(AK::move(closed))
+        , m_top(top)
+        , m_height(height)
+        , m_opening(opening)
+    {
+        setObjectName("ArcFolderReveal");
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_OpaquePaintEvent); // The pictures are opaque and cover it.
+        setGeometry(viewport.rect());
+
+        m_animation = new QVariantAnimation(this);
+        m_animation->setDuration(SidebarTree::FOLDER_ANIMATION_MS);
+        m_animation->setStartValue(0.0);
+        m_animation->setEndValue(1.0);
+        m_animation->setEasingCurve(QEasingCurve::OutCubic);
+        connect(m_animation, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) {
+            m_progress = value.toReal();
+            update();
+        });
+        connect(m_animation, &QAbstractAnimation::finished, this, &FolderReveal::finish);
+        show();
+        raise();
+        m_animation->start();
+    }
+
+    void finish()
+    {
+        if (m_finished)
+            return;
+        m_finished = true;
+        m_animation->stop();
+        hide();
+        deleteLater();
+    }
+
+    bool is_finished() const { return m_finished; }
+
+protected:
+    virtual void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        auto shown = qRound(m_height * (m_opening ? m_progress : 1 - m_progress));
+        auto w = width();
+        auto h = height();
+        // The list down to the folder's row, and its contents as far as they're uncovered: from the open list.
+        painter.drawPixmap(QRectF(0, 0, w, m_top + shown), m_open, source(m_open, QRectF(0, 0, w, m_top + shown)));
+        // The rows below, right after: from the closed list, which has them all from the folder's row down.
+        auto below = qMax(0, h - m_top - shown);
+        painter.drawPixmap(QRectF(0, m_top + shown, w, below), m_closed, source(m_closed, QRectF(0, m_top, w, below)));
+    }
+
+private:
+    static QRectF source(QPixmap const& pixmap, QRectF rect)
+    {
+        auto dpr = pixmap.devicePixelRatio();
+        return QRectF(rect.topLeft() * dpr, rect.size() * dpr);
+    }
+
+    QPixmap m_open;
+    QPixmap m_closed;
+    int m_top { 0 };
+    int m_height { 0 };
+    bool m_opening { true };
+    qreal m_progress { 0 };
+    bool m_finished { false };
+    QVariantAnimation* m_animation { nullptr };
+};
+
+// The height of a folder's contents as shown when it's open: from below its row to the row after them.
+int SidebarTree::height_of_contents(QModelIndex const& folder) const
+{
+    auto folder_bottom = visualRect(folder).bottom() + 1;
+    auto last = folder;
+    for (auto index = indexBelow(folder); index.isValid(); index = indexBelow(index)) {
+        bool inside = false;
+        for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+            inside |= parent == folder;
+        if (!inside)
+            return visualRect(index).top() - folder_bottom;
+        last = index;
+    }
+    return visualRect(last).bottom() + 1 - folder_bottom;
+}
+
+void SidebarTree::toggle_folder(QModelIndex const& index)
+{
+    for (auto* widget : viewport()->findChildren<QWidget*>("ArcFolderReveal", Qt::FindDirectChildrenOnly))
+        static_cast<FolderReveal*>(widget)->finish();
+
+    auto opening = !isExpanded(index);
+    auto animate = isVisible() && model() && model()->hasChildren(index);
+    QPixmap before;
+    int scroll = verticalScrollBar()->value();
+    int height = 0;
+    if (animate) {
+        before = SpaceSlide::picture(*viewport(), viewport()->rect());
+        if (!opening)
+            height = height_of_contents(index);
+    }
+
+    setExpanded(index, opening);
+    if (!animate)
+        return;
+
+    // Lay the rows out now, to picture them.
+    executeDelayedItemsLayout();
+    updateGeometries();
+    if (opening)
+        height = height_of_contents(index);
+    // Closing at the end of a long list scrolls it; then it just closes.
+    if (verticalScrollBar()->value() != scroll || height <= 0)
+        return;
+    auto top = visualRect(index).bottom() + 1;
+    auto after = SpaceSlide::picture(*viewport(), viewport()->rect());
+    new FolderReveal(*viewport(), opening ? after : before, opening ? before : after, top, height, opening);
+}
+
 void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuild)
 {
     auto* bar = verticalScrollBar();
     auto scroll = bar->value();
     m_rebuilding = true;
     setUpdatesEnabled(false);
-    setAnimated(false);
     {
         // While the rows are replaced the list is briefly empty, so the scroll bar would clamp to the top and the
         // view scroll there and back. Keep it from telling the view, so the list never moves.
@@ -544,7 +670,6 @@ void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuil
     if (bar->value() != scroll)
         emit bar->valueChanged(bar->value());
 
-    setAnimated(true);
     setUpdatesEnabled(true);
     m_rebuilding = false;
 }

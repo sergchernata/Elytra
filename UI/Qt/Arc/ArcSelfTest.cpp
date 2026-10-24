@@ -164,6 +164,7 @@ private:
     void favorites_update_in_place();
     void pinned_tab_away_back_and_separate();
     void a_pinned_tab_that_redirects_isnt_away();
+    void opening_a_folder_leaves_the_list_alone_while_it_slides();
     void profiles_get_their_own_session();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
@@ -504,6 +505,59 @@ void SelfTest::a_pinned_tab_that_redirects_isnt_away()
     if (tab)
         s().close_tab(*tab);
     SpaceStore::the().remove_node(node);
+    rebuild_now();
+}
+
+// Opening a folder slides its rows in; anything that rebuilds or relays the list meanwhile draws the rows in their new
+// places under the sliding picture of the old ones, so both show.
+void SelfTest::opening_a_folder_leaves_the_list_alone_while_it_slides()
+{
+    s().switch_to_space(m_alpha);
+    settle(300);
+    auto folder = SpaceStore::the().add_folder(m_alpha, {}, 0, "Slide Folder");
+    for (int i = 0; i < 4; ++i)
+        SpaceStore::the().add_pinned_tab(m_alpha, folder, -1, page(QString("In folder %1").arg(i)), QString("In folder %1").arg(i));
+    rebuild_now();
+    settle(300);
+    auto row = row_for_node(folder);
+    if (!row.isValid()) {
+        check(false, "the folder is listed");
+        return;
+    }
+    if (m_sidebar.m_tree->isExpanded(row)) {
+        m_sidebar.m_tree->toggle_folder(row);
+        settle(600);
+        row = row_for_node(folder);
+    }
+
+    QStringList changes;
+    auto* model = s().m_model;
+    QList<QMetaObject::Connection> connections {
+        connect(model, &QAbstractItemModel::modelReset, this, [&] { changes.append("reset"); }),
+        connect(model, &QAbstractItemModel::rowsRemoved, this, [&] { changes.append("rows removed"); }),
+        connect(model, &QAbstractItemModel::rowsInserted, this, [&] { changes.append("rows inserted"); }),
+        connect(model, &QAbstractItemModel::layoutChanged, this, [&] { changes.append("layout changed"); }),
+        connect(model, &QAbstractItemModel::dataChanged, this, [&](QModelIndex const& from, QModelIndex const&, QList<int> const& roles) {
+            QStringList names;
+            for (auto role : roles)
+                names.append(QString::number(role));
+            changes.append(QString("data %1 [%2]").arg(from.data().toString(), names.join(',')));
+        }),
+    };
+    bool rebuilt = false;
+    QElapsedTimer timer;
+    s().on_row_clicked(row);
+    timer.start();
+    while (timer.elapsed() < 500) {
+        rebuilt |= m_sidebar.m_tree->is_rebuilding();
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    for (auto const& connection : connections)
+        disconnect(connection);
+    check(m_sidebar.m_tree->isExpanded(row_for_node(folder)), "clicking a folder opens it");
+    check(changes.isEmpty() && !rebuilt, "and nothing rebuilds or changes the list while it slides open", changes.join("; "));
+
+    SpaceStore::the().remove_node(folder);
     rebuild_now();
 }
 
@@ -1425,6 +1479,7 @@ int SelfTest::run()
     favorites_update_in_place();
     pinned_tab_away_back_and_separate();
     a_pinned_tab_that_redirects_isnt_away();
+    opening_a_folder_leaves_the_list_alone_while_it_slides();
     profiles_get_their_own_session();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
