@@ -196,7 +196,7 @@ private:
     virtual void tab_settings_changed() override;
     void update_mode();
     void dock_panel();
-    void apply_toolbar_inset();
+    void apply_toolbar_inset(bool new_tabs_only = false);
     void install_address_bar(QWidget& toolbar);
     void prepare_card_panel();
     void show_flat_host(QRect panel_rect);
@@ -324,6 +324,7 @@ private:
     QHBoxLayout* m_switcher_layout { nullptr };
     QList<QPointer<SymbolButton>> m_space_buttons;
     QStringList m_switcher_key;
+    Optional<QHash<QString, Tab*>> m_node_tabs; // See tab_for_node().
     OnePassword::Runner* m_one_password { nullptr };
     QList<QPointer<Tab>> m_recent_tabs; // Most recently shown first.
 

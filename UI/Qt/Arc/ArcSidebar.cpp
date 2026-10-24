@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ScopeGuard.h>
 #include <LibWebView/Application.h>
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
@@ -397,7 +398,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     });
 
     connect(&m_tabs, &TabWidget::tabs_changed, this, [this] {
-        apply_toolbar_inset(); // Now, before the new tab's toolbar is first shown.
+        apply_toolbar_inset(true); // Now, before the new tab's toolbar is first shown.
         track_tabs();
         schedule_rebuild();
         save_session();
@@ -948,6 +949,9 @@ Tab* ArcSidebar::tab_for_node(QString const& node_id) const
 {
     if (node_id.isEmpty())
         return nullptr;
+    // While the list is filled, once per pinned row: from a map made once, rather than a search of every tab each time.
+    if (m_node_tabs.has_value())
+        return m_node_tabs->value(node_id);
     for (auto* tab : tabs()) {
         if (node_of(*tab) == node_id)
             return tab;
@@ -2391,6 +2395,12 @@ void ArcSidebar::rebuild_tree()
 void ArcSidebar::fill_tree()
 {
     m_model->clear();
+    m_node_tabs = QHash<QString, Tab*> {};
+    for (auto* tab : tabs()) {
+        if (auto node = node_of(*tab); !node.isEmpty() && !m_node_tabs->contains(node))
+            m_node_tabs->insert(node, tab);
+    }
+    ScopeGuard forget_node_tabs = [this] { m_node_tabs.clear(); };
 
     auto const* space = SpaceStore::the().space(m_space_id);
     if (!space)
@@ -2716,17 +2726,27 @@ void ArcSidebar::install_address_bar(QWidget& toolbar)
     });
 }
 
-void ArcSidebar::apply_toolbar_inset()
+// Each tab's toolbar, looked up in that tab's toolbar container (searching the whole window was slow, and ran on every
+// tab opened or closed). `new_tabs_only`: tabs this sidebar hasn't done yet.
+void ArcSidebar::apply_toolbar_inset(bool new_tabs_only)
 {
     if (!m_window)
         return;
-    for (auto* toolbar : m_window->findChildren<QWidget*>("LadybirdNavigationToolbar")) {
+    auto done_key = QString("arc_toolbar_inset_%1").arg(m_serial).toUtf8();
+    for (auto* tab : tabs()) {
+        if (new_tabs_only && tab->property(done_key.constData()).toBool())
+            continue;
+        auto* container = tab->toolbar_container();
+        auto* toolbar = container ? container->findChild<QWidget*>("LadybirdNavigationToolbar") : nullptr;
+        if (!toolbar)
+            continue;
         if (!toolbar->property("arc_inset_watched").toBool()) {
             toolbar->setProperty("arc_inset_watched", true);
             toolbar->installEventFilter(this);
         }
         inset_toolbar(*toolbar);
         install_address_bar(*toolbar);
+        tab->setProperty(done_key.constData(), true);
     }
 }
 

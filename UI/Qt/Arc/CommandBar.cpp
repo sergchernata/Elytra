@@ -227,9 +227,19 @@ void CommandBar::open(String input, Optional<URL::URL> url, WebView::OmniboxDest
 static QIcon suggestion_icon(WebView::AutocompleteSuggestion const& suggestion, QColor color, qreal device_pixel_ratio)
 {
     if (suggestion.favicon_png.has_value()) {
+        // Decoded once per site's icon, not on every keystroke.
+        static QHash<QByteArray, QIcon> decoded;
+        auto key = QByteArray::fromRawData(reinterpret_cast<char const*>(suggestion.favicon_png->data()), static_cast<qsizetype>(suggestion.favicon_png->size()));
+        if (auto it = decoded.constFind(key); it != decoded.constEnd())
+            return *it;
         QPixmap pixmap;
-        if (pixmap.loadFromData(suggestion.favicon_png->data(), static_cast<uint>(suggestion.favicon_png->size()), "PNG"))
-            return QIcon(pixmap);
+        if (pixmap.loadFromData(suggestion.favicon_png->data(), static_cast<uint>(suggestion.favicon_png->size()), "PNG")) {
+            if (decoded.size() > 256)
+                decoded.clear();
+            QIcon icon(pixmap);
+            decoded.insert(QByteArray(key.constData(), key.size()), icon);
+            return icon;
+        }
     }
     if (suggestion.source != WebView::AutocompleteSuggestionSource::Search) {
         if (auto cached = ArcIcons::icon_for_url(qstring_from_ak_string(suggestion.text)); !cached.isNull())
