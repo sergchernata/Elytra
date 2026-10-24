@@ -1,0 +1,57 @@
+# Elytra: checks every few days whether upstream Ladybird still merges cleanly into the arc branch. When it doesn't,
+# the run fails (GitHub emails about failed scheduled runs) and its summary lists the conflicting files, so drift is
+# caught early.
+# It only test-merges; merging for real, building and testing is Meta/elytra-sync-upstream.sh (see SYNCING.md).
+name: Elytra upstream check
+
+on:
+  schedule:
+    - cron: "17 9 */3 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository != 'LadybirdBrowser/ladybird'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arc
+          fetch-depth: 0
+
+      - name: Test-merge upstream
+        id: merge
+        run: |
+          git config user.name "Elytra upstream check"
+          git config user.email "elytra-upstream-check@users.noreply.github.com"
+          git remote add upstream https://github.com/LadybirdBrowser/ladybird.git
+          git fetch --quiet upstream master
+          echo "behind=$(git rev-list --count HEAD..upstream/master)" >> "$GITHUB_OUTPUT"
+          if git merge --no-commit --no-ff upstream/master > merge.log 2>&1; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > conflicts.txt
+          fi
+          git merge --abort 2>/dev/null || true
+
+      - name: Report
+        env:
+          CLEAN: ${{ steps.merge.outputs.clean }}
+          BEHIND: ${{ steps.merge.outputs.behind }}
+        run: |
+          if [ "$CLEAN" = "true" ]; then
+            echo "Upstream ($BEHIND new commits) merges cleanly into arc." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "Merging upstream Ladybird ($BEHIND new commits) into \`arc\` conflicts in:"
+            echo
+            sed 's/^/- `/; s/$/`/' conflicts.txt
+            echo
+            echo "Run \`Meta/elytra-sync-upstream.sh\` locally and resolve these as SYNCING.md describes."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1

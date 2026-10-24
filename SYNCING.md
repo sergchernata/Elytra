@@ -44,7 +44,7 @@ private-or-not; these hooks carry the session itself instead. All are marked `Fo
 | `Autocomplete.cpp` | remote suggestions use `session_for_new_web_view()`'s cookies (the current space's profile) |
 
 `Tests/UI/Qt/Arc/TestArcProfileSessions.cpp` checks all of this with real processes, headlessly; run it, and
-upstream's `Tests/LibWebView` tests, after a rebase that touches these files. `BrowsingSession::create_persistent()`
+upstream's `Tests/LibWebView` tests, after a merge that touches these files. `BrowsingSession::create_persistent()`
 takes `Persist::No` for SQL-disabled runs (and as the fallback when a profile's database can't be opened).
 
 
@@ -99,18 +99,38 @@ git diff upstream/master --stat -- . ':!UI/Qt/Arc' ':!SYNCING.md'
 ## Updating
 
 ```sh
-git fetch upstream
-git rebase upstream/master          # replays the arc commits on top of the latest upstream
-./Meta/ladybird.py build --preset Release
-./Meta/ladybird.py run --preset Release
+Meta/elytra-sync-upstream.sh             # fetch, merge, build, run every test
+Meta/elytra-sync-upstream.sh --continue  # after resolving conflicts by hand
+git push origin arc
 ```
 
-### If the rebase conflicts
+The `arc` branch is published (and releases are built from it), so upstream is **merged** in, never rebased onto: a
+rebase rewrites every Elytra commit and needs a force push. The script turns on Git's `rerere`, so a conflict
+resolved once is resolved the same way the next time it comes up.
 
-Conflicts can only happen at the hooks above. Re-add the hook line in the
-equivalent spot in the new upstream code, then `git add` the file and run `git rebase --continue`.
+Between merges, a scheduled GitHub workflow (`elytra-upstream-check.yml`) test-merges upstream every three days and
+fails, listing the conflicting files, once it no longer merges cleanly. Merging often keeps each merge small.
 
-### If the build breaks after a rebase
+### If the merge conflicts
+
+Conflicts happen at the hooks above. Keep upstream's new code and re-add the hook line in the equivalent spot, then
+`git add` the file and run the script with `--continue`. Spots that conflicted before:
+
+- `UI/Qt/main.cpp`: `Ladybird::Arc::install();` goes right before upstream's startup code (which now restores the
+  previous session) opens the first window.
+- `UI/Qt/Tab.cpp`, `focus_location_editor()`: the `on_focus_location_editor` hook goes after upstream's checks.
+- `Services/Compositor/PictureInPictureControls.cpp`: Arc rewrote this file; take upstream's include changes (it
+  moved `PaintingSurface` and the Skia helpers from LibGfx into the Compositor) and keep Arc's painting.
+
+### Rules that keep merges easy
+
+- Arc code lives in `UI/Qt/Arc/`. An upstream file gets only a small hook, marked `Fork hook (Arc)`, preferably a
+  static callback or flag on an upstream class (`Tab::toolbar_left_margin`, `Tab::animates_loading_spinner`) that Arc
+  sets from `ArcChrome.cpp`, rather than Arc logic inside upstream code. List each one above.
+- A tab may not have loaded: upstream restores tabs deferred, without a view until shown. Arc code must not call
+  `Tab::view()` on a tab that isn't `is_loaded()`; use `Tab::url()` for its address.
+
+### If the build breaks after a merge
 
 Upstream renamed or reworked something the Arc code uses (for example a method on
 `BrowserWindow`, `Tab`, `LocationEdit` or the web view). To fix it:
@@ -135,7 +155,7 @@ The sidebar also relies on upstream behavior that could change silently:
 - Upstream leaves the window's background to the native window. The sidebar paints the (tinted) chrome color
   under the whole window from its event filter on the window's `Paint` events, so nothing shows the untinted native
   color; the self-test `every_chrome_surface_takes_the_space_color` renders the window under two tints and fails on
-  any patch that doesn't change. Run it after a rebase that touches chrome styling.
+  any patch that doesn't change. Run it after a merge that touches chrome styling.
 - Arc's other shortcuts (`ArcShortcuts.h`) take some keys upstream binds: Cmd+D (bookmark), Cmd+Shift+C (dev
   tools, still on Cmd+Shift+I and F12), and next/previous tab (which upstream steps through in tab order, across
   spaces). The same filter claims the `ShortcutOverride` for those keys, so Qt hands them over as plain key presses
@@ -195,7 +215,7 @@ Fork `LadybirdBrowser/ladybird` on GitHub, then:
 ```sh
 git remote add origin git@github.com:<you>/ladybird.git
 git push -u origin arc
-# after each rebase:
+# after each merge:
 git push --force-with-lease origin arc
 ```
 
