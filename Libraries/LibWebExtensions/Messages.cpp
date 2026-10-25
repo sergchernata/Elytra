@@ -19,8 +19,10 @@ namespace WebExtensions {
 
 static constexpr size_t max_catalog_file_size = 16 * MiB;
 // Guards against placeholders that expand into themselves.
-static constexpr size_t max_replacements = 1000;
-static constexpr size_t max_expanded_length = 1 * MiB;
+static constexpr size_t max_replacements = 100;
+// Real messages are short. These keep a hostile catalog from costing much: it's read at every launch.
+static constexpr size_t max_expanded_length = 64 * KiB;
+static constexpr size_t max_catalog_length = 4 * MiB;
 
 // Chrome's MessageBundle::IsValidName: ASCII letters, digits, '_' and '@'.
 static bool is_valid_name(StringView name)
@@ -149,6 +151,7 @@ ErrorOr<void> MessageCatalog::add_catalog(StringView locale, StringView json)
         return Error::from_string_literal("Message catalog is not a JSON dictionary.");
 
     HashMap<String, String> messages;
+    size_t catalog_length = 0;
     TRY(parsed.as_object().try_for_each_member([&](String const& key, JsonValue const& value) -> ErrorOr<void> {
         if (!is_valid_name(key))
             return Error::from_string_literal("Name of a message key is invalid. Only ASCII [a-z], [A-Z], [0-9] and \"_\" are allowed.");
@@ -181,6 +184,9 @@ ErrorOr<void> MessageCatalog::add_catalog(StringView locale, StringView json)
         auto replaced = TRY(replace_variables(*message, "$"sv, "$"sv, OnUndefined::Fail, [&](String const& name) -> Optional<String> {
             return placeholders.get(name).copy();
         }));
+        catalog_length += replaced.length();
+        if (catalog_length > max_catalog_length)
+            return Error::from_string_literal("Message catalog is too large.");
         messages.set(to_lowercase(key), MUST(String::from_byte_string(replaced)));
         return {};
     }));

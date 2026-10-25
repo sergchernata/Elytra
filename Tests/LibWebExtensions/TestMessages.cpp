@@ -315,3 +315,42 @@ TEST_CASE(resolved_messages_prefer_the_first_locale_and_fill_in_named_placeholde
     EXPECT_EQ(messages.get("color"sv), "color, $1"sv);
     EXPECT_EQ(messages.get("only_en"sv), "en"sv);
 }
+
+// A catalog may not grow without bound as its placeholders expand: every launch would read it again.
+TEST_CASE(catalogs_are_limited_in_how_much_they_expand_to)
+{
+    auto big_message = [](size_t copies) {
+        StringBuilder message;
+        for (size_t i = 0; i < copies; ++i)
+            message.append("$a$"sv);
+        return message.to_byte_string();
+    };
+    auto content = ByteString::repeated('x', 2000);
+
+    // One message past 64 KiB.
+    {
+        WebExtensions::MessageCatalog catalog;
+        auto json = ByteString::formatted(R"({{"m":{{"message":"{}","placeholders":{{"a":{{"content":"{}"}}}}}}}})", big_message(40), content);
+        EXPECT(catalog.add_catalog("en"sv, json).is_error());
+    }
+
+    // Many messages, each within bounds, past 4 MiB together.
+    {
+        StringBuilder json;
+        json.append('{');
+        for (size_t i = 0; i < 100; ++i) {
+            if (i > 0)
+                json.append(',');
+            json.appendff(R"("m{}":{{"message":"{}","placeholders":{{"a":{{"content":"{}"}}}}}})", i, big_message(30), content);
+        }
+        json.append('}');
+        WebExtensions::MessageCatalog catalog;
+        EXPECT(catalog.add_catalog("en"sv, json.string_view()).is_error());
+    }
+
+    // An ordinary catalog is fine.
+    {
+        WebExtensions::MessageCatalog catalog;
+        EXPECT(!catalog.add_catalog("en"sv, R"({"m":{"message":"Hello $who$","placeholders":{"who":{"content":"you"}}}})"sv).is_error());
+    }
+}
