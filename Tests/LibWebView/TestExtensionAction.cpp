@@ -85,7 +85,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         CHECK(!report.get_bool("enabled_tab_7"sv).value_or(true));
         CHECK_EQ(string_in(report, "settings"sv), R"({"isOnToolbar":true})"sv);
 #if defined(AK_OS_MACOS)
-        CHECK_EQ(string_in(report, "commands"sv), R"([["_execute_action","Command+Shift+Y",""],["lock","Ctrl+Shift+K","Lock it"],["unbound","","No key"]])"sv);
+        // Keys need a modifier (but media keys), and at most four commands get one, as in Chrome.
+        CHECK_EQ(string_in(report, "commands"sv), R"([["_execute_action","Command+Shift+Y",""],["lock","Ctrl+Shift+K","Lock it"],["unbound","","No key"],["bare","","No modifier"],["media","MediaPlayPause","Media"],["shift_only","","Shift alone"],["fifth","Ctrl+Shift+5","One too many"],["sixth","","Two too many"]])"sv);
 #endif
 
         // What the UI sees, and hears of.

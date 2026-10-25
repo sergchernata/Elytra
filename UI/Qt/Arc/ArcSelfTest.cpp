@@ -1440,9 +1440,6 @@ void SelfTest::profiles_get_their_own_session()
     settle(300);
 }
 
-// A tab's cookies come from the session its view is made in. Tabs coming back (restored at launch, reopened after
-// closing) and tabs a page opens are made in their own profile's session, never in the profile shown at the time:
-// else the page loads with the other profile's cookies (and leaves its own there) before the sidebar reopens it.
 // An extension's button sits in the sidebar's top strip; clicking it opens the extension's popup, which fits its page,
 // and removing the extension takes the button away.
 void SelfTest::extension_buttons_open_their_popups()
@@ -1458,6 +1455,8 @@ void SelfTest::extension_buttons_open_their_popups()
     if (installed.is_error())
         return;
     auto id = installed.value()->id();
+    // Whatever happens, the extension doesn't stay for the scenarios after.
+    ArmedScopeGuard uninstall = [&] { (void)registry.uninstall(id); };
 
     auto find_button = [&]() -> QToolButton* {
         for (auto* button : window().findChildren<QToolButton*>()) {
@@ -1490,10 +1489,14 @@ void SelfTest::extension_buttons_open_their_popups()
         popup->close();
     }
 
+    uninstall.disarm();
     check(!registry.uninstall(id).is_error(), "the extension uninstalls");
     check(wait_until([&] { return find_button() == nullptr; }), "and its button goes");
 }
 
+// A tab's cookies come from the session its view is made in. Tabs coming back (restored at launch, reopened after
+// closing) and tabs a page opens are made in their own profile's session, never in the profile shown at the time:
+// else the page loads with the other profile's cookies (and leaves its own there) before the sidebar reopens it.
 void SelfTest::tabs_come_back_in_their_own_profile()
 {
     auto beta_session = session_for_profile("SelfTest");

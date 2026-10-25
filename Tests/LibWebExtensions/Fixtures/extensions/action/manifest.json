@@ -3,15 +3,62 @@
     "name": "Action test extension",
     "version": "1.0",
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvQpMWuf6ZfzkVmEOp6XqgCMhURL4RHbngdsu6q6eCsyZ9KAZBz5VaDo/Y5JfhqtD0ix3oMEFYt7cRxQKJA+bfxaX3N+C8AjoooRd3lJBEOr4MkBC0jNsEJeBytiTP3q5mgNZIEXKK0cG69CpGoS8jKDZpatGplUsPa+zxTgNmmUYIHqYo5kR+TO3FwoHV6WnxlmB70z5pa7biM3mufk/+F+pQi/8Y7sIB29CnFwBwuWEEyU4zD2acnl4X9Xz9VMI8EwwUD0vG0TSW/Y3u34k5xXQsNtyyvFjfRXDcfIVmWLzFtzQbjv8WmWr75mwoDAehajX8bb3mD9WaiOeg1SyQwIDAQAB",
-    "background": { "service_worker": "background.js" },
+    "background": {
+        "service_worker": "background.js"
+    },
     "action": {
         "default_title": "Default title",
         "default_popup": "popup.html",
-        "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+        "default_icon": {
+            "16": "icons/16.png",
+            "32": "icons/32.png"
+        }
     },
     "commands": {
-        "_execute_action": { "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" } },
-        "lock": { "description": "Lock it", "suggested_key": { "default": "Ctrl+Shift+K" } },
-        "unbound": { "description": "No key" }
+        "_execute_action": {
+            "suggested_key": {
+                "default": "Ctrl+Shift+Y",
+                "mac": "Command+Shift+Y"
+            }
+        },
+        "lock": {
+            "description": "Lock it",
+            "suggested_key": {
+                "default": "Ctrl+Shift+K"
+            }
+        },
+        "unbound": {
+            "description": "No key"
+        },
+        "bare": {
+            "description": "No modifier",
+            "suggested_key": {
+                "default": "A"
+            }
+        },
+        "media": {
+            "description": "Media",
+            "suggested_key": {
+                "default": "MediaPlayPause"
+            }
+        },
+        "shift_only": {
+            "description": "Shift alone",
+            "suggested_key": {
+                "default": "Shift+B"
+            }
+        },
+        "fifth": {
+            "description": "One too many",
+            "suggested_key": {
+                "default": "Ctrl+Shift+5"
+            }
+        },
+        "sixth": {
+            "description": "Two too many",
+            "suggested_key": {
+                "default": "Alt+Shift+6"
+            }
+        }
     }
 }

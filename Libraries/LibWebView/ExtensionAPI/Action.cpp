@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/HashTable.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <LibURL/Parser.h>
@@ -371,6 +372,44 @@ void ActionAPI::clicked(StringView extension_id, Optional<i64> tab_id, Optional<
     runtime().dispatch_event(extension_id, "action.onClicked"sv, JsonArray { Vector<JsonValue> { tab_object(tab_id) } });
 }
 
+// A suggested key as Chrome accepts it: Ctrl, Alt, Command or MacCtrl (and maybe Shift) with a key, or a media key
+// alone. Anything else gets no key.
+static bool is_valid_shortcut(StringView shortcut)
+{
+    if (shortcut.is_empty())
+        return false;
+    auto parts = shortcut.split_view('+');
+    auto key = parts.take_last();
+    if (key.starts_with("Media"sv))
+        return parts.is_empty() && key.is_one_of("MediaNextTrack"sv, "MediaPrevTrack"sv, "MediaPlayPause"sv, "MediaStop"sv);
+
+    bool is_letter_or_digit = key.length() == 1 && (is_ascii_upper_alpha(key[0]) || is_ascii_digit(key[0]));
+    if (!is_letter_or_digit && !key.is_one_of("Comma"sv, "Period"sv, "Home"sv, "End"sv, "PageUp"sv, "PageDown"sv, "Space"sv, "Insert"sv, "Delete"sv, "Up"sv, "Down"sv, "Left"sv, "Right"sv))
+        return false;
+
+    bool has_primary_modifier = false;
+    bool has_ctrl = false;
+    bool has_alt = false;
+    HashTable<StringView> seen;
+    for (auto modifier : parts) {
+        if (seen.set(modifier) != HashSetResult::InsertedNewEntry)
+            return false;
+        if (modifier == "Ctrl"sv || modifier == "Command"sv)
+            has_ctrl = true;
+        else if (modifier == "Alt"sv)
+            has_alt = true;
+        else if (modifier != "MacCtrl"sv && modifier != "Shift"sv)
+            return false;
+        if (modifier != "Shift"sv)
+            has_primary_modifier = true;
+    }
+    // Chrome refuses Ctrl+Alt, which some keyboards use to type characters.
+    return has_primary_modifier && !(has_ctrl && has_alt);
+}
+
+// Chrome gives keys to at most four of an extension's commands.
+static constexpr size_t MAXIMUM_COMMANDS_WITH_KEYS = 4;
+
 Vector<ActionAPI::Command> ActionAPI::commands_for(StringView extension_id) const
 {
     Vector<Command> commands;
@@ -384,10 +423,16 @@ Vector<ActionAPI::Command> ActionAPI::commands_for(StringView extension_id) cons
 #else
     auto platform = "linux"sv;
 #endif
+    size_t with_keys = 0;
     for (auto const& command : extension->manifest().commands) {
+        auto shortcut = command.suggested_key.for_platform(platform).value_or({});
+        if (!is_valid_shortcut(shortcut) || with_keys == MAXIMUM_COMMANDS_WITH_KEYS)
+            shortcut = {};
+        else
+            ++with_keys;
         commands.append({
             .name = command.name,
-            .shortcut = command.suggested_key.for_platform(platform).value_or({}),
+            .shortcut = move(shortcut),
             .description = command.description.value_or({}),
         });
     }
