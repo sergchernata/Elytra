@@ -147,6 +147,15 @@ void WebWorkerClient::did_request_file(ByteString path, i32 request_id)
     WorkerProcessManager::the().worker_did_request_file(m_agent_id, move(path), request_id);
 }
 
+void WebWorkerClient::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    auto file = Application::extension_registry().open_file(extension_id, path, requester);
+    if (file.is_error())
+        async_handle_file_return(file.error().code(), {}, request_id);
+    else
+        async_handle_file_return(0, file.release_value(), request_id);
+}
+
 Messages::WebWorkerClient::DidIsKnownHstsHostResponse WebWorkerClient::did_is_known_hsts_host(String domain)
 {
     auto session = m_session.strong_ref();

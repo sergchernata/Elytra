@@ -46,6 +46,7 @@
 #include <LibWebCommon/Page/PageId.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BookmarkStore.h>
+#include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/BrowserProcess.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/DownloadStore.h>
@@ -157,6 +158,7 @@ public:
     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
 
     static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
+    static ExtensionRegistry& extension_registry() { return the().m_extension_registry; }
     void update_bookmark_action_for_current_web_view();
     void update_actions_for_active_web_view();
     void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
@@ -587,6 +589,7 @@ private:
     OwnPtr<ApplicationSettingsObserver> m_settings_observer;
 
     OwnPtr<BookmarkStore> m_bookmark_store;
+    ExtensionRegistry m_extension_registry;
     OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
 
     OwnPtr<AutocompleteService> m_autocomplete_service;

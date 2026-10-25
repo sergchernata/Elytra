@@ -122,8 +122,12 @@ void ConnectionFromClient::request_file(Web::FileRequest request)
     auto request_id = ++last_id;
 
     auto path = request.path();
+    auto extension_file = request.extension_file();
     m_requested_files.set(request_id, move(request));
-    async_did_request_file(path, request_id);
+    if (extension_file.has_value())
+        async_did_request_extension_file(extension_file->extension_id, extension_file->path, extension_file->requester, request_id);
+    else
+        async_did_request_file(path, request_id);
 }
 
 void ConnectionFromClient::blob_url_entry_removed(Utf16String url)

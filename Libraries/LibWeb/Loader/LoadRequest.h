@@ -65,6 +65,10 @@ public:
     Optional<HTTP::NetworkIsolationKey> const& network_isolation_key() const { return m_network_isolation_key; }
     void set_network_isolation_key(Optional<HTTP::NetworkIsolationKey> network_isolation_key) { m_network_isolation_key = move(network_isolation_key); }
 
+    // The origin of whoever asked, when it's known.
+    Optional<URL::Origin> const& origin() const { return m_origin; }
+    void set_origin(URL::Origin origin) { m_origin = move(origin); }
+
     Optional<URL::URL> const& source_url() const { return m_source_url; }
     void set_source_url(URL::URL source_url) { m_source_url = move(source_url); }
 
@@ -81,6 +85,7 @@ public:
 
 private:
     Optional<URL::URL> m_url;
+    Optional<URL::Origin> m_origin;
     ByteString m_method { "GET" };
     NonnullRefPtr<HTTP::HeaderList> m_headers;
     ByteBuffer m_body;

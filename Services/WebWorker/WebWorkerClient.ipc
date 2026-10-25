@@ -2,6 +2,7 @@
 #include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
 #include <LibIPC/File.h>
 #include <LibIPC/TransportHandle.h>
+#include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWebCommon/FileAPI/SerializedBlobURLEntry.h>
 #include <LibWebCommon/HTML/BroadcastChannelMessage.h>
@@ -19,6 +20,7 @@ endpoint WebWorkerClient {
     did_report_worker_exception(Utf16String message, Utf16String filename, u32 lineno, u32 colno) =|
     did_request_cookie(URL::URL url, HTTP::Cookie::Source source) => (HTTP::Cookie::VersionedCookie cookie)
     did_request_file(ByteString path, i32 request_id) =|
+    did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id) =|
     did_is_known_hsts_host(String domain) => (bool result)
     request_media_server_connection() => (Optional<IPC::TransportHandle> handle)
     did_post_broadcast_channel_message(Web::HTML::PostedBroadcastChannelMessage message) =|

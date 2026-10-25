@@ -46,6 +46,10 @@ Trustworthiness is_origin_potentially_trustworthy(URL::Origin const& origin)
     // 7. If origin’s scheme component is one which the user agent considers to be authenticated, return "Potentially Trustworthy".
     // Note: See § 7.1 Packaged Applications for detail here.
 
+    // AD-HOC: An installed extension's files come from the browser itself.
+    if (origin.scheme() == "chrome-extension"sv)
+        return Trustworthiness::PotentiallyTrustworthy;
+
     // 8. If origin has been configured as a trustworthy origin, return "Potentially Trustworthy".
     // Note: See § 7.2 Development Environments for detail here.
 

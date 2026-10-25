@@ -1501,6 +1501,16 @@ void WebContentPage::did_request_file(ByteString path, i32 request_id)
         async_handle_file_return(0, file.release_value(), request_id);
 }
 
+void WebContentPage::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    // NB: The registry gives a page that isn't the extension's only the files it makes web accessible to that page.
+    auto file = Application::extension_registry().open_file(extension_id, path, requester);
+    if (file.is_error())
+        async_handle_file_return(file.error().code(), {}, request_id);
+    else
+        async_handle_file_return(0, file.release_value(), request_id);
+}
+
 void WebContentPage::did_request_color_picker(Color current_color)
 {
     view().did_request_color_picker({}, *this, current_color);

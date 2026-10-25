@@ -140,6 +140,13 @@ if (NOT WIN32)
         target_compile_definitions(TestFavicon PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
     endif()
 
+    add_executable(TestExtensions TestExtensions.cpp)
+    add_dependencies(TestExtensions ladybird_build_resource_files ${ladybird_helper_processes})
+    target_link_libraries(TestExtensions PRIVATE AK LibCore LibFileSystem LibGfx LibIPC LibMain LibRequests LibURL LibWeb LibWebView)
+    if (APPLE)
+        target_compile_definitions(TestExtensions PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
+    endif()
+
     add_executable(TestFileDownloader TestFileDownloader.cpp)
     add_dependencies(TestFileDownloader ${ladybird_helper_processes})
     target_link_libraries(TestFileDownloader PRIVATE AK LibCore LibDiff LibFileSystem LibGfx LibImageDecoders LibImageDecoderClient LibIPC LibJS LibMain LibRequests LibThreading LibURL LibWeb LibWebView)
@@ -403,6 +410,9 @@ if (BUILD_TESTING AND NOT WIN32)
 
     add_test(NAME TestFavicon COMMAND $<TARGET_FILE:TestFavicon>)
     set_tests_properties(TestFavicon PROPERTIES TIMEOUT 120 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
+
+    add_test(NAME TestExtensions COMMAND $<TARGET_FILE:TestExtensions>)
+    set_tests_properties(TestExtensions PROPERTIES TIMEOUT 120 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
 
     add_test(NAME TestFileDownloader COMMAND $<TARGET_FILE:TestFileDownloader>)
     set_tests_properties(TestFileDownloader PROPERTIES TIMEOUT 120 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})

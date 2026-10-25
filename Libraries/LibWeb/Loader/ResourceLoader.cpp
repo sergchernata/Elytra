@@ -182,6 +182,16 @@ static NonnullRefPtr<HTTP::HeaderList> response_headers_for_file(StringView path
     return response_headers;
 }
 
+// An extension's file. Its pages and scripts load one another, and web pages load what it makes web accessible (the
+// browser refuses the rest), so CORS requests may read it.
+static NonnullRefPtr<HTTP::HeaderList> response_headers_for_extension_file(StringView path)
+{
+    return HTTP::HeaderList::create({
+        { "Access-Control-Allow-Origin"sv, "*"sv },
+        { "Content-Type"sv, Core::guess_mime_type_based_on_filename(path) },
+    });
+}
+
 static void log_request_start(LoadRequest const& request)
 {
     auto url_for_logging = sanitized_url_for_logging(*request.url());
@@ -254,8 +264,9 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
     }
 
     auto const& url = request.url().value();
+    bool is_extension_file = url.scheme() == "chrome-extension"sv;
 
-    FileRequest file_request(url.file_path(), [request, on_file, on_error, url](ErrorOr<i32> file_or_error) mutable {
+    FileRequest file_request(url.file_path(), [request, on_file, on_error, url, is_extension_file](ErrorOr<i32> file_or_error) mutable {
         if (file_or_error.is_error()) {
             auto const message = ByteString::formatted("{}", file_or_error.error());
             on_error(message);
@@ -265,6 +276,11 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
         auto const fd = file_or_error.value();
 
         auto maybe_is_valid_directory = Core::Directory::is_valid_directory(fd);
+        if (is_extension_file && !maybe_is_valid_directory.is_error() && maybe_is_valid_directory.value()) {
+            (void)Core::System::close(fd);
+            on_error("Extension folders can't be listed"sv);
+            return;
+        }
         if (!maybe_is_valid_directory.is_error() && maybe_is_valid_directory.value()) {
             auto maybe_response = load_file_directory_page(url);
             if (maybe_response.is_error()) {
@@ -302,10 +318,20 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
 
         FileLoadResult load_result {
             .data = maybe_data.value().bytes(),
-            .response_headers = response_headers_for_file(request.url()->file_path(), st_or_error.value().st_mtime),
+            .response_headers = is_extension_file
+                ? response_headers_for_extension_file(request.url()->file_path())
+                : response_headers_for_file(request.url()->file_path(), st_or_error.value().st_mtime),
         };
         on_file(load_result);
     });
+
+    if (is_extension_file) {
+        file_request.set_extension_file({
+            .extension_id = MUST(String::from_utf8(url.serialized_host())),
+            .path = url.file_path(),
+            .requester = request.origin(),
+        });
+    }
 
     page->client().request_file(move(file_request));
 }
@@ -432,7 +458,7 @@ RefPtr<Requests::Request> ResourceLoader::load(LoadRequest& request, GC::Root<On
         return nullptr;
     }
 
-    if (url.scheme() == "file"sv) {
+    if (url.scheme() == "file"sv || url.scheme() == "chrome-extension"sv) {
         handle_file_load_request(
             request,
             [request, on_headers_received = move(on_headers_received), on_data_received = move(on_data_received), on_complete](FileLoadResult const& load_result) {

@@ -573,8 +573,10 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
 
         // -> request’s current URL’s scheme is not an HTTP(S) scheme
         // AD-HOC: We allow CORS requests for resource:// URLs from opaque origins to enable requesting JS modules from internal pages.
+        // AD-HOC: And for an extension's files: the browser answers only for those the extension makes web accessible.
         if (!Infrastructure::is_http_or_https_scheme(request->current_url().scheme())
-            && !(origin && origin->is_opaque() && request->current_url().scheme() == "resource"sv)) {
+            && !(origin && origin->is_opaque() && request->current_url().scheme() == "resource"sv)
+            && request->current_url().scheme() != "chrome-extension"sv) {
             // NOTE: At this point all other request modes have been handled. Ensure we're not lying in the error message :^)
             VERIFY(request->mode() == Infrastructure::Request::Mode::CORS);
 
@@ -1347,6 +1349,11 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
         if (!request->destination().has_value())
             return error;
 
+        return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
+    }
+    // AD-HOC: -> "chrome-extension"
+    // An extension's files. The browser decides which of them the requesting origin may have.
+    else if (request->current_url().scheme() == "chrome-extension"sv) {
         return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
     }
     // -> HTTP(S) scheme
@@ -2328,6 +2335,10 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     load_request.set_request_mode(request->mode());
     load_request.set_referrer_policy(request->referrer_policy());
     load_request.set_is_navigation_request(request->is_navigation_request());
+    // A navigation the browser starts has no requester of its own.
+    bool browser_initiated_navigation = request->client() == nullptr && request->mode() == Infrastructure::Request::Mode::Navigate;
+    if (auto const* origin = request->origin().get_pointer<URL::Origin>(); origin && !browser_initiated_navigation)
+        load_request.set_origin(*origin);
     load_request.set_priority(request->priority());
     load_request.set_source_url(content_blocker_source_url_for_request(*request));
     load_request.set_network_isolation_key(Infrastructure::determine_the_network_partition_key(*request));

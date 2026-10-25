@@ -786,3 +786,20 @@ TEST_CASE(host_is_loopback_or_localhost)
     EXPECT(!host_of("http://example.com"sv).is_loopback_or_localhost());
     EXPECT(!host_of("http://0.0.0.0"sv).is_loopback_or_localhost());
 }
+
+TEST_CASE(extension_urls_have_the_extension_as_their_origin)
+{
+    auto page = URL::Parser::basic_parse("chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/popup/index.html"sv).value();
+    auto script = URL::Parser::basic_parse("chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/background/background.js"sv).value();
+    auto other_extension = URL::Parser::basic_parse("chrome-extension://bkpbhnjcbehoklfkljkkbbmipaphipgl/popup/index.html"sv).value();
+
+    EXPECT(!page.origin().is_opaque());
+    EXPECT_EQ(page.origin().serialize(), "chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa"sv);
+    EXPECT(page.origin().is_same_origin(script.origin()));
+    EXPECT(!page.origin().is_same_origin(other_extension.origin()));
+    EXPECT(!page.origin().is_same_site(other_extension.origin()));
+
+    // Blob URLs an extension makes belong to it.
+    auto blob = URL::Parser::basic_parse("blob:chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/0b6e4f3c-1d2a-4c55-9e57-1a2b3c4d5e6f"sv).value();
+    EXPECT(blob.origin().is_same_origin(page.origin()));
+}

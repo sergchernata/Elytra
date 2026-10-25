@@ -254,6 +254,7 @@ private:
     virtual void did_change_picture_in_picture_video_size(Gfx::IntSize video_size) override;
     virtual void did_change_picture_in_picture_player_controls_visibility(bool shown) override;
     virtual void did_request_file(ByteString path, i32 request_id) override;
+    virtual void did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id) override;
     virtual void did_request_color_picker(Color current_color) override;
     virtual void did_request_geolocation_position(u64 request_id) override;
     virtual void did_cancel_geolocation_position_request(u64 request_id) override;

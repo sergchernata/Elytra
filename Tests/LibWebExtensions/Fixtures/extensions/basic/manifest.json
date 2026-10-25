@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "Basic test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwP7hvVwNL4dwZnTzkB0OixVGeBdJBLxUARr9z749FFISf4M6PRwm1PsK8O80EAWWTJMas2x5r1lFvhR8PuzPglnGaLpG843q2hvUK+jcig5O8rNq2zj+hWXvhu3ujlZFa1Q+JfmG/UbyVd9i3+QdmhT38MugwJomOw82zANBSONq5HeszOsrhreUby4L0AKhz761O4XPSOv1YgG6ar+HnSJIkrASwg0/gaa1uFJFlEMBQuQo92IqXL8TzDvFQJkx1AFWBQ/UZGEYbEUcFsofJB/7rchZCwvt7C6MsYFy7AemruRlHDc+WnZTZZaH1zg37JUQAwK4N4vfvHAQk9rDTwIDAQAB",
+    "web_accessible_resources": [
+        { "resources": ["public/*"], "matches": ["<all_urls>"] }
+    ]
+}
