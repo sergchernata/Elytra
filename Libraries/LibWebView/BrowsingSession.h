@@ -9,6 +9,7 @@
 #include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Optional.h>
 #include <AK/OwnPtr.h>
 #include <AK/RefCounted.h>
 #include <AK/Types.h>
@@ -32,8 +33,8 @@ public:
     static NonnullRefPtr<BrowsingSession> create(IsPrivate);
     ~BrowsingSession();
 
-    // Fork hook (Arc profiles): a persistent session of its own, with cookies, site storage and HSTS policies in
-    // `directory`. Its history, favicons and tab restore are `records`'s (see records()).
+    // Fork hook (Arc profiles): a persistent session of its own, with cookies, site storage, HSTS policies, history and
+    // favicons in `directory`. Its tab restore is `records`'s (see records()).
     // With Persist::No (e.g. SQL disabled), its stores are in memory and nothing is written.
     enum class Persist : u8 {
         No,
@@ -41,8 +42,8 @@ public:
     };
     static ErrorOr<NonnullRefPtr<BrowsingSession>> create_persistent(ByteString const& directory, BrowsingSession& records, Persist);
 
-    // Fork hook (Arc profiles): the session that keeps the browser's own records (history, favicons, tab restore) for
-    // views of this one. Itself, except for a profile's session.
+    // Fork hook (Arc profiles): the session that keeps tab restore for views of this one (windows hold tabs of several
+    // profiles). Itself, except for a profile's session.
     BrowsingSession& records() { return m_records ? *m_records : *this; }
     bool is_profile_session() const { return m_records; } // Fork hook (Arc profiles)
 
@@ -56,6 +57,10 @@ public:
     OwnPtr<FaviconStore> favicon_store;
     OwnPtr<HistoryStore> history_store;
     OwnPtr<SessionStore> session_store;
+
+    // Fork hook (Arc profiles): where history_store's database is, for the omnibox's own connection to it. None when
+    // history isn't on disk (private, disabled, or in memory), so the omnibox suggests none from it.
+    Optional<ByteString> history_database_directory;
 
 private:
     explicit BrowsingSession(IsPrivate);

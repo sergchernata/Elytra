@@ -31,6 +31,15 @@ namespace WebView {
 static constexpr auto file_url_prefix = "file://"sv;
 static constexpr auto about_url_prefix = "about:"sv;
 
+// Fork hook (Arc profiles): suggestions come from the history of the profile new views open in (the current space's).
+// Private windows read the default history, as they always have; they record nothing.
+static AutocompleteService::HistorySource history_source(IsPrivate is_private)
+{
+    if (is_private == IsPrivate::Yes)
+        return { Application::default_session().history_database_directory };
+    return { Application::session_for_new_web_view(is_private)->history_database_directory };
+}
+
 Autocomplete::Autocomplete(IsPrivate is_private)
     : m_is_private(is_private)
 {
@@ -80,7 +89,7 @@ void Autocomplete::record_engagement(OmniboxEngagement engagement)
         return;
     if (engagement.destination_kind == OmniboxDestinationKind::Search && !Application::settings().search_engine_settings().engine.has_value())
         return;
-    Application::autocomplete_service().record_engagement(move(engagement));
+    Application::autocomplete_service().record_engagement(move(engagement), history_source(m_is_private));
 }
 
 String autocomplete_suggestion_display_text(AutocompleteSuggestion const& suggestion)
@@ -295,7 +304,7 @@ void Autocomplete::query_autocomplete_engine(AutocompleteQueryID query_id, Strin
     dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Autocomplete query='{}' trimmed='{}'", m_query, m_trimmed_query);
 
     // Private windows may read normal-profile history but never write through this worker connection.
-    Application::autocomplete_service().query(m_service_client_id, query_id, m_trimmed_query, m_max_suggestions);
+    Application::autocomplete_service().query(m_service_client_id, query_id, m_trimmed_query, m_max_suggestions, history_source(m_is_private));
 
     if (m_external_url.has_value()) {
         auto weak_this = make_weak_ptr();

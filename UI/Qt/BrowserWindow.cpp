@@ -572,7 +572,9 @@ Tab& BrowserWindow::create_restored_tab(WebView::RestoredSessionTab const& resto
 {
     if (defer) {
         // Until the tab loads, it shows what browsing history knows about its page.
-        auto entry = m_session->history_store->entry_for_url(restored.url);
+        // Fork hook (Arc profiles): from the history of the tab's profile.
+        auto history_session = Tab::session_for_returning_tab ? Tab::session_for_returning_tab(restored.url) : nullptr;
+        auto entry = (history_session ? *history_session : *m_session).history_store->entry_for_url(restored.url);
         DeferredTab deferred_tab {
             .session_tab_id = restored.tab_id,
             .url = restored.url,

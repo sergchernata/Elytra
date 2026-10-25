@@ -73,6 +73,8 @@ public:
 
     // Tab::create_returning_view: a restored or reopened tab's view is made in the profile the tab belongs to.
     static void create_returning_view(Tab const*, URL::URL const&, Function<void()> const& create_view);
+    // Tab::session_for_returning_tab: a restored tab's title and icon come from its profile's history.
+    static RefPtr<WebView::BrowsingSession> session_for_returning_tab(URL::URL const&);
     // Picture-in-Picture windows opened or closed: each window's player shows only while its tab has none.
     static void picture_in_picture_windows_changed();
 
@@ -122,6 +124,10 @@ private:
     Tab* tab_for_node(QString const& node_id) const;
     static QString space_of(Tab const&);
     static QString node_of(Tab const&);
+    // A tab's profile (its favorite's, else its space's), and the same for a saved tab's space and node.
+    static QString profile_of_tab(Tab const&);
+    static QString profile_of_entry(QString const& space_id, QString const& node_id);
+    static Optional<QString> profile_of_returning_tab(Tab const*, URL::URL const&, bool take_closed);
     static void set_tab_space(Tab&, QString const&);
     static void set_tab_node(Tab&, QString const&);
     static QString url_of(Tab const&);
@@ -240,8 +246,6 @@ private:
     void update_current_highlight();
     QColor space_color() const;
     QString current_profile() const;
-    static QString profile_of_tab(Tab const&);
-    static QString profile_of_entry(QString const& space_id, QString const& node_id);
     void apply_profile_for_new_views();
     void style_update_button();
     void place_tabs_in_their_profiles();

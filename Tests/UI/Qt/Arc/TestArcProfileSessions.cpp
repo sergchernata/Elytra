@@ -13,13 +13,17 @@
 #include <LibCore/Directory.h>
 #include <LibCore/Environment.h>
 #include <LibCore/EventLoop.h>
+#include <LibCore/File.h>
 #include <LibCore/StandardPaths.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
 #include <LibMain/Main.h>
 #include <LibURL/Parser.h>
+#include <AK/AnyOf.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/AutocompleteService.h>
+#include <LibWebView/HistoryStore.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/CookieJar.h>
 #include <LibWebView/HeadlessWebView.h>
@@ -59,6 +63,12 @@ void expect(bool condition, StringView what)
     }
     warnln("FAIL: {}", what);
     ++s_failures;
+}
+
+URL::URL const& history_url()
+{
+    static auto url = URL::Parser::basic_parse("https://history.example/page"sv).release_value();
+    return url;
 }
 
 URL::URL const& example_url()
@@ -138,7 +148,15 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         expect(work->storage_jar.ptr() != default_session.storage_jar.ptr(), "a profile has its own site storage"sv);
         expect(work->hsts_store.ptr() != default_session.hsts_store.ptr(), "a profile has its own HSTS policies"sv);
         expect(work->blob_url_store.ptr() != default_session.blob_url_store.ptr(), "a profile has its own blob URLs"sv);
-        expect(&work->records() == &default_session && &default_session.records() == &default_session, "history and tab restore are shared with the default session"sv);
+        expect(&work->records() == &default_session && &default_session.records() == &default_session, "tab restore is shared with the default session"sv);
+        expect(work->history_store.ptr() != default_session.history_store.ptr() && work->history_store.ptr() != side->history_store.ptr(), "a profile has its own history"sv);
+        expect(work->favicon_store.ptr() != default_session.favicon_store.ptr(), "and its own favicons"sv);
+        expect(work->history_database_directory == work_directory, "kept in the profile's folder"sv);
+
+        work->history_store->record_visit(history_url(), "Work only"_string);
+        expect(work->history_store->entry_for_url(history_url()).has_value(), "a profile's visit is in its history"sv);
+        expect(!side->history_store->entry_for_url(history_url()).has_value() && !default_session.history_store->entry_for_url(history_url()).has_value(),
+            "and in no other profile's"sv);
 
         set_cookie(*work, "who"sv, "work"sv);
         set_cookie(default_session, "who"sv, "default"sv);
@@ -149,6 +167,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     {
         auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session, WebView::BrowsingSession::Persist::Yes));
         expect(cookie_value(*work, "who"sv) == "work"sv, "a profile's cookies survive a restart"sv);
+        auto entry = work->history_store->entry_for_url(history_url());
+        expect(entry.has_value() && entry->title == "Work only"sv, "and so does its history"sv);
     }
 
     // A profile that mustn't persist (SQL disabled, or its database couldn't be opened) still has its own jar, in
@@ -159,6 +179,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         set_cookie(*memory, "who"sv, "memory"sv);
         expect(cookie_value(*memory, "who"sv) == "memory"sv && cookie_value(default_session, "who"sv) == "default"sv, "a profile kept in memory has its own cookies"sv);
         expect(!FileSystem::exists(memory_directory), "and writes nothing to disk"sv);
+        expect(!memory->history_database_directory.has_value(), "nor keeps history on disk"sv);
     }
 
     auto work = TRY(WebView::BrowsingSession::create_persistent(work_directory, default_session, WebView::BrowsingSession::Persist::Yes));
@@ -217,6 +238,49 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     expect(app->request_server_client_ids_for_testing(*work).size() > work_clients
             && app->request_server_client_ids_for_testing(default_session).size() == default_clients,
         "a profile page's workers use the profile's cookies"sv);
+
+    // A page a profile's view loads goes in the profile's history, never another's.
+    {
+        auto page_path = LexicalPath::join(test_directory, "visited.html"sv).string();
+        {
+            auto file = TRY(Core::File::open(page_path, Core::File::OpenMode::Write));
+            TRY(file->write_until_depleted("<title>Visited in Work</title>visited"sv));
+        }
+        auto page_url = URL::create_with_file_scheme(page_path).release_value();
+        auto side = TRY(WebView::BrowsingSession::create_persistent(side_directory, default_session, WebView::BrowsingSession::Persist::Yes));
+        size_t loads = 0;
+        work_view->on_load_finish = [&](auto const&) { ++loads; };
+        work_view->load(page_url);
+        spin_until([&] { return loads > 0 && work->history_store->entry_for_url(page_url).has_value(); }, "the visit to be recorded in the profile's history"sv);
+        expect(work->history_store->entry_for_url(page_url).has_value(), "a page loaded in a profile is in the profile's history"sv);
+        expect(!side->history_store->entry_for_url(page_url).has_value() && !default_session.history_store->entry_for_url(page_url).has_value(),
+            "and not in another profile's or the default one's"sv);
+
+        // The omnibox suggests from the history of the profile asking, and only from it.
+        auto& service = WebView::Application::autocomplete_service();
+        Vector<WebView::AutocompleteSuggestion> work_suggestions;
+        Vector<WebView::AutocompleteSuggestion> side_suggestions;
+        bool work_done = false;
+        bool side_done = false;
+        auto work_client = service.register_client([&](auto, auto suggestions) { work_suggestions = move(suggestions); work_done = true; });
+        auto side_client = service.register_client([&](auto, auto suggestions) { side_suggestions = move(suggestions); side_done = true; });
+        service.query(work_client, 1, "history.exam"_string, 8, WebView::AutocompleteService::HistorySource { work->history_database_directory });
+        service.query(side_client, 1, "history.exam"_string, 8, WebView::AutocompleteService::HistorySource { side->history_database_directory });
+        spin_until([&] { return work_done && side_done; }, "omnibox suggestions"sv);
+        auto suggests_history_page = [](auto const& suggestions) {
+            return any_of(suggestions, [](auto const& suggestion) { return suggestion.text.contains("history.example"sv); });
+        };
+        expect(suggests_history_page(work_suggestions), "the omnibox suggests a profile's own pages"sv);
+        expect(!suggests_history_page(side_suggestions), "and never another profile's"sv);
+        service.unregister_client(work_client);
+        service.unregister_client(side_client);
+
+        // Clearing history clears every profile's.
+        WebView::Application::ClearBrowsingDataOptions history_options;
+        history_options.delete_history = WebView::Application::ClearBrowsingDataOptions::Delete::Yes;
+        (void)app->clear_browsing_data(history_options);
+        expect(!work->history_store->entry_for_url(page_url).has_value() && !work->history_store->entry_for_url(history_url()).has_value(), "clearing history clears every profile's"sv);
+    }
 
     // Clearing site data clears every profile's, not just the default session's.
     set_cookie(*work, "who"sv, "work"sv);

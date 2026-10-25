@@ -18,6 +18,7 @@ namespace WebView {
 
 AutocompleteService::AutocompleteService(Core::EventLoop& main_event_loop, Optional<ByteString> history_database_directory)
     : m_main_event_loop(main_event_loop)
+    , m_default_history_database_directory(history_database_directory)
     , m_worker(Threading::Thread::construct("Omnibox"sv, [this, history_database_directory = move(history_database_directory)]() mutable {
         return worker_main(move(history_database_directory));
     }))
@@ -53,14 +54,14 @@ void AutocompleteService::unregister_client(ClientID client_id)
     m_clients.remove(client_id);
 }
 
-void AutocompleteService::query(ClientID client_id, AutocompleteQueryID query_id, String input, size_t max_suggestions)
+void AutocompleteService::query(ClientID client_id, AutocompleteQueryID query_id, String input, size_t max_suggestions, Optional<HistorySource> history)
 {
     auto client = m_clients.find(client_id);
     if (client == m_clients.end())
         return;
     client->value->active_query_id = query_id;
 
-    Query query { client_id, query_id, move(input), max_suggestions };
+    Query query { client_id, query_id, move(input), max_suggestions, history.has_value() ? history->directory : m_default_history_database_directory };
     MutexLocker locker(m_worker_mutex);
     m_active_queries.set(client_id, query);
     m_pending_queries.remove_all_matching([&](auto const& query) {
@@ -100,10 +101,10 @@ void AutocompleteService::update_bookmarks(Vector<AutocompleteBookmark> bookmark
     m_worker_condition.signal();
 }
 
-void AutocompleteService::record_engagement(OmniboxEngagement engagement)
+void AutocompleteService::record_engagement(OmniboxEngagement engagement, Optional<HistorySource> history)
 {
     MutexLocker locker(m_worker_mutex);
-    m_pending_engagements.append(move(engagement));
+    m_pending_engagements.append({ move(engagement), history.has_value() ? history->directory : m_default_history_database_directory });
     m_worker_condition.signal();
 }
 
@@ -119,31 +120,46 @@ bool AutocompleteService::query_is_current(Query const& query)
 
 intptr_t AutocompleteService::worker_main(Optional<ByteString> history_database_directory)
 {
-    RefPtr<Database::Database> database;
-    OwnPtr<HistoryStore> history_store;
-
-    if (history_database_directory.has_value()) {
-        auto database_or_error = Database::Database::create(*history_database_directory, "History"sv);
+    // Fork hook (Arc profiles): one connection per History database (each profile keeps its own), opened when first
+    // asked for. Without a database, an empty store: suggestions come from no one else's history.
+    struct HistoryConnection {
+        RefPtr<Database::Database> database;
+        OwnPtr<HistoryStore> history_store;
+    };
+    HashMap<ByteString, HistoryConnection> connections;
+    HistoryConnection no_history { nullptr, HistoryStore::create() };
+    auto connection_for = [&](Optional<ByteString> const& directory) -> HistoryConnection& {
+        if (!directory.has_value())
+            return no_history;
+        if (auto it = connections.find(*directory); it != connections.end())
+            return it->value;
+        HistoryConnection connection;
+        auto database_or_error = Database::Database::create(*directory, "History"sv);
         if (database_or_error.is_error()) {
             warnln("Unable to open the omnibox history database: {}", database_or_error.error());
         } else {
-            database = database_or_error.release_value();
-            auto history_store_or_error = HistoryStore::create(*database);
+            connection.database = database_or_error.release_value();
+            auto history_store_or_error = HistoryStore::create(*connection.database);
             if (history_store_or_error.is_error())
                 warnln("Unable to prepare the omnibox history database: {}", history_store_or_error.error());
             else
-                history_store = history_store_or_error.release_value();
+                connection.history_store = history_store_or_error.release_value();
         }
-    }
-    if (!history_store)
-        history_store = HistoryStore::create();
+        if (!connection.history_store) {
+            connection.database = nullptr;
+            connection.history_store = HistoryStore::create();
+        }
+        connections.set(*directory, move(connection));
+        return connections.find(*directory)->value;
+    };
+    (void)connection_for(history_database_directory);
 
     Vector<AutocompleteBookmark> bookmarks;
 
     while (true) {
         Optional<Query> query;
         Optional<Vector<AutocompleteBookmark>> bookmark_update;
-        Vector<OmniboxEngagement> engagements;
+        Vector<PendingEngagement> engagements;
         {
             MutexLocker locker(m_worker_mutex);
             m_worker_condition.wait_while([&] {
@@ -160,15 +176,20 @@ intptr_t AutocompleteService::worker_main(Optional<ByteString> history_database_
 
         if (bookmark_update.has_value())
             bookmarks = bookmark_update.release_value();
-        for (auto const& engagement : engagements)
-            history_store->record_omnibox_engagement(engagement, engagement.used_at);
+        for (auto const& pending : engagements)
+            connection_for(pending.history_database_directory).history_store->record_omnibox_engagement(pending.engagement, pending.engagement.used_at);
         if (!query.has_value())
             continue;
+
+        auto& connection = connection_for(query->history_database_directory);
+        auto* database = connection.database.ptr();
+        // Held as pointers: the map's slots move when it grows, the database and store don't.
+        auto* history_store = connection.history_store.ptr();
 
         {
             MutexLocker locker(m_worker_mutex);
             m_running_query_client_id = query->client_id;
-            m_interruptible_database = database.ptr();
+            m_interruptible_database = database;
         }
         ScopeGuard clear_running_query = [&] {
             MutexLocker locker(m_worker_mutex);

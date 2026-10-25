@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/HashTable.h>
 #include <LibCore/Directory.h>
 #include <LibDatabase/Database.h>
 #include <LibWebView/Application.h>
@@ -56,6 +57,9 @@ ErrorOr<NonnullRefPtr<BrowsingSession>> BrowsingSession::create_persistent(ByteS
 
     if (persist == Persist::No) {
         in_memory();
+        // As the default session does without SQL: no history at all.
+        session->favicon_store = FaviconStore::create();
+        session->history_store = HistoryStore::create_disabled();
     } else {
         TRY(Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes));
         auto database = TRY(Database::Database::create(directory, "Ladybird"sv));
@@ -75,13 +79,32 @@ ErrorOr<NonnullRefPtr<BrowsingSession>> BrowsingSession::create_persistent(ByteS
             warnln("Profile database in {} was created by a newer Ladybird version; its site data will not be persisted", directory);
             in_memory();
         }
+
+        // The profile's own history and favicons, in a History database beside its site data, as the default session
+        // keeps them (Application::launch_services()): one profile's browsing never shows in another's.
+        auto history_database = TRY(Database::Database::create(directory, "History"sv));
+        auto history_migrates = [&](Database::MigrationMode mode) -> ErrorOr<bool> {
+            return TRY(FaviconStore::migrate_schema(history_database, mode)) == Database::MigrationOutcome::Success
+                && TRY(HistoryStore::migrate_schema(history_database, mode)) == Database::MigrationOutcome::Success;
+        };
+        if (TRY(history_migrates(Database::MigrationMode::CheckOnly)) && TRY(history_migrates(Database::MigrationMode::Apply))) {
+            session->favicon_store = TRY(FaviconStore::create(history_database));
+            session->history_store = TRY(HistoryStore::create(history_database));
+            session->history_database_directory = directory;
+            HashTable<String> referenced_hashes;
+            for (auto& hash : session->history_store->referenced_favicon_hashes())
+                referenced_hashes.set(move(hash));
+            session->favicon_store->remove_unreferenced_favicons(referenced_hashes);
+        } else {
+            warnln("Profile history database in {} was created by a newer Ladybird version; its history will not be persisted", directory);
+            session->favicon_store = FaviconStore::create();
+            session->history_store = HistoryStore::create(*session->favicon_store);
+        }
     }
     session->blob_url_store = make<BlobURLStore>();
 
-    // Never used: views of this session keep their records in `records` (see records()). Present so that no store is
+    // Never used: views of this session keep tab restore in `records` (see records()). Present so that no store is
     // ever null.
-    session->favicon_store = FaviconStore::create();
-    session->history_store = HistoryStore::create_disabled();
     session->session_store = SessionStore::create();
 
     Application::did_create_profile_session(*session);

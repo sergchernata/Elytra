@@ -2360,32 +2360,39 @@ QString ArcSidebar::profile_of_entry(QString const& space_id, QString const& nod
 // A tab's cookies and site data come from the session its view is created in, which can't change afterwards. One
 // coming back (restored at launch, or reopened) is created in its own profile, never in whichever is shown: else its
 // page loads with another profile's cookies (and leaves its own there) before the sidebar could reopen it.
-void ArcSidebar::create_returning_view(Tab const* tab, URL::URL const& url, Function<void()> const& create_view)
+// The profile of a tab coming back: its own, once it has a space; else the one a recently closed tab at that address
+// had (taken, when `take_closed`), else the one the saved session gives that address.
+Optional<QString> ArcSidebar::profile_of_returning_tab(Tab const* tab, URL::URL const& url, bool take_closed)
 {
-    Optional<QString> profile;
-    if (tab && (tab->property(SPACE_PROPERTY).isValid() || !node_of(*tab).isEmpty()))
-        profile = profile_of_tab(*tab);
+    if (tab && (tab->property(SPACE_PROPERTY).isValid() || !ArcSidebar::node_of(*tab).isEmpty()))
+        return ArcSidebar::profile_of_tab(*tab);
 
     auto text = qstring_from_ak_string(url.serialize());
-    if (!profile.has_value()) {
-        auto& closed = recently_closed_tabs();
-        for (int i = 0; i < closed.size(); ++i) {
-            if (closed[i].url == text) {
-                profile = profile_of_entry(closed[i].space_id, closed[i].node_id);
+    auto& closed = recently_closed_tabs();
+    for (int i = 0; i < closed.size(); ++i) {
+        if (closed[i].url == text) {
+            auto profile = ArcSidebar::profile_of_entry(closed[i].space_id, closed[i].node_id);
+            if (take_closed)
                 closed.removeAt(i);
-                break;
-            }
+            return profile;
         }
     }
-    if (!profile.has_value()) {
-        for (auto const& entry : SpaceStore::the().session()) {
-            if (entry.url == text) {
-                profile = profile_of_entry(entry.space_id, entry.node_id);
-                break;
-            }
-        }
+    for (auto const& entry : SpaceStore::the().session()) {
+        if (entry.url == text)
+            return ArcSidebar::profile_of_entry(entry.space_id, entry.node_id);
     }
+    return {};
+}
 
+RefPtr<WebView::BrowsingSession> ArcSidebar::session_for_returning_tab(URL::URL const& url)
+{
+    auto profile = profile_of_returning_tab(nullptr, url, false);
+    return profile.has_value() ? session_for_profile(*profile) : nullptr;
+}
+
+void ArcSidebar::create_returning_view(Tab const* tab, URL::URL const& url, Function<void()> const& create_view)
+{
+    auto profile = profile_of_returning_tab(tab, url, true);
     if (!profile.has_value()) {
         create_view();
         return;

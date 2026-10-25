@@ -38,13 +38,19 @@ public:
     AutocompleteService(Core::EventLoop&, Optional<ByteString> history_database_directory);
     ~AutocompleteService();
 
+    // Fork hook (Arc profiles): whose history a query reads and an engagement is kept in: the History database in
+    // `directory`, or none. Left out, the one the service was made with (the default session's).
+    struct HistorySource {
+        Optional<ByteString> directory;
+    };
+
     ClientID register_client(OnQueryComplete);
     void unregister_client(ClientID);
 
-    void query(ClientID, AutocompleteQueryID, String, size_t max_suggestions);
+    void query(ClientID, AutocompleteQueryID, String, size_t max_suggestions, Optional<HistorySource> = {});
     void cancel(ClientID);
     void update_bookmarks(Vector<AutocompleteBookmark>);
-    void record_engagement(OmniboxEngagement);
+    void record_engagement(OmniboxEngagement, Optional<HistorySource> = {});
 
 private:
     struct Client final : public RefCounted<Client> {
@@ -62,6 +68,12 @@ private:
         AutocompleteQueryID query_id { 0 };
         String input;
         size_t max_suggestions { 0 };
+        Optional<ByteString> history_database_directory; // Fork hook (Arc profiles)
+    };
+
+    struct PendingEngagement { // Fork hook (Arc profiles)
+        OmniboxEngagement engagement;
+        Optional<ByteString> history_database_directory;
     };
 
     intptr_t worker_main(Optional<ByteString> history_database_directory);
@@ -77,7 +89,8 @@ private:
     HashMap<ClientID, Query> m_active_queries;
     Vector<Query> m_pending_queries;
     Optional<Vector<AutocompleteBookmark>> m_pending_bookmarks;
-    Vector<OmniboxEngagement> m_pending_engagements;
+    Vector<PendingEngagement> m_pending_engagements; // Fork hook (Arc profiles): with their history
+    Optional<ByteString> m_default_history_database_directory; // Fork hook (Arc profiles)
     Optional<ClientID> m_running_query_client_id;
     Database::Database* m_interruptible_database { nullptr };
     bool m_stopping { false };

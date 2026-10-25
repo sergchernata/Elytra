@@ -434,7 +434,7 @@ void WebContentPage::maybe_record_history_visit_for_current_load(URL::URL const&
     auto transition = HistoryVisitTransition::Link;
     if (displays_tab())
         transition = view().m_history_visit_transition_for_current_load;
-    client().session().records().history_store->record_visit(url, move(title), UnixDateTime::now(), transition);
+    client().session().history_store->record_visit(url, move(title), UnixDateTime::now(), transition);
     m_history_recorded_url_for_current_load = normalized_url.release_value();
 }
 
@@ -2362,9 +2362,9 @@ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, 
 
         maybe_record_history_visit_for_current_load(committed_url, title, "load finish"sv);
         if (title.has_value())
-            client().session().records().history_store->update_title(committed_url, *title);
+            client().session().history_store->update_title(committed_url, *title);
         if (view().favicon_hash().has_value())
-            client().session().records().history_store->update_favicon(committed_url, *view().favicon_hash());
+            client().session().history_store->update_favicon(committed_url, *view().favicon_hash());
 
         view().did_finish_navigation();
 
@@ -2393,7 +2393,7 @@ void WebContentPage::did_change_title(Utf16String title)
                 view().url(),
                 title_utf8);
 
-            client().session().records().history_store->update_title(view().url(), title_utf8);
+            client().session().history_store->update_title(view().url(), title_utf8);
         }
 
         if (title.is_empty())

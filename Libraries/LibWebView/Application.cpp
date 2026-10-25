@@ -1731,6 +1731,7 @@ ErrorOr<void> Application::launch_services()
         if (favicons_outcome == Database::MigrationOutcome::Success && history_outcome == Database::MigrationOutcome::Success) {
             m_default_session->favicon_store = TRY(FaviconStore::create(history_database));
             m_default_session->history_store = TRY(HistoryStore::create(history_database));
+            m_default_session->history_database_directory = history_database_directory; // Fork hook (Arc profiles)
             should_remove_unreferenced_favicons = true;
         } else {
             dbgln("History database was created by a newer Ladybird version; favicons and history will not be persisted this session");
@@ -2475,6 +2476,11 @@ NonnullRefPtr<Core::Promise<Empty>> Application::clear_browsing_data(ClearBrowsi
 
     if (options.delete_history == ClearBrowsingDataOptions::Delete::Yes) {
         m_default_session->history_store->remove_entries_accessed_since(options.since);
+        // Fork hook (Arc profiles): each profile keeps its own history.
+        for (auto const& weak_session : m_profile_sessions) {
+            if (auto session = weak_session.strong_ref())
+                session->history_store->remove_entries_accessed_since(options.since);
+        }
         if (auto result = m_default_session->session_store->remove_entries_accessed_since(options.since); result.is_error())
             dbgln("Unable to remove closed session entries: {}", result.error());
         if (auto private_session = m_private_session.strong_ref()) {

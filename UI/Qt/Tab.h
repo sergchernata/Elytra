@@ -180,6 +180,9 @@ public:
     // reopened) in the session of the profile it belongs to, rather than the profile shown at the time. `tab` is null
     // when the view is made along with the tab.
     static inline Function<void(Tab const* tab, URL::URL const& url, Function<void()> const& create_view)> create_returning_view;
+    // Fork hook (Arc profiles): the session whose history knows a restored tab's title and icon until it loads (its
+    // profile's); null for the window's.
+    static inline Function<RefPtr<WebView::BrowsingSession>(URL::URL const& url)> session_for_returning_tab;
 
 public slots:
     void focus_location_editor();

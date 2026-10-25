@@ -131,7 +131,7 @@ pid_t ViewImplementation::web_content_pid() const
 
 Vector<HistoryEntry> ViewImplementation::recent_history_entries(size_t limit) const
 {
-    return m_session->records().history_store->list_entries({}, 0, limit);
+    return m_session->history_store->list_entries({}, 0, limit);
 }
 
 CanonicalTraversable& ViewImplementation::traversable() const
@@ -248,13 +248,20 @@ void ViewImplementation::set_favicon(Optional<Gfx::Bitmap const&> favicon)
     m_favicon_hash.clear();
 
     if (favicon.has_value()) {
-        if (auto favicon_png = Gfx::PNGWriter::encode(*favicon); !favicon_png.is_error())
-            m_favicon_hash = m_session->records().favicon_store->add_favicon(favicon_png.release_value());
+        if (auto favicon_png = Gfx::PNGWriter::encode(*favicon); !favicon_png.is_error()) {
+            // Fork hook (Arc profiles): bookmarks are the default session's, and find their icons by hash in its store.
+            // Only the image goes there, never the address it came from.
+            if (m_session->is_profile_session() && m_is_private == IsPrivate::No) {
+                if (auto copy = ByteBuffer::copy(favicon_png.value()); !copy.is_error())
+                    (void)Application::default_session().favicon_store->add_favicon(copy.release_value());
+            }
+            m_favicon_hash = m_session->favicon_store->add_favicon(favicon_png.release_value());
+        }
 
         if (m_favicon_hash.has_value()) {
             if (m_is_private == IsPrivate::No)
                 Application::bookmark_store().update_favicon(url(), *m_favicon_hash);
-            m_session->records().history_store->update_favicon(url(), *m_favicon_hash);
+            m_session->history_store->update_favicon(url(), *m_favicon_hash);
         }
     }
 
@@ -626,7 +633,7 @@ Vector<ViewImplementation::SessionHistoryTraversalMenuItem> ViewImplementation::
     auto append_item = [&](size_t target_step_index) {
         auto target_step = used_steps[target_step_index];
         auto const& target_entry = *session_history.top_level_entry_for_step(target_step);
-        auto history_entry = m_session->records().history_store->entry_for_url(target_entry.url);
+        auto history_entry = m_session->history_store->entry_for_url(target_entry.url);
         auto url = target_entry.url.serialize();
         auto title = history_entry.has_value() && history_entry->title.has_value() && !history_entry->title->is_empty()
             ? move(*history_entry->title)
