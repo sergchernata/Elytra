@@ -8,6 +8,7 @@
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
+#include <LibWebView/ExtensionRegistry.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcSelfTest.h>
@@ -196,6 +197,7 @@ private:
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
     void tabs_come_back_in_their_own_profile();
+    void extension_buttons_open_their_popups();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
     void background_tabs_show_while_loading_and_stay_open();
@@ -1441,6 +1443,57 @@ void SelfTest::profiles_get_their_own_session()
 // A tab's cookies come from the session its view is made in. Tabs coming back (restored at launch, reopened after
 // closing) and tabs a page opens are made in their own profile's session, never in the profile shown at the time:
 // else the page loads with the other profile's cookies (and leaves its own there) before the sidebar reopens it.
+// An extension's button sits in the sidebar's top strip; clicking it opens the extension's popup, which fits its page,
+// and removing the extension takes the button away.
+void SelfTest::extension_buttons_open_their_popups()
+{
+    auto source = qEnvironmentVariable("LADYBIRD_SOURCE_DIR");
+    if (source.isEmpty()) {
+        check(false, "LADYBIRD_SOURCE_DIR names the source tree, for the test extension");
+        return;
+    }
+    auto& registry = WebView::Application::extension_registry();
+    auto installed = registry.install_unpacked(ak_byte_string_from_qstring(source + "/Tests/LibWebExtensions/Fixtures/extensions/action"));
+    check(!installed.is_error(), "the test extension installs");
+    if (installed.is_error())
+        return;
+    auto id = installed.value()->id();
+
+    auto find_button = [&]() -> QToolButton* {
+        for (auto* button : window().findChildren<QToolButton*>()) {
+            if (button->toolTip() == "Default title" && button->isVisible())
+                return button;
+        }
+        return nullptr;
+    };
+    check(wait_until([&] { return find_button() != nullptr; }), "its button shows in the sidebar's top strip");
+    auto* button = find_button();
+    if (!button)
+        return;
+    check(!button->icon().isNull(), "with the extension's icon");
+
+    auto find_popup = []() -> QWidget* {
+        for (auto* widget : QApplication::topLevelWidgets()) {
+            if (widget->isVisible() && (widget->windowFlags() & Qt::Popup) == Qt::Popup && widget->findChild<WebContentView*>())
+                return widget;
+        }
+        return nullptr;
+    };
+    button->click();
+    check(wait_until([&] { return find_popup() != nullptr; }), "clicking it opens the popup");
+    // popup.html is one short paragraph: the popup shrinks from its first size to fit it.
+    check(wait_until([&] { auto* popup = find_popup(); return popup && popup->height() < 120 && popup->width() < 320; }), "the popup fits its page",
+        find_popup() ? QString("%1x%2").arg(find_popup()->width()).arg(find_popup()->height()) : QString("no popup"));
+    if (auto* popup = find_popup()) {
+        auto below = button->mapToGlobal(QPoint(0, button->height()));
+        check(popup->geometry().top() >= below.y(), "below its button");
+        popup->close();
+    }
+
+    check(!registry.uninstall(id).is_error(), "the extension uninstalls");
+    check(wait_until([&] { return find_button() == nullptr; }), "and its button goes");
+}
+
 void SelfTest::tabs_come_back_in_their_own_profile()
 {
     auto beta_session = session_for_profile("SelfTest");
@@ -2455,6 +2508,7 @@ int SelfTest::run()
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
     tabs_come_back_in_their_own_profile();
+    extension_buttons_open_their_popups();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
     background_tabs_show_while_loading_and_stay_open();
