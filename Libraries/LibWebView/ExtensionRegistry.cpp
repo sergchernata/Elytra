@@ -1014,7 +1014,11 @@ static Optional<String> decode_xml_attribute(StringView value)
         if (!entity("&amp;"sv, '&') && !entity("&lt;"sv, '<') && !entity("&gt;"sv, '>') && !entity("&quot;"sv, '"') && !entity("&apos;"sv, '\''))
             return {};
     }
-    return builder.to_string().release_value_but_fixme_should_propagate_errors();
+    // Not UTF-8: a broken response.
+    auto decoded = builder.to_string();
+    if (decoded.is_error())
+        return {};
+    return decoded.release_value();
 }
 
 static ErrorOr<Optional<UpdateCheck>> parse_update_check(StringView xml, StringView id)

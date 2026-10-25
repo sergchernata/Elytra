@@ -876,6 +876,14 @@ void installed_extensions_update_from_the_web_store(ByteString const& directory)
     CHECK(fails(update_response(id, "ok"sv, ""sv, "3.0"sv, version_3)));
     CHECK(fails(update_response(id, "ok"sv, codebase_3, "../3"sv, version_3), codebase_3, version_3));
     CHECK(fails(update_response(id, "error-unknownApplication"sv)));
+    // Bytes that aren't UTF-8, in any attribute, are a broken response rather than a crash.
+    CHECK(fails(update_response(id, "ok\xff"sv, codebase_3, "3.0"sv, version_3), codebase_3, version_3));
+    {
+        auto response = update_response(id, "ok"sv, codebase_3, "3.0"sv, version_3).replace("<app appid=\""sv, "<app appid=\"\xff"sv);
+        store.respond(update_url_for(id, "2.0"sv), 200, {}, bytes_of(response));
+        auto checked = check_for_updates(registry);
+        CHECK(checked.size() == 1 && !checked[0].updated_to.has_value());
+    }
 
     // An older or equal version on offer isn't downloaded.
     store.requests.clear();
