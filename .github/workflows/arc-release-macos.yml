@@ -106,7 +106,7 @@ jobs:
         id: package
         run: |
           # Upstream's packager makes the bundle self-contained (Qt and libraries inside) and signs it ad hoc.
-          "${{ env.pythonLocation }}/bin/python" Meta/package-macos-app-bundle.py \
+          "${{ env.pythonLocation }}/bin/python" Meta/package-macos-test-bundle.py \
             --build-dir Build --install-dir Install --output ladybird-app-bundle.tar.gz
 
           TAG="${{ steps.release.outputs.tag }}"

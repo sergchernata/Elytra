@@ -84,6 +84,9 @@ if [ -f .git/MERGE_HEAD ]; then
     git_retrying commit --no-edit
 fi
 
+say "Checking Elytra's workflows"
+Meta/elytra-check-workflows.sh
+
 say "Building"
 ninja -C "$BUILD_DIR"
 
