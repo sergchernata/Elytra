@@ -56,6 +56,14 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
         MUST(harness.registry.load_unpacked(fixture("action"sv)));
 
+        // What happens while the background is still starting reaches it once it has: Chrome wakes its service worker.
+        action.command(extension_id, "lock"sv, 4);
+        {
+            auto early = report_of(harness.view, page("command"sv));
+            CHECK_EQ(string_in(early, "command"sv), "lock"sv);
+            CHECK_EQ(early.get_integer<i64>("command_tab"sv).value_or(-1), 4);
+        }
+
         // The manifest's button, before anything changes it.
         auto initial = action.state_for(extension_id);
         CHECK(initial.has_value());

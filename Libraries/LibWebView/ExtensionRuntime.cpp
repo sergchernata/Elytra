@@ -475,6 +475,15 @@ void ExtensionRuntime::call_function(StringView name, Context const& context, Js
 
 void ExtensionRuntime::dispatch_event(StringView extension_id, StringView event, JsonArray arguments)
 {
+    // An event while the extension's background is starting waits for it, as Chrome wakes a service worker for one:
+    // else the background, which is what listens, would miss it.
+    if (background_is_starting(extension_id)) {
+        wait_for_background(extension_id, [this, extension_id = MUST(String::from_utf8(extension_id)), event = MUST(String::from_utf8(event)), arguments = move(arguments)]() mutable {
+            dispatch_event(extension_id, event, move(arguments));
+        });
+        return;
+    }
+
     for (auto const& [id, context] : m_contexts) {
         if (context->extension_id != extension_id)
             continue;
@@ -692,6 +701,10 @@ void ExtensionRuntime::wait_for_background(StringView extension_id, Function<voi
 {
     auto background = m_backgrounds.find(extension_id);
     VERIFY(background != m_backgrounds.end());
+    // A background that never finishes starting doesn't gather what waits for it without end.
+    static constexpr size_t maximum_waiting = 1000;
+    if (background->value.waiting.size() >= maximum_waiting)
+        return;
     background->value.waiting.append(move(callback));
 }
 

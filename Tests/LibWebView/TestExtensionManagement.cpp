@@ -61,8 +61,10 @@ void lifecycle_events(Harness& harness)
     MUST(harness.registry.install_unpacked(fixture("permissions"sv)));
     harness.registry.set_allows_file_access(management_id, true);
 
+    // It also hears of the two installed after it, though its background was still starting: what happens meanwhile waits
+    // for the background.
     auto report = report_of(harness.view, page(management_id, "lifecycle"sv));
-    CHECK_EQ(string_in(report, "events"sv), R"([{"onInstalled":{"reason":"install"}}])"sv);
+    CHECK_EQ(string_in(report, "events"sv), MUST(String::formatted(R"([{{"onInstalled":{{"reason":"install"}}}},{{"management.onInstalled":"{}"}},{{"management.onInstalled":"{}"}}])", other_id, permissions_id)));
 
     report = report_of(harness.view, page(other_id, "lifecycle"sv));
     CHECK_EQ(string_in(report, "events"sv), R"([{"onStartup":{}}])"sv);
