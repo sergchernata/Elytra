@@ -791,6 +791,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         m_stats_log->start_sampling();
     TRY(launch_services());
 
+    // Installed extensions, once the event loop runs (their backgrounds need the rest of the browser). Tests install
+    // their own.
+    if (m_web_content_options.is_test_mode == IsTestMode::No && m_browser_options.disable_sql_database == DisableSQLDatabase::No) {
+        m_extension_registry.set_extensions_directory(LexicalPath::join(profile().paths().data, "Extensions"sv).string());
+        Core::deferred_invoke([] {
+            if (auto result = extension_registry().load_installed_extensions(); result.is_error())
+                warnln("Unable to load the installed extensions: {}", result.error());
+        });
+    }
+
     if (m_web_content_options.is_test_mode == IsTestMode::No && m_browser_options.enable_content_blocker == EnableContentBlocker::Yes) {
         m_content_blocker_list_update_timer = Core::Timer::create_repeating(AK::Duration::from_seconds(24 * 60 * 60), [this] {
             start_content_blocker_list_update(ContentBlockerListUpdateTrigger::Automatic);
