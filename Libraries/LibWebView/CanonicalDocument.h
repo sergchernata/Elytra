@@ -95,6 +95,8 @@ public:
     // The host of the WebUI the document displays, if it was created from the about: URL of a page with a channel to
     // the UI process.
     Optional<String> const& web_ui_host() const { return m_web_ui_host; }
+    // The extension whose document this is, by ID: one of its pages, or a document of its origin.
+    Optional<String> const& extension_host() const { return m_extension_host; }
 
     void make_active();
 
@@ -114,6 +116,7 @@ private:
     u32 m_unload_counter { 0 };
     bool m_is_local_file_content { false };
     Optional<String> m_web_ui_host;
+    Optional<String> m_extension_host;
     RefPtr<WebContentPage> m_host;
 };
 

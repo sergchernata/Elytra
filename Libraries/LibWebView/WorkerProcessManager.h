@@ -117,6 +117,7 @@ private:
     void worker_did_die(Web::HTML::WorkerAgentId);
     void worker_process_did_exit(WebWorkerClient&);
     void worker_did_request_file(Web::HTML::WorkerAgentId, ByteString path, i32 request_id);
+    void worker_did_request_extension_file(Web::HTML::WorkerAgentId, String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id);
 
     enum class AgentRemovalCause {
         OwnerSetEmptied,

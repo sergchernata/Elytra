@@ -11,6 +11,7 @@
 #include <LibCore/Resource.h>
 #include <LibGC/Root.h>
 #include <LibJS/Runtime/ExecutionContext.h>
+#include <LibJS/Runtime/JSONObject.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Script.h>
 #include <LibURL/Parser.h>
@@ -31,6 +32,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/WebIDL/Promise.h>
 #include <LibWebExtensions/MatchPattern.h>
 
 namespace Web::Extensions {
@@ -239,6 +241,29 @@ static void run_script(JS::Realm& realm, JS::ExecutionContext* world_execution_c
         vm.pop_execution_context();
 }
 
+static JsonObject json_of(HTML::CrossProcessId id)
+{
+    JsonObject object;
+    object.set("ns"sv, id.namespace_id);
+    object.set("id"sv, id.local_id);
+    return object;
+}
+
+// What the browser hears of a frame's documents, for chrome.webNavigation: "committed", "dom_content_loaded" and
+// "completed", as a message for no context.
+static void report_navigation(DOM::Document& document, StringView event)
+{
+    auto navigable = document.navigable();
+    if (s_extensions.is_empty() || !navigable || document.is_initial_about_blank())
+        return;
+    JsonObject message;
+    message.set("type"sv, "navigation"sv);
+    message.set("event"sv, event);
+    message.set("navigable"sv, json_of(navigable->id()));
+    message.set("url"sv, document.url().serialize());
+    document.page().client().page_did_post_extension_message(0, message.serialized());
+}
+
 static String context_info(InstalledExtension const& extension, u64 context_id, StringView context_type)
 {
     JsonObject info;
@@ -274,6 +299,13 @@ static void start_context(DOM::Document& document, InstalledExtension const& ext
     s_contexts.set(context_id, move(context));
 
     document.page().client().page_did_create_extension_context(context_id, extension.id, MUST(String::from_utf8(context_type)), document.url(), is_top_level(document));
+    // The frame it's in, for the browser to know its tab and frame.
+    if (auto navigable = document.navigable()) {
+        JsonObject frame;
+        frame.set("type"sv, "frame"sv);
+        frame.set("navigable"sv, json_of(navigable->id()));
+        document.page().client().page_did_post_extension_message(context_id, frame.serialized());
+    }
     run_script(realm, execution_context, api_source(), "chrome-api.js"sv);
 }
 
@@ -370,6 +402,7 @@ static void run_content_scripts(DOM::Document& document, RunAt run_at)
 
 void document_is_ready_to_run_scripts(DOM::Document& document)
 {
+    report_navigation(document, "committed"sv);
     auto const& url = document.url();
     if (url.scheme() == "chrome-extension"sv && document.window()) {
         if (auto const* extension = find_extension(url.serialized_host())) {
@@ -382,10 +415,13 @@ void document_is_ready_to_run_scripts(DOM::Document& document)
 
 void document_readiness_changed(DOM::Document& document, HTML::DocumentReadyState readiness)
 {
-    if (readiness == HTML::DocumentReadyState::Interactive)
+    if (readiness == HTML::DocumentReadyState::Interactive) {
+        report_navigation(document, "dom_content_loaded"sv);
         run_content_scripts(document, RunAt::DocumentEnd);
-    else if (readiness == HTML::DocumentReadyState::Complete)
+    } else if (readiness == HTML::DocumentReadyState::Complete) {
+        report_navigation(document, "completed"sv);
         run_content_scripts(document, RunAt::DocumentIdle);
+    }
 }
 
 void document_is_going_away(DOM::Document& document)
@@ -402,6 +438,80 @@ void document_is_going_away(DOM::Document& document)
             context.world->detach();
         document.page().client().page_did_destroy_extension_context(id);
     }
+}
+
+static void report_script_result(Page& page, u64 request_id, Optional<String> result, Optional<StringView> error = {})
+{
+    JsonObject message;
+    message.set("type"sv, "script_result"sv);
+    message.set("request"sv, request_id);
+    if (error.has_value())
+        message.set("error"sv, *error);
+    else if (result.has_value())
+        message.set("result"sv, *result);
+    page.client().page_did_post_extension_message(0, message.serialized());
+}
+
+void run_extension_script(Page& page, u64 request_id, HTML::CrossProcessId navigable_id, String const& extension_id, bool main_world, String const& source, String const& filename)
+{
+    auto const* extension = find_extension(extension_id);
+    auto navigable = HTML::navigable_with_id_in_any_page(page, navigable_id);
+    GC::Ptr<DOM::Document> document;
+    if (navigable && &navigable->page() == &page && navigable->is_local_navigable())
+        document = as<HTML::LocalNavigable>(*navigable).active_document();
+    if (!extension || !document || !document->window() || !document->browsing_context())
+        return report_script_result(page, request_id, {}, "The frame was removed."sv);
+
+    JS::Realm* realm = nullptr;
+    JS::ExecutionContext* world_execution_context = nullptr;
+    if (main_world) {
+        realm = &document->window()->principal_realm();
+    } else {
+        auto* context = content_script_context(*document, *extension);
+        if (!context)
+            return report_script_result(page, request_id, {}, "The frame was removed."sv);
+        realm = context->realm.ptr();
+        world_execution_context = context->execution_context.ptr();
+    }
+
+    auto& vm = realm->vm();
+    HTML::TemporaryExecutionContext temporary_context { *realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+    if (world_execution_context)
+        vm.push_execution_context(*world_execution_context);
+    ScopeGuard pop_world = [&] {
+        if (world_execution_context)
+            vm.pop_execution_context();
+    };
+
+    auto script = JS::Script::parse(Utf16String::from_utf8(source), *realm, filename);
+    if (script.is_error()) {
+        auto error = script.error().first().to_utf16_string().to_utf8();
+        return report_script_result(page, request_id, {}, error.bytes_as_string_view());
+    }
+    auto completion = vm.run(script.value());
+    if (completion.is_throw_completion()) {
+        // As in Chrome, a script that throws reports it in the page's console, and has no result.
+        HTML::report_exception(completion, *realm);
+        return report_script_result(page, request_id, {});
+    }
+
+    // A promise is awaited, and what it resolves to is the result.
+    auto page_ref = GC::Ref { page };
+    auto promise = WebIDL::create_resolved_promise(*realm, completion.value());
+    auto fulfilled = GC::create_function(vm.heap(), [page_ref, request_id, realm = GC::Ref { *realm }](JS::Value value) -> WebIDL::ExceptionOr<JS::Value> {
+        auto json = JS::JSONObject::stringify_impl(realm->vm(), value, JS::js_undefined(), JS::js_undefined());
+        Optional<String> result;
+        if (!json.is_error() && json.value().has_value())
+            result = json.value()->to_utf8();
+        report_script_result(page_ref, request_id, move(result));
+        return JS::js_undefined();
+    });
+    auto rejected = GC::create_function(vm.heap(), [page_ref, request_id, realm = GC::Ref { *realm }](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
+        HTML::report_exception_to_console(reason, realm, HTML::ErrorInPromise::Yes);
+        report_script_result(page_ref, request_id, {});
+        return JS::js_undefined();
+    });
+    WebIDL::react_to_promise(promise, fulfilled, rejected);
 }
 
 void deliver_message(u64 context_id, String const& message)

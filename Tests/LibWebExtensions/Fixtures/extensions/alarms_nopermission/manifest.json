@@ -1,0 +1,6 @@
+{
+    "manifest_version": 3,
+    "name": "Alarms test extension without permissions",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzlubfLGNnH602RqVw2J9voM+BKDi8jAiH1dysGbHpv6nZGH6cZqq88F5cOPBGGZYhvrjmUli40RTyewvZvUDTpRsWj6l72w40sbDYYzDfn9F5xP9wE5vzefEokXMlYue7KRD0MvzgdY0xuomG/VH6hCiyIYINC8FcliQEPoZFRdcvbg9aMJFB2c3DV1cwf7/5hm8SaDBCQWe2mn+skcfzRGa1L3D8MOS/cqYOqwry9f960VqyM+mwR3pi1YKlgPF3/6rWewoHEyeIb2MIj339A6htVCO9Am652K2k1kD3SEmRdzcUtJzRBLpYQtdd18Xu1YyiiL03itDEUvN3zVKvQIDAQAB"
+}

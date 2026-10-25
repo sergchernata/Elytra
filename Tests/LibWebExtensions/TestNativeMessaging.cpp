@@ -6,12 +6,15 @@
 
 #include <AK/JsonObject.h>
 #include <AK/LexicalPath.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
 #include <LibCore/StandardPaths.h>
 #include <LibCore/System.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibTest/TestCase.h>
 #include <LibWebExtensions/NativeMessaging.h>
+
+#include <sys/wait.h>
 
 static constexpr auto extension_id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"sv;
 static constexpr auto other_extension_id = "dppgmdbiimibapkepcbdbmkaabgiofem"sv;
@@ -532,4 +535,174 @@ TEST_CASE(connection_rejects_invalid_extension_id)
     auto manifest = host_manifest("/bin/cat"sv);
     EXPECT(WebExtensions::NativeHostConnection::launch(manifest, "not-an-id"sv).is_error());
     EXPECT(WebExtensions::NativeHostConnection::launch(manifest, other_extension_id).is_error());
+}
+
+TEST_CASE(connection_starts_in_the_host_directory)
+{
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto cwd_path = LexicalPath::join(test_root(), "cwd"sv).string();
+    auto script = write_host_script(directory, "cwd-host"sv, ByteString::formatted("pwd -P > '{}'", cwd_path));
+
+    auto connection = TRY_OR_FAIL(WebExtensions::NativeHostConnection::launch(host_manifest(script), extension_id));
+    auto messages = receive_messages(*connection, 1);
+    EXPECT(messages.is_empty());
+    connection->close();
+
+    auto cwd = MUST(MUST(Core::File::open(cwd_path, Core::File::OpenMode::Read))->read_until_eof());
+    auto real_directory = MUST(FileSystem::real_path(directory));
+    EXPECT_EQ(StringView(cwd).trim_whitespace(), real_directory.view());
+    remove_test_root();
+}
+
+// The event loop's kind of connection, as the browser uses.
+static void spin_until(Function<bool()> condition)
+{
+    auto deadline = MonotonicTime::now() + AK::Duration::from_seconds(10);
+    Core::EventLoop::current().spin_until([&] { return condition() || MonotonicTime::now() > deadline; });
+}
+
+TEST_CASE(process_round_trip_in_order)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "echo-host"sv, "exec cat"sv);
+
+    auto process = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    Vector<JsonValue> received;
+    Optional<WebExtensions::NativeHostProcess::Ending> ending;
+    process->on_message = [&](JsonValue message) { received.append(move(message)); };
+    process->on_end = [&](auto how) { ending = how; };
+
+    // More than a pipe holds, so writes have to wait for the host to read.
+    constexpr size_t count = 2000;
+    auto padding = MUST(String::repeated('p', 1000));
+    for (size_t i = 0; i < count; ++i) {
+        JsonObject message;
+        message.set("seq"sv, i);
+        message.set("padding"sv, padding);
+        TRY_OR_FAIL(process->send(message));
+    }
+    EXPECT(process->queued_bytes() > 0u);
+
+    spin_until([&] { return received.size() == count || ending.has_value(); });
+    EXPECT_EQ(received.size(), count);
+    bool in_order = true;
+    for (size_t i = 0; i < received.size(); ++i)
+        in_order = in_order && received[i].as_object().get_u64("seq"sv) == i;
+    EXPECT(in_order);
+    EXPECT(!ending.has_value());
+
+    process->close();
+    EXPECT(process->is_closed());
+    EXPECT(process->send(JsonValue(1)).is_error());
+    spin_until([] { return WebExtensions::NativeHostProcess::ending_count() == 0; });
+    EXPECT_EQ(WebExtensions::NativeHostProcess::ending_count(), 0u);
+    remove_test_root();
+}
+
+TEST_CASE(process_reports_exit)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "exit-host"sv, "exit 0"sv);
+
+    auto process = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    Optional<WebExtensions::NativeHostProcess::Ending> ending;
+    process->on_end = [&](auto how) { ending = how; };
+    // Writing to a host that's gone doesn't hurt us.
+    for (int i = 0; i < 1000; ++i)
+        (void)process->send(JsonValue("payload"sv));
+    spin_until([&] { return ending.has_value(); });
+    EXPECT(ending == WebExtensions::NativeHostProcess::Ending::Exited);
+    EXPECT(process->is_closed());
+    remove_test_root();
+}
+
+TEST_CASE(process_rejects_bad_output)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "garbage-host"sv, "printf 'xxxxxxxxxxxx'\nexec cat > /dev/null"sv);
+
+    auto process = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    Optional<WebExtensions::NativeHostProcess::Ending> ending;
+    process->on_end = [&](auto how) { ending = how; };
+    spin_until([&] { return ending.has_value(); });
+    EXPECT(ending == WebExtensions::NativeHostProcess::Ending::BadOutput);
+    remove_test_root();
+}
+
+TEST_CASE(process_may_be_dropped_from_its_callbacks)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "echo-host"sv, "exec cat"sv);
+
+    RefPtr<WebExtensions::NativeHostProcess> process = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    size_t received = 0;
+    process->on_message = [&](JsonValue) {
+        ++received;
+        process->close();
+        process = nullptr;
+    };
+    TRY_OR_FAIL(process->send(JsonValue(1)));
+    TRY_OR_FAIL(process->send(JsonValue(2)));
+    spin_until([&] { return !process; });
+    EXPECT_EQ(received, 1u);
+    remove_test_root();
+}
+
+TEST_CASE(process_that_ignores_its_stdin_is_killed)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "stubborn-host"sv, "trap '' TERM\nexec sleep 60"sv);
+
+    auto process = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    spin_until([] { return WebExtensions::NativeHostProcess::ending_count() == 0; });
+    auto start = MonotonicTime::now();
+    process->close();
+    // close() didn't wait for it.
+    EXPECT((MonotonicTime::now() - start).to_milliseconds() < 500);
+    EXPECT_EQ(WebExtensions::NativeHostProcess::ending_count(), 1u);
+    // The grace period comes first.
+    spin_until([&] { return (MonotonicTime::now() - start).to_milliseconds() > 1000; });
+    EXPECT_EQ(WebExtensions::NativeHostProcess::ending_count(), 1u);
+    spin_until([] { return WebExtensions::NativeHostProcess::ending_count() == 0; });
+    EXPECT_EQ(WebExtensions::NativeHostProcess::ending_count(), 0u);
+    remove_test_root();
+}
+
+TEST_CASE(processes_end_at_shutdown)
+{
+    Core::EventLoop loop;
+    remove_test_root();
+    auto directory = make_directory("hosts"sv);
+    auto script = write_host_script(directory, "stubborn-host"sv, "exec sleep 60"sv);
+
+    auto first = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    auto second = TRY_OR_FAIL(WebExtensions::NativeHostProcess::launch(host_manifest(script), extension_id));
+    auto start = MonotonicTime::now();
+    WebExtensions::NativeHostProcess::end_all(AK::Duration::from_milliseconds(100));
+    EXPECT((MonotonicTime::now() - start).to_milliseconds() < 1000);
+    EXPECT(first->is_closed());
+    EXPECT(second->is_closed());
+    EXPECT_EQ(WebExtensions::NativeHostProcess::ending_count(), 0u);
+    // Both are gone: nothing is left to reap.
+    EXPECT(Core::System::waitpid(first->pid(), WNOHANG).is_error());
+    EXPECT(Core::System::waitpid(second->pid(), WNOHANG).is_error());
+    remove_test_root();
+}
+
+TEST_CASE(process_to_missing_executable)
+{
+    auto manifest = host_manifest("/nonexistent/native/host"sv);
+    EXPECT(WebExtensions::NativeHostProcess::launch(manifest, extension_id).is_error());
+    EXPECT(WebExtensions::NativeHostProcess::launch(host_manifest("/bin/cat"sv), other_extension_id).is_error());
 }

@@ -1,0 +1,16 @@
+{
+    "manifest_version": 3,
+    "name": "Management test extension",
+    "short_name": "Management",
+    "version": "1.0",
+    "version_name": "1.0 beta",
+    "description": "Exercises chrome.management, chrome.privacy and chrome.runtime",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3G77KRwJby0eszX6ZtQPFeA9ZqL+/0EABX6vP1x1AlRob4aBE/eVjTP6+A0whNOcxLTi+bhIlWucnjr3tuTp+bTzyZXY+lqjUe3Y6ghjsMFjnpPUowc3+DizAJv6BHuVvw9Ddhwx+Eqb17K2r18pD/QqZCnFbJt9LklkkptL5RBxBNCguHJtU5F2yEbkHyTEUTm15gRKtXn+hB+RllskHOvP78Ek69VFtdxSUAER3xmaUFXezSiFqqhY5UYSTW5/7Cyndoz3CfNL+khgGqNSBGQXvyFAjvoGREU7oLh4n6lTIXwjrXszc1gGjFAID5JkRJV4SqxZwrV74/lXYmsqrwIDAQAB",
+    "permissions": ["management", "privacy", "storage"],
+    "host_permissions": ["https://granted.example/*"],
+    "homepage_url": "https://example.com/home",
+    "options_ui": { "page": "options.html" },
+    "icons": { "128": "icon128.png", "16": "icon16.png" },
+    "offline_enabled": true,
+    "background": { "service_worker": "background.js" }
+}

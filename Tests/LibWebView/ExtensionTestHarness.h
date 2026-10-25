@@ -18,6 +18,7 @@
 #include <LibCore/File.h>
 #include <LibCore/StandardPaths.h>
 #include <LibCore/System.h>
+#include <LibCore/Timer.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibMain/Main.h>
@@ -87,7 +88,11 @@ inline JsonObject report_of(WebView::HeadlessWebView& view, URL::URL const& url)
     view.load(url);
 
     auto deadline = MonotonicTime::now() + AK::Duration::from_seconds(15);
+    // Wakes the loop, so the deadline passes even when nothing else happens.
+    auto wake = Core::Timer::create_repeating(AK::Duration::from_milliseconds(100), [] { });
+    wake->start();
     Core::EventLoop::current().spin_until([&] { return report.has_value() || MonotonicTime::now() > deadline; });
+    wake->stop();
     view.on_title_change = nullptr;
 
     if (!report.has_value()) {

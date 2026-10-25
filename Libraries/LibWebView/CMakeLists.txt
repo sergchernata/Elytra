@@ -30,6 +30,7 @@ set(SOURCES
     DownloadPresentation.cpp
     DownloadSegmentation.cpp
     DownloadStore.cpp
+    ExtensionAPI/Action.cpp
     ExtensionAPI/Alarms.cpp
     ExtensionAPI/Management.cpp
     ExtensionAPI/NativeMessaging.cpp

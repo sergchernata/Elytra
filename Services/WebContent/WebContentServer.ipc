@@ -86,6 +86,7 @@ endpoint WebContentServer routed by Web::PageId page_id
     connect_to_web_ui(Web::PageId page_id, IPC::TransportHandle handle) =|
     set_installed_extensions(Web::PageId page_id, String extensions) =|
     deliver_extension_message(Web::PageId page_id, u64 context_id, String message) =|
+    run_extension_script(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, String extension_id, bool main_world, String source, String filename) =|
     connect_to_request_server(IPC::TransportHandle handle, int client_id) =|
     connect_to_test_endpoint(IPC::TransportHandle handle) =|
     connect_to_image_decoder(IPC::TransportHandle handle) =|

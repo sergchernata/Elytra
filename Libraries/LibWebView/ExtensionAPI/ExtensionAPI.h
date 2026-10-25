@@ -7,8 +7,10 @@
 #pragma once
 
 #include <AK/Forward.h>
+#include <AK/Function.h>
 #include <AK/Noncopyable.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Time.h>
 #include <AK/kmalloc.h>
 #include <LibWebView/Export.h>
 
@@ -28,6 +30,8 @@ public:
 
     // A context of an extension is gone (its page closed or navigated away).
     virtual void context_destroyed(u64 /* context_id */) { }
+    // A context added or removed a listener to the event.
+    virtual void listeners_changed(u64 /* context_id */, StringView /* event */) { }
     // An extension was installed, replaced or removed.
     virtual void extensions_changed() { }
     // The browser is shutting down, while the rest of the application is still whole.
@@ -47,9 +51,19 @@ private:
 
 // The parts, each in ExtensionAPI/<Name>.cpp.
 NonnullOwnPtr<ExtensionAPI> create_storage_api(ExtensionRuntime&);
+NonnullOwnPtr<ExtensionAPI> create_action_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_alarms_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_native_messaging_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_tabs_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_management_api(ExtensionRuntime&);
+
+// For tests (ExtensionAPI/Alarms.cpp): until called, chrome.alarms keeps Chrome's 30-second minimum and chrome.idle
+// asks the system.
+struct IdleState {
+    AK::Duration idle_time;
+    bool screen_locked { false };
+};
+WEBVIEW_API void set_minimum_alarm_delay_for_testing(AK::Duration);
+WEBVIEW_API void set_idle_state_source_for_testing(Function<IdleState()>, AK::Duration poll_interval);
 
 }

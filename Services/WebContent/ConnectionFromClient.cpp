@@ -432,6 +432,12 @@ void ConnectionFromClient::deliver_extension_message(Web::PageId, u64 context_id
     Web::Extensions::deliver_message(context_id, message);
 }
 
+void ConnectionFromClient::run_extension_script(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, String extension_id, bool main_world, String source, String filename)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        Web::Extensions::run_extension_script(page->page(), request_id, navigable_id, extension_id, main_world, source, filename);
+}
+
 void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
 {
     if (on_image_decoder_connection)

@@ -1486,6 +1486,22 @@ bool WebContentPage::populates_a_navigation_to_local_file(ByteString const& path
     return result;
 }
 
+// FIXME: Also a history entry's, as for local files.
+bool WebContentPage::populates_a_navigation_to_extension_file(StringView extension_id, ByteString const& path) const
+{
+    bool result = false;
+    traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        auto navigation = navigable.uncommitted_navigation();
+        result = navigation
+            && navigation->worker() == this
+            && navigation->url.scheme() == "chrome-extension"sv
+            && navigation->url.serialized_host() == extension_id
+            && navigation->url.file_path() == path;
+        return result ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return result;
+}
+
 void WebContentPage::did_request_file(ByteString path, i32 request_id)
 {
     // NB: The renderer's sandbox keeps it out of the local file system, so this is the only way it can read a file.
@@ -1520,7 +1536,10 @@ void WebContentPage::did_post_extension_message(u64 context_id, String message)
 
 void WebContentPage::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
 {
-    // NB: The registry gives a page that isn't the extension's only the files it makes web accessible to that page.
+    // NB: The registry gives a page that isn't the extension's only the files it makes web accessible to that page. A
+    //     renderer names the requester itself, though: only a process hosting the extension's pages may speak for it.
+    if (!client().may_speak_for_extension(extension_id) && !populates_a_navigation_to_extension_file(extension_id, path) && (!requester.has_value() || (!requester->is_opaque() && requester->scheme() == "chrome-extension"sv && requester->host().serialize() == extension_id)))
+        requester = URL::Origin::create_opaque();
     auto file = Application::extension_registry().open_file(extension_id, path, requester);
     if (file.is_error())
         async_handle_file_return(file.error().code(), {}, request_id);

@@ -111,6 +111,7 @@ private:
     virtual void connect_to_web_ui(Web::PageId page_id, IPC::TransportHandle handle) override;
     virtual void set_installed_extensions(Web::PageId page_id, String extensions) override;
     virtual void deliver_extension_message(Web::PageId page_id, u64 context_id, String message) override;
+    virtual void run_extension_script(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, String extension_id, bool main_world, String source, String filename) override;
     virtual void connect_to_request_server(IPC::TransportHandle handle, int client_id) override;
     virtual void connect_to_test_endpoint(IPC::TransportHandle handle) override;
     virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;

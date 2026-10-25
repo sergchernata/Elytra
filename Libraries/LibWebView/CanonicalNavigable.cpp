@@ -735,10 +735,13 @@ RefPtr<WebContentClient> CanonicalNavigable::process_to_host(CanonicalDocument c
     if (site_isolation_mode() == SiteIsolationMode::Disabled)
         return process;
     auto process_has_hosted_local_file_content = process && process->has_hosted_local_file_content();
-    auto process_has_hosted_web_ui = process && process->hosted_web_ui().has_value();
+    // NB: A process an extension's pages run in speaks for the extension, as one hosting a WebUI speaks for the WebUI.
+    auto process_has_hosted_web_ui = process && (process->hosted_web_ui().has_value() || process->hosted_extension().has_value());
 
     if (document.web_ui_host().has_value())
         return process && process->hosted_web_ui() == document.web_ui_host() ? process : nullptr;
+    if (document.extension_host().has_value())
+        return process && process->hosted_extension() == document.extension_host() ? process : nullptr;
     if (document.is_local_file_content())
         return process_has_hosted_local_file_content ? process : nullptr;
     if (!process_has_hosted_local_file_content && !process_has_hosted_web_ui)
@@ -769,6 +772,8 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host(C
         page->client().set_has_hosted_local_file_content();
     if (auto const& web_ui_host = document.web_ui_host(); web_ui_host.has_value())
         page->client().set_hosted_web_ui(*web_ui_host);
+    if (auto const& extension_host = document.extension_host(); extension_host.has_value())
+        page->client().set_hosted_extension(*extension_host);
     return page;
 }
 

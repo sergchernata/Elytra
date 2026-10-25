@@ -7,10 +7,18 @@
 #include <AK/JsonParser.h>
 #include <AK/LexicalPath.h>
 #include <LibCore/Directory.h>
+#include <LibCore/StandardPaths.h>
+#include <LibWebExtensions/NativeMessaging.h>
+#include <LibCore/EventLoop.h>
+#include <LibCore/File.h>
+#include <LibWebCommon/Loader/UserAgent.h>
+#include <LibWebView/ExtensionAPI/Action.h>
 #include <LibWebView/ExtensionAPI/ExtensionAPI.h>
+#include <LibWebView/ExtensionAPI/Management.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/ViewImplementation.h>
+#include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebContentPage.h>
 
 namespace WebView {
@@ -22,20 +30,29 @@ ExtensionRuntime::ExtensionRuntime(ExtensionRegistry& registry)
     register_messaging_functions();
 
     m_apis.append(create_storage_api(*this));
+    m_apis.append(create_action_api(*this));
+    m_action = static_cast<ActionAPI*>(m_apis.last().ptr());
     m_apis.append(create_alarms_api(*this));
     m_apis.append(create_native_messaging_api(*this));
     m_apis.append(create_tabs_api(*this));
     m_apis.append(create_management_api(*this));
+    m_management = static_cast<ManagementAPI*>(m_apis.last().ptr());
 }
 
 ExtensionRuntime::~ExtensionRuntime() = default;
 
 void ExtensionRuntime::context_created(WebContentPage& page, u64 page_context_id, String extension_id, String type, URL::URL url, bool is_top_level)
 {
-    // A page process may only speak for an extension that's installed.
+    // A page process may only speak for an extension that's installed, and only one hosting the extension's pages may
+    // have its pages' API: any other gets a content script's at most.
     if (!m_registry.find(extension_id))
         return;
-    // FIXME: Check that a context claiming to be an extension page is in a process hosting that extension's pages.
+    if (type != "content_script"sv && !page.client().may_speak_for_extension(extension_id)) {
+        page.client().did_misbehave("did_create_extension_context"sv, "an extension page outside the extension's process"sv);
+        return;
+    }
+    if (type != "content_script"sv && type != "page"sv && type != "background"sv && type != "popup"sv)
+        return;
 
     auto context = make<Context>();
     context->id = m_next_context_id++;
@@ -62,6 +79,8 @@ void ExtensionRuntime::context_destroyed(WebContentPage& page, u64 page_context_
 
 void ExtensionRuntime::page_closed(WebContentPage& page)
 {
+    if (tabs_hooks.page_closed)
+        tabs_hooks.page_closed(page);
     Vector<u64> closed;
     for (auto const& [id, context] : m_contexts) {
         if (context->page.ptr() == &page)
@@ -100,7 +119,7 @@ void ExtensionRuntime::send(Context const& context, JsonObject const& message)
 void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_id, StringView text)
 {
     auto* context = find_context(page, page_context_id);
-    if (!context)
+    if (!context && page_context_id != 0)
         return;
 
     auto json = JsonParser::parse(text);
@@ -111,10 +130,33 @@ void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_i
     if (!type.has_value())
         return;
 
-    if (type == "call"sv) {
+    if (!context) {
+        if (tabs_hooks.page_message)
+            tabs_hooks.page_message(page, message);
+        return;
+    }
+
+    if (type == "frame"sv) {
+        // The frame a context is in: only one its page hosts, and only once.
+        auto navigable = message.get_object("navigable"sv);
+        if (!navigable.has_value() || context->navigable_id.has_value() || !page.is_open())
+            return;
+        auto namespace_id = navigable->get_u64("ns"sv);
+        auto local_id = navigable->get_u64("id"sv);
+        if (!namespace_id.has_value() || !local_id.has_value())
+            return;
+        Web::HTML::CrossProcessId id { .namespace_id = *namespace_id, .local_id = *local_id };
+        if (page.hosted_navigable(id).has_value())
+            context->navigable_id = id;
+    } else if (type == "call"sv) {
         handle_call(*context, message);
     } else if (type == "message_response"sv) {
         message_response_received(*context, message);
+    } else if (type == "document_size"sv) {
+        auto width = message.get_integer<i32>("width"sv);
+        auto height = message.get_integer<i32>("height"sv);
+        if (on_document_size && width.has_value() && height.has_value() && *width >= 0 && *height >= 0)
+            on_document_size(*context, *width, *height);
     } else if (type == "port_post"sv) {
         post_to_port(*context, message);
     } else if (type == "port_disconnect"sv) {
@@ -123,14 +165,19 @@ void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_i
     } else if (type == "listen"sv) {
         auto event = message.get_string("event"sv);
         auto listener = message.get_integer<i64>("listener"sv);
-        if (event.has_value() && listener.has_value())
+        if (event.has_value() && listener.has_value()) {
             context->listeners.ensure(*event).set(*listener, message.get_array("extra"sv).value_or({}));
+            for (auto& api : m_apis)
+                api->listeners_changed(context->id, *event);
+        }
     } else if (type == "unlisten"sv) {
         auto event = message.get_string("event"sv);
         auto listener = message.get_integer<i64>("listener"sv);
         if (event.has_value() && listener.has_value()) {
             if (auto listeners = context->listeners.find(*event); listeners != context->listeners.end())
                 listeners->value.remove(*listener);
+            for (auto& api : m_apis)
+                api->listeners_changed(context->id, *event);
         }
     }
 }
@@ -168,6 +215,14 @@ void ExtensionRuntime::handle_call(Context& context, JsonObject const& message)
 void ExtensionRuntime::register_function(StringView name, Handler handler)
 {
     m_functions.set(MUST(String::from_utf8(name)), move(handler));
+}
+
+void ExtensionRuntime::call_function(StringView name, Context const& context, JsonArray const& arguments, Reply reply)
+{
+    auto handler = m_functions.find(name);
+    if (handler == m_functions.end())
+        return reply(MUST(String::formatted("{} isn't supported", name)));
+    handler->value(context, arguments, move(reply));
 }
 
 void ExtensionRuntime::dispatch_event(StringView extension_id, StringView event, JsonArray arguments)
@@ -220,6 +275,15 @@ void ExtensionRuntime::set_storage_directory(ByteString directory)
 // Backgrounds: each runs in a hidden view of its own, from the extension's install until it's removed.
 void ExtensionRuntime::extensions_changed()
 {
+    // A disabled or uninstalled extension's background stops.
+    Vector<String> gone;
+    for (auto const& [id, background] : m_backgrounds) {
+        if (!m_registry.find(id))
+            gone.append(id);
+    }
+    for (auto const& id : gone)
+        stop_background(id);
+
     m_registry.for_each_extension([&](Extension const& extension) {
         auto running = m_backgrounds.find(extension.id());
         if (running != m_backgrounds.end() && running->value.version == extension.manifest().version)
@@ -240,15 +304,14 @@ void ExtensionRuntime::start_background(Extension const& extension)
         return;
 
     auto id = extension.id();
-    view->on_load_finish = [this, id](URL::URL const&) {
+    view->on_load_finish = [this, id, events = lifecycle_events(extension)](URL::URL const&) {
         // Listeners are added as the background's script first runs, so they hear of the install once it has loaded.
         auto background = m_backgrounds.find(id);
         if (background == m_backgrounds.end() || background->value.installed_event_sent)
             return;
         background->value.installed_event_sent = true;
-        JsonObject details;
-        details.set("reason"sv, "install"sv);
-        dispatch_event(id, "runtime.onInstalled"sv, JsonArray { Vector<JsonValue> { move(details) } });
+        for (auto const& event : events)
+            dispatch_event(id, event.get_string("event"sv).value(), JsonArray { Vector<JsonValue> { event.get_object("details"sv).value() } });
 
         auto waiting = move(background->value.waiting);
         for (auto& callback : waiting)
@@ -256,6 +319,110 @@ void ExtensionRuntime::start_background(Extension const& extension)
     };
     view->load(*url);
     m_backgrounds.set(id, Background { .version = extension.manifest().version, .view = move(view), .installed_event_sent = false, .waiting = {} });
+}
+
+// runtime.onInstalled and onStartup. The version and browser version an extension last started with are kept in
+// <storage>/<id>/runtime.json: without them, it's an install; with them, the browser has started again (onStartup),
+// and a version that changed gives onInstalled "update" (the extension's) or "chrome_update" (the browser's). A
+// background restarting in the same run (reloaded, or enabled again) hears nothing, unless its version changed.
+Vector<JsonObject> ExtensionRuntime::lifecycle_events(Extension const& extension)
+{
+    auto const& version = extension.manifest().version;
+    auto browser_version = StringView { BROWSER_VERSION, __builtin_strlen(BROWSER_VERSION) };
+    auto event = [](StringView name, JsonObject details) {
+        JsonObject event;
+        event.set("event"sv, name);
+        event.set("details"sv, move(details));
+        return event;
+    };
+    auto installed = [&](StringView reason, Optional<String> previous_version = {}) {
+        JsonObject details;
+        details.set("reason"sv, reason);
+        if (previous_version.has_value())
+            details.set("previousVersion"sv, *previous_version);
+        return event("runtime.onInstalled"sv, move(details));
+    };
+
+    Vector<JsonObject> events;
+    if (auto started = m_started_versions.get(extension.id()); started.has_value()) {
+        if (*started != version)
+            events.append(installed("update"sv, *started));
+    } else {
+        Optional<JsonObject> state;
+        if (m_storage_directory.has_value()) {
+            auto path = LexicalPath::join(*m_storage_directory, extension.id(), "runtime.json"sv).string();
+            if (auto file = Core::File::open(path, Core::File::OpenMode::Read); !file.is_error()) {
+                if (auto contents = file.value()->read_until_eof(); !contents.is_error()) {
+                    if (auto json = JsonParser::parse(contents.value()); !json.is_error() && json.value().is_object())
+                        state = json.value().as_object();
+                }
+            }
+        }
+        auto previous_version = state.has_value() ? state->get_string("version"sv) : Optional<String> {};
+        if (!previous_version.has_value()) {
+            events.append(installed("install"sv));
+        } else {
+            if (*previous_version != version)
+                events.append(installed("update"sv, *previous_version));
+            else if (state->get_string("browser_version"sv) != browser_version)
+                events.append(installed("chrome_update"sv));
+            events.append(event("runtime.onStartup"sv, {}));
+        }
+    }
+    m_started_versions.set(extension.id(), version);
+
+    if (m_storage_directory.has_value()) {
+        auto directory = LexicalPath::join(*m_storage_directory, extension.id()).string();
+        JsonObject state;
+        state.set("version"sv, version);
+        state.set("browser_version"sv, browser_version);
+        auto saved = [&]() -> ErrorOr<void> {
+            TRY(Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes));
+            auto file = TRY(Core::File::open(LexicalPath::join(directory, "runtime.json"sv).string(), Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+            auto text = state.serialized();
+            TRY(file->write_until_depleted(text.bytes()));
+            return {};
+        }();
+        if (saved.is_error())
+            dbgln("Extensions: Can't save {}'s runtime state: {}", extension.id(), saved.error());
+    }
+    return events;
+}
+
+void ExtensionRuntime::stop_background(StringView extension_id)
+{
+    // The background may be what's calling: it goes once the call is done.
+    auto background = m_backgrounds.take(extension_id);
+    if (!background.has_value() || !background->view)
+        return;
+    background->view->on_load_finish = nullptr;
+    Core::deferred_invoke([view = background->view.release_nonnull()] { (void)view; });
+}
+
+void ExtensionRuntime::restart_background(StringView extension_id)
+{
+    stop_background(extension_id);
+    auto const* extension = m_registry.find(extension_id);
+    if (extension)
+        start_background(*extension);
+}
+
+void ExtensionRuntime::reload_extension(StringView extension_id)
+{
+    Core::deferred_invoke([this, id = MUST(String::from_utf8(extension_id))] {
+        Vector<ViewImplementation*> views;
+        for (auto const& [context_id, context] : m_contexts) {
+            if (context->extension_id != id || context->type == "content_script"sv || context->type == "background"sv || !context->is_top_level)
+                continue;
+            if (!context->page || !context->page->is_open() || is_background_page(*context->page))
+                continue;
+            if (!views.contains_slow(&context->page->view()))
+                views.append(&context->page->view());
+        }
+        restart_background(id);
+        for (auto* view : views)
+            view->reload();
+    });
 }
 
 void ExtensionRuntime::shut_down()
@@ -300,7 +467,9 @@ JsonObject ExtensionRuntime::sender_of(Context const& context) const
     sender.set("id"sv, context.extension_id);
     sender.set("url"sv, context.url.serialize());
     sender.set("origin"sv, context.url.origin().serialize());
-    if (context.page && !is_background_page(*context.page)) {
+    if (m_tabs_delegate && tabs_hooks.describe_sender) {
+        tabs_hooks.describe_sender(context, sender);
+    } else if (context.page && !is_background_page(*context.page)) {
         JsonObject tab;
         tab.set("id"sv, static_cast<i64>(context.page->view().view_id()));
         tab.set("url"sv, context.page->view().url().serialize());
@@ -310,6 +479,18 @@ JsonObject ExtensionRuntime::sender_of(Context const& context) const
     if (context.type == "content_script"sv)
         sender.set("documentLifecycle"sv, "active"sv);
     return sender;
+}
+
+void ExtensionRuntime::set_tabs_delegate(ExtensionTabsDelegate* delegate)
+{
+    m_tabs_delegate = delegate;
+    tabs_changed();
+}
+
+void ExtensionRuntime::tabs_changed()
+{
+    if (tabs_hooks.tabs_changed)
+        tabs_hooks.tabs_changed();
 }
 
 bool ExtensionRuntime::Context::has_listener(StringView event) const
@@ -349,18 +530,7 @@ void ExtensionRuntime::register_messaging_functions()
             return;
         }
 
-        auto message_id = m_next_message_id++;
-        PendingMessage pending { .caller = caller.id, .reply = move(reply), .awaiting = {} };
-        JsonObject delivery;
-        delivery.set("type"sv, "message"sv);
-        delivery.set("message_id"sv, message_id);
-        delivery.set("message"sv, message);
-        delivery.set("sender"sv, sender_of(caller));
-        for (auto const* receiver : receivers) {
-            pending.awaiting.set(receiver->id);
-            send(*receiver, delivery);
-        }
-        m_pending_messages.set(message_id, move(pending));
+        deliver_message(caller, move(receivers), message, move(reply));
     });
 
     // runtime.connect([extensionId], [connectInfo]): a port to each of the extension's pages and background listening.
@@ -380,6 +550,24 @@ void ExtensionRuntime::register_messaging_functions()
         }
         open_channel(caller, arguments.at(2).as_string(), move(receivers), name);
     });
+}
+
+void ExtensionRuntime::deliver_message(Context const& caller, Vector<Context const*> receivers, JsonValue const& message, Reply reply)
+{
+    if (receivers.is_empty())
+        return reply(MUST(String::from_utf8(no_receiver_error)));
+    auto message_id = m_next_message_id++;
+    PendingMessage pending { .caller = caller.id, .reply = move(reply), .awaiting = {} };
+    JsonObject delivery;
+    delivery.set("type"sv, "message"sv);
+    delivery.set("message_id"sv, message_id);
+    delivery.set("message"sv, message);
+    delivery.set("sender"sv, sender_of(caller));
+    for (auto const* receiver : receivers) {
+        pending.awaiting.set(receiver->id);
+        send(*receiver, delivery);
+    }
+    m_pending_messages.set(message_id, move(pending));
 }
 
 void ExtensionRuntime::message_response_received(Context& context, JsonObject const& message)
@@ -482,6 +670,12 @@ void ExtensionRuntime::post_to_port(Context const& context, JsonObject const& me
         return;
     auto const& channel = m_channels.get(*channel_id).value();
 
+    if (channel.browser_end) {
+        // It may close the port as it goes; nothing of the channel is touched after.
+        channel.browser_end->browser_port_message(*channel_id, message.get("message"sv).value_or(JsonValue {}));
+        return;
+    }
+
     auto deliver = [&](PortEnd const& to) {
         auto const* receiver = find_context(to.context_id);
         if (!receiver)
@@ -509,6 +703,11 @@ void ExtensionRuntime::disconnect_port(PortEnd const& end, Optional<String> erro
     auto& channel = m_channels.get(*channel_id).value();
 
     if (channel.opener == end) {
+        if (auto* browser_end = channel.browser_end) {
+            m_channels.remove(*channel_id);
+            browser_end->browser_port_disconnected(*channel_id);
+            return;
+        }
         auto receivers = move(channel.receivers);
         m_channels.remove(*channel_id);
         for (auto const& receiver : receivers)
@@ -521,6 +720,56 @@ void ExtensionRuntime::disconnect_port(PortEnd const& end, Optional<String> erro
         m_channels.remove(*channel_id);
         send_port_disconnected(opener, error);
     }
+}
+
+Optional<u64> ExtensionRuntime::open_browser_port(Context const& opener, String opener_port_id, BrowserPortEnd& browser_end)
+{
+    PortEnd opener_end { opener.id, move(opener_port_id) };
+    if (channel_of(opener_end).has_value())
+        return {};
+    auto channel_id = m_next_channel_id++;
+    m_channels.set(channel_id, Channel { .opener = move(opener_end), .receivers = {}, .browser_end = &browser_end });
+    return channel_id;
+}
+
+void ExtensionRuntime::post_from_browser_port(u64 port, JsonValue const& message)
+{
+    auto channel = m_channels.find(port);
+    if (channel == m_channels.end() || !channel->value.browser_end)
+        return;
+    auto const* context = find_context(channel->value.opener.context_id);
+    if (!context)
+        return;
+    JsonObject delivery;
+    delivery.set("type"sv, "port_message"sv);
+    delivery.set("port_id"sv, channel->value.opener.port_id);
+    delivery.set("message"sv, message);
+    send(*context, delivery);
+}
+
+// The browser's end closing: the context's end hears of it, with the error if there is one.
+void ExtensionRuntime::close_browser_port(u64 port, Optional<String> error)
+{
+    auto channel = m_channels.find(port);
+    if (channel == m_channels.end() || !channel->value.browser_end)
+        return;
+    auto opener = channel->value.opener;
+    m_channels.remove(channel);
+    send_port_disconnected(opener, move(error));
+}
+
+void ExtensionRuntime::set_native_host_directories(Vector<ByteString> directories)
+{
+    m_native_host_directories = move(directories);
+}
+
+Vector<ByteString> ExtensionRuntime::native_host_directories() const
+{
+    if (m_native_host_directories.has_value())
+        return *m_native_host_directories;
+    // The browser's own directory first, then Chrome's (where hosts such as 1Password's install their manifests).
+    auto own = LexicalPath::join(Core::StandardPaths::user_data_directory(), "Ladybird"sv, "NativeMessagingHosts"sv).string();
+    return WebExtensions::default_native_host_directories(move(own));
 }
 
 void ExtensionRuntime::send_port_disconnected(PortEnd const& end, Optional<String> error)

@@ -127,6 +127,11 @@ public:
     // documents processes of their own, which host nothing else.
     Optional<String> const& hosted_web_ui() const { return m_hosted_web_ui; }
     void set_hosted_web_ui(String host) { m_hosted_web_ui = move(host); }
+    // The extension whose pages the process hosts: it may speak for that extension, and hosts nothing else.
+    Optional<String> const& hosted_extension() const { return m_hosted_extension; }
+    void set_hosted_extension(String id) { m_hosted_extension = move(id); }
+    // Without site isolation, every process may.
+    bool may_speak_for_extension(StringView id) const;
     void register_embedded_page(Web::PageId page_id, CanonicalTraversable&);
     void unregister_embedded_page(Web::PageId page_id);
     Optional<Web::PageId> page_id_for_traversable(CanonicalTraversable const&) const;
@@ -215,6 +220,7 @@ private:
     bool m_rejected_ipc { false };
     bool m_has_hosted_local_file_content { false };
     Optional<String> m_hosted_web_ui;
+    Optional<String> m_hosted_extension;
     Vector<u64> m_crashed_view_ids;
 
     WebContentPage& open_page(Web::PageId, CanonicalTraversable&);

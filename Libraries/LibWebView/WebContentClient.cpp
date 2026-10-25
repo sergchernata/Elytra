@@ -612,6 +612,13 @@ bool WebContentClient::renderers_may_synthesize_input()
         || Application::web_content_options().expose_internals_object == ExposeInternalsObject::Yes;
 }
 
+bool WebContentClient::may_speak_for_extension(StringView id) const
+{
+    if (site_isolation_mode() == SiteIsolationMode::Disabled)
+        return true;
+    return m_hosted_extension.has_value() && *m_hosted_extension == id;
+}
+
 bool WebContentClient::may_read_local_files() const
 {
     // WebDriver's Element Send Keys selects the files it names by path through the process hosting the file input.

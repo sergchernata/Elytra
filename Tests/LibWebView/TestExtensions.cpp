@@ -9,6 +9,9 @@
 
 #include "ExtensionTestHarness.h"
 
+#include <LibWebView/WebContentClient.h>
+#include <LibWebView/WebContentPage.h>
+
 namespace ExtensionTests {
 
 namespace {
@@ -180,6 +183,20 @@ void extension_pages_have_their_content_security_policy(WebView::HeadlessWebView
     CHECK_EQ(string_in(report, "image"sv), "blocked"sv);
 }
 
+// An extension's pages get processes of their own, which host nothing else: a process that may speak for an extension
+// mustn't run what a site made.
+void extension_pages_have_processes_of_their_own(WebView::HeadlessWebView& view, ByteString const& directory)
+{
+    (void)report_of(view, url("chrome-extension://pckljhfmpcocnokpjgdbfakokjjhbfka/page.html"sv));
+    auto& extension_process = view.page().client();
+    CHECK_EQ(extension_process.hosted_extension().value_or("(none)"_string), "pckljhfmpcocnokpjgdbfakokjjhbfka"sv);
+
+    (void)directory;
+    (void)report_of(view, url("data:text/html,<script>document.title = JSON.stringify({ plain: true });</script>"sv));
+    CHECK(&view.page().client() != &extension_process);
+    CHECK(!view.page().client().hosted_extension().has_value());
+}
+
 }
 
 }
@@ -196,5 +213,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         content_scripts_run_in_their_own_world(harness.view, harness.registry, harness.directory);
         content_scripts_stay_out_of_local_files_unless_allowed(harness.view, harness.registry, harness.directory);
         extension_pages_have_their_content_security_policy(harness.view, harness.registry);
+        extension_pages_have_processes_of_their_own(harness.view, harness.directory);
     });
 }

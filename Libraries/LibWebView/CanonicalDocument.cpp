@@ -48,6 +48,8 @@ CanonicalDocument::CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL crea
         if (auto page = WebUI::page_for_host(m_creation_url.path_segments().first()); page.has_value() && page->type == WebUI::PageType::Dynamic)
             m_web_ui_host = MUST(String::from_utf8(page->host));
     }
+    if (!m_origin.is_opaque() && m_origin.scheme() == "chrome-extension"sv)
+        m_extension_host = m_origin.host().serialize();
 }
 
 CanonicalDocument::~CanonicalDocument() = default;

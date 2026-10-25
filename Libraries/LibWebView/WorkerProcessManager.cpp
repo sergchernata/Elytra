@@ -657,6 +657,25 @@ void WorkerProcessManager::worker_did_request_file(Web::HTML::WorkerAgentId agen
         client->async_handle_file_return(0, file.release_value(), request_id);
 }
 
+void WorkerProcessManager::worker_did_request_extension_file(Web::HTML::WorkerAgentId agent_id, String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    auto maybe_agent = m_agents.find(agent_id);
+    if (maybe_agent == m_agents.end())
+        return;
+
+    // NB: A worker speaks for an extension only when it's one of the extension's own: its origin is the extension's.
+    //     Any other may have what the extension makes web accessible to the worker's origin.
+    auto const& worker_origin = maybe_agent->value.inside_settings->origin();
+    requester = worker_origin;
+
+    auto file = Application::extension_registry().open_file(extension_id, path, requester);
+    auto& client = maybe_agent->value.client;
+    if (file.is_error())
+        client->async_handle_file_return(file.error().code(), {}, request_id);
+    else
+        client->async_handle_file_return(0, file.release_value(), request_id);
+}
+
 void WorkerProcessManager::remove_agent(Web::HTML::WorkerAgentId agent_id, AgentRemovalCause cause)
 {
     auto maybe_agent = m_agents.find(agent_id);

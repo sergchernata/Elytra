@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Tabs test extension without the tabs permission",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0NO5byYXAZ8hMLaNOeQhlwm45l2VSOFCvI7DNwp652K+MDvBQhqXRz5wMq7HY7oFc116bBN6VywAVy5U4o51OJ4cqHxwpzF5jAYTI6YB2NwKUJgDedFRHgfOBtMszcf7gQzC6979f5d7kiGJfA6RkVnJHhERyJBRQxXa72+WMpWXkN/NgcIc6iQXn9BY+0jL9pZ4PJVXejcebJgCodtHZ7B+++JO8qEkOQjexTwR6GrqWVU0XgKMF1QOY2Etv0s2TVLmerPtCICoZbZaVhoUWZg8vXUS3VyPDMP4nqcSCcJ+qmotl9WjwNJed6sVkm3S5qkgZ7JMuTVKWn5xxZKRvQIDAQAB",
+    "permissions": ["scripting"],
+    "host_permissions": ["file:///*"]
+}

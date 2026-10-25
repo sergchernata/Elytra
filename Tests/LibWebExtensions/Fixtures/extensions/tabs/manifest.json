@@ -1,0 +1,11 @@
+{
+    "manifest_version": 3,
+    "name": "Tabs test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA91E19VvSy248c+/2NELU5qKPeWZTPhjhFlw0uMiB/+ghJhDrk+kZku3e/XIy228IMPN7RnMyJAInd6HXNYLLAgd5jfswWl8uk2ROwhP+y/jz/UslwOgJsg2nvv39rG0TfvVMFqYyhno7iEH4GkhPj1L4sn7naKHzc4w4YykfWtetR9Ln+PzJOTryG8qWyqlgjxB46aXdWsJdISL3i9AW2Gi+kZF4Kd0K5yRLUEqiBMufVr7vmKxhP/k+Zo6ZyBG+c1Chf9TDoqmDXMbRKO6GwfRfitBydotvkTbnRu9ecmC1oeS2N3u+s6kkHVtLMS+BwdQ2673KW1vnA0XBT+9roQIDAQAB",
+    "permissions": ["tabs", "scripting", "webNavigation"],
+    "host_permissions": ["file:///*"],
+    "content_scripts": [
+        { "matches": ["file:///*"], "js": ["content.js"], "all_frames": true, "run_at": "document_end" }
+    ]
+}

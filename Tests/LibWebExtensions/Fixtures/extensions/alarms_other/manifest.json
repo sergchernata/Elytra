@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Other alarms test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAusD6TUw26gsQqyvPbvnTgig5w2yaqqu9YH+am0mHfD7f191xQECH43w8RcGaBacojIAgulI7Q2nFHuecbbb+dcCf/Xx3GoHlv9qt8hzxwACa02GhULe/RG3RbdDX6ZmWXYcGvtK7pUQ2cKxnOBlsK+zgiSLLaYWr9k8ZSDaYWL4yjPKhJWVOOlfUuwx7ie2VkPjQv9j3rD7uJ0HQuGDjaCtDH093IGrR+zlbtMkjY5XZJ9JitI6xzLKLh0MgngKe/FF+sCTxqeOnSsr78NJfIlJearbtbnF5cUuxrYx9dihEq+NPJg3613xGNGJDzA+NchigYXhqxQNM4nGvJUZWtQIDAQAB",
+    "permissions": ["alarms", "storage"],
+    "background": { "service_worker": "background.js" }
+}

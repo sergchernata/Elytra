@@ -16,10 +16,24 @@
 #include <LibCore/System.h>
 #include <LibWebExtensions/NativeMessaging.h>
 
+#include <AK/HashTable.h>
+#include <AK/Time.h>
+#include <LibCore/Notifier.h>
+#include <LibCore/Timer.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <unistd.h>
+
+#if defined(AK_OS_MACOS)
+#    include <crt_externs.h>
+#    include <dlfcn.h>
+#    include <spawn.h>
+#elif defined(AK_OS_LINUX)
+#    include <sys/syscall.h>
+#endif
 
 namespace WebExtensions {
 
@@ -247,7 +261,88 @@ ErrorOr<Vector<JsonValue>> NativeMessageDecoder::feed(ReadonlyBytes bytes)
     return messages;
 }
 
-ErrorOr<NonnullOwnPtr<NativeHostConnection>> NativeHostConnection::launch(NativeHostManifest const& manifest, StringView extension_id)
+#if !defined(AK_OS_WINDOWS)
+// Starts the host as Chrome does: in its own directory, with only the given pipes as its stdin and stdout (and our
+// stderr), default signal handling, and on macOS responsible for itself rather than for us.
+static ErrorOr<pid_t> spawn_host(NativeHostManifest const& manifest, StringView extension_id, int stdin_fd, int stdout_fd)
+{
+    // Spawning a path that isn't there may only fail in the child; check first, so the caller can tell.
+    if (::access(manifest.path.characters(), X_OK) < 0)
+        return Error::from_syscall("access"sv, errno);
+
+    auto arguments = native_host_arguments(manifest, extension_id);
+    Vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.append(const_cast<char*>(argument.characters()));
+    argv.append(nullptr);
+    auto directory = ByteString { LexicalPath(manifest.path).dirname() };
+
+    sigset_t no_signals;
+    sigemptyset(&no_signals);
+
+#    if defined(AK_OS_MACOS)
+#        define CHECK(invocation)                  \
+            if (int returned_errno = (invocation)) \
+                return Error::from_errno(returned_errno);
+
+    posix_spawn_file_actions_t actions;
+    CHECK(posix_spawn_file_actions_init(&actions));
+    ScopeGuard destroy_actions = [&] { posix_spawn_file_actions_destroy(&actions); };
+    posix_spawnattr_t attributes;
+    CHECK(posix_spawnattr_init(&attributes));
+    ScopeGuard destroy_attributes = [&] { posix_spawnattr_destroy(&attributes); };
+
+    // Nothing but what's named here reaches the host, and it starts with default signal handling.
+    CHECK(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF));
+    CHECK(posix_spawnattr_setsigmask(&attributes, &no_signals));
+    sigset_t default_signals;
+    sigfillset(&default_signals);
+    CHECK(posix_spawnattr_setsigdefault(&attributes, &default_signals));
+
+    // As in Chrome, the host is responsible for itself: macOS asks the user about its privacy permissions, not ours.
+    using DisclaimFunction = int (*)(posix_spawnattr_t*, int);
+    static auto disclaim = reinterpret_cast<DisclaimFunction>(dlsym(RTLD_DEFAULT, "responsibility_spawnattrs_setdisclaim"));
+    if (disclaim)
+        CHECK(disclaim(&attributes, 1));
+
+    CHECK(posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO));
+    CHECK(posix_spawn_file_actions_adddup2(&actions, stdout_fd, STDOUT_FILENO));
+    if (::fcntl(STDERR_FILENO, F_GETFD) != -1)
+        CHECK(posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO));
+    CHECK(posix_spawn_file_actions_addchdir_np(&actions, directory.characters()));
+#        undef CHECK
+
+    pid_t pid = -1;
+    if (int error = ::posix_spawn(&pid, manifest.path.characters(), &actions, &attributes, argv.data(), *_NSGetEnviron()))
+        return Error::from_errno(error);
+    return pid;
+#    else
+    auto pid = TRY(Core::System::fork());
+    if (pid == 0) {
+        // Only async-signal-safe calls from here on.
+        for (int signal_number = 1; signal_number < NSIG; ++signal_number)
+            ::signal(signal_number, SIG_DFL);
+        ::sigprocmask(SIG_SETMASK, &no_signals, nullptr);
+        if (::dup2(stdin_fd, STDIN_FILENO) < 0 || ::dup2(stdout_fd, STDOUT_FILENO) < 0 || ::chdir(directory.characters()) < 0)
+            ::_exit(127);
+#        if defined(SYS_close_range)
+        ::syscall(SYS_close_range, STDERR_FILENO + 1, ~0U, 0);
+#        endif
+        ::execv(manifest.path.characters(), argv.data());
+        ::_exit(127);
+    }
+    return pid;
+#    endif
+}
+#endif
+
+struct HostPipes {
+    int stdin_write { -1 };
+    int stdout_read { -1 };
+    pid_t pid { -1 };
+};
+
+static ErrorOr<HostPipes> launch_host(NativeHostManifest const& manifest, StringView extension_id)
 {
     if (!manifest.allows_extension(extension_id))
         return Error::from_string_literal("Access to the native messaging host is forbidden");
@@ -269,6 +364,7 @@ ErrorOr<NonnullOwnPtr<NativeHostConnection>> NativeHostConnection::launch(Native
         return Error::from_syscall("fcntl(F_SETNOSIGPIPE)"sv, errno);
 #endif
 
+#if defined(AK_OS_WINDOWS)
     auto arguments = native_host_arguments(manifest, extension_id);
     Core::ProcessSpawnOptions options {
         .executable = manifest.path,
@@ -278,18 +374,36 @@ ErrorOr<NonnullOwnPtr<NativeHostConnection>> NativeHostConnection::launch(Native
             Core::FileAction::DupFd { stdout_fds[1], STDOUT_FILENO },
         },
     };
-    auto process = TRY(Core::Process::spawn(options));
+    auto pid = TRY(Core::Process::spawn(options)).pid();
+#else
+    auto pid = TRY(spawn_host(manifest, extension_id, stdin_fds[0], stdout_fds[1]));
+#endif
 
     close_stdin.disarm();
     close_stdout.disarm();
     (void)Core::System::close(stdin_fds[0]);
     (void)Core::System::close(stdout_fds[1]);
-
-    return adopt_nonnull_own_or_enomem(new (nothrow) NativeHostConnection(move(process), stdin_fds[1], stdout_fds[0]));
+    return HostPipes { .stdin_write = stdin_fds[1], .stdout_read = stdout_fds[0], .pid = pid };
 }
 
-NativeHostConnection::NativeHostConnection(Core::Process process, int stdin_fd, int stdout_fd)
-    : m_process(move(process))
+// Kills the host if it's still our child and not yet reaped (so its pid can't be anyone else's yet).
+static bool kill_if_still_running(pid_t pid)
+{
+    auto result = Core::System::waitpid(pid, WNOHANG);
+    if (result.is_error() || result.value().pid == pid)
+        return false;
+    (void)Core::Process::terminate_process(pid, Core::Process::TerminationMode::Forceful);
+    return true;
+}
+
+ErrorOr<NonnullOwnPtr<NativeHostConnection>> NativeHostConnection::launch(NativeHostManifest const& manifest, StringView extension_id)
+{
+    auto host = TRY(launch_host(manifest, extension_id));
+    return adopt_nonnull_own_or_enomem(new (nothrow) NativeHostConnection(host.pid, host.stdin_write, host.stdout_read));
+}
+
+NativeHostConnection::NativeHostConnection(pid_t pid, int stdin_fd, int stdout_fd)
+    : m_pid(pid)
     , m_stdin_fd(stdin_fd)
     , m_stdout_fd(stdout_fd)
 {
@@ -361,22 +475,274 @@ void NativeHostConnection::close()
         m_stdout_fd = -1;
     }
 
-    if (m_reaped || m_process.pid() <= 0)
+    if (m_reaped || m_pid <= 0)
         return;
 
     // Closing stdin tells the host to quit. Give it a moment, then make sure it is gone.
     for (u32 waited_ms = 0; waited_ms < host_exit_grace_period_ms; waited_ms += 10) {
-        auto result = Core::System::waitpid(m_process.pid(), WNOHANG);
-        if (result.is_error() || result.value().pid == m_process.pid()) {
+        auto result = Core::System::waitpid(m_pid, WNOHANG);
+        if (result.is_error() || result.value().pid == m_pid) {
             m_reaped = true;
             return;
         }
         (void)Core::System::sleep_ms(10);
     }
 
-    (void)Core::Process::terminate_process(m_process.pid(), Core::Process::TerminationMode::Forceful);
-    (void)Core::System::waitpid(m_process.pid());
+    if (kill_if_still_running(m_pid))
+        (void)Core::System::waitpid(m_pid);
     m_reaped = true;
+}
+
+// Hosts that were closed and haven't exited yet: polled until they have, killed once their grace period is over.
+namespace {
+
+struct EndingHost {
+    pid_t pid { -1 };
+    MonotonicTime deadline;
+    bool killed { false };
+};
+
+struct HostReaper {
+    Vector<EndingHost> hosts;
+    RefPtr<Core::Timer> timer;
+    HashTable<NativeHostProcess*> running;
+
+    // Returns whether the host is gone.
+    static bool poll(EndingHost& host)
+    {
+        auto result = Core::System::waitpid(host.pid, WNOHANG);
+        // An error means someone else (such as the browser's SIGCHLD handler) has reaped it.
+        if (result.is_error() || result.value().pid == host.pid)
+            return true;
+        if (!host.killed && MonotonicTime::now() >= host.deadline)
+            host.killed = kill_if_still_running(host.pid);
+        return false;
+    }
+
+    void poll_all()
+    {
+        hosts.remove_all_matching([](auto& host) { return poll(host); });
+        if (hosts.is_empty() && timer)
+            timer->stop();
+    }
+
+    void add(pid_t pid)
+    {
+        EndingHost host { .pid = pid, .deadline = MonotonicTime::now() + AK::Duration::from_milliseconds(host_exit_grace_period_ms), .killed = false };
+        if (poll(host))
+            return;
+        hosts.append(host);
+        if (!timer)
+            timer = Core::Timer::create_repeating(AK::Duration::from_milliseconds(50), [this] { poll_all(); });
+        if (!timer->is_active())
+            timer->start();
+    }
+};
+
+// Never destroyed: hosts may still be ending as the application exits.
+HostReaper& reaper()
+{
+    static auto* reaper = new HostReaper;
+    return *reaper;
+}
+
+}
+
+// Chrome doesn't limit this; it only keeps a host that reads nothing from making us hold on to everything.
+static constexpr size_t max_queued_bytes_to_native_host = 4 * max_message_size_to_native_host;
+
+// How much is read from a host at a time, so a chatty host can't hold up the event loop.
+static constexpr size_t max_read_per_activation = 1 * MiB;
+
+ErrorOr<NonnullRefPtr<NativeHostProcess>> NativeHostProcess::launch(NativeHostManifest const& manifest, StringView extension_id)
+{
+    auto host = TRY(launch_host(manifest, extension_id));
+    // Only our ends are non-blocking; the host's are as it expects.
+    auto make_non_blocking = [](int fd) -> ErrorOr<void> {
+        auto flags = TRY(Core::System::fcntl(fd, F_GETFL));
+        TRY(Core::System::fcntl(fd, F_SETFL, flags | O_NONBLOCK));
+        return {};
+    };
+    auto result = make_non_blocking(host.stdin_write);
+    if (!result.is_error())
+        result = make_non_blocking(host.stdout_read);
+    auto process = adopt_ref_if_nonnull(new (nothrow) NativeHostProcess(host.pid, host.stdin_write, host.stdout_read));
+    if (!process) {
+        (void)Core::System::close(host.stdin_write);
+        (void)Core::System::close(host.stdout_read);
+        reaper().add(host.pid);
+        return Error::from_errno(ENOMEM);
+    }
+    if (result.is_error()) {
+        process->close();
+        return result.release_error();
+    }
+    return process.release_nonnull();
+}
+
+NativeHostProcess::NativeHostProcess(pid_t pid, int stdin_fd, int stdout_fd)
+    : m_pid(pid)
+    , m_stdin_fd(stdin_fd)
+    , m_stdout_fd(stdout_fd)
+{
+    reaper().running.set(this);
+    m_stdout_notifier = Core::Notifier::construct(m_stdout_fd, Core::Notifier::Type::Read);
+    m_stdout_notifier->on_activation = [this] { read_output(); };
+    m_stdin_notifier = Core::Notifier::construct(m_stdin_fd, Core::Notifier::Type::Write);
+    m_stdin_notifier->set_enabled(false);
+    m_stdin_notifier->on_activation = [this] { write_queued(); };
+}
+
+NativeHostProcess::~NativeHostProcess()
+{
+    close();
+    reaper().running.remove(this);
+}
+
+ErrorOr<void> NativeHostProcess::send(JsonValue const& message)
+{
+    if (m_closed)
+        return Error::from_string_literal("Native messaging host connection is closed");
+    auto frame = TRY(encode_native_message(message));
+    if (queued_bytes() + frame.size() > max_queued_bytes_to_native_host)
+        return Error::from_string_literal("Native messaging host isn't reading its messages");
+
+    if (m_outgoing_offset == m_outgoing.size()) {
+        m_outgoing.clear();
+        m_outgoing_offset = 0;
+    }
+    TRY(m_outgoing.try_append(frame.bytes()));
+    write_queued();
+    return {};
+}
+
+void NativeHostProcess::write_queued()
+{
+    while (!m_closed && m_outgoing_offset < m_outgoing.size()) {
+        auto written = ::write(m_stdin_fd, m_outgoing.data() + m_outgoing_offset, m_outgoing.size() - m_outgoing_offset);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                m_stdin_notifier->set_enabled(true);
+                return;
+            }
+            // The host stopped reading (it's exiting, most likely). Stop writing; its output says the rest.
+            m_outgoing.clear();
+            m_outgoing_offset = 0;
+            m_stdin_notifier->set_enabled(false);
+            return;
+        }
+        m_outgoing_offset += written;
+    }
+    if (m_stdin_notifier)
+        m_stdin_notifier->set_enabled(false);
+    // Don't hold on to a large buffer once it has gone out.
+    if (m_outgoing_offset == m_outgoing.size() && m_outgoing.capacity() > 64 * KiB) {
+        m_outgoing = {};
+        m_outgoing_offset = 0;
+    }
+}
+
+void NativeHostProcess::read_output()
+{
+    NonnullRefPtr protect = *this;
+    u8 buffer[64 * KiB];
+    size_t total = 0;
+    while (!m_closed && total < max_read_per_activation) {
+        auto count = ::read(m_stdout_fd, buffer, sizeof(buffer));
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            end(Ending::Exited);
+            return;
+        }
+        if (count == 0) {
+            // The host closed its output. A partial frame left over is simply dropped.
+            end(Ending::Exited);
+            return;
+        }
+        total += count;
+
+        auto messages = m_decoder.feed({ buffer, static_cast<size_t>(count) });
+        if (messages.is_error()) {
+            end(Ending::BadOutput);
+            return;
+        }
+        for (auto& message : messages.value()) {
+            if (m_closed)
+                return;
+            if (on_message)
+                on_message(move(message));
+        }
+    }
+}
+
+void NativeHostProcess::end(Ending ending)
+{
+    if (m_closed)
+        return;
+    close();
+    if (on_end)
+        on_end(ending);
+}
+
+void NativeHostProcess::close()
+{
+    if (m_closed)
+        return;
+    m_closed = true;
+    if (m_stdout_notifier) {
+        m_stdout_notifier->close();
+        m_stdout_notifier->on_activation = nullptr;
+    }
+    if (m_stdin_notifier) {
+        m_stdin_notifier->close();
+        m_stdin_notifier->on_activation = nullptr;
+    }
+    (void)Core::System::close(m_stdin_fd);
+    (void)Core::System::close(m_stdout_fd);
+    m_stdin_fd = -1;
+    m_stdout_fd = -1;
+    m_outgoing = {};
+    m_outgoing_offset = 0;
+    if (m_pid > 0)
+        reaper().add(m_pid);
+}
+
+void NativeHostProcess::end_all(AK::Duration grace)
+{
+    auto& reaper = WebExtensions::reaper();
+    // Closing one may run code that drops others, so take them as they come.
+    while (!reaper.running.is_empty()) {
+        auto* process = *reaper.running.begin();
+        reaper.running.remove(process);
+        process->close();
+    }
+
+    auto deadline = MonotonicTime::now() + grace;
+    while (!reaper.hosts.is_empty() && MonotonicTime::now() < deadline) {
+        reaper.hosts.remove_all_matching([](auto& host) {
+            auto result = Core::System::waitpid(host.pid, WNOHANG);
+            return result.is_error() || result.value().pid == host.pid;
+        });
+        if (!reaper.hosts.is_empty())
+            (void)Core::System::sleep_ms(10);
+    }
+    for (auto const& host : reaper.hosts) {
+        if (kill_if_still_running(host.pid))
+            (void)Core::System::waitpid(host.pid);
+    }
+    reaper.hosts.clear();
+    if (reaper.timer)
+        reaper.timer->stop();
+}
+
+size_t NativeHostProcess::ending_count()
+{
+    return reaper().hosts.size();
 }
 
 }

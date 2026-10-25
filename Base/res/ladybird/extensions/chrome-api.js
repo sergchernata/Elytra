@@ -320,6 +320,29 @@
         }
     });
 
+    // scripting.executeScript(injection, [callback]): a func crosses to the browser as source, called with its args,
+    // as { ...injection, js: "(<func>)(...<args>)" }.
+    function executeScript(args) {
+        args = Array.from(args);
+        const callback = typeof args[args.length - 1] === "function" ? args.pop() : undefined;
+        let injection = args[0];
+        if (injection && typeof injection === "object" && typeof injection.func === "function") {
+            const { func, args: funcArgs = [], ...rest } = injection;
+            let serialized;
+            if (Array.isArray(funcArgs) && funcArgs.every(arg => typeof arg !== "function" && typeof arg !== "symbol" && arg !== undefined))
+                serialized = JSON.stringify(funcArgs);
+            if (serialized === undefined) {
+                const error = new Error("Error in invocation of scripting.executeScript: args must be an array of JSON-serializable values.");
+                if (!callback)
+                    return Promise.reject(error);
+                withLastError(error.message, () => callback());
+                return;
+            }
+            injection = { ...rest, js: `(${Function.prototype.toString.call(func)})(...${serialized})` };
+        }
+        return call("scripting.executeScript", callback ? [injection, callback] : [injection]);
+    }
+
     // chrome.i18n.getMessage, which is synchronous, from the messages the browser chose for this context.
     function getMessage(name, substitutions) {
         if (typeof name !== "string")
@@ -362,8 +385,10 @@
         });
     }
 
+    // As in Chrome, native messaging is only there with its permission, and never in content scripts.
+    const hasNativeMessaging = !isContentScript && Array.isArray(manifest.permissions) && manifest.permissions.includes("nativeMessaging");
     const runtime = namespace("runtime",
-        isContentScript ? [] : ["getPlatformInfo", "getContexts", "openOptionsPage", "setUninstallURL", "requestUpdateCheck", "reload", "restart", "sendNativeMessage", "getPackageDirectoryEntry"],
+        isContentScript ? [] : ["getPlatformInfo", "getContexts", "openOptionsPage", "setUninstallURL", "requestUpdateCheck", "reload", "restart", ...(hasNativeMessaging ? ["sendNativeMessage"] : []), "getPackageDirectoryEntry"],
         isContentScript ? ["onMessage", "onConnect"] : ["onMessage", "onConnect", "onMessageExternal", "onConnectExternal", "onInstalled", "onStartup", "onSuspend", "onSuspendCanceled", "onUpdateAvailable", "onRestartRequired", "onUserScriptMessage"],
         {
             id: extensionId,
@@ -377,7 +402,7 @@
             PlatformArch: { ARM: "arm", ARM64: "arm64", X86_32: "x86-32", X86_64: "x86-64", MIPS: "mips", MIPS64: "mips64" },
             ContextType: { TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL", DEVELOPER_TOOLS: "DEVELOPER_TOOLS" },
         });
-    if (!isContentScript)
+    if (hasNativeMessaging)
         runtime.connectNative = function (application) {
             const portId = `${info.contextId}:${nextPortId++}`;
             const port = new Port(portId, "");
@@ -458,6 +483,7 @@
             },
             scripting: namespace("scripting", ["executeScript", "insertCSS", "removeCSS", "registerContentScripts", "getRegisteredContentScripts", "unregisterContentScripts", "updateContentScripts"], [], {
                 ExecutionWorld: { ISOLATED: "ISOLATED", MAIN: "MAIN" },
+                executeScript: function () { return executeScript(arguments); },
             }),
             tabs: namespace("tabs", ["get", "getCurrent", "create", "duplicate", "query", "highlight", "update", "move", "reload", "remove", "group", "ungroup", "detectLanguage", "captureVisibleTab", "executeScript", "insertCSS", "removeCSS", "setZoom", "getZoom", "setZoomSettings", "getZoomSettings", "discard", "goForward", "goBack"], ["onCreated", "onUpdated", "onMoved", "onActivated", "onHighlighted", "onDetached", "onAttached", "onRemoved", "onReplaced", "onZoomChange"], {
                 sendMessage: function () { return sendMessage("tabs.sendMessage", arguments); },
@@ -490,4 +516,34 @@
     }
 
     Object.defineProperty(globalThis, "chrome", { value: chrome, writable: true, configurable: true, enumerable: false });
+
+    // An extension page tells the browser how big its document is, so a popup can fit it.
+    if (contextType === "page" && globalThis.top === globalThis) {
+        let reported = "";
+        // The document's own size, as Chrome sizes popups: as wide as its content wants, and as tall as it then is,
+        // whatever the window's size now.
+        const report = () => {
+            const root = document.documentElement;
+            if (!root)
+                return;
+            const previous_width = root.style.width;
+            root.style.width = "max-content";
+            const box = root.getBoundingClientRect();
+            root.style.width = previous_width;
+            const width = Math.ceil(box.width);
+            const height = Math.ceil(box.height);
+            const size = `${width}x${height}`;
+            if (size === reported)
+                return;
+            reported = size;
+            post({ type: "document_size", width, height });
+        };
+        addEventListener("DOMContentLoaded", () => {
+            report();
+            new ResizeObserver(report).observe(document.documentElement);
+            if (document.body)
+                new ResizeObserver(report).observe(document.body);
+        });
+        addEventListener("load", report);
+    }
 })();
