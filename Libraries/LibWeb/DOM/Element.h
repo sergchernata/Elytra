@@ -160,6 +160,13 @@ enum class ProximityToTheViewport : u8 {
     NotDetermined,
 };
 
+// NB: The steps of these algorithms that follow running the reflected target's get the element, shared by the
+//     element and ElementInternals reflected targets.
+// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-element
+WEB_API GC::Ptr<Element> get_the_attribute_associated_element(Element const& element, Optional<Utf16String> const& content_attribute_value, GC::Ptr<Element> explicitly_set_attribute_element);
+// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-elements
+WEB_API Optional<GC::RootVector<GC::Ref<Element>>> get_the_attribute_associated_elements(Element const& element, Function<Optional<Utf16String>()> const& get_the_content_attribute, Optional<Vector<GC::Weak<Element>> const&> explicitly_set_attribute_elements);
+
 class WEB_API Element
     : public ParentNode
     , public ChildNode<Element>
@@ -859,6 +866,11 @@ public:
 
     ProximityToTheViewport proximity_to_the_viewport() const;
     void determine_proximity_to_the_viewport(Layout::BegunRead const& read);
+
+    // https://w3c.github.io/paint-timing/#set-of-elements-with-rendered-text
+    bool is_in_set_of_elements_with_rendered_text() const { return m_is_in_set_of_elements_with_rendered_text; }
+    void append_to_set_of_elements_with_rendered_text() { m_is_in_set_of_elements_with_rendered_text = true; }
+    void remove_from_set_of_elements_with_rendered_text() { m_is_in_set_of_elements_with_rendered_text = false; }
     bool is_relevant_to_the_user();
 
     // https://drafts.csswg.org/css-contain-2/#skips-its-contents
@@ -924,6 +936,9 @@ public:
     virtual void initialize_element() { }
 
     void prepare_for_style_computation(Badge<CSS::StyleComputer>) { prepare_for_style_computation(); }
+
+    // Unregisters the anchor names this element registered in the tree scope `tree_root` is the root of.
+    void unregister_anchor_names_before_leaving_tree_scope(Badge<Node>, Node& tree_root);
 
 protected:
     Element(Document&, DOM::QualifiedName);
@@ -1103,6 +1118,10 @@ private:
     bool m_uses_document_global_custom_element_registry : 1 { false };
     bool m_has_name : 1 { false };
     mutable bool m_style_attribute_is_dirty : 1 { false };
+    bool m_is_in_set_of_elements_with_rendered_text : 1 { false };
+    // Whether the style attribute was set while the element was not connected, so that whether Content Security
+    // Policy blocks it is decided when the element is inserted.
+    bool m_style_attribute_awaits_content_security_policy_check : 1 { false };
 
     // The child indices the element remembers, or zero for those not counted yet, and the generation of its parent's
     // child list they were counted in; zero for none.

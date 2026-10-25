@@ -6,7 +6,7 @@
 
 use crate::css::css_string::CssString;
 use crate::css::descriptor_metadata::CUSTOM_DESCRIPTOR_ID;
-use crate::css::ffi_support::FfiUtf16View;
+use crate::css::ffi_support::{FfiUtf16View, OwnedBox};
 use crate::css::serialize::{
     SerializationMode, StringUnits, TextSink, serialize_an_identifier, serialize_style_value, sink_into_raw,
 };
@@ -152,10 +152,8 @@ pub extern "C" fn rust_descriptor_block_replace(block: &mut FfiDescriptorBlock, 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_descriptor_block_destroy(block: *mut FfiDescriptorBlock) {
-    if !block.is_null() {
-        drop(unsafe { Box::from_raw(block) });
-    }
+pub extern "C" fn rust_descriptor_block_destroy(block: OwnedBox<FfiDescriptorBlock>) {
+    drop(block);
 }
 
 #[unsafe(no_mangle)]
@@ -165,7 +163,11 @@ pub extern "C" fn rust_descriptor_block_length(block: &FfiDescriptorBlock) -> us
 
 // The block owns the returned value until its next mutation.
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_descriptor_block_get(block: &FfiDescriptorBlock, id: u8, name: FfiUtf16View) -> *const c_void {
+pub extern "C" fn rust_descriptor_block_get(
+    block: &FfiDescriptorBlock,
+    id: u8,
+    name: FfiUtf16View,
+) -> *const StyleValueData {
     let name = name.units().unwrap();
     block
         .data()
@@ -182,7 +184,7 @@ pub extern "C" fn rust_descriptor_block_get(block: &FfiDescriptorBlock, id: u8, 
                             .enumerate()
                             .all(|(index, unit)| *unit == name.code_unit_at(index))))
         })
-        .map_or(std::ptr::null(), |descriptor| Arc::as_ptr(&descriptor.value).cast())
+        .map_or(std::ptr::null(), |descriptor| Arc::as_ptr(&descriptor.value))
 }
 
 #[unsafe(no_mangle)]
@@ -329,7 +331,7 @@ mod tests {
         let allocations = DESCRIPTOR_OWNER_ALLOCATIONS.get();
         let descriptor = snapshot.descriptors[0].view();
         let value = rust_descriptor_block_get(block, descriptor.id, descriptor.name);
-        assert_eq!(value, descriptor.value);
+        assert_eq!(value.cast(), descriptor.value);
         assert_eq!(
             serialize_descriptors(&block.data()).into_utf16(),
             "font-family: 文字; src: url(\"font.woff\");"

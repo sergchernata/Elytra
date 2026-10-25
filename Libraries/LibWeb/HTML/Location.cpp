@@ -20,7 +20,6 @@
 #include <LibWeb/Bindings/Location.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
 #include <LibWeb/HTML/LocalNavigable.h>
@@ -302,13 +301,21 @@ bool Location::has_relevant_document() const
 WebIDL::ExceptionOr<void> Location::navigate(URL::URL url, NavigationHistoryBehavior history_handling)
 {
     // 1. Let navigable be location's relevant global object's navigable.
-    auto navigable = m_window.visit([](auto const& window) -> GC::Ptr<Navigable> { return window->navigable(); });
+    // INTEROP: Other browsers keep a window reused from an initial about:blank with the about:blank until the new
+    //          document commits, so its Location navigates the about:blank's navigable. Take the relevant Document's.
+    // FIXME: Associate a reused window with the new document when it is made active, not when it is created, which
+    //        leaves the window without a navigable meanwhile.
+    auto navigable = m_window.visit(
+        [&](GC::Ref<Window> const&) -> GC::Ptr<Navigable> { return relevant_document()->navigable(); },
+        [](GC::Ref<RemoteWindow> const& window) -> GC::Ptr<Navigable> { return window->navigable(); });
+    if (!navigable)
+        return {};
 
     // 2. Let sourceDocument be the incumbent global object's associated Document.
     auto& source_document = incumbent_window().associated_document();
 
     // 3. If location's relevant Document is not yet completely loaded, and the incumbent global object does not have transient activation, then set historyHandling to "replace".
-    // NB: The relevant Document is navigable's active document, which step 1 reached through the relevant global object.
+    // NB: The relevant Document is navigable's active document.
     if (!navigable->active_document_is_completely_loaded() && !incumbent_window().has_transient_activation()) {
         history_handling = NavigationHistoryBehavior::Replace;
     }
@@ -753,12 +760,14 @@ WebIDL::ExceptionOr<void> Location::replace(Utf16String const& url)
     if (!has_relevant_document())
         return {};
 
-    // 2. Parse url relative to the entry settings object. If that failed, throw a "SyntaxError" DOMException.
-    auto replace_url = DOMURL::parse(url.utf16_view(), entry_settings_object().api_base_url());
+    // 2. Let urlRecord be the result of encoding-parsing a URL given url, relative to the entry settings object.
+    auto replace_url = entry_settings_object().encoding_parse_url(url.utf16_view());
+
+    // 3. If urlRecord is failure, then throw a "SyntaxError" DOMException.
     if (!replace_url.has_value())
         return WebIDL::SyntaxError::create(Utf16String::formatted("Invalid URL '{}'", url));
 
-    // 3. Location-object navigate this to the resulting URL record given "replace".
+    // 4. Location-object navigate this to urlRecord given "replace".
     TRY(navigate(replace_url.release_value(), NavigationHistoryBehavior::Replace));
 
     return {};
@@ -776,12 +785,14 @@ WebIDL::ExceptionOr<void> Location::assign(Utf16String const& url)
     if (!relevant_document->origin().is_same_origin_domain(entry_settings_object().origin()))
         return WebIDL::SecurityError::create("Location's relevant document is not same origin-domain with the entry settings object's origin"_utf16);
 
-    // 3. Parse url relative to the entry settings object. If that failed, throw a "SyntaxError" DOMException.
-    auto assign_url = DOMURL::parse(url.utf16_view(), entry_settings_object().api_base_url());
+    // 3. Let urlRecord be the result of encoding-parsing a URL given url, relative to the entry settings object.
+    auto assign_url = entry_settings_object().encoding_parse_url(url.utf16_view());
+
+    // 4. If urlRecord is failure, then throw a "SyntaxError" DOMException.
     if (!assign_url.has_value())
         return WebIDL::SyntaxError::create(Utf16String::formatted("Invalid URL '{}'", url));
 
-    // 4. Location-object navigate this to the resulting URL record.
+    // 5. Location-object navigate this to urlRecord.
     TRY(navigate(assign_url.release_value()));
 
     return {};

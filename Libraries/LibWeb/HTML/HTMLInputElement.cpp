@@ -490,6 +490,11 @@ WebIDL::ExceptionOr<void> HTMLInputElement::run_input_activation_behavior(DOM::E
         if (!is_connected())
             return {};
 
+        // INTEROP: Browsers do not fire input and change events at a radio button that was already checked before it
+        //          was activated.
+        if (type_state() == TypeAttributeState::RadioButton && m_before_legacy_pre_activation_behavior_checked)
+            return {};
+
         // 2. Fire an event named input at the element with the bubbles and composed attributes initialized to true.
         auto input_event = create_event_for_element(*this, HTML::EventNames::input);
         input_event->set_bubbles(true);
@@ -1607,6 +1612,8 @@ void HTMLInputElement::did_receive_focus()
 
 void HTMLInputElement::did_lose_focus()
 {
+    reveal_cursor_if_pending();
+
     if (m_text_node)
         m_text_node->set_needs_repaint(InvalidateDisplayList::PaintCommands);
 
@@ -3383,7 +3390,8 @@ WebIDL::ExceptionOr<void> HTMLInputElement::step_up_or_down(bool is_down, WebIDL
 
     // 5. If applying the algorithm to convert a string to a number to the string given by the element's value does not result in an error,
     // then let value be the result of that algorithm. Otherwise, let value be zero.
-    double value = convert_string_to_number(this->value()).value_or(0);
+    auto maybe_value = convert_string_to_number(this->value());
+    double value = maybe_value.value_or(0);
 
     // 6. Let valueBeforeStepping be value.
     double value_before_stepping = value;
@@ -3427,11 +3435,12 @@ WebIDL::ExceptionOr<void> HTMLInputElement::step_up_or_down(bool is_down, WebIDL
 
     // 10. If either the method invoked was the stepDown() method and value is greater than valueBeforeStepping,
     // or the method invoked was the stepUp() method and value is less than valueBeforeStepping, then return.
-    if (is_down) {
-        if (value > value_before_stepping)
+    // INTEROP: Browsers only do this when the element's value could be converted to a number, so stepping an
+    //          element without a value always gives it one.
+    if (maybe_value.has_value()) {
+        if (is_down && value > value_before_stepping)
             return {};
-    } else {
-        if (value < value_before_stepping)
+        if (!is_down && value < value_before_stepping)
             return {};
     }
 

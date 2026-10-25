@@ -10,8 +10,8 @@
 #include <LibCore/ElapsedTimer.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/StatsLog.h>
-#include <LibDevTools/StorageHelpers.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibWebCommon/Geolocation/GeolocationPositionErrorCode.h>
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/Error.h>
@@ -31,6 +31,7 @@
 #include <LibWebView/NavigationLoader.h>
 #include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/RequestServerManager.h>
+#include <LibWebView/StorageAreaRegistry.h>
 #include <LibWebView/StorageJar.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/Utilities.h>
@@ -805,6 +806,7 @@ void WebContentPage::did_create_child_frame(Web::HTML::CrossProcessId parent_fra
 
     hosted_state.container.document_active_sandboxing_flag_set = container_document->active_sandboxing_flag_set();
     hosted_state.container.document_embedder_policy = container_document->embedder_policy();
+    hosted_state.container.document_permissions_policy = container_document->permissions_policy();
     traversable.adopt_nested_history_for_created_child(*parent_navigable, *container_document, frame_id);
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#create-a-new-child-navigable
@@ -1247,47 +1249,34 @@ void WebContentPage::did_request_document_cookie_version_index(Web::HTML::Enviro
     }
 }
 
-Messages::WebContentClient::DidRequestStorageItemResponse WebContentPage::did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return Optional<Utf16String> {};
-    return storage_jar->get_item(storage_endpoint, *canonical_key, bottle_key);
-}
-
-Messages::WebContentClient::DidSetStorageItemResponse WebContentPage::did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key, Utf16String value)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return WebView::StorageOperationError::QuotaExceededError;
-    return storage_jar->set_item(storage_endpoint, *canonical_key, bottle_key, value);
-}
-
-void WebContentPage::did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (canonical_key.has_value() && storage_jar)
-        storage_jar->remove_item(storage_endpoint, *canonical_key, bottle_key);
-}
-
-Messages::WebContentClient::DidRequestStorageKeysResponse WebContentPage::did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return Vector<Utf16String> {};
-    return storage_jar->get_all_keys(storage_endpoint, *canonical_key);
-}
-
-void WebContentPage::did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
+void WebContentPage::clear_storage_for_testing(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id)
 {
     auto canonical_key = canonical_storage_key(environment_id);
     auto* storage_jar = this->storage_jar(storage_endpoint);
     if (canonical_key.has_value() && storage_jar)
         storage_jar->clear_storage_key(storage_endpoint, *canonical_key);
+}
+
+Messages::WebContentClient::ConnectToStorageAreaResponse WebContentPage::connect_to_storage_area(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
+{
+    auto canonical_key = canonical_storage_key(environment_id);
+    auto* storage_jar = this->storage_jar(storage_endpoint);
+    if (!canonical_key.has_value() || !storage_jar)
+        return { {}, {}, {}, 0 };
+
+    auto connection = StorageAreaRegistry::the().connect(client(), *storage_jar, storage_endpoint, *canonical_key);
+    if (!connection.has_value())
+        return { {}, {}, {}, 0 };
+
+    Vector<Utf16String> keys;
+    Vector<Utf16String> values;
+    keys.ensure_capacity(connection->items.size());
+    values.ensure_capacity(connection->items.size());
+    for (auto& item : connection->items) {
+        keys.unchecked_append(move(item.key));
+        values.unchecked_append(move(item.value));
+    }
+    return { connection->id, move(keys), move(values), connection->usage };
 }
 
 void WebContentPage::did_change_needs_beforeunload_check(bool needs_beforeunload_check)
@@ -1636,8 +1625,26 @@ void WebContentPage::did_request_color_picker(Color current_color)
     view().did_request_color_picker({}, *this, current_color);
 }
 
+bool WebContentPage::hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature feature) const
+{
+    auto is_allowed = false;
+    traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        auto const& document = navigable.active_document();
+        if (document.host() != this)
+            return IterationDecision::Continue;
+        auto value = Web::PermissionsPolicy::check_permissions_policy(document.permissions_policy(), feature, document.origin(), document.origin());
+        is_allowed = value == Web::PermissionsPolicy::FeatureValue::Enabled;
+        return is_allowed ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return is_allowed;
+}
+
 void WebContentPage::did_request_geolocation_position(u64 request_id)
 {
+    if (!hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature::Geolocation)) {
+        async_geolocation_position_response(request_id, {}, to_underlying(Web::Geolocation::GeolocationPositionErrorCode::PermissionDenied));
+        return;
+    }
     if (view().on_request_geolocation_position)
         view().on_request_geolocation_position(*this, request_id);
 }
@@ -2029,32 +2036,6 @@ void WebContentPage::did_receive_network_response_headers(u64 request_id, u32 st
     if (displays_tab()) {
         if (view().on_network_response_headers_received)
             view().on_network_response_headers_received(request_id, status_code, reason_phrase, response_headers, cache_state);
-    }
-}
-
-void WebContentPage::did_change_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String url, Optional<Utf16String> key, Optional<Utf16String> old_value, Optional<Utf16String> new_value)
-{
-    if (displays_tab()) {
-        auto host = DevTools::storage_host_for_url(url);
-        if (!host.has_value())
-            return;
-
-        DevTools::DevToolsDelegate::StorageChange::Type type;
-        if (!key.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Cleared;
-        else if (!old_value.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Added;
-        else if (!new_value.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Deleted;
-        else
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Changed;
-
-        view().notify_storage_changed({
-            .storage_endpoint = storage_endpoint,
-            .host = host.release_value(),
-            .type = type,
-            .key = key.has_value() ? Optional<String> { key->to_utf8() } : Optional<String> {},
-        });
     }
 }
 
@@ -2981,10 +2962,10 @@ void WebContentPage::did_request_stop_loading_for_testing()
         view().stop_loading();
 }
 
-void WebContentPage::did_request_reload_for_testing()
+void WebContentPage::did_request_reload_for_testing(bool bypass_cache)
 {
     if (displays_tab())
-        view().reload();
+        view().reload(bypass_cache ? BypassCache::Yes : BypassCache::No);
 }
 
 // The tab's Back and Forward buttons, which traverse the history with no source document.

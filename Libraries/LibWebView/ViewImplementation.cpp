@@ -500,7 +500,7 @@ void ViewImplementation::load_navigation_error_page(StringView text)
     load_html(builder.string_view());
 }
 
-void ViewImplementation::reload()
+void ViewImplementation::reload(BypassCache bypass_cache)
 {
     m_history_visit_transition_for_next_load = HistoryVisitTransition::Reload;
 
@@ -525,7 +525,7 @@ void ViewImplementation::reload()
         return;
     }
 
-    traversable().reload();
+    traversable().reload(bypass_cache);
     update_navigation_action_state();
     dump_session_history("reload-mark-current-entry-reload-pending"sv);
 }
@@ -1636,21 +1636,6 @@ void ViewImplementation::inspect_dom_tree()
 void ViewImplementation::inspect_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, u64 request_id)
 {
     page().async_inspect_storage(storage_endpoint, request_id);
-}
-
-Optional<StorageSetResult> ViewImplementation::set_session_storage_item(Utf16String const& key, Utf16String const& value)
-{
-    return page().set_session_storage_item(key, value);
-}
-
-Optional<Utf16String> ViewImplementation::remove_session_storage_item(Utf16String const& key)
-{
-    return page().remove_session_storage_item(key);
-}
-
-bool ViewImplementation::clear_session_storage()
-{
-    return page().clear_session_storage();
 }
 
 void ViewImplementation::inspect_accessibility_tree()

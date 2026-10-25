@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Promise resolved during #report-the-error
+Pass	Promise resolved during event handlers other than error

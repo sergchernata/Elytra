@@ -229,7 +229,6 @@ class AnglePercentage;
 class AngleStyleValue;
 class BackgroundSizeStyleValue;
 class BlurFilterStyleValue;
-class BorderImageSliceStyleValue;
 class CalculatedStyleValue;
 class CustomPropertyData;
 class ColorFilterStyleValue;
@@ -310,7 +309,6 @@ class DimensionStyleValue;
 class Display;
 class DisplayStyleValue;
 class DropShadowFilterStyleValue;
-class EdgeStyleValue;
 class FilterStyleValue;
 class Flex;
 class FlexStyleValue;
@@ -324,6 +322,8 @@ class Frequency;
 class FrequencyPercentage;
 class FrequencyStyleValue;
 class FunctionStyleValue;
+class Highlight;
+class HighlightRegistry;
 class HueRotateFilterStyleValue;
 class ImageSetStyleValue;
 class ImageStyleValue;
@@ -331,7 +331,6 @@ class IntegerStyleValue;
 class KeywordStyleValue;
 class Length;
 class LengthBox;
-class LengthOrAuto;
 class LengthPercentage;
 class LengthPercentageOrAuto;
 class LengthStyleValue;
@@ -342,15 +341,12 @@ class Number;
 class NumberStyleValue;
 class NumericType;
 class OpacityValueStyleValue;
-class OpenTypeTaggedStyleValue;
 class PendingSubstitutionStyleValue;
 class Percentage;
 class PercentageStyleValue;
-class PositionStyleValue;
 class PropertyNameAndID;
 class Ratio;
 class RatioStyleValue;
-class RepeatStyleStyleValue;
 class Resolution;
 class ResolutionStyleValue;
 class Screen;
@@ -565,7 +561,9 @@ class FileSystemEntry;
 
 namespace Web::EventTiming {
 
+class EventCounts;
 class PerformanceEventTiming;
+struct WindowEventTimingState;
 
 }
 
@@ -986,6 +984,18 @@ class PerformanceTiming;
 namespace Web::NotificationsAPI {
 
 class Notification;
+
+}
+
+namespace Web::LargestContentfulPaint {
+
+class LargestContentfulPaint;
+
+}
+
+namespace Web::PaintTiming {
+
+class PerformancePaintTiming;
 
 }
 

@@ -18,7 +18,9 @@
 #include <LibWebCommon/HTML/EmbedderPolicy.h>
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
 #include <LibWebCommon/Page/CompositorContextId.h>
+#include <LibWebCommon/PermissionsPolicy/PermissionsPolicy.h>
 #include <LibWebCommon/ReferrerPolicy/ReferrerPolicy.h>
+#include <LibWebCommon/UpgradeInsecureRequests/InsecureRequestsPolicy.h>
 
 namespace Web::HTML {
 
@@ -37,11 +39,28 @@ struct ReplicatedContainerState {
     // document's policy container.
     EmbedderPolicy document_embedder_policy {};
 
+    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-permissions-policy, of the container's node
+    // document.
+    PermissionsPolicy::PermissionsPolicy document_permissions_policy { PermissionsPolicy::PermissionsPolicy::empty_permissions_policy() };
+
     // The container's local name, which navigate makes its request's destination and initiator type.
     Optional<Utf16FlyString> local_name;
 
     // https://html.spec.whatwg.org/multipage/browsers.html#determining-the-iframe-element-referrer-policy
     ReferrerPolicy::ReferrerPolicy iframe_referrer_policy { ReferrerPolicy::ReferrerPolicy::EmptyString };
+
+    // https://w3c.github.io/webappsec-permissions-policy/#container-policy
+    // The result of processing the container's permissions policy attributes.
+    PermissionsPolicy::PolicyDirective container_policy {};
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy, of the container's node
+    // document's relevant settings object, which a browsing context created for the navigable in another process
+    // inherits.
+    UpgradeInsecureRequests::InsecureRequestsPolicy document_insecure_requests_policy { UpgradeInsecureRequests::InsecureRequestsPolicy::DoNotUpgrade };
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set, of the container's
+    // node document's relevant settings object.
+    UpgradeInsecureRequests::UpgradeInsecureNavigationsSet document_upgrade_insecure_navigations_set {};
 };
 
 // What the process hosting a navigable's active document reports of it to the UI process, which composes the

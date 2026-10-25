@@ -43,6 +43,16 @@ fn for_each_empty_visual_line_position(
             segments.push((node, &content.text));
         }
     }
+    // A text that starts with a newline starts with an empty line.
+    if let Some(&(node, text)) = segments.first()
+        && text.first() == Some(&u16::from(b'\n'))
+    {
+        let dom_offset =
+            layout_arena.dom_offset_for_rendered_text_offset(node, 0, crate::layout::RenderedTextBoundary::Start);
+        if !callback(dom_offset) {
+            return;
+        }
+    }
     for (segment_index, &(node, text)) in segments.iter().enumerate() {
         for (rendered_offset, code_unit) in text.iter().enumerate() {
             if *code_unit != u16::from(b'\n') {
@@ -107,7 +117,17 @@ pub(crate) fn collect_visual_lines(layout_arena: &impl PaintRead, node_slots: &[
     if let Some(&primary) = node_slots.last()
         && text_preserves_newlines(layout_arena, primary)
     {
+        // The empty line after a text control's trailing newline holds a zero-length fragment, so its line is already
+        // in the list.
+        let empty_lines_with_fragments: Vec<usize> = lines
+            .iter()
+            .filter(|line| line.start_offset == line.end_offset)
+            .map(|line| line.start_offset)
+            .collect();
         for_each_empty_visual_line_position(layout_arena, node_slots, |position| {
+            if empty_lines_with_fragments.contains(&position) {
+                return true;
+            }
             lines.push(RecordVisualLine {
                 start_offset: position,
                 end_offset: position,

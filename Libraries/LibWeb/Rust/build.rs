@@ -626,6 +626,7 @@ fn generate_selector_pseudo_types(manifest_dir: &Path, out_dir: &Path) -> Result
         let parameter_type = match function_syntax {
             None => "None",
             Some("<compound-selector>") => "CompoundSelector",
+            Some("<highlight-name-selector>") => "HighlightNameSelector",
             Some("<ident>+") => "IdentList",
             Some("<pt-name-and-class-selector>") => "PTNameAndClassSelector",
             Some(argument) => return Err(format!("unsupported pseudo-element parameter type {argument}").into()),
@@ -2446,6 +2447,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             .rename
             .insert(rust_name.to_string(), cxx_name.to_string());
     }
+    // A selector parses against a namespace context as the value parser header declares it.
+    selector_config.export.rename.insert(
+        "NativeNamespaceContext".to_string(),
+        "Web::CSS::Parser::ValueParserFFI::NativeNamespaceContext".to_string(),
+    );
+    selector_config
+        .after_includes
+        .get_or_insert_with(String::new)
+        .push_str("\nnamespace Web::CSS::Parser::ValueParserFFI { struct NativeNamespaceContext; }");
 
     generate_ffi_header(
         selector_config,
@@ -2480,6 +2490,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     .map(String::from)
     .to_vec();
     expose_compositing_types_as_cpp_types(&mut style_value_config);
+    // A calculation's Typed OM reification is opaque to C++, which holds it by pointer.
+    style_value_config
+        .export
+        .rename
+        .insert("CalcReificationStorage".to_string(), "void".to_string());
+    style_value_config
+        .export
+        .exclude
+        .push("CalcReificationStorage".to_string());
     // A compositor keyframe value is substituted by the document's style engine, which the document host reaches.
     declare_document_host_of_layout_header(&mut style_value_config);
 
@@ -2545,6 +2564,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .after_includes
         .get_or_insert_with(String::new)
         .push_str("\nnamespace Web::CSS::ComputedValuesFFI { struct FfiLengthResolutionContext; }");
+    // A counter style's system is read as the style value header declares it.
+    value_parser_config.export.rename.insert(
+        "StyleValueData".to_string(),
+        "Web::CSS::StyleValueFFI::StyleValueData".to_string(),
+    );
+    value_parser_config
+        .after_includes
+        .get_or_insert_with(String::new)
+        .push_str("\nnamespace Web::CSS::StyleValueFFI { union StyleValueData; }");
 
     generate_ffi_header(
         value_parser_config,
@@ -2646,6 +2674,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         .after_includes
         .get_or_insert_with(String::new)
         .push_str("\nnamespace Web::DOM { class Element; }\nnamespace Web::CSS { struct StyleReactionApplication; }");
+    // The native sheets, rules and declaration blocks the host publishes are named as the value parser header declares
+    // them.
+    for name in ["DeclarationBlock", "NativeRule", "NativeStyleSheet"] {
+        style_engine_config
+            .export
+            .rename
+            .insert(name.to_string(), format!("Web::CSS::Parser::ValueParserFFI::{name}"));
+    }
+    style_engine_config
+        .after_includes
+        .get_or_insert_with(String::new)
+        .push_str(
+            "\nnamespace Web::CSS::Parser::ValueParserFFI { struct DeclarationBlock; struct NativeRule; struct NativeStyleSheet; }",
+        );
 
     generate_ffi_header(
         style_engine_config,
@@ -2740,6 +2782,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         .rename
         .insert("OptionalF64".to_string(), "Optional<double>".to_string());
     computed_values_config.includes.push("AK/Optional.h".to_string());
+    // The custom property registry and stores, a sample's animated custom properties and a shorthand expansion are
+    // opaque to C++, which holds each by pointer.
+    for name in [
+        "CustomPropertyRegistry",
+        "CustomPropertyStore",
+        "AnimatedCustomPropertyResults",
+        "ShorthandExpansion",
+    ] {
+        computed_values_config
+            .export
+            .rename
+            .insert(name.to_string(), "void".to_string());
+        computed_values_config.export.exclude.push(name.to_string());
+    }
     computed_values_config.export.rename.insert(
         "DeclarationBlockData".to_string(),
         "Web::CSS::Parser::ValueParserFFI::DeclarationBlockData".to_string(),
@@ -2757,6 +2813,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .after_includes
         .get_or_insert_with(String::new)
         .push_str("\nnamespace Web::CSS::StyleValueFFI { union StyleValueData; }");
+    // So do the names it hands out as CSS strings.
+    computed_values_config.export.rename.insert(
+        "CssString".to_string(),
+        "Web::CSS::StyleValueFFI::CssString".to_string(),
+    );
+    computed_values_config
+        .after_includes
+        .get_or_insert_with(String::new)
+        .push_str("\nnamespace Web::CSS::StyleValueFFI { struct CssString; }");
     // An animation sample and plan read the document's style engine, which the document host reaches.
     declare_document_host_of_layout_header(&mut computed_values_config);
 
@@ -2812,6 +2877,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         "FfiReplacedContentFacts".to_string(),
         "FfiStylePayloads".to_string(),
         "FfiUtf16View".to_string(),
+        // Lent and handed back through the layout header, which builds on this one.
+        "ArcRef".to_string(),
+        "OwnedArc".to_string(),
+        "OwnedBox".to_string(),
         "NodeFlag".to_string(),
         "NodeKind".to_string(),
     ];

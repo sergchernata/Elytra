@@ -55,11 +55,13 @@ set(SOURCES
     Page/InputTrace.cpp
     Page/MediaContextMenu.cpp
     Page/SpellingError.cpp
+    PermissionsPolicy/PermissionsPolicy.cpp
     PixelUnits.cpp
     ReferrerPolicy/ReferrerPolicy.cpp
     SecureContexts/AbstractOperations.cpp
     StorageAPI/StorageEndpoint.cpp
     StorageAPI/StorageKey.cpp
+    UpgradeInsecureRequests/InsecureRequestsPolicy.cpp
     WebDriver/Capabilities.cpp
     WebDriver/Client.cpp
     WebDriver/Error.cpp

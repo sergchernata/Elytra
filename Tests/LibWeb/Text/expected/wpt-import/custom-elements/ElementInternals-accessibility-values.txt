@@ -1,0 +1,54 @@
+Harness status: OK
+
+Found 49 tests
+
+49 Pass
+Pass	role
+Pass	ariaActiveDescendantElement
+Pass	ariaAtomic
+Pass	ariaAutoComplete
+Pass	ariaBrailleLabel
+Pass	ariaBrailleRoleDescription
+Pass	ariaBusy
+Pass	ariaChecked
+Pass	ariaColCount
+Pass	ariaColIndex
+Pass	ariaColSpan
+Pass	ariaControlsElements
+Pass	ariaCurrent
+Pass	ariaDescribedByElements
+Pass	ariaDetailsElements
+Pass	ariaDisabled
+Pass	ariaErrorMessageElements
+Pass	ariaExpanded
+Pass	ariaFlowToElements
+Pass	ariaHasPopup
+Pass	ariaHidden
+Pass	ariaInvalid
+Pass	ariaKeyShortcuts
+Pass	ariaLabel
+Pass	ariaLabelledByElements
+Pass	ariaLevel
+Pass	ariaLive
+Pass	ariaModal
+Pass	ariaMultiLine
+Pass	ariaMultiSelectable
+Pass	ariaOrientation
+Pass	ariaOwnsElements
+Pass	ariaPlaceholder
+Pass	ariaPosInSet
+Pass	ariaPressed
+Pass	ariaReadOnly
+Pass	ariaRelevant
+Pass	ariaRequired
+Pass	ariaRoleDescription
+Pass	ariaRowCount
+Pass	ariaRowIndex
+Pass	ariaRowSpan
+Pass	ariaSelected
+Pass	ariaSetSize
+Pass	ariaSort
+Pass	ariaValueMax
+Pass	ariaValueMin
+Pass	ariaValueNow
+Pass	ariaValueText

@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
@@ -51,6 +52,19 @@ GC::Ptr<DOM::Document> Navigable::container_document() const
 
     // 2. Return navigable's container's node document.
     return container->document();
+}
+
+PermissionsPolicy::PermissionsPolicy Navigable::create_a_permissions_policy_from_a_response(URL::Origin const& origin, HTTP::HeaderList const& response_header_list) const
+{
+    if (!parent())
+        return PermissionsPolicy::create_a_permissions_policy_for_a_navigable_from_response({}, origin, response_header_list);
+
+    // NB: The container's node document is the parent's active document. An origin not yet replicated is same origin
+    //     with nothing, which withholds features whose default allowlist is 'self'.
+    auto container_document_origin = parent()->active_document_origin().value_or_lazy_evaluated([] { return URL::Origin::create_opaque(); });
+    auto container_state = this->container_state();
+    PermissionsPolicy::NavigableContainerPolicyInputs container { container_state.document_permissions_policy, container_document_origin, container_state.container_policy };
+    return PermissionsPolicy::create_a_permissions_policy_for_a_navigable_from_response(container, origin, response_header_list);
 }
 
 bool Navigable::is_ancestor_of(Navigable const& other) const
@@ -271,7 +285,16 @@ bool Navigable::allowed_by_sandboxing_to_navigate(Navigable const& target, Sourc
 
     // 4. If target is a top-level traversable:
     if (target.is_top_level_traversable()) {
-        // FIXME: 1. If source is the one permitted sandboxed navigator of target, then return true.
+        // 1. If source is the one permitted sandboxed navigator of target, then return true.
+        // NB: The one permitted sandboxed navigator is a browsing context, so we compare the active browsing contexts.
+        auto const* local_source = as_if<LocalNavigable>(source);
+        auto const* local_target = as_if<LocalNavigable>(target);
+        if (local_source && local_target) {
+            auto source_browsing_context = const_cast<LocalNavigable&>(*local_source).active_browsing_context();
+            auto target_browsing_context = const_cast<LocalNavigable&>(*local_target).active_browsing_context();
+            if (source_browsing_context && target_browsing_context && target_browsing_context->the_one_permitted_sandboxed_navigator() == source_browsing_context)
+                return true;
+        }
 
         // 2. If sourceSnapshotParams's sandboxing flags's sandboxed navigation browsing context flag is set, then return false.
         if (has_flag(source_snapshot_params.sandboxing_flags, SandboxingFlagSet::SandboxedNavigation))

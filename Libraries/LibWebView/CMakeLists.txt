@@ -76,6 +76,7 @@ set(SOURCES
     SessionStore.cpp
     Settings.cpp
     SiteCompatibility.cpp
+    StorageAreaRegistry.cpp
     StorageJar.cpp
     TestSpellChecker.cpp
     URL.cpp

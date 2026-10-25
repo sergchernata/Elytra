@@ -82,6 +82,9 @@ pub(super) struct CacheEntry {
     pub holds_accessor: bool,
     /// Whether a `Set` writes a data property the object has.
     pub writes_data_property: bool,
+    /// Whether the property holds data while its holder keeps its shape (see
+    /// `PropertyCacheEntrySnapshot::property_holds_data`).
+    pub property_holds_data: bool,
     /// The function of the accessor the property held, which an access may
     /// call inline.
     pub accessor_function: Option<AccessorFunctionSnapshot>,
@@ -91,6 +94,12 @@ pub(super) struct CacheEntry {
     /// The snapshot executable of the function `prototype_property` holds,
     /// if calls of it may be inlined.
     pub prototype_property_inline_executable: Option<u32>,
+    /// The target through which code may call the function
+    /// `prototype_property` holds directly.
+    pub prototype_property_direct_call: Option<crate::snapshot::DirectCallTarget>,
+    /// The watchpoint set that stays valid while the prototype holds
+    /// `prototype_property`, if there is one.
+    pub prototype_property_watchpoint: Option<CellId>,
 }
 
 impl CacheEntry {
@@ -160,11 +169,14 @@ impl CacheEntry {
             action,
             holds_accessor: entry.holds_accessor,
             writes_data_property: entry.writes_data_property,
+            property_holds_data: entry.property_holds_data,
             accessor_function: entry.accessor_function,
             prototype_property: entry
                 .prototype_property
                 .map(|cell| (cell, entry.prototype_property_intrinsic)),
             prototype_property_inline_executable: entry.prototype_property_inline_executable,
+            prototype_property_direct_call: entry.prototype_property_direct_call,
+            prototype_property_watchpoint: entry.prototype_property_watchpoint,
         })
     }
 
@@ -269,7 +281,11 @@ impl GraphBuilder<'_> {
     ) -> Option<NodeId> {
         let entries = self.entries_for_known_shape(object, entries);
         let shapes = entries.iter().map(|entry| self.shape_guard(entry)).collect::<Vec<_>>();
-        let one_action = entries.iter().all(|entry| entry.action == entries[0].action);
+        // NB: The action applies the first entry's, so entries that differ in whether the property holds data do not
+        //     share one.
+        let one_action = entries.iter().all(|entry| {
+            entry.action == entries[0].action && entry.property_holds_data == entries[0].property_holds_data
+        });
         self.dispatch_on_shapes(object, entries, &shapes, one_action, apply)
     }
 

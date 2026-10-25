@@ -105,7 +105,7 @@ Utf16String HTMLOptionElement::value() const
 {
     // The value of an option element is the value of the value content attribute, if there is one.
     // ...or, if there is not, the value of the element's text IDL attribute.
-    if (auto value = attribute(HTML::AttributeNames::value); value.has_value())
+    if (auto value = get_attribute_ns({}, HTML::AttributeNames::value); value.has_value())
         return value.release_value();
     return text();
 }
@@ -133,7 +133,7 @@ Utf16String HTMLOptionElement::label() const
 {
     // The label IDL attribute, on getting, if there is a label content attribute,
     // must return that attribute's value; otherwise, it must return the element's label.
-    if (auto label = attribute(HTML::AttributeNames::label); label.has_value())
+    if (auto label = get_attribute_ns({}, HTML::AttributeNames::label); label.has_value())
         return label.release_value();
     return text();
 }
@@ -198,9 +198,26 @@ void HTMLOptionElement::ask_for_a_reset()
 // https://html.spec.whatwg.org/multipage/form-elements.html#concept-option-disabled
 bool HTMLOptionElement::disabled() const
 {
-    // An option element is disabled if its disabled attribute is present or if it is a child of an optgroup element whose disabled attribute is present.
-    return has_attribute(AttributeNames::disabled)
-        || (parent() && is<HTMLOptGroupElement>(parent()) && static_cast<HTMLOptGroupElement const&>(*parent()).has_attribute(AttributeNames::disabled));
+    // An option element option is disabled if the following steps return true:
+
+    // 1. If option's disabled attribute is present, then return true.
+    if (has_attribute(AttributeNames::disabled))
+        return true;
+
+    // 2. For each ancestor of option's ancestors in reverse tree order:
+    for (auto const* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
+        // 1. If ancestor is a select, hr, datalist, or option element, then return false.
+        if (is<HTMLSelectElement>(*ancestor) || is<HTMLHRElement>(*ancestor) || is<HTMLDataListElement>(*ancestor) || is<HTMLOptionElement>(*ancestor))
+            return false;
+
+        // 2. If ancestor is an optgroup element, then return true if ancestor's disabled attribute is present;
+        //    otherwise false.
+        if (auto const* optgroup = as_if<HTMLOptGroupElement>(*ancestor))
+            return optgroup->has_attribute(AttributeNames::disabled);
+    }
+
+    // 3. Return false.
+    return false;
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-option-form

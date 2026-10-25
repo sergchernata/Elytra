@@ -53,6 +53,7 @@ static NavigationRequestDescriptor create_navigation_request_descriptor(Fetch::I
         .redirect_count = request.redirect_count(),
         .text_directive_user_activation = request.text_directive_user_activation(),
         .browsing_context_group_has_multiple_contexts = request.browsing_context_group_has_multiple_contexts(),
+        .cache_mode = request.cache_mode(),
     };
 }
 
@@ -180,6 +181,7 @@ static NavigationParamsDescriptor create_navigation_params_descriptor(Navigation
         .agent_cluster_id = params.agent_cluster_id,
         .agent_cluster_cross_origin_isolation_mode = params.agent_cluster_cross_origin_isolation_mode,
         .new_browsing_context_group_id = params.new_browsing_context_group_id,
+        .permissions_policy = params.permissions_policy,
     };
 }
 
@@ -242,6 +244,7 @@ static GC::Ptr<Fetch::Infrastructure::Request> create_navigation_request_from_de
     request->set_redirect_count(descriptor->redirect_count);
     request->set_text_directive_user_activation(descriptor->text_directive_user_activation);
     request->set_browsing_context_group_has_multiple_contexts(descriptor->browsing_context_group_has_multiple_contexts);
+    request->set_cache_mode(descriptor->cache_mode);
     return request;
 }
 
@@ -396,6 +399,7 @@ ErrorOr<NavigationParamsVariant> create_navigation_params_from_descriptor(JS::Re
     navigation_params->agent_cluster_id = params.agent_cluster_id;
     navigation_params->agent_cluster_cross_origin_isolation_mode = params.agent_cluster_cross_origin_isolation_mode;
     navigation_params->new_browsing_context_group_id = params.new_browsing_context_group_id;
+    navigation_params->permissions_policy = move(params.permissions_policy);
     return navigation_params;
 }
 

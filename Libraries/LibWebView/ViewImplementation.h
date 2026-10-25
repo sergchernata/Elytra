@@ -163,7 +163,7 @@ public:
     void load_html(StringView);
     void load_navigation_error_page(StringView);
 
-    void reload();
+    void reload(BypassCache = BypassCache::No);
     void stop_loading();
     bool is_loading() const { return m_is_loading; }
     // Whether the most recent load ran to completion, rather than being stopped or canceled.
@@ -320,9 +320,6 @@ public:
 
     void inspect_dom_tree();
     void inspect_storage(Web::StorageAPI::StorageEndpointType, u64 request_id);
-    Optional<StorageSetResult> set_session_storage_item(Utf16String const& key, Utf16String const& value);
-    Optional<Utf16String> remove_session_storage_item(Utf16String const& key);
-    bool clear_session_storage();
     void inspect_accessibility_tree();
     void request_accessibility_tree();
     void perform_accessibility_action(i64 node_id, String action);

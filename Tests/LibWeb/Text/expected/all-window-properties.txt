@@ -164,6 +164,7 @@ Error
 ErrorEvent
 EvalError
 Event
+EventCounts
 EventSource
 EventTarget
 External
@@ -272,6 +273,8 @@ HTMLUnknownElement
 HTMLVideoElement
 HashChangeEvent
 Headers
+Highlight
+HighlightRegistry
 History
 IDBCursor
 IDBCursorWithValue
@@ -299,6 +302,7 @@ IntersectionObserverEntry
 Iterator
 KeyboardEvent
 KeyframeEffect
+LargestContentfulPaint
 Location
 Lock
 LockManager
@@ -367,6 +371,7 @@ PerformanceNavigation
 PerformanceNavigationTiming
 PerformanceObserver
 PerformanceObserverEntryList
+PerformancePaintTiming
 PerformanceResourceTiming
 PerformanceServerTiming
 PerformanceTiming

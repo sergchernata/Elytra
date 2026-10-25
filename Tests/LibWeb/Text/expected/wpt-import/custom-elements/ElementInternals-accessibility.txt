@@ -1,0 +1,55 @@
+Harness status: OK
+
+Found 50 tests
+
+50 Pass
+Pass	role is defined in ElementInternals
+Pass	ariaActiveDescendantElement is defined in ElementInternals
+Pass	ariaAtomic is defined in ElementInternals
+Pass	ariaAutoComplete is defined in ElementInternals
+Pass	ariaBrailleLabel is defined in ElementInternals
+Pass	ariaBrailleRoleDescription is defined in ElementInternals
+Pass	ariaBusy is defined in ElementInternals
+Pass	ariaChecked is defined in ElementInternals
+Pass	ariaColCount is defined in ElementInternals
+Pass	ariaColIndex is defined in ElementInternals
+Pass	ariaColSpan is defined in ElementInternals
+Pass	ariaControlsElements is defined in ElementInternals
+Pass	ariaCurrent is defined in ElementInternals
+Pass	ariaDescribedByElements is defined in ElementInternals
+Pass	ariaDetailsElements is defined in ElementInternals
+Pass	ariaDisabled is defined in ElementInternals
+Pass	ariaErrorMessageElements is defined in ElementInternals
+Pass	ariaExpanded is defined in ElementInternals
+Pass	ariaFlowToElements is defined in ElementInternals
+Pass	ariaHasPopup is defined in ElementInternals
+Pass	ariaHidden is defined in ElementInternals
+Pass	ariaInvalid is defined in ElementInternals
+Pass	ariaKeyShortcuts is defined in ElementInternals
+Pass	ariaLabel is defined in ElementInternals
+Pass	ariaLabelledByElements is defined in ElementInternals
+Pass	ariaLevel is defined in ElementInternals
+Pass	ariaLive is defined in ElementInternals
+Pass	ariaModal is defined in ElementInternals
+Pass	ariaMultiLine is defined in ElementInternals
+Pass	ariaMultiSelectable is defined in ElementInternals
+Pass	ariaOrientation is defined in ElementInternals
+Pass	ariaOwnsElements is defined in ElementInternals
+Pass	ariaPlaceholder is defined in ElementInternals
+Pass	ariaPosInSet is defined in ElementInternals
+Pass	ariaPressed is defined in ElementInternals
+Pass	ariaReadOnly is defined in ElementInternals
+Pass	ariaRelevant is defined in ElementInternals
+Pass	ariaRequired is defined in ElementInternals
+Pass	ariaRoleDescription is defined in ElementInternals
+Pass	ariaRowCount is defined in ElementInternals
+Pass	ariaRowIndex is defined in ElementInternals
+Pass	ariaRowSpan is defined in ElementInternals
+Pass	ariaSelected is defined in ElementInternals
+Pass	ariaSetSize is defined in ElementInternals
+Pass	ariaSort is defined in ElementInternals
+Pass	ariaValueMax is defined in ElementInternals
+Pass	ariaValueMin is defined in ElementInternals
+Pass	ariaValueNow is defined in ElementInternals
+Pass	ariaValueText is defined in ElementInternals
+Pass	ariaErrorMessageElement is not defined in ElementInternals

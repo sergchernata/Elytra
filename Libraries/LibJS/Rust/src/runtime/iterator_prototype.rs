@@ -34,6 +34,7 @@ use crate::runtime::property_attributes::{Attribute, PropertyAttributes};
 use crate::runtime::property_key::PropertyKey;
 use crate::runtime::prototype_object::this_object;
 use crate::runtime::realm::Realm;
+use crate::runtime::value::same_value_zero;
 use crate::runtime::value_conversions::MAX_ARRAY_LIKE_INDEX;
 use crate::utf16::{Utf16StringBuilder, Utf16View};
 
@@ -104,12 +105,18 @@ impl IteratorPrototype {
         define(&names.find, raw_native!(IteratorPrototype::find), 1);
         define(&names.flatMap, raw_native!(IteratorPrototype::flat_map), 1);
         define(&names.forEach, raw_native!(IteratorPrototype::for_each), 1);
+        define(&names.includes, raw_native!(IteratorPrototype::includes), 1);
         define(&names.join, raw_native!(IteratorPrototype::join), 1);
         define(&names.map, raw_native!(IteratorPrototype::map), 1);
         define(&names.reduce, raw_native!(IteratorPrototype::reduce), 1);
         define(&names.some, raw_native!(IteratorPrototype::some), 1);
         define(&names.take, raw_native!(IteratorPrototype::take), 1);
         define(&names.toArray, raw_native!(IteratorPrototype::to_array), 0);
+        define(
+            &PropertyKey::from(vm.well_known_symbols().dispose),
+            raw_native!(IteratorPrototype::symbol_dispose),
+            0,
+        );
 
         // 27.1.4.1 Iterator.prototype.constructor, https://tc39.es/ecma262/#sec-iterator.prototype.constructor
         object.define_native_accessor(
@@ -482,6 +489,99 @@ impl IteratorPrototype {
         }
     }
 
+    // 1 Iterator.prototype.includes ( searchElement [ , skippedElements ] ), https://tc39.es/proposal-iterator-includes/#sec-iterator.prototype.includes
+    fn includes(vm: &Vm) -> ThrowCompletionOr<Value> {
+        let search_element = vm.argument(0);
+        let skipped_elements = vm.argument(1);
+
+        // 1. Let obj be the this value.
+        // 2. If obj is not an Object, throw a TypeError exception.
+        let object = this_object(vm)?;
+
+        // 3. Let iterated be the Iterator Record { [[Iterator]]: obj, [[NextMethod]]: undefined, [[Done]]: false }.
+        let mut iterated = IteratorRecord::create(vm, Some(object), Value::UNDEFINED, false);
+
+        // 4. If skippedElements is undefined, then
+        let to_skip = if skipped_elements.is_undefined() {
+            // a. Let toSkip be +0𝔽.
+            0.0
+        }
+        // 5. Else,
+        else {
+            // a. If skippedElements is not one of +∞𝔽, -∞𝔽, or an integral Number, then
+            if !skipped_elements.is_number()
+                || !(skipped_elements.is_integral_number() || skipped_elements.as_f64().is_infinite())
+            {
+                // i. Let error be ThrowCompletion(a newly created TypeError object).
+                let error = vm.throw_completion::<Value>(
+                    ErrorKind::TypeError,
+                    ErrorType::IsNotAn,
+                    &[&"skippedElements", &"integral Number"],
+                );
+
+                // ii. Return ? IteratorClose(iterated, error).
+                return iterator_close(vm, &iterated, Completion::from(error)).into_throw_completion_or();
+            }
+
+            // b. Let toSkip be skippedElements.
+            skipped_elements.as_f64()
+        };
+
+        // 6. If toSkip < -0𝔽, then
+        if to_skip < 0.0 {
+            // a. Let error be ThrowCompletion(a newly created RangeError object).
+            let error = vm.throw_completion::<Value>(
+                ErrorKind::RangeError,
+                ErrorType::NumberIsNegative,
+                &[&"skippedElements"],
+            );
+
+            // b. Return ? IteratorClose(iterated, error).
+            return iterator_close(vm, &iterated, Completion::from(error)).into_throw_completion_or();
+        }
+
+        // 7. If toSkip is finite and toSkip > 𝔽(2**53 - 1), then
+        if to_skip.is_finite() && to_skip > MAX_ARRAY_LIKE_INDEX {
+            // a. Let error be ThrowCompletion(a newly created RangeError object).
+            let error = vm.throw_completion::<Value>(
+                ErrorKind::RangeError,
+                ErrorType::NumberIsLargerThanMaxSafeNumber,
+                &[&"skippedElements"],
+            );
+
+            // b. Return ? IteratorClose(iterated, error).
+            return iterator_close(vm, &iterated, Completion::from(error)).into_throw_completion_or();
+        }
+
+        // 8. Let skipped be +0𝔽.
+        let mut skipped: f64 = 0.0;
+
+        // 9. Set iterated to ? GetIteratorDirect(obj).
+        iterated = get_iterator_direct(vm, object)?;
+
+        // 10. Repeat,
+        loop {
+            // a. Let value be ? IteratorStepValue(iterated).
+            let value = iterator_step_value(vm, &iterated)?;
+
+            // b. If value is done, return false.
+            let Some(value) = value else {
+                return Ok(Value::FALSE);
+            };
+
+            // c. If skipped < toSkip, then
+            if skipped < to_skip {
+                // i. Set skipped to skipped + 1𝔽.
+                skipped += 1.0;
+            }
+            // d. Else if SameValueZero(value, searchElement) is true, then
+            else if same_value_zero(value, search_element) {
+                // i. Return ? IteratorClose(iterated, NormalCompletion(true)).
+                return iterator_close(vm, &iterated, Completion::normal(Value::TRUE)).into_throw_completion_or();
+            }
+        }
+    }
+
     // 27.1.3.3.8 Iterator.prototype.join ( separator ), https://tc39.es/ecma262/#sec-iterator.prototype.join
     fn join(vm: &Vm) -> ThrowCompletionOr<Value> {
         let separator = vm.argument(0);
@@ -826,6 +926,24 @@ impl IteratorPrototype {
             // c. Append value to items.
             items.push(value);
         }
+    }
+
+    // 27.1.4.14 Iterator.prototype [ %Symbol.dispose% ] ( ), https://tc39.es/ecma262/#sec-iterator.prototype-%symbol.dispose%
+    fn symbol_dispose(vm: &Vm) -> ThrowCompletionOr<Value> {
+        // 1. Let obj be the this value.
+        let object = vm.this_value();
+
+        // 2. Let return be ? GetMethod(obj, "return").
+        let return_method = object.get_method(vm, &vm.names.return_)?;
+
+        // 3. If return is not undefined, then
+        if let Some(return_method) = return_method {
+            // a. Perform ? Call(return, obj).
+            call_function_object(vm, return_method, object, &[])?;
+        }
+
+        // 4. Return undefined.
+        Ok(Value::UNDEFINED)
     }
 
     // 27.1.4.15 Iterator.prototype [ %Symbol.iterator% ] ( ), https://tc39.es/ecma262/#sec-iterator.prototype-%symbol.iterator%

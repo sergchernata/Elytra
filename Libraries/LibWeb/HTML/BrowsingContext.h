@@ -17,6 +17,7 @@
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/HTML/CrossProcessId.h>
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
+#include <LibWebCommon/UpgradeInsecureRequests/InsecureRequestsPolicy.h>
 
 namespace Web::HTML {
 
@@ -62,10 +63,9 @@ public:
     Optional<u64> browsing_context_group_id() const { return m_browsing_context_group_id; }
     void set_browsing_context_group_id(Optional<u64> id) { m_browsing_context_group_id = id; }
 
-    void set_the_one_permitted_sandboxed_navigator(BrowsingContext const*)
-    {
-        // FIXME: Implement this
-    }
+    // https://html.spec.whatwg.org/multipage/browsers.html#one-permitted-sandboxed-navigator
+    GC::Ptr<BrowsingContext const> the_one_permitted_sandboxed_navigator() const { return m_the_one_permitted_sandboxed_navigator; }
+    void set_the_one_permitted_sandboxed_navigator(BrowsingContext const* browsing_context) { m_the_one_permitted_sandboxed_navigator = browsing_context; }
 
     bool has_navigable_been_destroyed() const;
 
@@ -81,6 +81,14 @@ public:
 
     SandboxingFlagSet popup_sandboxing_flag_set() const { return m_popup_sandboxing_flag_set; }
     void set_popup_sandboxing_flag_set(SandboxingFlagSet value) { m_popup_sandboxing_flag_set = value; }
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy
+    UpgradeInsecureRequests::InsecureRequestsPolicy insecure_requests_policy() const { return m_insecure_requests_policy; }
+    void set_insecure_requests_policy(UpgradeInsecureRequests::InsecureRequestsPolicy policy) { m_insecure_requests_policy = policy; }
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set
+    UpgradeInsecureRequests::UpgradeInsecureNavigationsSet const& upgrade_insecure_navigations_set() const { return m_upgrade_insecure_navigations_set; }
+    void add_to_upgrade_insecure_navigations_set(UpgradeInsecureRequests::HostAndPort tuple) { m_upgrade_insecure_navigations_set.insert(move(tuple)); }
 
 private:
     explicit BrowsingContext(GC::Ref<Page>);
@@ -103,6 +111,9 @@ private:
     // NB: Held as its WindowProxy, which also stands for a browsing context another process holds.
     GC::Ptr<WindowProxy> m_opener_browsing_context_window_proxy;
 
+    // https://html.spec.whatwg.org/multipage/browsers.html#one-permitted-sandboxed-navigator
+    GC::Ptr<BrowsingContext const> m_the_one_permitted_sandboxed_navigator;
+
     // https://html.spec.whatwg.org/multipage/browsers.html#is-popup
     TokenizedFeature::Popup m_is_popup { TokenizedFeature::Popup::No };
 
@@ -114,6 +125,14 @@ private:
 
     // https://html.spec.whatwg.org/multipage/browsers.html#tlbc-group
     Optional<u64> m_browsing_context_group_id;
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy
+    // It is set to Do Not Upgrade unless otherwise specified.
+    UpgradeInsecureRequests::InsecureRequestsPolicy m_insecure_requests_policy { UpgradeInsecureRequests::InsecureRequestsPolicy::DoNotUpgrade };
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set
+    // Its value is the empty set unless otherwise specified.
+    UpgradeInsecureRequests::UpgradeInsecureNavigationsSet m_upgrade_insecure_navigations_set;
 };
 
 SandboxingFlagSet determine_the_creation_sandboxing_flags(BrowsingContext const&, GC::Ptr<DOM::Element> embedder);

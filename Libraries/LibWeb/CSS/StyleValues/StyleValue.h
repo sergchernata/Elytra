@@ -34,7 +34,7 @@
 
 namespace Web::CSS {
 
-WEB_API Utf16FlyString css_string_from_rust(void const*);
+WEB_API Utf16FlyString css_string_from_rust(StyleValueFFI::CssString const*);
 
 #define ENUMERATE_CSS_STYLE_VALUE_TYPES                                                                        \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Anchor, anchor, StyleValue)                                               \
@@ -42,7 +42,7 @@ WEB_API Utf16FlyString css_string_from_rust(void const*);
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Angle, angle, AngleStyleValue)                                            \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(BackgroundSize, background_size, BackgroundSizeStyleValue)                \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(BasicShape, basic_shape, StyleValue)                                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderImageSlice, border_image_slice, BorderImageSliceStyleValue)         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderImageSlice, border_image_slice, StyleValue)                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderRadius, border_radius, StyleValue)                                  \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(BorderRadiusRect, border_radius_rect, StyleValue)                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Calculated, calculated, CalculatedStyleValue)                             \
@@ -59,7 +59,7 @@ WEB_API Utf16FlyString css_string_from_rust(void const*);
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(CustomIdent, custom_ident, CustomIdentStyleValue)                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Display, display, DisplayStyleValue)                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Easing, easing, StyleValue)                                               \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Edge, edge, EdgeStyleValue)                                               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Edge, edge, StyleValue)                                                   \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(EmptyOptional, empty_optional, StyleValue)                                \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Filter, filter, FilterStyleValue)                                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Function, function, FunctionStyleValue)                                   \
@@ -80,18 +80,18 @@ WEB_API Utf16FlyString css_string_from_rust(void const*);
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(LinearGradient, linear_gradient, AbstractImageStyleValue)                 \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Number, number, NumberStyleValue)                                         \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpacityValue, opacity_value, OpacityValueStyleValue)                      \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpenTypeTagged, open_type_tagged, OpenTypeTaggedStyleValue)               \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(OpenTypeTagged, open_type_tagged, StyleValue)                             \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(OverflowClipMargin, overflow_clip_margin, StyleValue)                     \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(PendingSubstitution, pending_substitution, PendingSubstitutionStyleValue) \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Percentage, percentage, PercentageStyleValue)                             \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Position, position, PositionStyleValue)                                   \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(Position, position, StyleValue)                                           \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(RadialGradient, radial_gradient, AbstractImageStyleValue)                 \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(RadialSize, radial_size, StyleValue)                                      \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(RandomValueSharing, random_value_sharing, StyleValue)                     \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Ratio, ratio, RatioStyleValue)                                            \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Ray, ray, StyleValue)                                                     \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Rect, rect, StyleValue)                                                   \
-    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RepeatStyle, repeat_style, RepeatStyleStyleValue)                         \
+    __ENUMERATE_CSS_STYLE_VALUE_TYPE(RepeatStyle, repeat_style, StyleValue)                                    \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(Resolution, resolution, ResolutionStyleValue)                             \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarColor, scrollbar_color, StyleValue)                              \
     __ENUMERATE_CSS_STYLE_VALUE_TYPE(ScrollbarGutter, scrollbar_gutter, StyleValue)                            \
@@ -218,7 +218,6 @@ public:
     StyleValueVector subdivide_into_iterations(PropertyNameAndID const&) const;
 
     void set_style_sheet(StyleSheetState*);
-    bool has_style_sheet_context() const { return m_has_style_sheet_context; }
 
     bool equals(StyleValue const& other) const;
 
@@ -242,7 +241,6 @@ protected:
 
 private:
     Type m_type;
-    bool m_has_style_sheet_context { false };
 };
 
 template<typename T>
@@ -251,7 +249,6 @@ struct StyleValueWithDefaultOperators : public StyleValue {
     using Base = StyleValue;
 };
 
-i32 int_from_style_value(NonnullRefPtr<StyleValue const> const& style_value);
 double number_from_style_value(NonnullRefPtr<StyleValue const> const& style_value, Optional<double> percentage_basis);
 Utf16FlyString string_from_style_value(NonnullRefPtr<StyleValue const> const& style_value);
 

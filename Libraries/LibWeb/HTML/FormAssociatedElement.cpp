@@ -930,7 +930,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_start_
     }
 
     // 2. Let end be the value of this element's selectionEnd attribute.
-    auto end = m_selection_end;
+    auto end = selection_end();
 
     // 3. If end is less than the given value, set end to the given value.
     if (value.has_value() && end < value.value())
@@ -984,7 +984,7 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_end_bi
 
     // 2. Set the selection range with the value of this element's selectionStart attribute, the
     //    given value, and the value of this element's selectionDirection attribute.
-    set_the_selection_range(m_selection_start, value, selection_direction_state());
+    set_the_selection_range(selection_start(), value, selection_direction_state());
     return {};
 }
 
@@ -1030,7 +1030,9 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_direct
     //    throw an "InvalidStateError" DOMException.
     TRY(validate_selection_direction_applies(*this));
 
-    set_the_selection_range(m_selection_start, m_selection_end, string_to_selection_direction(optional_utf16_view(direction)));
+    // 2. Set the selection range with the value of this element's selectionStart attribute, the value of this
+    //    element's selectionEnd attribute, and the given value.
+    set_the_selection_range(selection_start(), selection_end(), string_to_selection_direction(optional_utf16_view(direction)));
     return {};
 }
 
@@ -1038,19 +1040,22 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_direct
 {
     TRY(validate_selection_direction_applies(*this));
 
-    set_the_selection_range(m_selection_start, m_selection_end, string_to_selection_direction(direction));
+    set_the_selection_range(selection_start(), selection_end(), string_to_selection_direction(direction));
     return {};
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
 WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text_binding(Utf16View replacement)
 {
-    return set_range_text(replacement, m_selection_start, m_selection_end);
+    return set_range_text(replacement, selection_start(), selection_end());
 }
 
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
 WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Utf16String const& replacement)
 {
-    return set_range_text(replacement.utf16_view(), 0, replacement.length_in_code_units());
+    // 3. If the method has only one argument, then let start and end have the values of the selectionStart attribute
+    //    and the selectionEnd attribute respectively.
+    return set_range_text(replacement.utf16_view(), selection_start(), selection_end());
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-setrangetext
@@ -1091,10 +1096,10 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_range_text(Utf16
         end = relevant_value_length;
 
     // 7. Let selection start be the current value of the selectionStart attribute.
-    auto selection_start = m_selection_start;
+    auto selection_start = this->selection_start();
 
     // 8. Let selection end be the current value of the selectionEnd attribute.
-    auto selection_end = m_selection_end;
+    auto selection_end = this->selection_end();
 
     // 9. If start is less than end, delete the sequence of code units within the element's relevant value starting with
     //    the code unit at the startth position and ending with the code unit at the (end-1)th position.
@@ -1195,6 +1200,12 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::set_selection_range(
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#set-the-selection-range
 void FormAssociatedTextControlElement::set_the_selection_range(Optional<WebIDL::UnsignedLong> start, Optional<WebIDL::UnsignedLong> end, SelectionDirection direction, SelectionSource source)
 {
+    // NB: A cursor reveal that an earlier execCommand() edit left pending is for the cursor that edit placed, so reveal
+    //     it before the selection moves. Edits that execCommand() is making right now set the selection here too, and
+    //     they keep their reveal pending.
+    if (m_cursor_reveal_after_edit == CursorRevealAfterEdit::Immediately)
+        reveal_cursor_if_pending();
+
     // 1. If start is null, let start be 0.
     start = start.value_or(0);
 
@@ -1217,6 +1228,11 @@ void FormAssociatedTextControlElement::set_the_selection_range(Optional<WebIDL::
     //    where there is no concept of an empty selection, this must set the cursor to be just
     //    before the character with offset end.
     new_selection_start = AK::min(new_selection_start, new_selection_end);
+
+    // NB: m_selection_start and m_selection_end hold the anchor and the focus of the selection. The focus of a
+    //     backward selection is its start, so that the user extends it from there.
+    if (direction == SelectionDirection::Backward)
+        swap(new_selection_start, new_selection_end);
 
     bool was_modified = m_selection_start != new_selection_start || m_selection_end != new_selection_end;
     m_selection_start = new_selection_start;
@@ -1315,7 +1331,7 @@ void FormAssociatedTextControlElement::handle_insert(Utf16FlyString const& input
 
     did_edit_text_node(input_type, data_for_input_event);
     html_element.document().spell_check_controller().did_user_edit(html_element);
-    scroll_cursor_into_view();
+    reveal_cursor_after_edit();
 }
 
 GC::Ptr<DOM::StaticRange> FormAssociatedTextControlElement::deletion_target_range(Utf16FlyString const& input_type)
@@ -1404,7 +1420,7 @@ void FormAssociatedTextControlElement::handle_delete(Utf16FlyString const& input
 
     did_edit_text_node(input_type, {});
     html_element.document().spell_check_controller().did_user_edit(html_element);
-    scroll_cursor_into_view();
+    reveal_cursor_after_edit();
 }
 
 Optional<Utf16String> FormAssociatedTextControlElement::selected_text_for_stringifier() const
@@ -1440,8 +1456,27 @@ void FormAssociatedTextControlElement::move_selection_end_to(size_t offset, Text
         history->selection_changed();
 }
 
+void FormAssociatedTextControlElement::reveal_cursor_after_edit()
+{
+    // NB: Only the focused text control reveals its cursor in the rendering update, so a control that lost focus during
+    //     the edit reveals it right away.
+    if (m_cursor_reveal_after_edit == CursorRevealAfterEdit::InNextRenderingUpdate && text_control_to_html_element().is_focused()) {
+        m_has_pending_cursor_reveal = true;
+        return;
+    }
+    scroll_cursor_into_view();
+}
+
+void FormAssociatedTextControlElement::reveal_cursor_if_pending()
+{
+    if (m_has_pending_cursor_reveal)
+        scroll_cursor_into_view();
+}
+
 void FormAssociatedTextControlElement::scroll_cursor_into_view()
 {
+    m_has_pending_cursor_reveal = false;
+
     auto& element = text_control_to_html_element();
     Layout::ForcedReadScope read { element.document() };
     element.document().update_layout(DOM::UpdateLayoutReason::ScrollCursorIntoView);

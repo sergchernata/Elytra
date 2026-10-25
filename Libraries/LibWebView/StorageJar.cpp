@@ -8,12 +8,13 @@
 #include <AK/NonnullOwnPtr.h>
 #include <AK/StdLibExtras.h>
 #include <LibDatabase/Database.h>
+#include <LibWebView/StorageAreaRegistry.h>
 #include <LibWebView/StorageJar.h>
 
-namespace WebView {
+using Web::StorageAPI::quota_for;
+using Web::StorageAPI::storage_quota_size;
 
-// Quota size is specified in https://storage.spec.whatwg.org/#registered-storage-endpoints
-static constexpr size_t LOCAL_STORAGE_QUOTA = 5 * MiB;
+namespace WebView {
 
 static constexpr u32 WEB_STORAGE_SCHEMA_BASELINE_VERSION = 2u;
 
@@ -46,11 +47,14 @@ ErrorOr<NonnullOwnPtr<StorageJar>> StorageJar::create(Database::Database& databa
     statements.set_item = TRY(database.prepare_statement("INSERT OR REPLACE INTO WebStorage (storage_endpoint, storage_key, bottle_key, bottle_value, last_access_time) VALUES (?, ?, ?, ?, ?);"sv));
     statements.delete_item = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
     statements.delete_items_accessed_since = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE last_access_time >= ?;"sv));
-    statements.update_last_access_time = TRY(database.prepare_statement("UPDATE WebStorage SET last_access_time = ? WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
+    statements.bottles_accessed_since = TRY(database.prepare_statement("SELECT DISTINCT storage_endpoint, storage_key FROM WebStorage WHERE last_access_time >= ?;"sv));
+    statements.mark_accessed = TRY(database.prepare_statement("UPDATE WebStorage SET last_access_time = ? WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.clear = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.get_keys = TRY(database.prepare_statement("SELECT bottle_key FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
+    statements.get_items = TRY(database.prepare_statement("SELECT bottle_key, bottle_value FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.calculate_size_excluding_bottle_key = TRY(database.prepare_statement("SELECT COALESCE(SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)), 0) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key != ?;"sv));
     statements.calculate_size = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE storage_key = ?;"sv));
+    statements.calculate_bottle_size = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.estimate_storage_size_accessed_since = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(storage_key), 0) + COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE last_access_time >= ?;"sv));
 
     return adopt_own(*new StorageJar { PersistedStorage { database, statements } });
@@ -66,12 +70,17 @@ StorageJar::StorageJar(Optional<PersistedStorage> persisted_storage)
 {
 }
 
-StorageJar::~StorageJar() = default;
-
-static size_t storage_quota_size(Utf16String const& string)
+StorageJar::~StorageJar()
 {
-    auto utf8_string = string.to_utf8();
-    return utf8_string.bytes().size();
+    StorageAreaRegistry::the().remove_areas_of({}, *this);
+}
+
+void StorageJar::notify(StorageChange const& change)
+{
+    // The registry hears of every change to every jar, by construction: nothing installed and nothing to forget.
+    StorageAreaRegistry::the().did_change({}, *this, change);
+    if (on_change)
+        on_change(change);
 }
 
 Optional<Utf16String> StorageJar::get_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& bottle_key)
@@ -83,39 +92,69 @@ Optional<Utf16String> StorageJar::get_item(StorageEndpointType storage_endpoint,
     return m_transient_storage.get_item(storage_location);
 }
 
+Vector<StorageItem> StorageJar::get_all_items(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    if (m_persisted_storage.has_value())
+        return m_persisted_storage->get_items(storage_endpoint, storage_key);
+    return m_transient_storage.get_items(storage_endpoint, storage_key);
+}
+
 StorageSetResult StorageJar::set_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& bottle_key, Utf16String const& bottle_value)
 {
     StorageLocation storage_location { storage_endpoint, storage_key, bottle_key };
 
-    if (m_persisted_storage.has_value())
-        return m_persisted_storage->set_item(storage_location, bottle_value);
-    return m_transient_storage.set_item(storage_location, bottle_value);
+    auto result = m_persisted_storage.has_value()
+        ? m_persisted_storage->set_item(storage_location, bottle_value)
+        : m_transient_storage.set_item(storage_location, bottle_value);
+
+    // A refused write and a write of the value already there change nothing, so neither is reported.
+    if (auto const* old_value = result.get_pointer<Optional<Utf16String>>(); old_value && *old_value != bottle_value)
+        notify({ StorageChange::Type::Set, storage_endpoint, storage_key, bottle_key, *old_value, bottle_value });
+    return result;
 }
 
 void StorageJar::remove_item(StorageEndpointType storage_endpoint, String const& storage_key, Utf16String const& key)
 {
-    StorageLocation storage_location { storage_endpoint, storage_key, key };
+    auto old_value = get_item(storage_endpoint, storage_key, key);
+    if (!old_value.has_value())
+        return;
 
+    StorageLocation storage_location { storage_endpoint, storage_key, key };
     if (m_persisted_storage.has_value())
         m_persisted_storage->delete_item(storage_location);
     else
         m_transient_storage.delete_item(storage_location);
+    notify({ StorageChange::Type::Removed, storage_endpoint, storage_key, key, move(old_value), {} });
 }
 
 void StorageJar::remove_items_accessed_since(UnixDateTime since)
 {
-    if (m_persisted_storage.has_value())
-        m_persisted_storage->delete_items_accessed_since(since);
-    else
-        m_transient_storage.delete_items_accessed_since(since);
+    auto affected_bottles = m_persisted_storage.has_value()
+        ? m_persisted_storage->delete_items_accessed_since(since)
+        : m_transient_storage.delete_items_accessed_since(since);
+
+    for (auto const& bottle : affected_bottles)
+        notify({ StorageChange::Type::Reset, bottle.storage_endpoint, bottle.storage_key, {}, {}, {} });
 }
 
 void StorageJar::clear_storage_key(StorageEndpointType storage_endpoint, String const& storage_key)
 {
+    if (get_all_keys(storage_endpoint, storage_key).is_empty())
+        return;
+
     if (m_persisted_storage.has_value())
         m_persisted_storage->clear(storage_endpoint, storage_key);
     else
         m_transient_storage.clear(storage_endpoint, storage_key);
+    notify({ StorageChange::Type::Cleared, storage_endpoint, storage_key, {}, {}, {} });
+}
+
+void StorageJar::mark_accessed(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    if (m_persisted_storage.has_value())
+        m_persisted_storage->mark_accessed(storage_endpoint, storage_key);
+    else
+        m_transient_storage.mark_accessed(storage_endpoint, storage_key);
 }
 
 Vector<Utf16String> StorageJar::get_all_keys(StorageEndpointType storage_endpoint, String const& storage_key)
@@ -130,6 +169,13 @@ u64 StorageJar::usage(String const& storage_key)
     if (m_persisted_storage.has_value())
         return m_persisted_storage->usage(storage_key);
     return m_transient_storage.usage(storage_key);
+}
+
+u64 StorageJar::bottle_usage(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    if (m_persisted_storage.has_value())
+        return m_persisted_storage->bottle_usage(storage_endpoint, storage_key);
+    return m_transient_storage.bottle_usage(storage_endpoint, storage_key);
 }
 
 Requests::CacheSizes StorageJar::estimate_storage_size_accessed_since(UnixDateTime since) const
@@ -152,12 +198,23 @@ Optional<Utf16String> StorageJar::TransientStorage::get_item(StorageLocation con
     if (!bottle.has_value())
         return {};
 
-    if (auto entry = bottle->items.get(key.bottle_key); entry.has_value()) {
-        entry->last_access_time = UnixDateTime::now();
+    if (auto entry = bottle->items.get(key.bottle_key); entry.has_value())
         return entry->value;
-    }
 
     return {};
+}
+
+Vector<StorageItem> StorageJar::TransientStorage::get_items(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    Vector<StorageItem> items;
+    auto bottle = m_bottles.get({ storage_endpoint, storage_key });
+    if (!bottle.has_value())
+        return items;
+
+    items.ensure_capacity(bottle->items.size());
+    for (auto const& [bottle_key, entry] : bottle->items)
+        items.unchecked_append({ bottle_key, entry.value });
+    return items;
 }
 
 StorageSetResult StorageJar::TransientStorage::set_item(StorageLocation const& key, Utf16String const& value)
@@ -173,7 +230,7 @@ StorageSetResult StorageJar::TransientStorage::set_item(StorageLocation const& k
     }
 
     auto new_size = storage_quota_size(key.bottle_key) + storage_quota_size(value);
-    if (current_size + new_size > LOCAL_STORAGE_QUOTA)
+    if (auto quota = quota_for(key.storage_endpoint); quota.has_value() && current_size + new_size > *quota)
         return StorageOperationError::QuotaExceededError;
 
     bottle.items.set(key.bottle_key, { value, UnixDateTime::now(), new_size });
@@ -191,16 +248,37 @@ void StorageJar::TransientStorage::delete_item(StorageLocation const& key)
         bottle->usage -= entry->quota_size;
 }
 
-void StorageJar::TransientStorage::delete_items_accessed_since(UnixDateTime since)
+Vector<StorageBottleLocation> StorageJar::TransientStorage::delete_items_accessed_since(UnixDateTime since)
 {
+    Vector<StorageBottleLocation> affected_bottles;
     for (auto& [location, bottle] : m_bottles) {
-        bottle.items.remove_all_matching([&](auto const&, auto const& entry) {
+        auto removed = bottle.items.remove_all_matching([&](auto const&, auto const& entry) {
             if (entry.last_access_time < since)
                 return false;
             bottle.usage -= entry.quota_size;
             return true;
         });
+        if (removed)
+            affected_bottles.append(location);
     }
+    return affected_bottles;
+}
+
+void StorageJar::TransientStorage::mark_accessed(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    auto bottle = m_bottles.get({ storage_endpoint, storage_key });
+    if (!bottle.has_value())
+        return;
+
+    auto now = UnixDateTime::now();
+    for (auto& entry : bottle->items)
+        entry.value.last_access_time = now;
+}
+
+u64 StorageJar::TransientStorage::bottle_usage(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    auto bottle = m_bottles.get({ storage_endpoint, storage_key });
+    return bottle.has_value() ? bottle->usage : 0;
 }
 
 void StorageJar::TransientStorage::clear(StorageEndpointType storage_endpoint, String const& storage_key)
@@ -247,17 +325,23 @@ Optional<Utf16String> StorageJar::PersistedStorage::get_item(StorageLocation con
         key.storage_key,
         key.bottle_key);
 
-    if (result.has_value()) {
-        database->execute_statement(
-            statements.update_last_access_time,
-            {},
-            UnixDateTime::now(),
-            to_underlying(key.storage_endpoint),
-            key.storage_key,
-            key.bottle_key);
-    }
-
     return result;
+}
+
+Vector<StorageItem> StorageJar::PersistedStorage::get_items(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    Vector<StorageItem> items;
+
+    database->execute_statement(
+        statements.get_items,
+        [&](auto statement_id) -> ErrorOr<void> {
+            items.append({ database->result_column<Utf16String>(statement_id, 0), database->result_column<Utf16String>(statement_id, 1) });
+            return {};
+        },
+        to_underlying(storage_endpoint),
+        storage_key);
+
+    return items;
 }
 
 StorageSetResult StorageJar::PersistedStorage::set_item(StorageLocation const& key, Utf16String const& value)
@@ -276,7 +360,7 @@ StorageSetResult StorageJar::PersistedStorage::set_item(StorageLocation const& k
         key.bottle_key);
 
     auto new_size = storage_quota_size(key.bottle_key) + storage_quota_size(value);
-    if (current_size + new_size > LOCAL_STORAGE_QUOTA)
+    if (auto quota = quota_for(key.storage_endpoint); quota.has_value() && current_size + new_size > *quota)
         return StorageOperationError::QuotaExceededError;
 
     database->execute_statement(
@@ -301,9 +385,44 @@ void StorageJar::PersistedStorage::delete_item(StorageLocation const& key)
         key.bottle_key);
 }
 
-void StorageJar::PersistedStorage::delete_items_accessed_since(UnixDateTime since)
+Vector<StorageBottleLocation> StorageJar::PersistedStorage::delete_items_accessed_since(UnixDateTime since)
 {
+    Vector<StorageBottleLocation> affected_bottles;
+
+    database->execute_statement(
+        statements.bottles_accessed_since,
+        [&](auto statement_id) -> ErrorOr<void> {
+            affected_bottles.append({ static_cast<StorageEndpointType>(database->result_column<i64>(statement_id, 0)), database->result_column<String>(statement_id, 1) });
+            return {};
+        },
+        since);
+
     database->execute_statement(statements.delete_items_accessed_since, {}, since);
+    return affected_bottles;
+}
+
+void StorageJar::PersistedStorage::mark_accessed(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    database->execute_statement(
+        statements.mark_accessed,
+        {},
+        UnixDateTime::now(),
+        to_underlying(storage_endpoint),
+        storage_key);
+}
+
+u64 StorageJar::PersistedStorage::bottle_usage(StorageEndpointType storage_endpoint, String const& storage_key)
+{
+    u64 current_size_in_bytes = 0;
+    database->execute_statement(
+        statements.calculate_bottle_size,
+        [&](auto statement_id) -> ErrorOr<void> {
+            current_size_in_bytes = static_cast<u64>(database->result_column<i64>(statement_id, 0));
+            return {};
+        },
+        to_underlying(storage_endpoint),
+        storage_key);
+    return current_size_in_bytes;
 }
 
 void StorageJar::PersistedStorage::clear(StorageEndpointType storage_endpoint, String const& storage_key)

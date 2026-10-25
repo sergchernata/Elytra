@@ -70,6 +70,7 @@
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/Streams/TransformStream.h>
+#include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOrUtils.h>
 #include <LibWebCommon/Fetch/Infrastructure/DataURL.h>
@@ -447,7 +448,8 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
     // 4. Run report Content Security Policy violations for request.
     ContentSecurityPolicy::report_content_security_policy_violations_for_request(realm, request);
 
-    // FIXME: 5. Upgrade request to a potentially trustworthy URL, if appropriate.
+    // 5. Upgrade request to a potentially trustworthy URL, if appropriate.
+    UpgradeInsecureRequests::upgrade_request_to_a_potentially_trustworthy_url_if_appropriate(request);
 
     // 6. Upgrade a mixed content request to a potentially trustworthy URL, if appropriate.
     MixedContent::upgrade_a_mixed_content_request_to_a_potentially_trustworthy_url_if_appropriate(request);
@@ -1930,6 +1932,13 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             http_request->set_cache_mode(HTTP::CacheMode::NoStore);
         }
 
+        // AD-HOC: While a document loads bypassing the HTTP cache, so do the requests it makes without a cache mode of
+        //         their own, as do its child navigables' navigations (see create navigation params by fetching).
+        if (http_request->cache_mode() == HTTP::CacheMode::Default && http_request->mode() != Infrastructure::Request::Mode::Navigate && http_request->client()) {
+            if (auto* window = HTML::window_from_global_object(http_request->client()->global_object()); window && window->associated_document().is_loading_bypassing_cache())
+                http_request->set_cache_mode(HTTP::CacheMode::Reload);
+        }
+
         // 17. If httpRequest’s cache mode is "no-cache", httpRequest’s prevent no-cache cache-control header
         //     modification flag is unset, and httpRequest’s header list does not contain `Cache-Control`, then append
         //     (`Cache-Control`, `max-age=0`) to httpRequest’s header list.
@@ -2575,6 +2584,65 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     if (network_request && fetch_params.has_response_body_transfer_lease())
         network_request->set_body_delivery_paused(true);
     fetch_params.controller()->set_pending_request(network_request);
+
+    // To transmit request’s body body, run these steps:
+    // 1. If body is null and fetchParams’s process request end-of-body is non-null, then queue a fetch task given
+    //    fetchParams’s process request end-of-body and fetchParams’s task destination.
+    if (request->body().has<Empty>()) {
+        if (fetch_params.algorithms()->process_request_end_of_body()) {
+            Infrastructure::queue_fetch_task(fetch_params.controller(), fetch_params.task_destination(), GC::create_function(GC::Heap::the(), [&fetch_params]() {
+                fetch_params.algorithms()->process_request_end_of_body()();
+            }));
+        }
+    }
+    // 2. Otherwise, if body is non-null:
+    else if (auto const* body = request->body().get_pointer<GC::Ref<Infrastructure::Body>>()) {
+        // 1. Let processBodyChunk given bytes be these steps:
+        auto process_body_chunk = GC::create_function(GC::Heap::the(), [&fetch_params](ByteBuffer bytes) {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. Run this step in parallel: transmit bytes.
+            // NB: The whole body was handed to RequestServer above, from body's source.
+
+            // 3. If fetchParams’s process request body chunk length is non-null, then run fetchParams’s process
+            //    request body chunk length given bytes’s length.
+            if (fetch_params.algorithms()->process_request_body_chunk_length())
+                fetch_params.algorithms()->process_request_body_chunk_length()(bytes.size());
+        });
+
+        // 2. Let processEndOfBody be these steps:
+        auto process_end_of_body = GC::create_function(GC::Heap::the(), [&fetch_params]() {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. If fetchParams’s process request end-of-body is non-null, then run fetchParams’s process request
+            //    end-of-body.
+            if (fetch_params.algorithms()->process_request_end_of_body())
+                fetch_params.algorithms()->process_request_end_of_body()();
+        });
+
+        // 3. Let processBodyError given e be these steps:
+        auto process_body_error = GC::create_function(GC::Heap::the(), [&realm, &fetch_params](JS::Value error) {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. If e is an "AbortError" DOMException, then abort fetchParams’s controller.
+            auto const* exception = error.is_object() ? Bindings::dom_exception_from_object(error.as_object()) : nullptr;
+            if (exception && exception->name() == "AbortError"_utf16_fly_string)
+                fetch_params.controller()->abort(realm, {});
+            // 3. Otherwise, terminate fetchParams’s controller.
+            else
+                fetch_params.controller()->terminate();
+        });
+
+        // 4. Incrementally read request’s body given processBodyChunk, processEndOfBody, processBodyError, and
+        //    fetchParams’s task destination.
+        (void)(*body)->incrementally_read(realm, process_body_chunk, process_end_of_body, process_body_error, fetch_params.task_destination());
+    }
 
     return pending_response;
 }

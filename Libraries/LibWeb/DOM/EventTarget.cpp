@@ -50,6 +50,7 @@
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
+#include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -387,6 +388,27 @@ static void update_needs_beforeunload_check(EventTarget& event_target, DOMEventL
     navigable->page().update_needs_beforeunload_check();
 }
 
+// A storage event made in another process reaches this one only through the mirror of the map it changed, and a
+// window that has never touched its storage has no mirror. So the moment a window starts listening for storage
+// events, its Storage objects are created, which connects the mirrors and brings the events.
+static void connect_storage_for_storage_event_listener(EventTarget& event_target, DOMEventListener const& listener)
+{
+    if (listener.type != HTML::EventNames::storage)
+        return;
+
+    auto* window = as_if<HTML::Window>(event_target);
+    if (!window)
+        return;
+    auto document = window->associated_document_if_any();
+    if (!document || !document->is_fully_active())
+        return;
+
+    if (auto local_storage = window->local_storage(); !local_storage.is_error())
+        local_storage.value()->connect();
+    if (auto session_storage = window->session_storage(); !session_storage.is_error())
+        session_storage.value()->connect();
+}
+
 static void notify_page_that_window_listens_for_gamepad_events(EventTarget& event_target, DOMEventListener const& listener)
 {
     if (!first_is_one_of(listener.type, Gamepad::EventNames::gamepadconnected, Gamepad::EventNames::gamepaddisconnected))
@@ -480,6 +502,7 @@ void EventTarget::add_an_event_listener(DOMEventListener& listener)
         update_needs_beforeunload_check(*this, listener);
         event_listener_list_changed();
         notify_page_that_window_listens_for_gamepad_events(*this, listener);
+        connect_storage_for_storage_event_listener(*this, listener);
     }
 
     // 6. If listener’s signal is not null, then add the following abort steps to it:
@@ -811,9 +834,15 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(Utf16FlySt
             // 1. Set eventHandler's value to null.
             event_handler->value = GC::Ptr<WebIDL::CallbackType> {};
 
-            // FIXME: 2. Report the error for the appropriate script and with the appropriate position (line number and column number) given by location, using settings object's global object.
+            // 2. Let syntaxError be a new SyntaxError exception associated with settings object's realm which describes
+            //    the error while parsing. It should be based on location, where the script body originated.
+            // FIXME: Base the error on location.
+            auto syntax_error = JS::SyntaxError::create(settings_object.realm(), compiled_function.release_error());
 
-            // 3. Return null.
+            // 3. Report an exception with syntaxError for settings object's global object.
+            HTML::report_an_exception(settings_object.global_object(), syntax_error);
+
+            // 4. Return null.
             return nullptr;
         }
 

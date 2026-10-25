@@ -356,16 +356,6 @@ pub(super) fn queue(host: &DocumentHost, write: EngineWrite) {
     host.queue_change(ArenaChange::Engine(write));
 }
 
-/// A copy of the `count` values at `values`.
-///
-/// # Safety
-///
-/// `values` must point at `count` readable values, or `count` be zero.
-unsafe fn owned<T: Copy>(values: *const T, count: usize) -> Box<[T]> {
-    // SAFETY: Guaranteed by the caller.
-    unsafe { borrow(values, count) }.into()
-}
-
 /// Publishes the document's `@font-face` table and the memo of the cascades resolved from it, which every later font
 /// resolution of the engine reads. Takes one reference to each. The shadow tree scopes that declare
 /// `@font-feature-values` are the ones whose values the table carries beside the document's.
@@ -459,15 +449,12 @@ pub unsafe extern "C" fn style_engine_set_pseudo_element_custom_property_data(
     host.queue_change(ArenaChange::Engine(write));
 }
 
-/// Makes the `count` identities at `nodes`, which the host minted, live.
-///
-/// # Safety
-/// `host` must be a live document host, and `nodes` must point at `count` readable `u32` values.
+/// Makes the identities `nodes`, which the host minted, live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn style_engine_mint_style_nodes(host: &DocumentHost, nodes: *const u32, count: usize) {
-    // SAFETY: Guaranteed by the caller.
-    let nodes = unsafe { owned(nodes, count) };
-    host.queue_change(ArenaChange::Engine(EngineWrite::MintStyleNodes(nodes)));
+pub extern "C" fn style_engine_mint_style_nodes(host: &DocumentHost, nodes: ak::Span<'_, u32>) {
+    host.queue_change(ArenaChange::Engine(EngineWrite::MintStyleNodes(
+        nodes.as_slice().into(),
+    )));
 }
 
 /// Stages the tree delta `delta` for the input the host submits next.
@@ -1344,28 +1331,20 @@ pub extern "C" fn style_engine_begin_bound_failure_trace(host: &DocumentHost) {
     *host.engine_memo().bound_failure_trace.borrow_mut() = Some(String::new());
 }
 
-/// Ends the trace and writes it to `buffer`, NUL-terminated and cut to fit `capacity`, answering its length.
-///
-/// # Safety
-///
-/// `buffer` must be writable for `capacity` bytes.
+/// Ends the trace and writes it to `buffer`, NUL-terminated and cut to fit, answering its length.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn style_engine_end_bound_failure_trace(
-    host: &DocumentHost,
-    buffer: *mut u8,
-    capacity: usize,
-) -> usize {
+pub extern "C" fn style_engine_end_bound_failure_trace(host: &DocumentHost, buffer: ak::SpanMut<'_, u8>) -> usize {
     let trace = host
         .engine_memo()
         .bound_failure_trace
         .borrow_mut()
         .take()
         .unwrap_or_default();
-    let length = trace.len().min(capacity.saturating_sub(1));
-    // SAFETY: Guaranteed by the caller.
-    unsafe {
-        std::ptr::copy_nonoverlapping(trace.as_ptr(), buffer, length);
-        buffer.add(length).write(0);
+    let buffer = buffer.into_slice();
+    let length = trace.len().min(buffer.len().saturating_sub(1));
+    buffer[..length].copy_from_slice(&trace.as_bytes()[..length]);
+    if let Some(terminator) = buffer.get_mut(length) {
+        *terminator = 0;
     }
     length
 }
@@ -1582,17 +1561,13 @@ pub extern "C" fn style_engine_native_rule_id(
 }
 
 /// The name of the engine's counter at `index`, with its length and value written out, or null past the last one.
-///
-/// # Safety
-///
-/// `host` must be a live document host, on its document's thread, and the out pointers writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn style_engine_counter(
+pub extern "C" fn style_engine_counter(
     host: &DocumentHost,
     read: &crate::render_state::BegunRead,
     index: usize,
-    out_value: *mut u64,
-    out_name_length: *mut usize,
+    out_value: &mut u64,
+    out_name_length: &mut usize,
 ) -> *const u8 {
     let counter = with_engine(read, host, |engine| {
         let retired = engine.computed_group_sets.retired_animation_overlay_records();
@@ -1604,11 +1579,8 @@ pub unsafe extern "C" fn style_engine_counter(
     let Some((name, value)) = counter else {
         return std::ptr::null();
     };
-    // SAFETY: Guaranteed by the caller.
-    unsafe {
-        out_value.write(value);
-        out_name_length.write(name.len());
-    }
+    *out_value = value;
+    *out_name_length = name.len();
     name.as_ptr()
 }
 

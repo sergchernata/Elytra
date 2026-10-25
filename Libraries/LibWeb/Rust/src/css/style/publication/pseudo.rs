@@ -162,6 +162,11 @@ impl RetainedState {
 
         // Only an element's settled record leads here, which an unhosted engine never computes.
         debug_assert!(self.computes_records());
+        if settlement == PseudoSettlement::Generated
+            && self.settles_no_pseudo_element(node, old_element_record, old_is_list_item, new_element_record)?
+        {
+            return Ok(());
+        }
         let mut inputs = self.document_style_computation_inputs;
         // NB: Root pseudos use the originating record's current font, independently of
         //     the document context used for the root's own remaining properties.
@@ -631,6 +636,62 @@ impl RetainedState {
         Ok(())
     }
 
+    /// OPTIMIZATION: Whether a style update's settlement of the node's pseudo-elements would settle
+    /// none of them: the node holds no pseudo-element row to remove or keep, and no kind it
+    /// settles can generate a box. A kind generates one where the node's answer has rules for it,
+    /// but for a backdrop outside the top layer and for a marker, which only a list item (or an
+    /// element that stops being one) generates; highlight kinds inherit an ancestor's record
+    /// without rules of their own, so a settlement selecting one is never skipped. Most elements
+    /// match only the user agent's universal `::backdrop` and `::marker` rules, and an element
+    /// styled for the first time holds no pseudo-element row.
+    fn settles_no_pseudo_element(
+        &mut self,
+        node: StyleNodeID,
+        old_element_record: Option<computed::FinalStyleRecordID>,
+        old_is_list_item: Option<bool>,
+        new_element_record: computed::FinalStyleRecordID,
+    ) -> Drive<bool> {
+        use bridge::element_adjustment_fact as fact;
+        use pseudo_kind::{BACKDROP, MARKER};
+
+        let facts = self.computed_group_sets.adjustment_facts(node);
+        // The document element's pseudo-elements read the root font inputs its record settles.
+        if facts & fact::IS_DOCUMENT_ELEMENT != 0 || self.computed_group_sets.has_pseudo_rows(node) {
+            return Ok(false);
+        }
+        let settlement = PseudoSettlement::Generated;
+        let mut generated = settlement
+            .kinds()
+            .iter()
+            .filter(|&&kind| settlement.selects(kind, self.deferred_pseudo_elements))
+            .fold(0_u64, |kinds, &kind| kinds | (1 << kind));
+        if pseudo_kind::SETTLEMENT_ORDER
+            .iter()
+            .any(|&kind| pseudo_kind::is_highlight(kind) && generated & (1 << kind) != 0)
+        {
+            return Ok(false);
+        }
+        generated &= self.pseudo_kinds_with_rules(node, settlement)?;
+        if facts & fact::RENDERED_IN_TOP_LAYER == 0 {
+            generated &= !(1_u64 << BACKDROP);
+        }
+        if generated & (1 << MARKER) != 0 {
+            let display_is_list_item = |engine: &Self, record: computed::FinalStyleRecordID| {
+                engine
+                    .computed_group_sets
+                    .style_record_view(record.raw())
+                    .and_then(|view| view.longhand_table)
+                    .is_none_or(|table| table.display_is_list_item())
+            };
+            let old_is_list_item = old_is_list_item
+                .unwrap_or_else(|| old_element_record.is_some_and(|record| display_is_list_item(self, record)));
+            if !old_is_list_item && !display_is_list_item(self, new_element_record) {
+                generated &= !(1_u64 << MARKER);
+            }
+        }
+        Ok(generated == 0)
+    }
+
     /// A later pseudo-element alike in what this record is computed from takes it in a later
     /// transaction. The cache is small and bounded.
     fn remember_pseudo_record(
@@ -810,6 +871,11 @@ impl RetainedState {
         if published.is_some() {
             return published;
         }
+        if let Some((version, matches)) = self.shadow_host_backing_pseudo_matches.get(&host)
+            && *version == self.program.version()
+        {
+            return Some(for_target(matches));
+        }
         match self.retained_match_answer(host) {
             Lookup::Known(answer) => answer
                 .iter()
@@ -826,7 +892,7 @@ impl RetainedState {
     }
 
     /// The matches for element-backed pseudo-elements in the answer a transaction publishes for a
-    /// node, read before that answer is installed. `None` when it has none.
+    /// node, read before that answer is installed. `None` when the answer does not hold its matches.
     pub(in crate::css::style) fn batch_backing_pseudo_matches_of(
         &self,
         node: StyleNodeID,
@@ -856,7 +922,7 @@ impl RetainedState {
                 .map(|entry| entry.materialize(node, &self.programs, 0))
                 .collect::<Option<_>>()?,
         };
-        (!matches.is_empty()).then_some(matches)
+        Some(matches)
     }
 
     /// The record of an element standing for its shadow host's pseudo-element, the way C++

@@ -9,7 +9,9 @@
 
 use super::canvas_2d::{Compositing, Paint, Stroke, TapeWriter};
 use super::commands::*;
-use libgfx_rust::{AffineTransform, Color, FloatPoint, FloatRect, IntRect, IntSize, ScalingMode, WindingRule};
+use libgfx_rust::{
+    AffineTransform, Color, FloatPoint, FloatRect, IntPoint, IntRect, IntSize, ScalingMode, WindingRule,
+};
 
 /// The number of commands that the shared stream carries to the Compositor at most in one batch. A batch holds the
 /// image frames of its commands, each a bitmap that an IPC attachment carries, so it has to stay small.
@@ -130,27 +132,13 @@ impl<T: Transport> Recorder<T> {
     }
 
     /// `path` is a serialized Gfx::Path.
-    pub fn fill_path(
-        &mut self,
-        path: &[u8],
-        paint: &Paint,
-        winding_rule: WindingRule,
-        blur_radius: f32,
-        compositing: &Compositing,
-    ) {
-        self.record(|tape| tape.fill_path(path, paint, winding_rule, blur_radius, compositing));
+    pub fn fill_path(&mut self, path: &[u8], paint: &Paint, winding_rule: WindingRule, compositing: &Compositing) {
+        self.record(|tape| tape.fill_path(path, paint, winding_rule, compositing));
     }
 
     /// `path` is a serialized Gfx::Path.
-    pub fn stroke_path(
-        &mut self,
-        path: &[u8],
-        paint: &Paint,
-        stroke: &Stroke,
-        blur_radius: f32,
-        compositing: &Compositing,
-    ) {
-        self.record(|tape| tape.stroke_path(path, paint, stroke, blur_radius, compositing));
+    pub fn stroke_path(&mut self, path: &[u8], paint: &Paint, stroke: &Stroke, compositing: &Compositing) {
+        self.record(|tape| tape.stroke_path(path, paint, stroke, compositing));
     }
 
     pub fn draw_glyph_run(
@@ -173,7 +161,7 @@ impl<T: Transport> Recorder<T> {
         &mut self,
         frame: &T::ImageFrame,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -181,11 +169,17 @@ impl<T: Transport> Recorder<T> {
         self.record(|tape| tape.draw_image_frame(frame_id, dst_rect, src_rect, scaling_mode, compositing));
     }
 
+    /// Sets the pixels of the canvas at the position to those of the frame, as putImageData() does.
+    pub fn put_image_frame(&mut self, frame: &T::ImageFrame, position: IntPoint) {
+        let frame_id = self.transport.add_image_frame(frame);
+        self.record(|tape| tape.put_image_frame(frame_id, position));
+    }
+
     pub fn draw_canvas(
         &mut self,
         source_canvas_id: CanvasId,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -203,7 +197,7 @@ impl<T: Transport> Recorder<T> {
         video_sink_handle: u64,
         generation: u64,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -371,7 +365,7 @@ mod tests {
     fn an_image_and_a_video_frame_travel_beside_the_records_that_draw_them() {
         let mut recorder = Recorder::new(FakeTransport::default());
         let dst_rect = FloatRect::new(0.0, 0.0, 8.0, 8.0);
-        let src_rect = IntRect::new(0, 0, 4, 4);
+        let src_rect = FloatRect::new(0.0, 0.0, 4.0, 4.0);
         recorder.draw_image_frame(
             &9,
             dst_rect,

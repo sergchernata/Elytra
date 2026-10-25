@@ -68,10 +68,11 @@ pub enum DisplayListCommandType {
     Canvas2DClipPath,
     Canvas2DReset,
     Canvas2DClearCanvas,
+    Canvas2DPutImageFrame,
 }
 ffi_enum_bytes!(DisplayListCommandType as u8);
 
-pub const DISPLAY_LIST_COMMAND_TYPE_COUNT: usize = DisplayListCommandType::Canvas2DClearCanvas as usize + 1;
+pub const DISPLAY_LIST_COMMAND_TYPE_COUNT: usize = DisplayListCommandType::Canvas2DPutImageFrame as usize + 1;
 
 impl DisplayListCommandType {
     pub fn from_u8(value: u8) -> Option<Self> {
@@ -119,6 +120,7 @@ impl DisplayListCommandType {
                 | Self::Canvas2DClipPath
                 | Self::Canvas2DReset
                 | Self::Canvas2DClearCanvas
+                | Self::Canvas2DPutImageFrame
         )
     }
 
@@ -176,6 +178,7 @@ impl DisplayListCommandType {
             Self::Canvas2DClipPath => "Canvas2DClipPath",
             Self::Canvas2DReset => "Canvas2DReset",
             Self::Canvas2DClearCanvas => "Canvas2DClearCanvas",
+            Self::Canvas2DPutImageFrame => "Canvas2DPutImageFrame",
         }
     }
 }
@@ -1812,8 +1815,26 @@ ffi_bytes_fields!(Canvas2DPaint {
     pattern_transform
 });
 
+/// The shadow that a 2D canvas draw casts, with its offset and blur in the coordinates of the canvas, which the
+/// current transformation matrix does not affect.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct Canvas2DShadow {
+    pub color: Color,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+}
+ffi_bytes_fields!(Canvas2DShadow {
+    color,
+    offset_x,
+    offset_y,
+    blur
+});
+
 /// How a 2D canvas draw composites onto the canvas: through the serialized filter graph of the context, if it has one,
-/// with the global alpha of the context, and with its compositing and blending operator.
+/// with the global alpha of the context, with its compositing and blending operator, and with the shadow that it
+/// casts, if it casts one.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct Canvas2DCompositing {
@@ -1821,30 +1842,30 @@ pub struct Canvas2DCompositing {
     pub has_filter: bool,
     pub global_alpha: f32,
     pub compositing_and_blending_operator: CompositingAndBlendingOperator,
+    pub has_shadow: bool,
+    pub shadow: Canvas2DShadow,
 }
 ffi_bytes_fields!(Canvas2DCompositing {
     filter,
     has_filter,
     global_alpha,
-    compositing_and_blending_operator
+    compositing_and_blending_operator,
+    has_shadow,
+    shadow
 });
 
-// A path fill. A solid color fill with a blur radius is a shadow, which is blurred and drawn without the filter and the
-// global alpha.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Canvas2DFillPath {
     pub path_data: DisplayListDataSpan,
     pub paint: Canvas2DPaint,
     pub winding_rule: WindingRule,
-    pub blur_radius: f32,
     pub compositing: Canvas2DCompositing,
 }
 ffi_bytes_fields!(Canvas2DFillPath {
     path_data,
     paint,
     winding_rule,
-    blur_radius,
     compositing
 });
 
@@ -1863,7 +1884,6 @@ pub struct Canvas2DStrokePath {
     pub miter_limit: f32,
     pub dash_array: DisplayListDataSpan,
     pub dash_offset: f32,
-    pub blur_radius: f32,
     pub compositing: Canvas2DCompositing,
 }
 ffi_bytes_fields!(Canvas2DStrokePath {
@@ -1875,7 +1895,6 @@ ffi_bytes_fields!(Canvas2DStrokePath {
     miter_limit,
     dash_array,
     dash_offset,
-    blur_radius,
     compositing
 });
 
@@ -1922,7 +1941,7 @@ impl DisplayListCommand for Canvas2DClearRect {
 pub struct Canvas2DDrawImageFrame {
     pub frame_id: ImageFrameResourceId,
     pub dst_rect: FloatRect,
-    pub src_rect: IntRect,
+    pub src_rect: FloatRect,
     pub scaling_mode: ScalingMode,
     pub compositing: Canvas2DCompositing,
 }
@@ -1944,7 +1963,7 @@ impl DisplayListCommand for Canvas2DDrawImageFrame {
 pub struct Canvas2DDrawCanvas {
     pub source_canvas_id: CanvasId,
     pub dst_rect: FloatRect,
-    pub src_rect: IntRect,
+    pub src_rect: FloatRect,
     pub scaling_mode: ScalingMode,
     pub compositing: Canvas2DCompositing,
 }
@@ -1967,7 +1986,7 @@ pub struct Canvas2DDrawVideoFrame {
     pub video_sink_handle: u64,
     pub generation: u64,
     pub dst_rect: FloatRect,
-    pub src_rect: IntRect,
+    pub src_rect: FloatRect,
     pub scaling_mode: ScalingMode,
     pub compositing: Canvas2DCompositing,
 }
@@ -2056,6 +2075,20 @@ ffi_bytes_fields!(Canvas2DClearCanvas { color });
 
 impl DisplayListCommand for Canvas2DClearCanvas {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::Canvas2DClearCanvas;
+}
+
+// Sets the pixels of the canvas at the position to those of the frame, regardless of the transform, the clip and the
+// compositing of the context, as putImageData() does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct Canvas2DPutImageFrame {
+    pub frame_id: ImageFrameResourceId,
+    pub position: IntPoint,
+}
+ffi_bytes_fields!(Canvas2DPutImageFrame { frame_id, position });
+
+impl DisplayListCommand for Canvas2DPutImageFrame {
+    const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::Canvas2DPutImageFrame;
 }
 
 pub fn int_rect_from_two_points(a: IntPoint, b: IntPoint) -> IntRect {

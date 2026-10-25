@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Fail
+Fail	getComputedStyle() for root element
+Fail	getComputedStyle() for root highlight applied to div
+Fail	getComputedStyle() for div specific highlight

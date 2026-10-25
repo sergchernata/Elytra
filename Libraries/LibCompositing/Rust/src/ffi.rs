@@ -550,55 +550,6 @@ pub unsafe extern "C" fn visual_context_tree_sampled_background_color(
 
 /// # Safety
 ///
-/// `tree` must be a live retained tree handle and `out_opacity` must be writable. Returns whether
-/// `effect` names an effects node.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_effects_opacity(
-    tree: *const c_void,
-    effect: EffectNodeIndex,
-    out_opacity: *mut f32,
-) -> bool {
-    match unsafe { tree_from_handle(tree) }.effects_opacity(effect) {
-        Some(opacity) => {
-            // SAFETY: The caller guarantees `out_opacity` is writable.
-            unsafe { *out_opacity = opacity };
-            true
-        }
-        None => false,
-    }
-}
-
-/// # Safety
-///
-/// `tree` must be a live retained tree handle; `roots` must address `root_count` spatial indices and
-/// `out_flags` must address one writable flag per spatial node (`flag_count` of them).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_mark_spatial_subtrees(
-    tree: *const c_void,
-    roots: *const SpatialNodeIndex,
-    root_count: usize,
-    out_flags: *mut bool,
-    flag_count: usize,
-) {
-    let tree = unsafe { tree_from_handle(tree) };
-    // SAFETY: The caller guarantees the roots address `root_count` indices.
-    let roots = unsafe { ak::slice_from_raw_parts(roots, root_count) };
-    let in_subtree = tree.spatial_nodes_in_subtrees_of(roots);
-    assert_eq!(in_subtree.len(), flag_count);
-    // SAFETY: The caller guarantees `out_flags` addresses `flag_count` writable flags.
-    unsafe { std::ptr::copy_nonoverlapping(in_subtree.as_ptr(), out_flags, flag_count) };
-}
-
-/// # Safety
-///
-/// `tree` must be a live retained tree handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_has_unisolated_destination_reading_effect(tree: *const c_void) -> bool {
-    unsafe { tree_from_handle(tree) }.has_unisolated_destination_reading_effect()
-}
-
-/// # Safety
-///
 /// `tree` must be a live retained tree handle; `visit` is called synchronously with `context` for the id
 /// of every image frame that a filter or backdrop filter of an effect node draws.
 #[unsafe(no_mangle)]
@@ -621,17 +572,6 @@ pub unsafe extern "C" fn visual_context_tree_for_each_effects_filter_image_frame
             filter.for_each_image_frame_id(&mut |id| unsafe { visit(context, id) });
         }
     }
-}
-
-/// # Safety
-///
-/// `tree` must be a live retained tree handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_effect_is_isolated_by_layer(
-    tree: *const c_void,
-    effect: EffectNodeIndex,
-) -> bool {
-    unsafe { tree_from_handle(tree) }.effect_is_isolated_by_layer(effect)
 }
 
 /// # Safety
@@ -767,97 +707,6 @@ pub unsafe extern "C" fn visual_context_tree_test_builder_append_clip(
         SpatialNodeIndex(spatial),
     )
     .0
-}
-
-/// # Safety
-///
-/// `builder` must be a live handle from `visual_context_tree_test_builder_create`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_test_builder_append_background_color_animation(
-    builder: *mut c_void,
-    parent_effect: u32,
-    spatial: u32,
-    local_clip: u32,
-) -> u32 {
-    let tree = unsafe { test_builder_tree(builder) };
-    tree.append_effect(
-        crate::visual_context::EffectNodeData::BackgroundColorAnimation,
-        EffectNodeIndex(parent_effect),
-        SpatialNodeIndex(spatial),
-        ClipNodeIndex(local_clip),
-    )
-    .0
-}
-
-/// # Safety
-///
-/// `builder` must be a live handle from `visual_context_tree_test_builder_create`; `path_bytes`
-/// must address `path_bytes_length` readable bytes of a serialized `Gfx::Path`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_test_builder_append_clip_path(
-    builder: *mut c_void,
-    parent_clip: u32,
-    spatial: u32,
-    path_bytes: *const u8,
-    path_bytes_length: usize,
-    bounding_rect: libgfx_rust::IntRect,
-    fill_rule: libgfx_rust::WindingRule,
-) -> u32 {
-    let tree = unsafe { test_builder_tree(builder) };
-    // SAFETY: The caller guarantees `path_bytes` addresses `path_bytes_length` readable bytes.
-    let path_bytes = unsafe { ak::slice_from_raw_parts(path_bytes, path_bytes_length) };
-    let path = libgfx_rust::path::Path::from_serialized_bytes(path_bytes);
-    tree.append_clip(
-        crate::visual_context::ClipNodeData::Path(crate::visual_context::ClipPathData {
-            path: std::sync::Arc::new(path),
-            bounding_rect,
-            fill_rule,
-        }),
-        ClipNodeIndex(parent_clip),
-        SpatialNodeIndex(spatial),
-    )
-    .0
-}
-
-/// # Safety
-///
-/// `builder` must be a live handle from `visual_context_tree_test_builder_create`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_test_builder_append_effects(
-    builder: *mut c_void,
-    parent_effect: u32,
-    spatial: u32,
-    local_clip: u32,
-    opacity: f32,
-    blend_mode: libgfx_rust::CompositingAndBlendingOperator,
-) -> u32 {
-    let tree = unsafe { test_builder_tree(builder) };
-    tree.append_effect(
-        crate::visual_context::EffectNodeData::Effects(crate::visual_context::EffectsData {
-            isolation: false,
-            opacity,
-            blend_mode,
-            filter: None,
-            backdrop_filter: None,
-        }),
-        EffectNodeIndex(parent_effect),
-        SpatialNodeIndex(spatial),
-        ClipNodeIndex(local_clip),
-    )
-    .0
-}
-
-/// # Safety
-///
-/// `builder` must be a live handle from `visual_context_tree_test_builder_create`. Gives the tree
-/// the structural epoch another tree carries, so a test can stage a compatible tree-only update.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn visual_context_tree_test_builder_set_structural_epoch(
-    builder: *mut c_void,
-    structural_epoch: u64,
-) {
-    let tree = unsafe { test_builder_tree(builder) };
-    tree.structural_epoch = structural_epoch;
 }
 
 /// # Safety

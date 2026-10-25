@@ -29,6 +29,7 @@
 use super::owner::DocumentId;
 use super::{DocumentHost, RenderState};
 use crate::css::css_pixels::CssPixelRect;
+use crate::css::ffi_support::OwnedArc;
 use crate::css::style::animations::{AnimationTimelineSamples, ScrollProgress};
 use crate::css::style::engine_sample::{DependentRestyle, NeedsHost, TickShownRecords};
 use crate::css::style::tree::StyleNodeID;
@@ -1575,35 +1576,20 @@ impl ClockRecorder {
 }
 
 /// Hands the lanes `ticks` belong to a display tick at `frame_time_nanoseconds`, at which the compositor had scrolled to
-/// the `scroll_offset_count` offsets at `scroll_offsets`, and answers whether they want the next one.
-///
-/// # Safety
-///
-/// `ticks` must come from `document_host_clock_ticks` and not be released yet, and `scroll_offsets` must hold
-/// `scroll_offset_count` offsets.
+/// the offsets `scroll_offsets`, and answers whether they want the next one.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn clock_ticks_tick(
-    ticks: *const ClockTicks,
+pub extern "C" fn clock_ticks_tick(
+    ticks: crate::css::ffi_support::ArcRef<'_, ClockTicks>,
     frame_time_nanoseconds: i64,
-    scroll_offsets: *const FfiScrollOffset,
-    scroll_offset_count: usize,
+    scroll_offsets: ak::Span<'_, FfiScrollOffset>,
 ) -> bool {
-    // SAFETY: Guaranteed by the caller, whose reference this borrows.
-    let ticks = std::mem::ManuallyDrop::new(unsafe { Arc::from_raw(ticks) });
-    // SAFETY: Guaranteed by the caller.
-    let scroll_offsets = unsafe { ak::slice_from_raw_parts(scroll_offsets, scroll_offset_count) };
-    ticks.tick(frame_time_nanoseconds, scroll_offsets)
+    ticks.to_arc().tick(frame_time_nanoseconds, scroll_offsets.as_slice())
 }
 
 /// Gives up the reference `ticks` holds.
-///
-/// # Safety
-///
-/// `ticks` must come from `document_host_clock_ticks`, and be released once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn clock_ticks_release(ticks: *const ClockTicks) {
-    // SAFETY: Guaranteed by the caller.
-    drop(unsafe { Arc::from_raw(ticks) });
+pub extern "C" fn clock_ticks_release(ticks: OwnedArc<ClockTicks>) {
+    drop(ticks);
 }
 
 /// A reference to the ticks the render clock hands the lanes of `host`'s document, which the caller releases with

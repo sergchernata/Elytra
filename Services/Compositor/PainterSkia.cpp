@@ -22,10 +22,11 @@
 #include <core/SkFont.h>
 #include <core/SkImage.h>
 #include <core/SkPath.h>
+#include <core/SkPathBuilder.h>
 #include <core/SkSurface.h>
-#include <effects/SkBlurMaskFilter.h>
 #include <effects/SkDashPathEffect.h>
 #include <effects/SkGradient.h>
+#include <effects/SkImageFilters.h>
 
 namespace Gfx {
 
@@ -45,6 +46,13 @@ static void apply_paint_style(SkPaint& paint, PaintStyle const& style, SkColorSp
     if (auto const& solid_color = as_if<SolidColorPaintStyle>(style)) {
         set_color(paint, solid_color->color(), color_space);
     } else if (auto const& linear_gradient = as_if<Gfx::CanvasLinearGradientPaintStyle>(style)) {
+        // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-createlineargradient
+        // If x0 = x1 and y0 = y1, then the linear gradient must paint nothing.
+        if (linear_gradient->start_point() == linear_gradient->end_point()) {
+            paint.setColor(SK_ColorTRANSPARENT);
+            return;
+        }
+
         auto const& color_stops = linear_gradient->color_stops();
 
         Vector<SkColor4f> colors;
@@ -63,6 +71,13 @@ static void apply_paint_style(SkPaint& paint, PaintStyle const& style, SkColorSp
         auto shader = SkShaders::LinearGradient(points.data(), gradient, &matrix);
         paint.setShader(shader);
     } else if (auto const* radial_gradient = as_if<CanvasRadialGradientPaintStyle>(style)) {
+        // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-createradialgradient
+        // 1. If x0 = x1 and y0 = y1 and r0 = r1, then the radial gradient must paint nothing. Return.
+        if (radial_gradient->start_center() == radial_gradient->end_center() && radial_gradient->start_radius() == radial_gradient->end_radius()) {
+            paint.setColor(SK_ColorTRANSPARENT);
+            return;
+        }
+
         auto const& color_stops = radial_gradient->color_stops();
 
         Vector<SkColor4f> colors;
@@ -101,9 +116,12 @@ static void apply_paint_style(SkPaint& paint, PaintStyle const& style, SkColorSp
         auto center = conic_gradient->center();
         auto start_angle_degrees = AK::to_degrees(conic_gradient->start_angle());
 
+        // NB: The angles of a Skia sweep gradient pick where its colors start and end, and every angle outside of them
+        //     takes the color of the nearest end. So the gradient is rotated to its start angle instead.
         SkMatrix matrix;
+        matrix.setRotate(start_angle_degrees, center.x(), center.y());
         SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { positions.data(), positions.size() }, SkTileMode::kClamp, sk_ref_sp(color_space) }, {} };
-        auto shader = SkShaders::SweepGradient(to_skia_point(center), start_angle_degrees, start_angle_degrees + 360, gradient, &matrix);
+        auto shader = SkShaders::SweepGradient(to_skia_point(center), 0, 360, gradient, &matrix);
         paint.setShader(shader);
     } else if (auto const* canvas_pattern = as_if<CanvasPatternPaintStyle>(style)) {
         auto frame = canvas_pattern->image();
@@ -148,6 +166,123 @@ static SkPaint to_skia_paint(Gfx::PaintStyle const& style, sk_sp<SkImageFilter> 
     return paint;
 }
 
+// NB: These operators change the destination even where the source is fully transparent, which makes them affect
+//     pixels that the source does not cover.
+static bool affects_pixels_not_covered_by_source(CompositingAndBlendingOperator compositing_and_blending_operator)
+{
+    return first_is_one_of(compositing_and_blending_operator,
+        CompositingAndBlendingOperator::Copy,
+        CompositingAndBlendingOperator::SourceIn,
+        CompositingAndBlendingOperator::SourceOut,
+        CompositingAndBlendingOperator::DestinationIn,
+        CompositingAndBlendingOperator::DestinationATop);
+}
+
+// https://html.spec.whatwg.org/multipage/canvas.html#drawing-model
+template<typename Callback>
+static void draw_with_compositing(SkCanvas& canvas, SkPaint& paint, CompositingAndBlendingOperator compositing_and_blending_operator, Optional<CanvasShadow> const& shadow, Callback draw)
+{
+    // 5. When shadows are drawn, render the shadow from image B, using the current shadow styles, creating image C.
+    // 6. When shadows are drawn, composite C within the clipping region over the current output bitmap using the
+    //    current compositing and blending operator.
+    // NB: The current transformation matrix does not affect the offset and the blur of a shadow, so the source is
+    //     drawn into a layer whose filter makes the shadow in the coordinates of the canvas. The paint carries the
+    //     global alpha and the filter of the context, so the layer holds image B.
+    if (shadow.has_value()) {
+        auto matrix = canvas.getTotalMatrix();
+        canvas.save();
+        canvas.resetMatrix();
+        auto sigma = shadow->blur / 2;
+        SkPaint shadow_layer_paint;
+        shadow_layer_paint.setImageFilter(SkImageFilters::DropShadowOnly(shadow->offset_x, shadow->offset_y, sigma, sigma, to_skia_color4f(shadow->color), sk_ref_sp(canvas.imageInfo().colorSpace()), nullptr));
+        shadow_layer_paint.setBlender(to_skia_blender(compositing_and_blending_operator));
+        canvas.saveLayer(nullptr, &shadow_layer_paint);
+        canvas.setMatrix(matrix);
+        draw(canvas, paint);
+        canvas.restore();
+        canvas.restore();
+    }
+
+    // 7. Composite B within the clipping region over the current output bitmap using the current compositing and
+    //    blending operator.
+    // NB: A Skia blend mode only touches the pixels that a draw covers. For the operators that also affect uncovered
+    //     pixels, the source is drawn into a transparent layer, which is then composited onto all of the destination
+    //     inside the clip.
+    if (!affects_pixels_not_covered_by_source(compositing_and_blending_operator)) {
+        paint.setBlender(to_skia_blender(compositing_and_blending_operator));
+        draw(canvas, paint);
+        return;
+    }
+
+    SkPaint layer_paint;
+    layer_paint.setBlender(to_skia_blender(compositing_and_blending_operator));
+    canvas.saveLayer(nullptr, &layer_paint);
+    draw(canvas, paint);
+    canvas.restore();
+}
+
+// https://html.spec.whatwg.org/multipage/canvas.html#trace-a-path
+static SkPath prune_path_for_stroking(SkPath const& path)
+{
+    // 2. Prune all zero-length line segments from path.
+    // 3. Remove from path any subpaths containing no lines (i.e. subpaths with just one point).
+    // NB: Skia strokes a zero-length segment with caps, so such segments and the subpaths that are left with no
+    //     lines are removed before the path is stroked.
+    auto is_zero_length = [](SkSpan<SkPoint const> points) {
+        for (size_t i = 1; i < points.size(); ++i) {
+            if (points[i] != points[0])
+                return false;
+        }
+        return true;
+    };
+
+    SkPathBuilder builder(path.getFillType());
+    bool subpath_has_lines = false;
+    auto iterator = path.iter();
+    while (auto record = iterator.next()) {
+        auto points = record->fPoints;
+        switch (record->fVerb) {
+        case SkPathVerb::kMove:
+            subpath_has_lines = false;
+            continue;
+        case SkPathVerb::kClose:
+            if (subpath_has_lines)
+                builder.close();
+            subpath_has_lines = false;
+            continue;
+        case SkPathVerb::kLine:
+        case SkPathVerb::kQuad:
+        case SkPathVerb::kConic:
+        case SkPathVerb::kCubic:
+            break;
+        }
+
+        if (is_zero_length(points))
+            continue;
+        if (!subpath_has_lines) {
+            builder.moveTo(points[0]);
+            subpath_has_lines = true;
+        }
+        switch (record->fVerb) {
+        case SkPathVerb::kLine:
+            builder.lineTo(points[1]);
+            break;
+        case SkPathVerb::kQuad:
+            builder.quadTo(points[1], points[2]);
+            break;
+        case SkPathVerb::kConic:
+            builder.conicTo(points[1], points[2], record->conicWeight());
+            break;
+        case SkPathVerb::kCubic:
+            builder.cubicTo(points[1], points[2], points[3]);
+            break;
+        default:
+            VERIFY_NOT_REACHED();
+        }
+    }
+    return builder.detach();
+}
+
 PainterSkia::PainterSkia(NonnullRefPtr<Gfx::PaintingSurface> painting_surface)
     : m_painting_surface(move(painting_surface))
 {
@@ -181,25 +316,29 @@ void PainterSkia::fill_rect(Gfx::FloatRect const& rect, Color color)
     canvas.drawRect(to_skia_rect(rect), paint);
 }
 
-void PainterSkia::draw_bitmap(Gfx::FloatRect const& dst_rect, Gfx::DecodedImageFrame const& source, Gfx::IntRect const& src_rect, Gfx::ScalingMode scaling_mode, sk_sp<SkImageFilter> image_filter, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator)
+void PainterSkia::draw_bitmap(Gfx::FloatRect const& dst_rect, Gfx::DecodedImageFrame const& source, Gfx::FloatRect const& src_rect, Gfx::ScalingMode scaling_mode, sk_sp<SkImageFilter> image_filter, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<CanvasShadow> const& shadow)
+{
+    auto sk_image = sk_image_for_decoded_image_frame(source);
+    if (!sk_image)
+        return;
+    draw_image(*sk_image, dst_rect, src_rect, scaling_mode, move(image_filter), global_alpha, compositing_and_blending_operator, shadow);
+}
+
+void PainterSkia::draw_image(SkImage const& image, Gfx::FloatRect const& dst_rect, Gfx::FloatRect const& src_rect, Gfx::ScalingMode scaling_mode, sk_sp<SkImageFilter> image_filter, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Optional<CanvasShadow> const& shadow)
 {
     SkPaint paint;
     paint.setImageFilter(move(image_filter));
     paint.setAlpha(static_cast<u8>(global_alpha * 255));
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
 
-    auto sk_image = sk_image_for_decoded_image_frame(source);
-    if (!sk_image)
-        return;
-
-    auto& canvas = m_painting_surface->canvas();
-    canvas.drawImageRect(
-        sk_image.get(),
-        to_skia_rect(src_rect),
-        to_skia_rect(dst_rect),
-        to_skia_sampling_options(scaling_mode),
-        &paint,
-        SkCanvas::kStrict_SrcRectConstraint);
+    draw_with_compositing(m_painting_surface->canvas(), paint, compositing_and_blending_operator, shadow, [&](SkCanvas& canvas, SkPaint const& paint) {
+        canvas.drawImageRect(
+            &image,
+            to_skia_rect(src_rect),
+            to_skia_rect(dst_rect),
+            to_skia_sampling_options(scaling_mode),
+            &paint,
+            SkCanvas::kStrict_SrcRectConstraint);
+    });
 }
 
 void PainterSkia::set_transform(Gfx::AffineTransform const& transform)
@@ -213,35 +352,13 @@ void PainterSkia::set_transform(Gfx::AffineTransform const& transform)
     canvas.setMatrix(matrix);
 }
 
-void PainterSkia::stroke_path(Gfx::Path const& path, Gfx::Color color, float thickness, float blur_radius, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Gfx::Path::CapStyle cap_style, Gfx::Path::JoinStyle join_style, float miter_limit, Vector<float> const& dash_array, float dash_offset)
+void PainterSkia::stroke_path(Gfx::Path const& path, Gfx::PaintStyle const& paint_style, sk_sp<SkImageFilter> image_filter, float thickness, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Gfx::Path::CapStyle const& cap_style, Gfx::Path::JoinStyle const& join_style, float miter_limit, Vector<float> const& dash_array, float dash_offset, Optional<CanvasShadow> const& shadow)
 {
     // Skia treats zero thickness as a special case and will draw a hairline, while we want to draw nothing.
     if (thickness <= 0)
         return;
 
-    SkPaint paint;
-    paint.setAntiAlias(true);
-    paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur_radius / 2));
-    paint.setStyle(SkPaint::kStroke_Style);
-    paint.setStrokeWidth(thickness);
-    set_color(paint, color, color_space());
-    paint.setStrokeCap(to_skia_cap(cap_style));
-    paint.setStrokeJoin(to_skia_join(join_style));
-    paint.setStrokeMiter(miter_limit);
-    paint.setPathEffect(SkDashPathEffect::Make({ dash_array.data(), dash_array.size() }, dash_offset));
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
-    auto sk_path = to_skia_path(path);
-    auto& canvas = m_painting_surface->canvas();
-    canvas.drawPath(sk_path, paint);
-}
-
-void PainterSkia::stroke_path(Gfx::Path const& path, Gfx::PaintStyle const& paint_style, sk_sp<SkImageFilter> image_filter, float thickness, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Gfx::Path::CapStyle const& cap_style, Gfx::Path::JoinStyle const& join_style, float miter_limit, Vector<float> const& dash_array, float dash_offset)
-{
-    // Skia treats zero thickness as a special case and will draw a hairline, while we want to draw nothing.
-    if (thickness <= 0)
-        return;
-
-    auto sk_path = to_skia_path(path);
+    auto sk_path = prune_path_for_stroking(to_skia_path(path));
     auto paint = to_skia_paint(paint_style, move(image_filter), color_space());
     paint.setAntiAlias(true);
     float alpha = paint.getAlphaf();
@@ -252,25 +369,12 @@ void PainterSkia::stroke_path(Gfx::Path const& path, Gfx::PaintStyle const& pain
     paint.setStrokeJoin(to_skia_join(join_style));
     paint.setStrokeMiter(miter_limit);
     paint.setPathEffect(SkDashPathEffect::Make({ dash_array.data(), dash_array.size() }, dash_offset));
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
-    auto& canvas = m_painting_surface->canvas();
-    canvas.drawPath(sk_path, paint);
+    draw_with_compositing(m_painting_surface->canvas(), paint, compositing_and_blending_operator, shadow, [&](SkCanvas& canvas, SkPaint const& paint) {
+        canvas.drawPath(sk_path, paint);
+    });
 }
 
-void PainterSkia::fill_path(Gfx::Path const& path, Gfx::Color color, Gfx::WindingRule winding_rule, float blur_radius, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator)
-{
-    SkPaint paint;
-    paint.setAntiAlias(true);
-    paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, blur_radius / 2));
-    set_color(paint, color, color_space());
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
-    auto sk_path = to_skia_path(path);
-    sk_path.setFillType(to_skia_path_fill_type(winding_rule));
-    auto& canvas = m_painting_surface->canvas();
-    canvas.drawPath(sk_path, paint);
-}
-
-void PainterSkia::fill_path(Gfx::Path const& path, Gfx::PaintStyle const& paint_style, sk_sp<SkImageFilter> image_filter, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Gfx::WindingRule winding_rule)
+void PainterSkia::fill_path(Gfx::Path const& path, Gfx::PaintStyle const& paint_style, sk_sp<SkImageFilter> image_filter, float global_alpha, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator, Gfx::WindingRule winding_rule, Optional<CanvasShadow> const& shadow)
 {
     auto sk_path = to_skia_path(path);
     sk_path.setFillType(to_skia_path_fill_type(winding_rule));
@@ -278,12 +382,12 @@ void PainterSkia::fill_path(Gfx::Path const& path, Gfx::PaintStyle const& paint_
     paint.setAntiAlias(true);
     float alpha = paint.getAlphaf();
     paint.setAlphaf(alpha * global_alpha);
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
-    auto& canvas = m_painting_surface->canvas();
-    canvas.drawPath(sk_path, paint);
+    draw_with_compositing(m_painting_surface->canvas(), paint, compositing_and_blending_operator, shadow, [&](SkCanvas& canvas, SkPaint const& paint) {
+        canvas.drawPath(sk_path, paint);
+    });
 }
 
-void PainterSkia::draw_glyph_run(Font const& font, SkFont sk_font, ReadonlySpan<CanvasGlyph> glyphs, FloatPoint translation, PaintStyle const& style, sk_sp<SkImageFilter> image_filter, float global_alpha, CompositingAndBlendingOperator compositing_and_blending_operator)
+void PainterSkia::draw_glyph_run(Font const& font, SkFont sk_font, ReadonlySpan<CanvasGlyph> glyphs, FloatPoint translation, PaintStyle const& style, sk_sp<SkImageFilter> image_filter, float global_alpha, CompositingAndBlendingOperator compositing_and_blending_operator, Optional<CanvasShadow> const& shadow)
 {
     if (glyphs.is_empty() || font.is_invisible())
         return;
@@ -305,12 +409,13 @@ void PainterSkia::draw_glyph_run(Font const& font, SkFont sk_font, ReadonlySpan<
 
     auto paint = to_skia_paint(style, move(image_filter), color_space());
     paint.setAlphaf(paint.getAlphaf() * global_alpha);
-    paint.setBlender(to_skia_blender(compositing_and_blending_operator));
 
     // NB: Not drawTextBlob(). Skia caches a drawn SkTextBlob once per subpixel origin, and finds a cached entry by
     //     scanning every entry of that blob. Canvas text is often redrawn at moving fractional positions, which
     //     piles up thousands of entries per blob and makes each draw scan all of them.
-    m_painting_surface->canvas().drawGlyphs({ glyph_ids.data(), glyph_ids.size() }, { glyph_positions.data(), glyph_positions.size() }, to_skia_point(translation), sk_font, paint);
+    draw_with_compositing(m_painting_surface->canvas(), paint, compositing_and_blending_operator, shadow, [&](SkCanvas& canvas, SkPaint const& paint) {
+        canvas.drawGlyphs({ glyph_ids.data(), glyph_ids.size() }, { glyph_positions.data(), glyph_positions.size() }, to_skia_point(translation), sk_font, paint);
+    });
 }
 
 void PainterSkia::save()

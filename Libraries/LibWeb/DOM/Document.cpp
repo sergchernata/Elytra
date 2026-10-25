@@ -59,6 +59,7 @@
 #include <LibWeb/CSS/CustomPropertyRegistration.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/FontFaceSet.h>
+#include <LibWeb/CSS/HighlightRegistry.h>
 #include <LibWeb/CSS/HypotheticalElement.h>
 #include <LibWeb/CSS/Invalidation/AdoptedStyleSheetInvalidator.h>
 #include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
@@ -114,6 +115,7 @@
 #include <LibWeb/DOM/ElementByIdMap.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
+#include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/FragmentDirective.h>
 #include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/DOM/InputEventsTarget.h>
@@ -261,6 +263,7 @@
 #include <LibWeb/UIEvents/PointerEvent.h>
 #include <LibWeb/UIEvents/PointerTypes.h>
 #include <LibWeb/UIEvents/TextEvent.h>
+#include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
@@ -364,7 +367,14 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     // 1. Let browsingContext be the result of obtaining a browsing context to use for a navigation response given navigationParams.
     auto browsing_context = obtain_a_browsing_context_to_use_for_a_navigation_response(navigation_params);
 
-    // FIXME: 2. Let permissionsPolicy be the result of creating a permissions policy from a response given navigationParams's navigable's container, navigationParams's origin, and navigationParams's response.
+    // 2. Let permissionsPolicy be the result of creating a permissions policy from a response given navigationParams's
+    //    navigable's container, navigationParams's origin, and navigationParams's response.
+    // NB: The UI process creates it for navigation params it handled, from the documents and headers it holds. Only a
+    //     document that this process creates alone, such as from a javascript: URL or for inline content, creates it
+    //     here.
+    auto permissions_policy = navigation_params.permissions_policy;
+    if (!permissions_policy.has_value())
+        permissions_policy = navigation_params.navigable->create_a_permissions_policy_from_a_response(navigation_params.origin, navigation_params.response->header_list());
 
     // 3. Let creationURL be navigationParams's response's URL.
     auto creation_url = navigation_params.response->url();
@@ -469,7 +479,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     //    origin: navigationParams's origin
     //    browsing context: browsingContext
     //    policy container: navigationParams's policy container
-    //    FIXME: permissions policy: permissionsPolicy
+    //    permissions policy: permissionsPolicy
     //    active sandboxing flag set: navigationParams's final sandboxing flag set
     //    FIXME: opener policy: navigationParams's opener policy
     //    load timing info: loadTimingInfo
@@ -489,6 +499,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     document->set_browsing_context(browsing_context);
     document->m_policy_container = navigation_params.policy_container;
     document->set_opener_policy(navigation_params.opener_policy);
+    document->m_permissions_policy = permissions_policy.release_value();
     document->m_active_sandboxing_flag_set = navigation_params.final_sandboxing_flag_set;
     document->m_navigation_id = navigation_params.id;
     document->set_load_timing_info(load_timing_info);
@@ -520,6 +531,9 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     // 10. Set window's associated Document to document.
     window->set_associated_document(*document);
 
+    // NB: Upgrade Insecure Requests has a new Document inherit its browsing context's insecure requests policy.
+    UpgradeInsecureRequests::inherit_the_insecure_requests_policy_into_a_new_document(document->relevant_settings_object(), browsing_context);
+
     // 11. Set document's internal ancestor origin objects list to the result of running the internal ancestor origin
     //     objects list creation steps given document and navigationParams's iframe element referrer policy.
     document->set_internal_ancestor_origin_objects_list(document->internal_ancestor_origin_objects_list_creation_steps(navigation_params.iframe_element_referrer_policy));
@@ -550,6 +564,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
             || navigation_params.request->text_directive_user_activation();
         navigation_params.request->set_text_directive_user_activation(false);
         document->m_browsing_context_group_has_remote_contexts = navigation_params.request->browsing_context_group_has_multiple_contexts();
+        document->m_navigation_bypassed_cache = navigation_params.request->cache_mode() == HTTP::CacheMode::Reload;
     }
 
     // NOTE: Step 16 is treated as the else branch of step 15. Otherwise, redirectCount is undefined when the fetch
@@ -930,6 +945,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     m_style_scope.visit_edges(visitor);
+    m_paint_timing_state.visit_edges(visitor);
     m_commit_messages->visit_edges(visitor);
     for (auto const& import : m_pending_css_import_rules)
         import->visit_edges(visitor);
@@ -977,6 +993,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_scripts);
     visitor.visit(m_all);
     visitor.visit(m_fonts);
+    visitor.visit(m_highlight_registry);
     visitor.visit(m_selection);
     visitor.visit(m_find_in_page_active_match);
     visitor.visit(m_find_in_page_highlighted_matches);
@@ -1204,7 +1221,7 @@ void Document::update_highlight_states_if_needed(Layout::BegunRead const& read)
     }
 }
 
-void Document::set_find_in_page_highlighted_matches(Vector<GC::Ref<Range>> matches)
+void Document::set_find_in_page_highlighted_matches(GC::RootVector<GC::Ref<Range>> matches)
 {
     if (matches.is_empty() && m_find_in_page_highlighted_matches.is_empty())
         return;
@@ -1495,13 +1512,14 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<Utf16String> const&, Opti
     // 17. Set the insertion point to point at just before the end of the input stream (which at this point will be empty).
     m_parser->tokenizer().update_insertion_point();
 
-    // 18. Set the parser's allow declarative shadow roots to true.
+    // FIXME: Preserve the parser's inherited allow declarative shadow roots value; the document open steps do not
+    //        override it.
     m_parser->set_allow_declarative_shadow_roots(HTML::HTMLParser::AllowDeclarativeShadowRoots::Yes);
 
-    // 19. Update the current document readiness of document to "loading".
+    // 18. Update the current document readiness of document to "loading".
     update_readiness(HTML::DocumentReadyState::Loading);
 
-    // 20. Return document.
+    // 19. Return document.
     return this;
 }
 
@@ -3578,6 +3596,13 @@ GC::Ref<HTML::HTMLAllCollection> Document::all()
 GC::Ref<CSS::FontFaceSet> Document::fonts()
 {
     return m_fonts;
+}
+
+GC::Ref<CSS::HighlightRegistry> Document::highlight_registry()
+{
+    if (!m_highlight_registry)
+        m_highlight_registry = CSS::HighlightRegistry::create(*this);
+    return *m_highlight_registry;
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-document-clear
@@ -5968,6 +5993,44 @@ void Document::remove_from_script_blocking_style_sheet_set(Element& element)
     schedule_html_parser_end_check();
 }
 
+// https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#printing-steps
+void Document::run_the_printing_steps()
+{
+    // 1. The user agent may display a message to the user or return (or both).
+
+    // 2. If the active sandboxing flag set of document has the sandboxed modals flag set, then return.
+    if (has_flag(active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedModals))
+        return;
+
+    // NB: The events go to the relevant global object of document, and to the active windows of its child navigables
+    //     that are in this process.
+    auto fire_print_event = [&](Utf16FlyString const& event_name) {
+        auto& window = HTML::relevant_window(*this);
+        window.dispatch_event(Event::create(event_name, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(window))));
+        for (auto const& child_navigable : document_tree_child_navigables()) {
+            auto* local_child_navigable = as_if<HTML::LocalNavigable>(*child_navigable);
+            if (!local_child_navigable)
+                continue;
+            if (auto child_window = local_child_navigable->active_window())
+                child_window->dispatch_event(Event::create(event_name, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(*child_window))));
+        }
+    };
+
+    // 3. The user agent must fire an event named beforeprint at the relevant global object of document, as well as
+    //    any child navigable in it.
+    fire_print_event(HTML::EventNames::beforeprint);
+
+    // FIXME: 4. The user agent should offer the user the opportunity to obtain a physical form (or the representation of
+    //           a physical form) of document. The user agent may wait for the user to either accept or decline before
+    //           returning; if so, the user agent must pause while the method is waiting. Even if the user agent doesn't
+    //           wait at this point, the user agent must use the state of the relevant documents as they are at this
+    //           point in the algorithm if and when it eventually creates the alternate form.
+
+    // 5. The user agent must fire an event named afterprint at the relevant global object of document, as well as any
+    //    child navigables in it.
+    fire_print_event(HTML::EventNames::afterprint);
+}
+
 void Document::set_ready_for_post_load_tasks(bool ready)
 {
     m_ready_for_post_load_tasks = ready;
@@ -6609,22 +6672,21 @@ void Document::abort()
     //    or any queued tasks or any network data getting discarded,
     //    then make document unsalvageable given document and "fetch".
     bool canceled_fetch = false;
-    if (m_ongoing_navigation_fetch_controller && m_ongoing_navigation_fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Ongoing) {
-        m_ongoing_navigation_fetch_controller->stop_fetch();
+    auto cancel_fetch = [&](GC::Ptr<Fetch::Infrastructure::FetchController> controller) {
+        if (!controller || controller->state() != Fetch::Infrastructure::FetchController::State::Ongoing)
+            return;
+        controller->stop_fetch();
         canceled_fetch = true;
-    }
+    };
+
+    cancel_fetch(m_ongoing_navigation_fetch_controller);
     m_ongoing_navigation_fetch_controller = nullptr;
 
     // AD-HOC: The fetch group belongs to the document's Window. Once the Window is associated with another document,
     //         as when the initial about:blank document is replaced, its fetches are not in the context of this document.
     if (auto window = this->window(); window && window->associated_document_if_any().ptr() == this) {
-        for (auto& fetch_record : relevant_settings_object().fetch_group()) {
-            auto controller = fetch_record.fetch_controller();
-            if (!controller || controller->state() != Fetch::Infrastructure::FetchController::State::Ongoing)
-                continue;
-            controller->stop_fetch();
-            canceled_fetch = true;
-        }
+        for (auto& fetch_record : relevant_settings_object().fetch_group())
+            cancel_fetch(fetch_record.fetch_controller());
     }
 
     if (canceled_fetch)
@@ -6801,13 +6863,10 @@ void Document::unload(GC::Ptr<Document> new_document)
     // 12. If oldDocument's salvageable state is false, then fire an event named unload at oldDocument's relevant global
     //     object, with legacy target override flag set.
     if (!m_salvageable) {
-        // then fire an event named unload at document's relevant global object, with legacy target override flag set.
-        // FIXME: The legacy target override flag is currently set by a virtual override of dispatch_event()
-        //        We should reorganize this so that the flag appears explicitly here instead.
         auto event = DOM::Event::create(
             HTML::EventNames::unload,
             HighResolutionTime::current_high_resolution_time(relevant_global_object(*this)));
-        HTML::relevant_window(*this).dispatch_event(event);
+        EventDispatcher::dispatch(HTML::relevant_window(*this), event, true);
     }
 
     // 13. If unloadTimingInfo is not null, then set unloadTimingInfo's unload event end time to the current high
@@ -6854,24 +6913,27 @@ void Document::unload(GC::Ptr<Document> new_document)
     did_stop_being_active_document_in_navigable();
 }
 
-// https://html.spec.whatwg.org/multipage/iframe-embed-object.html#allowed-to-use
-// The default allowlist of a policy-controlled feature is "self", which enables it in a document only if every
-// navigable between it and the top level is same origin with it. The origin of a navigable another process hosts is
-// replicated here, so an ancestor is compared wherever it is hosted.
-static bool default_allowlist_enables_feature_in(Document const& document)
+// https://w3c.github.io/webappsec-permissions-policy/#algo-is-feature-enabled
+static PermissionsPolicy::FeatureValue is_feature_enabled_in_document_for_origin(PolicyControlledFeature feature, Document const& document, URL::Origin const& origin)
 {
-    auto navigable = document.navigable();
-    if (!navigable)
-        return false;
+    // 1. Let policy be document's permissions policy.
+    auto const& policy = document.permissions_policy();
 
-    for (auto ancestor = navigable->parent(); ancestor; ancestor = ancestor->parent()) {
-        auto ancestor_origin = ancestor->active_document_origin();
-        if (!ancestor_origin.has_value() || !ancestor_origin->is_same_origin(document.origin()))
-            return false;
-    }
-    return true;
+    // FIXME: 2. Let report-only policy be document's report-only permissions policy.
+
+    // 3. Let result be the result of calling Check permissions policy, given policy, feature, origin, and document's
+    //    origin.
+    auto result = PermissionsPolicy::check_permissions_policy(policy, feature, origin, document.origin());
+
+    // FIXME: 4. Let report-only result be the result of calling Check permissions policy, given report-only policy,
+    //           feature, origin, and document's origin.
+    // FIXME: 5. If report is True, generate a report for a violation of either policy.
+
+    // 6. Return result
+    return result;
 }
 
+// https://html.spec.whatwg.org/multipage/iframe-embed-object.html#allowed-to-use
 bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
 {
     // 1. If document's browsing context is null, then return false.
@@ -6884,39 +6946,8 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
 
     // 3. If the result of running is feature enabled in document for origin on feature, document, and document's origin
     //    is "Enabled", then return true.
-    // FIXME: This is ad-hoc. Implement the Permissions Policy specification.
-    switch (feature) {
-    case PolicyControlledFeature::Autoplay:
-        // FIXME: Implement allowlist for this.
+    if (is_feature_enabled_in_document_for_origin(feature, *this, origin()) == PermissionsPolicy::FeatureValue::Enabled)
         return true;
-    case PolicyControlledFeature::Camera:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::CrossOriginIsolated:
-        // FIXME: Implement the allow attribute, which a container uses to delegate the feature to another origin.
-        return default_allowlist_enables_feature_in(*this);
-    case PolicyControlledFeature::FocusWithoutUserActivation:
-        // FIXME: Implement the allow attribute, which a container uses to delegate the feature to another origin.
-        return default_allowlist_enables_feature_in(*this);
-    case PolicyControlledFeature::EncryptedMedia:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::Fullscreen:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::Gamepad:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::Microphone:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::PictureInPicture:
-        // FIXME: Implement allowlist for this.
-        return true;
-    case PolicyControlledFeature::WindowManagement:
-        // FIXME: Implement allowlist for this.
-        return true;
-    }
 
     // 4. Return false.
     return false;
@@ -7836,6 +7867,7 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
                     old_url.serialize(),
                     entry->url().serialize(),
                     HighResolutionTime::current_high_resolution_time(relevant_global_object));
+                hashchange_event->set_is_trusted(true);
                 HTML::queue_global_task(HTML::Task::Source::DOMManipulation, relevant_global_object, GC::create_function(GC::Heap::the(), [hashchange_event, &window]() {
                     window.dispatch_event(hashchange_event);
                 }));
@@ -9536,17 +9568,6 @@ WebIDL::ExceptionOr<void> Document::set_design_mode(Utf16View design_mode)
     return {};
 }
 
-static Element* retarget_from_ua_internal_shadow_root(Element& element)
-{
-    auto* result = &element;
-    while (auto shadow_root = result->containing_shadow_root()) {
-        if (!shadow_root->is_user_agent_internal())
-            break;
-        result = shadow_root->host();
-    }
-    return result;
-}
-
 // https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint
 Element const* Document::element_from_point(double x, double y)
 {
@@ -9727,18 +9748,8 @@ Vector<Utf16FlyString> Document::supported_property_names() const
     OrderedHashTable<Utf16FlyString> names;
 
     for (auto const& element : m_potentially_named_elements) {
-        // - the value of the name content attribute for all exposed embed, form, iframe, img, and exposed object elements
-        //   that have a non-empty name content attribute and are in a document tree with document as their root;
-        if ((is<HTML::HTMLEmbedElement>(*element) && is_exposed(element))
-            || is<HTML::HTMLFormElement>(*element)
-            || is<HTML::HTMLIFrameElement>(*element)
-            || is<HTML::HTMLImageElement>(*element)
-            || (is<HTML::HTMLObjectElement>(*element) && is_exposed(element))) {
-            if (auto name = element->name(); name.has_value()) {
-                names.set(name.value());
-            }
-        }
-
+        // NB: Values from id attributes come before values from name attributes when the same element contributes
+        //     both, so the id values are collected first.
         // - the value of the id content attribute for all exposed object elements that have a non-empty id content attribute
         //   and are in a document tree with document as their root; and
         if (is<HTML::HTMLObjectElement>(*element) && is_exposed(element)) {
@@ -9752,6 +9763,18 @@ Vector<Utf16FlyString> Document::supported_property_names() const
         if (is<HTML::HTMLImageElement>(*element)) {
             if (auto id = element->id(); id.has_value() && element->name().has_value()) {
                 names.set(id.value());
+            }
+        }
+
+        // - the value of the name content attribute for all exposed embed, form, iframe, img, and exposed object elements
+        //   that have a non-empty name content attribute and are in a document tree with document as their root;
+        if ((is<HTML::HTMLEmbedElement>(*element) && is_exposed(element))
+            || is<HTML::HTMLFormElement>(*element)
+            || is<HTML::HTMLIFrameElement>(*element)
+            || is<HTML::HTMLImageElement>(*element)
+            || (is<HTML::HTMLObjectElement>(*element) && is_exposed(element))) {
+            if (auto name = element->name(); name.has_value()) {
+                names.set(name.value());
             }
         }
     }
@@ -10097,7 +10120,7 @@ void Document::publish_animation_keyframes_for_style_update()
     m_animation_keyframes_published_generation = m_style_sheet_set_generation;
     auto* host = style_computer().style_engine().host();
     for (auto const& departed : m_departed_animation_keyframes)
-        CSS::StyleEngineFFI::style_engine_set_tree_scope_animation_keyframes(host, departed.tree_scope.value(), departed.shadow_root_identity, nullptr, nullptr, 0, nullptr, 0);
+        CSS::StyleEngineFFI::style_engine_set_tree_scope_animation_keyframes(host, departed.tree_scope.value(), departed.shadow_root_identity, {}, {}, {});
     m_departed_animation_keyframes.clear();
     style_scope().build_rule_cache_if_needed();
     for_each_shadow_root([](DOM::ShadowRoot& shadow_root) {

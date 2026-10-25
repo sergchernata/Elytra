@@ -113,6 +113,7 @@
 #include <LibWebCommon/Clipboard/SystemClipboard.h>
 #include <LibWebCommon/Page/DragEvent.h>
 #include <LibWebCommon/Page/InputEvent.h>
+#include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 
 namespace Web::Internals {
 
@@ -536,6 +537,8 @@ static constexpr Optional<WebDriverKeyData> webdriver_key_to_key_code(u32 code_p
         return WebDriverKeyData { UIEvents::Key_LeftControl, UIEvents::Mod_Ctrl, 0 };
     case 0xE00A: // Alt
         return WebDriverKeyData { UIEvents::Key_LeftAlt, UIEvents::Mod_Alt, 0 };
+    case 0xE00C: // Escape
+        return WebDriverKeyData { UIEvents::Key_Escape, 0, 0 };
     case 0xE00D: // Space
         return WebDriverKeyData { UIEvents::Key_Space, 0, ' ' };
     case 0xE010: // End
@@ -1147,6 +1150,12 @@ void Internals::simulate_drop(double x, double y)
 
     auto position = page.css_to_device_point({ x, y });
     page.handle_drag_and_drop_event(DragEvent::Type::Drop, position, position, UIEvents::MouseButton::Primary, 0, 0, {});
+}
+
+void Internals::clear_storage_for_testing(Utf16String const& type)
+{
+    auto storage_endpoint = type == "session"_utf16 ? StorageAPI::StorageEndpointType::SessionStorage : StorageAPI::StorageEndpointType::LocalStorage;
+    page().client().page_did_request_clear_storage_for_testing(storage_endpoint, window().associated_document().relevant_settings_object());
 }
 
 void Internals::expire_cookies_with_time_offset(WebIDL::LongLong seconds)
@@ -1861,7 +1870,12 @@ void Internals::stop_loading_through_ui_process()
 
 void Internals::reload_through_ui_process()
 {
-    window().associated_document().page().client().reload_through_ui_process_for_testing();
+    window().associated_document().page().client().reload_through_ui_process_for_testing(false);
+}
+
+void Internals::reload_bypassing_cache_through_ui_process()
+{
+    window().associated_document().page().client().reload_through_ui_process_for_testing(true);
 }
 
 void Internals::traverse_history_through_ui_process(i32 delta)

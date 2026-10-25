@@ -63,7 +63,8 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_javascript_mod
     // 4. Set script's base URL to baseURL.
     auto script = create_internal(move(base_url), filename, settings);
 
-    // FIXME: 5. Set script's fetch options to options.
+    // 5. Set script's fetch options to options.
+    // NB: Callers set the script's fetch options once it has been created.
 
     // 6. Set script's parse error and error to rethrow to null.
     script->set_parse_error(JS::js_null());
@@ -78,7 +79,7 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_javascript_mod
         dbgln("JavaScriptModuleScript: Failed to parse: {}", parse_error.to_utf16_string());
 
         // 1. Set script's parse error to result[0].
-        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()));
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()), parse_error.position);
 
         // 2. Return script.
         return script;
@@ -105,7 +106,7 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_pre_parsed(
     if (result.is_error()) {
         auto& parse_error = result.error().first();
         dbgln("JavaScriptModuleScript: Failed to parse: {}", parse_error.to_utf16_string());
-        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()));
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()), parse_error.position);
         return script;
     }
 
@@ -127,7 +128,7 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_pre_compile
     if (result.is_error()) {
         auto& parse_error = result.error().first();
         dbgln("JavaScriptModuleScript: Failed to materialize: {}", parse_error.to_utf16_string());
-        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()));
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()), parse_error.position);
         return script;
     }
 
@@ -149,7 +150,7 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_bytecode_ca
     if (result.is_error()) {
         auto& parse_error = result.error().first();
         dbgln("JavaScriptModuleScript: Failed to materialize bytecode cache: {}", parse_error.to_utf16_string());
-        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()));
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()), parse_error.position);
         return script;
     }
 
@@ -262,7 +263,8 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_webassembly_mo
     // 2. Let script be a new module script that this algorithm will subsequently initialize.
     // 3. Set script's settings object to settings.
     // 4. Set script's base URL to baseURL.
-    // FIXME: 5. Set script's fetch options to options.
+    // 5. Set script's fetch options to options.
+    // NB: Callers set the script's fetch options once it has been created.
     auto script = create_internal(move(base_url), filename, settings);
 
     // 6. Set script's parse error and error to rethrow to null.
@@ -350,8 +352,8 @@ GC::Ptr<WebIDL::Promise> ModuleScript::run(PreventErrorReporting prevent_error_r
     // 8. If preventErrorReporting is false, then upon rejection of evaluationPromise with reason, report the exception given by reason for script.
     if (prevent_error_reporting == PreventErrorReporting::No) {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
-        WebIDL::upon_rejection(*evaluation_promise, GC::create_function(GC::Heap::the(), [&realm](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
-            report_an_exception(realm.global_object(), reason);
+        WebIDL::upon_rejection(*evaluation_promise, GC::create_function(GC::Heap::the(), [&realm, script = GC::Ref { *this }](JS::Value reason) -> WebIDL::ExceptionOr<JS::Value> {
+            report_an_exception(realm.global_object(), reason, OmitError::No, script);
             return JS::js_undefined();
         }));
     }

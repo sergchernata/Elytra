@@ -1230,20 +1230,29 @@ Vector<Utf16FlyString> Element::get_attribute_names() const
     return names;
 }
 
-// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-element
-GC::Ptr<DOM::Element> Element::get_the_attribute_associated_element(Utf16FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const
+// Whether attrElement is a descendant of any of element's shadow-including ancestors.
+static bool is_descendant_of_any_shadow_including_ancestor(Element const& attribute_element, Element const& element)
 {
-    // 1. Let element be the result of running reflectedTarget's get the element.
-    auto const& element = *this;
+    // NB: attrElement is a descendant of its root, so this holds exactly when that root is a shadow-including ancestor
+    //     of element.
+    auto const& root = attribute_element.root();
+    return &root != &attribute_element && root.is_shadow_including_ancestor_of(element);
+}
 
-    // 2. Let contentAttributeValue be the result of running reflectedTarget's get the content attribute.
-    auto content_attribute_value = element.get_attribute(content_attribute);
+// The first element, in tree order, whose root is the same as element's root and whose ID is id.
+static GC::Ptr<Element> first_element_with_id_in_the_same_tree(Element const& element, Utf16View id)
+{
+    return as<ParentNode>(element.root()).get_element_by_id(id);
+}
 
+// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-element
+GC::Ptr<Element> get_the_attribute_associated_element(Element const& element, Optional<Utf16String> const& content_attribute_value, GC::Ptr<Element> explicitly_set_attribute_element)
+{
     // 3. If reflectedTarget's explicitly set attr-element is not null:
     if (explicitly_set_attribute_element) {
         // 1. If reflectedTarget's explicitly set attr-element is a descendant of any of element's shadow-including
         //    ancestors, then return reflectedTarget's explicitly set attr-element.
-        if (&explicitly_set_attribute_element->root() == &element.shadow_including_root())
+        if (is_descendant_of_any_shadow_including_ancestor(*explicitly_set_attribute_element, element))
             return *explicitly_set_attribute_element;
 
         // 2. Return null.
@@ -1255,29 +1264,38 @@ GC::Ptr<DOM::Element> Element::get_the_attribute_associated_element(Utf16FlyStri
     //     * candidate's root is the same as element's root;
     //     * candidate's ID is contentAttributeValue; and
     //     * candidate implements T.
+    //    If no such element exists, then return null.
     if (content_attribute_value.has_value())
-        return element.document().get_element_by_id(content_attribute_value->utf16_view());
+        return first_element_with_id_in_the_same_tree(element, content_attribute_value->utf16_view());
 
-    // 5. If no such element exists, then return null.
-    // 6. Return null.
+    // 5. Return null.
     return {};
 }
 
+// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-element
+GC::Ptr<DOM::Element> Element::get_the_attribute_associated_element(Utf16FlyString const& content_attribute, GC::Ptr<DOM::Element> explicitly_set_attribute_element) const
+{
+    // 1. Let element be the result of running reflectedTarget's get the element.
+    auto const& element = *this;
+
+    // 2. Let contentAttributeValue be the result of running reflectedTarget's get the content attribute.
+    auto content_attribute_value = element.get_attribute(content_attribute);
+
+    return DOM::get_the_attribute_associated_element(element, content_attribute_value, explicitly_set_attribute_element);
+}
+
 // https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-elements
-Optional<GC::RootVector<GC::Ref<DOM::Element>>> Element::get_the_attribute_associated_elements(Utf16FlyString const& content_attribute, Optional<Vector<GC::Weak<DOM::Element>> const&> explicitly_set_attribute_elements) const
+Optional<GC::RootVector<GC::Ref<Element>>> get_the_attribute_associated_elements(Element const& element, Function<Optional<Utf16String>()> const& get_the_content_attribute, Optional<Vector<GC::Weak<Element>> const&> explicitly_set_attribute_elements)
 {
     // 1. Let elements be an empty list.
-    GC::RootVector<GC::Ref<DOM::Element>> elements;
-
-    // 2. Let element be the result of running reflectedTarget's get the element.
-    auto const& element = *this;
+    GC::RootVector<GC::Ref<Element>> elements;
 
     // 3. If reflectedTarget's explicitly set attr-elements is not null:
     if (explicitly_set_attribute_elements.has_value()) {
         // 1. For each attrElement in reflectedTarget's explicitly set attr-elements:
         for (auto const& attribute_element : *explicitly_set_attribute_elements) {
             // 1. If attrElement is not a descendant of any of element's shadow-including ancestors, then continue.
-            if (!attribute_element || &attribute_element->root() != &element.shadow_including_root())
+            if (!attribute_element || !is_descendant_of_any_shadow_including_ancestor(*attribute_element, element))
                 continue;
 
             // 2. Append attrElement to elements.
@@ -1287,26 +1305,25 @@ Optional<GC::RootVector<GC::Ref<DOM::Element>>> Element::get_the_attribute_assoc
     // 4. Otherwise:
     else {
         // 1. Let contentAttributeValue be the result of running reflectedTarget's get the content attribute.
-        auto content_attribute_value = element.get_attribute(content_attribute);
+        auto content_attribute_value = get_the_content_attribute();
 
         // 2. If contentAttributeValue is null, then return null.
         if (!content_attribute_value.has_value())
             return {};
 
         // 3. Let tokens be contentAttributeValue, split on ASCII whitespace.
+        // 4. For each id of tokens:
         for_each_ascii_whitespace_separated_token(content_attribute_value->utf16_view(), [&](auto id) {
-            // 4. For each id of tokens:
             // 1. Let candidate be the first element, in tree order, that meets the following criteria:
             //     * candidate's root is the same as element's root;
             //     * candidate's ID is id; and
             //     * candidate implements T.
-            auto candidate = element.document().get_element_by_id(id);
-
-            // 2. If no such element exists, then continue.
+            //    If no such element exists, then continue.
+            auto candidate = first_element_with_id_in_the_same_tree(element, id);
             if (!candidate)
                 return IterationDecision::Continue;
 
-            // 3. Append candidate to elements.
+            // 2. Append candidate to elements.
             elements.append(*candidate);
             return IterationDecision::Continue;
         });
@@ -1314,6 +1331,16 @@ Optional<GC::RootVector<GC::Ref<DOM::Element>>> Element::get_the_attribute_assoc
 
     // 5. Return elements.
     return elements;
+}
+
+// https://html.spec.whatwg.org/multipage/common-dom-interfaces.html#attr-associated-elements
+Optional<GC::RootVector<GC::Ref<DOM::Element>>> Element::get_the_attribute_associated_elements(Utf16FlyString const& content_attribute, Optional<Vector<GC::Weak<DOM::Element>> const&> explicitly_set_attribute_elements) const
+{
+    // 2. Let element be the result of running reflectedTarget's get the element.
+    auto const& element = *this;
+
+    return DOM::get_the_attribute_associated_elements(
+        element, [&] { return element.get_attribute(content_attribute); }, explicitly_set_attribute_elements);
 }
 
 CSS::ElementBoxKind Element::box_kind() const
@@ -3232,20 +3259,18 @@ static void prefetch_inline_style_image_resources(CSS::CSSStyleProperties const&
 void Element::clone_inline_style_from(Element const& source)
 {
     // NB: A source whose style attribute still awaits its check leaves the copy to make that check once connected.
-    auto const* source_rare_data = source.element_rare_data();
-    if (!m_inline_style || !source.m_inline_style || (source_rare_data && source_rare_data->style_attribute_awaits_content_security_policy_check))
+    if (!m_inline_style || !source.m_inline_style || source.m_style_attribute_awaits_content_security_policy_check)
         return;
     m_inline_style->set_declarations_from(*source.m_inline_style);
-    if (auto* rare_data = element_rare_data())
-        rare_data->style_attribute_awaits_content_security_policy_check = false;
+    m_style_attribute_awaits_content_security_policy_check = false;
 }
 
 void Element::inserted()
 {
     Base::inserted();
 
-    if (auto* rare_data = element_rare_data(); rare_data && rare_data->style_attribute_awaits_content_security_policy_check && is_connected()) {
-        rare_data->style_attribute_awaits_content_security_policy_check = false;
+    if (m_style_attribute_awaits_content_security_policy_check && is_connected()) {
+        m_style_attribute_awaits_content_security_policy_check = false;
         if (auto value = attribute(HTML::AttributeNames::style); value.has_value() && m_inline_style) {
             if (style_attribute_is_blocked_by_content_security_policy(*this, value->utf16_view()))
                 m_inline_style->set_declarations_from_text({});
@@ -3312,9 +3337,29 @@ void Element::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, No
     });
 }
 
+void Element::unregister_anchor_names_before_leaving_tree_scope(Badge<Node>, Node& tree_root)
+{
+    // Positioned boxes in the scope left behind may hold geometry resolved against these names, which the partial
+    // relayout planner's subtree check can no longer see.
+    if (unregister_current_anchor_names(*this, tree_root))
+        document().record_partial_relayout_escape(PartialRelayoutEscapeReason::AnchorNamesUnregisteredByElementRemoval);
+}
+
 void Element::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<Node> old_ancestor)
 {
     Base::moved_from(is_subtree_root, old_ancestor);
+
+    // The anchor names an element registers are kept in tree order, which a move changes without changing its style.
+    // A move into another tree scope has already unregistered them from the old one.
+    if (is_connected()) {
+        if (auto const* anchor_values = style_group<CSS::ComputedValues::AnchorValues>(); anchor_values && !anchor_values->anchor_names_span().is_empty()) {
+            auto scope = anchor_name_scope_of(*this, root());
+            for (auto const& name : anchor_values->anchor_names_span()) {
+                scope.names.unregister_name(name, *this, scope.host);
+                scope.names.register_name(name, *this, scope.host);
+            }
+        }
+    }
 
     if (is_subtree_root == IsSubtreeRoot::Yes)
         HTML::FormAssociatedElement::reposition_associated_elements_after_move({}, *this);
@@ -4055,15 +4100,18 @@ bool Element::is_actually_disabled() const
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#fragment-parsing-algorithm-steps
 WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> Element::parse_fragment(Variant<GC::Ref<Element>, GC::Ref<DocumentFragment>> target, Utf16View markup, HTML::ParserScriptingMode scripting_mode, HTML::FragmentFastPath fast_path)
 {
-    // 1. Assert: scriptingMode is either Inert or Fragment.
+    // NB: This helper implements Legacy mode with no sanitizer configuration; callers supply scriptingMode.
+    //     The HTML fragment parser requires scriptingMode to be either Inert or Fragment.
     VERIFY(scripting_mode == HTML::ParserScriptingMode::Inert || scripting_mode == HTML::ParserScriptingMode::Fragment);
 
-    // 2. If target's node document is an XML document, then return the result of invoking the XML fragment parsing
-    //    algorithm given target and markup.
+    // 1. If mode is Legacy and target's node document is an XML document, then return the result of invoking the
+    //    XML fragment parsing algorithm given target and markup.
     if (target.visit([](auto node) { return node->document().is_xml_document(); }))
         return XMLFragmentParser::parse_xml_fragment(target, markup);
 
-    // 3. If context's node document is an XML document, then set newChildren to the result of invoking the XML fragment parsing algorithm given context and markup.
+    // 8. Return the result of the HTML fragment parsing algorithm given target, markup, allowDeclarativeShadowRoots,
+    //    scriptingMode, and sanitizerConfig.
+    // NB: Legacy mode sets allowDeclarativeShadowRoots to false and uses a null sanitizerConfig.
     return HTML::HTMLParser::parse_html_fragment(target, markup, HTML::HTMLParser::AllowDeclarativeShadowRoots::No, scripting_mode, fast_path);
 }
 
@@ -4414,6 +4462,7 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
 
     CSSPixelRect scrolling_box_rect;
     CSSPixelPoint current_scroll_position;
+    Layout::NodeWithStyle const* scrolling_box_layout_node = nullptr;
     if (scrolling_box.is_document()) {
         auto& document = scrolling_box.document();
         auto& visual_viewport = *document.visual_viewport();
@@ -4424,17 +4473,37 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
             CSSPixels::nearest_value_for(visual_viewport.height()),
         };
         scrolling_box_rect = { visual_viewport.offset(), visible_size };
-        if (auto* layout_node = document.layout_node(read))
+        if (auto* layout_node = document.layout_node(read)) {
             scrolling_box_rect = Painting::scroll_snapport_rect(*layout_node, scrolling_box_rect);
+            scrolling_box_layout_node = as_if<Layout::NodeWithStyle>(layout_node);
+        }
         current_scroll_position = document.navigable()->viewport_scroll_offset() + visual_viewport.offset();
     } else if (auto* layout_node = scrolling_box.layout_node(read); layout_node && Painting::has_committed_box(*layout_node)) {
         current_scroll_position = Painting::scroll_offset(*layout_node);
+        scrolling_box_layout_node = as_if<Layout::NodeWithStyle>(layout_node);
         scrolling_box_rect = Painting::transform_rect_to_viewport(*layout_node, Painting::scroll_snapport_rect(*layout_node), Compositing::AccumulatedVisualContextTree::IncludeVisualViewportTransform::No);
     } else {
         return {};
     }
 
-    // FIXME: All of this needs to support different block/inline directions.
+    // NB: The block flow and inline base directions of the scrolling box decide which physical axis each runs along and
+    //     which way. The edges below are positions along those directions, which increase from their beginning edge
+    //     towards their ending edge.
+    auto writing_mode = scrolling_box_layout_node ? scrolling_box_layout_node->writing_mode() : CSS::WritingMode::HorizontalTb;
+    auto direction = scrolling_box_layout_node ? scrolling_box_layout_node->direction() : CSS::Direction::Ltr;
+    bool block_axis_is_horizontal = writing_mode != CSS::WritingMode::HorizontalTb;
+    bool block_axis_is_reversed = writing_mode == CSS::WritingMode::VerticalRl || writing_mode == CSS::WritingMode::SidewaysRl;
+    bool inline_axis_is_reversed = (direction == CSS::Direction::Rtl) != (writing_mode == CSS::WritingMode::SidewaysLr);
+    auto start_edge = [](CSSPixelRect const& rect, bool horizontal, bool reversed) {
+        if (horizontal)
+            return reversed ? -rect.right() : rect.left();
+        return reversed ? -rect.bottom() : rect.top();
+    };
+    auto end_edge = [](CSSPixelRect const& rect, bool horizontal, bool reversed) {
+        if (horizontal)
+            return reversed ? -rect.left() : rect.right();
+        return reversed ? -rect.top() : rect.bottom();
+    };
 
     // 1. Let target bounding border box be the box represented by the return value of invoking Element’s
     //    getBoundingClientRect(), if target is an Element, or Range’s getBoundingClientRect(),
@@ -4460,25 +4529,25 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
     // 2. Let scrolling box edge A be the beginning edge in the block flow direction of scrolling box, and
     //    let element edge A be target bounding border box’s edge on the same physical side as that of
     //    scrolling box edge A.
-    CSSPixels element_edge_a = target_bounding_border_box.top();
-    CSSPixels scrolling_box_edge_a = scrolling_box_rect.top();
+    CSSPixels element_edge_a = start_edge(target_bounding_border_box, block_axis_is_horizontal, block_axis_is_reversed);
+    CSSPixels scrolling_box_edge_a = start_edge(scrolling_box_rect, block_axis_is_horizontal, block_axis_is_reversed);
 
     // 3. Let scrolling box edge B be the ending edge in the block flow direction of scrolling box, and let
     //    element edge B be target bounding border box’s edge on the same physical side as that of scrolling
     //    box edge B.
-    CSSPixels element_edge_b = target_bounding_border_box.bottom();
-    CSSPixels scrolling_box_edge_b = scrolling_box_rect.bottom();
+    CSSPixels element_edge_b = end_edge(target_bounding_border_box, block_axis_is_horizontal, block_axis_is_reversed);
+    CSSPixels scrolling_box_edge_b = end_edge(scrolling_box_rect, block_axis_is_horizontal, block_axis_is_reversed);
 
     // 4. Let scrolling box edge C be the beginning edge in the inline base direction of scrolling box, and
     //    let element edge C be target bounding border box’s edge on the same physical side as that of scrolling
     //    box edge C.
-    CSSPixels element_edge_c = target_bounding_border_box.left();
-    CSSPixels scrolling_box_edge_c = scrolling_box_rect.left();
+    CSSPixels element_edge_c = start_edge(target_bounding_border_box, !block_axis_is_horizontal, inline_axis_is_reversed);
+    CSSPixels scrolling_box_edge_c = start_edge(scrolling_box_rect, !block_axis_is_horizontal, inline_axis_is_reversed);
 
     // 5. Let scrolling box edge D be the ending edge in the inline base direction of scrolling box, and let element
     //    edge D be target bounding border box’s edge on the same physical side as that of scrolling box edge D.
-    CSSPixels element_edge_d = target_bounding_border_box.right();
-    CSSPixels scrolling_box_edge_d = scrolling_box_rect.right();
+    CSSPixels element_edge_d = end_edge(target_bounding_border_box, !block_axis_is_horizontal, inline_axis_is_reversed);
+    CSSPixels scrolling_box_edge_d = end_edge(scrolling_box_rect, !block_axis_is_horizontal, inline_axis_is_reversed);
 
     // 6. Let element height be the distance between element edge A and element edge B.
     CSSPixels element_height = element_edge_b - element_edge_a;
@@ -4494,21 +4563,22 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
 
     // 10. Let position be the scroll position scrolling box would have by following these steps:
     auto position = [&]() -> CSSPixelPoint {
-        auto x = current_scroll_position.x();
-        auto y = current_scroll_position.y();
+        // NB: These are distances to scroll along the block flow and inline base directions.
+        CSSPixels block_delta = 0;
+        CSSPixels inline_delta = 0;
 
         // 1. If block is "start", then align element edge A with scrolling box edge A.
         if (block == Element::ScrollLogicalPosition::Start) {
-            y += element_edge_a - scrolling_box_edge_a;
+            block_delta += element_edge_a - scrolling_box_edge_a;
         }
         // 2. Otherwise, if block is "end", then align element edge B with scrolling box edge B.
         else if (block == Element::ScrollLogicalPosition::End) {
-            y += element_edge_b - scrolling_box_edge_b;
+            block_delta += element_edge_b - scrolling_box_edge_b;
         }
         // 3. Otherwise, if block is "center", then align the center of target bounding border box with the center of
         //    scrolling box in scrolling box’s block flow direction.
         else if (block == Element::ScrollLogicalPosition::Center) {
-            y += (element_edge_a + element_height / 2) - (scrolling_box_edge_a + scrolling_box_height / 2);
+            block_delta += (element_edge_a + element_height / 2) - (scrolling_box_edge_a + scrolling_box_height / 2);
         }
         // 4. Otherwise, block is "nearest":
         else {
@@ -4520,28 +4590,28 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
             // If element edge B is outside scrolling box edge B and element height is greater than scrolling box height
             else if ((element_edge_a <= scrolling_box_edge_a && element_height < scrolling_box_height) || (element_edge_b >= scrolling_box_edge_b && element_height > scrolling_box_height)) {
                 // Align element edge A with scrolling box edge A.
-                y += element_edge_a - scrolling_box_edge_a;
+                block_delta += element_edge_a - scrolling_box_edge_a;
             }
             // If element edge A is outside scrolling box edge A and element height is greater than scrolling box height
             // If element edge B is outside scrolling box edge B and element height is less than scrolling box height
             else if ((element_edge_b >= scrolling_box_edge_b && element_height < scrolling_box_height) || (element_edge_a <= scrolling_box_edge_a && element_height > scrolling_box_height)) {
                 // Align element edge B with scrolling box edge B.
-                y += element_edge_b - scrolling_box_edge_b;
+                block_delta += element_edge_b - scrolling_box_edge_b;
             }
         }
 
         // 5. If inline is "start", then align element edge C with scrolling box edge C.
         if (inline_ == Element::ScrollLogicalPosition::Start) {
-            x += element_edge_c - scrolling_box_edge_c;
+            inline_delta += element_edge_c - scrolling_box_edge_c;
         }
         // 6. Otherwise, if inline is "end", then align element edge D with scrolling box edge D.
         else if (inline_ == Element::ScrollLogicalPosition::End) {
-            x += element_edge_d - scrolling_box_edge_d;
+            inline_delta += element_edge_d - scrolling_box_edge_d;
         }
         // 7. Otherwise, if inline is "center", then align the center of target bounding border box with the center of
         //    scrolling box in scrolling box’s inline base direction.
         else if (inline_ == Element::ScrollLogicalPosition::Center) {
-            x += (element_edge_c + element_width / 2) - (scrolling_box_edge_c + scrolling_box_width / 2);
+            inline_delta += (element_edge_c + element_width / 2) - (scrolling_box_edge_c + scrolling_box_width / 2);
         }
         // 8. Otherwise, inline is "nearest":
         else {
@@ -4553,13 +4623,13 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
             // If element edge D is outside scrolling box edge D and element width is greater than scrolling box width
             else if ((element_edge_c <= scrolling_box_edge_c && element_width < scrolling_box_width) || (element_edge_d >= scrolling_box_edge_d && element_width > scrolling_box_width)) {
                 // Align element edge C with scrolling box edge C.
-                x += element_edge_c - scrolling_box_edge_c;
+                inline_delta += element_edge_c - scrolling_box_edge_c;
             }
             // If element edge C is outside scrolling box edge C and element width is greater than scrolling box width
             // If element edge D is outside scrolling box edge D and element width is less than scrolling box width
             else if ((element_edge_d >= scrolling_box_edge_d && element_width < scrolling_box_width) || (element_edge_c <= scrolling_box_edge_c && element_width > scrolling_box_width)) {
                 // Align element edge D with scrolling box edge D.
-                x += element_edge_d - scrolling_box_edge_d;
+                inline_delta += element_edge_d - scrolling_box_edge_d;
             }
         }
 
@@ -4568,6 +4638,12 @@ static CSSPixelPoint determine_the_scroll_into_view_position(Layout::BegunRead c
         //           nearest scroll container is a scroll snap container. The user agent may also do this even when the
         //           scroll container has scroll-snap-type: none.
 
+        if (block_axis_is_reversed)
+            block_delta = -block_delta;
+        if (inline_axis_is_reversed)
+            inline_delta = -inline_delta;
+        auto x = current_scroll_position.x() + (block_axis_is_horizontal ? block_delta : inline_delta);
+        auto y = current_scroll_position.y() + (block_axis_is_horizontal ? inline_delta : block_delta);
         return CSSPixelPoint { x, y };
     }();
 
@@ -5432,7 +5508,7 @@ void Element::replace_style_record(CSS::StyleRecordID style_record_identity)
     // what it moves from, and everything below that compares against the old record is read from it, before the
     // element lets go of it. The engine may free the old record's payloads as soon as it is no longer held.
     if (auto* layout_node = unsafe_layout_node(read))
-        layout_node->set_style_record_identity(m_installed_style, held_before);
+        layout_node->set_style_record_identity(m_installed_style.record());
     bool const was_display_none = !held_before || held_before.display_is_none();
     // https://drafts.csswg.org/scroll-animations-1/#timeline-scoping
     bool const timeline_declarations_changed = timeline_declarations_differ(held_before, m_installed_style);
@@ -6517,12 +6593,11 @@ void Element::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16
         //     into it, and are styled by the user agent rather than the document. So the check is made when an
         //     element that is not connected becomes connected, and the resources its declarations use are fetched then.
         if (value.has_value() && !is_connected()) {
-            ensure_element_rare_data().style_attribute_awaits_content_security_policy_check = true;
+            m_style_attribute_awaits_content_security_policy_check = true;
             m_inline_style->set_declarations_from_text(*value);
             return;
         }
-        if (auto* rare_data = element_rare_data())
-            rare_data->style_attribute_awaits_content_security_policy_check = false;
+        m_style_attribute_awaits_content_security_policy_check = false;
         if (!value.has_value()) {
             m_inline_style->set_declarations_from_text({});
             return;
@@ -6946,6 +7021,10 @@ GC::Ptr<NamedNodeMap const> Element::attributes() const
 
 Utf16FlyString const& Element::html_uppercased_qualified_name() const
 {
+    // NB: Whether the qualified name is uppercased depends on the node document, which can change when the element is
+    //     adopted. So we only use the cached uppercased name while it applies.
+    if (namespace_uri() != Namespace::HTML || document().document_type() != Document::Type::HTML)
+        return qualified_name();
     return ensure_element_rare_data().html_uppercased_qualified_name.ensure([&] { return make_html_uppercased_qualified_name(); });
 }
 
