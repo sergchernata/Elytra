@@ -117,7 +117,14 @@ public:
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate
     void navigate(URL::URL, Web::HTML::DocumentResource = {}, Web::Bindings::NavigationHistoryBehavior = Web::Bindings::NavigationHistoryBehavior::Auto);
     Web::HTML::PreparedNavigationDescriptor prepare_navigation(URL::URL, Web::HTML::DocumentResource = {}, Web::Bindings::NavigationHistoryBehavior = Web::Bindings::NavigationHistoryBehavior::Auto);
-    void begin_navigation(Web::HTML::PreparedNavigationDescriptor);
+    // Whether the browser's UI begins the navigation itself, which the call site says: a navigation a page asks for
+    // names no source document when it has none, as one of the UI's does. The browser opens any of an extension's pages
+    // for the UI.
+    enum class IsBrowserUINavigation : bool {
+        No,
+        Yes,
+    };
+    void begin_navigation(Web::HTML::PreparedNavigationDescriptor, IsBrowserUINavigation = IsBrowserUINavigation::No);
 
     CanonicalBrowsingContext::BrowsingContextAndDocument obtain_a_browsing_context_to_use_for_a_navigation_response(NavigationLoader::ResponseDocument const&);
     NonnullRefPtr<CanonicalDocument> create_and_initialize_a_document(NavigationLoader::ResponseDocument const&);

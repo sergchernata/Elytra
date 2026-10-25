@@ -8,12 +8,17 @@
 #include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
+#include <LibWebView/ExtensionAPI/ContextMenus.h>
+#include <LibWebView/ExtensionAPI/Notifications.h>
 #include <LibWebView/ExtensionRegistry.h>
+#include <LibWebView/ExtensionRuntime.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcSelfTest.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/CommandBar.h>
+#include <UI/Qt/Arc/ExtensionServices.h>
+#include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
 #include <UI/Qt/Arc/LittleArc.h>
 #include <UI/Qt/Arc/MiniPlayer.h>
@@ -36,6 +41,10 @@
 #include <UI/Qt/WebContentView.h>
 
 #include <QApplication>
+#include <QBuffer>
+#include <QImage>
+#include <QLabel>
+#include <QMessageBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QKeyEvent>
@@ -198,6 +207,8 @@ private:
     void profiles_get_their_own_session();
     void tabs_come_back_in_their_own_profile();
     void extension_buttons_open_their_popups();
+    void extension_menu_items_reach_their_extension();
+    void extension_cards_and_menus_stay_in_their_place();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
     void background_tabs_show_while_loading_and_stay_open();
@@ -1460,7 +1471,7 @@ void SelfTest::extension_buttons_open_their_popups()
 
     auto find_button = [&]() -> QToolButton* {
         for (auto* button : window().findChildren<QToolButton*>()) {
-            if (button->toolTip() == "Default title" && button->isVisible())
+            if (button->toolTip().contains("Default title") && button->isVisible())
                 return button;
         }
         return nullptr;
@@ -1492,6 +1503,164 @@ void SelfTest::extension_buttons_open_their_popups()
     uninstall.disarm();
     check(!registry.uninstall(id).is_error(), "the extension uninstalls");
     check(wait_until([&] { return find_button() == nullptr; }), "and its button goes");
+}
+
+// What extensions show stays in its place: menu titles are one short line; Find Next and Previous stay the browser's;
+// notification cards are small, a few at a time, inside the page, and out of the way of the browser's questions.
+void SelfTest::extension_cards_and_menus_stay_in_their_place()
+{
+    check(extension_menu_title("Open\tCtrl+Q"sv) == "Open Ctrl+Q", "a tab in a menu title doesn't start a shortcut", extension_menu_title("Open\tCtrl+Q"sv));
+    check(extension_menu_title("Two\nlines\r\x01!"sv) == "Two lines !", "nor do new lines or control characters show", extension_menu_title("Two\nlines\r\x01!"sv));
+    check(extension_menu_title("A & B"sv) == "A && B", "& isn't a mnemonic");
+    auto long_title = extension_menu_title(ByteString::repeated('x', 300));
+    check(long_title.size() == 80 && long_title.endsWith(QChar(0x2026)), "long titles are elided", QString::number(long_title.size()));
+
+    check(is_browser_shortcut(QKeyCombination(Qt::ControlModifier, Qt::Key_G)), "Find Next is the browser's");
+    check(is_browser_shortcut(QKeyCombination(Qt::ControlModifier | Qt::ShiftModifier, Qt::Key_G)), "and Find Previous");
+    check(!is_browser_shortcut(QKeyCombination(Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier, Qt::Key_Y)), "other keys are free");
+
+    auto png = [](int width, int height) {
+        QImage image(width, height, QImage::Format_ARGB32);
+        image.fill(Qt::red);
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "PNG");
+        return MUST(ByteBuffer::copy(bytes.constData(), static_cast<size_t>(bytes.size())));
+    };
+    constexpr auto extension_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"sv;
+    auto notification = [&](int i) {
+        WebView::ExtensionNotification n;
+        n.extension_id = MUST(String::from_utf8(extension_id));
+        n.id = MUST(String::formatted("n{}", i));
+        n.type = i == 0 ? "image"_string : "basic"_string;
+        n.title = MUST(String::formatted("Card {}", i));
+        n.message = MUST(String::repeated('m', 5000));
+        n.icon = png(2, 2);
+        if (i == 0)
+            n.image = png(1, 20000);
+        n.require_interaction = true;
+        return n;
+    };
+    ArmedScopeGuard close_all = [&] {
+        for (int i = 0; i < 8; ++i)
+            close_extension_notification_for_testing(extension_id, MUST(String::formatted("n{}", i)));
+    };
+    show_extension_notification_for_testing(notification(0));
+    QApplication::processEvents();
+    auto cards = extension_notification_cards_for_testing();
+    check(cards.size() == 1, "the notification shows");
+    if (cards.size() == 1) {
+        check(cards[0]->height() <= 420, "a tall image doesn't make a tall card", QString::number(cards[0]->height()));
+        bool image_fits = true;
+        for (auto* label : cards[0]->findChildren<QLabel*>()) {
+            if (!label->pixmap().isNull() && (label->width() > 240 || label->height() > 240))
+                image_fits = false;
+        }
+        check(image_fits, "its image fits its box");
+    }
+    for (int i = 1; i < 7; ++i)
+        show_extension_notification_for_testing(notification(i));
+    auto visible_cards = [] {
+        int visible = 0;
+        for (auto* card : extension_notification_cards_for_testing())
+            visible += card->isVisible() ? 1 : 0;
+        return visible;
+    };
+    check(wait_until([&] { return visible_cards() > 0; }), "cards show");
+    check(visible_cards() <= 3, "only a few at a time", QString::number(visible_cards()));
+    // They show in the window the user is in (a window that isn't private).
+    auto* cards_window = extension_notification_cards_for_testing().isEmpty() ? nullptr : qobject_cast<BrowserWindow*>(extension_notification_cards_for_testing().first()->parentWidget());
+    check(cards_window && cards_window->is_private() == WebView::IsPrivate::No, "in a window that isn't private");
+    auto* more = cards_window ? extension_notification_more_label_for_testing(*cards_window) : nullptr;
+    auto* more_label = qobject_cast<QLabel*>(more);
+    check(more_label && more_label->isVisible() && more_label->text().startsWith("+"), "and how many more there are", more_label ? more_label->text() : QString());
+    if (auto* tab = cards_window ? cards_window->current_tab() : nullptr) {
+        QRect page(tab->view().mapToGlobal(QPoint(0, 0)), tab->view().size());
+        bool inside = true;
+        QString where;
+        for (auto* card : extension_notification_cards_for_testing()) {
+            if (card->isVisible() && !page.contains(card->geometry())) {
+                inside = false;
+                where = QString("card %1,%2 %3x%4 page %5,%6 %7x%8").arg(card->x()).arg(card->y()).arg(card->width()).arg(card->height()).arg(page.x()).arg(page.y()).arg(page.width()).arg(page.height());
+            }
+        }
+        check(inside, "inside the page, below the toolbar", where);
+    }
+
+    // The browser asks something: the cards make way, and come back after.
+    auto* box = new QMessageBox(QMessageBox::Question, "Question", "A question of the browser's", QMessageBox::Ok, cards_window ? static_cast<QWidget*>(cards_window) : &window());
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->open();
+    check(wait_until([&] { return visible_cards() == 0; }, 3000), "cards hide while the browser asks the user");
+    box->close();
+    check(wait_until([&] { return visible_cards() > 0; }, 3000), "and show again after");
+
+    close_all.disarm();
+    for (int i = 0; i < 8; ++i)
+        close_extension_notification_for_testing(extension_id, MUST(String::formatted("n{}", i)));
+    check(wait_until([&] { return extension_notification_cards_for_testing().isEmpty(); }, 3000), "closed cards go");
+}
+
+// An extension's context menu item (chrome.contextMenus) shows in the page's context menu and its button's, and choosing
+// it reaches the extension: the test extension retitles its button with the item's ID.
+void SelfTest::extension_menu_items_reach_their_extension()
+{
+    auto source = qEnvironmentVariable("LADYBIRD_SOURCE_DIR");
+    if (source.isEmpty()) {
+        check(false, "LADYBIRD_SOURCE_DIR names the source tree, for the test extension");
+        return;
+    }
+    auto& registry = WebView::Application::extension_registry();
+    auto installed = registry.install_unpacked(ak_byte_string_from_qstring(source + "/Tests/LibWebExtensions/Fixtures/extensions/menus_single"));
+    check(!installed.is_error(), "the menu test extension installs");
+    if (installed.is_error())
+        return;
+    auto id = installed.value()->id();
+    ArmedScopeGuard uninstall = [&] { (void)registry.uninstall(id); };
+
+    auto& menus = WebView::Application::extension_runtime().context_menus();
+    check(wait_until([&] { return menus.item_count(id) > 0; }), "its background creates its menu item");
+
+    auto find_action = [](QMenu& menu, QString const& text) -> QAction* {
+        for (auto* action : menu.actions()) {
+            if (action->text() == text)
+                return action;
+        }
+        return nullptr;
+    };
+    QMenu page_menu;
+    add_extension_page_items_for_testing(page_menu, window());
+    auto* item = find_action(page_menu, "The only item");
+    check(item != nullptr, "the item shows in the page's context menu");
+    // Opening the menu again doesn't add the items twice.
+    add_extension_page_items_for_testing(page_menu, window());
+    int copies = 0;
+    for (auto* action : page_menu.actions())
+        copies += action->text() == "The only item" ? 1 : 0;
+    check(copies == 1, "once");
+    item = find_action(page_menu, "The only item");
+
+    QMenu button_menu;
+    add_extension_action_items(button_menu, id, &window());
+    check(find_action(button_menu, "The only item") != nullptr, "and in its button's menu");
+
+    // The tooltip is the button's title (as rich text).
+    auto find_button = [&](QString const& title) -> QToolButton* {
+        for (auto* button : window().findChildren<QToolButton*>()) {
+            if ((button->toolTip() == title || button->toolTip() == QString("<qt>%1</qt>").arg(title.toHtmlEscaped())) && button->isVisible())
+                return button;
+        }
+        return nullptr;
+    };
+    check(wait_until([&] { return find_button("Single item") != nullptr; }), "the extension's button shows");
+    if (item)
+        item->trigger();
+    check(wait_until([&] { return find_button("Clicked only") != nullptr; }), "choosing the item reaches the extension");
+
+    uninstall.disarm();
+    check(!registry.uninstall(id).is_error(), "the menu test extension uninstalls");
+    check(menus.item_count(id) == 0, "and its items go with it");
 }
 
 // A tab's cookies come from the session its view is made in. Tabs coming back (restored at launch, reopened after
@@ -2512,6 +2681,8 @@ int SelfTest::run()
     profiles_get_their_own_session();
     tabs_come_back_in_their_own_profile();
     extension_buttons_open_their_popups();
+    extension_menu_items_reach_their_extension();
+    extension_cards_and_menus_stay_in_their_place();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
     background_tabs_show_while_loading_and_stay_open();

@@ -7,7 +7,8 @@ set(SOURCES
     Crx.cpp
     NativeMessaging.cpp
     StorageArea.cpp
+    DeclarativeNetRequest.cpp
 )
 
 ladybird_lib(LibWebExtensions webextensions)
-target_link_libraries(LibWebExtensions PRIVATE LibCore LibCrypto LibCompress LibFileSystem LibURL OpenSSL::Crypto)
+target_link_libraries(LibWebExtensions PRIVATE LibCore LibCrypto LibCompress LibFileSystem LibURL LibRegex OpenSSL::Crypto)

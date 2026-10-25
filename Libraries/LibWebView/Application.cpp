@@ -634,10 +634,9 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
         return HeadlessWebView::create(theme.release_value(), { 800, 600 });
     };
     m_extension_registry.on_change = [] {
-        auto extensions = extension_registry().serialize_for_renderers();
         WebContentClient::for_each_client([&](WebContentClient& client) {
             client.for_each_page([&](WebContentPage& page) {
-                page.async_set_installed_extensions(extensions);
+                page.async_set_installed_extensions(extension_runtime().installed_extensions_for(page));
                 return IterationDecision::Continue;
             });
             return IterationDecision::Continue;

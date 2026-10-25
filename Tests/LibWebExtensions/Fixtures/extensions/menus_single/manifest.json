@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "Single item test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6K8tb/tIWue9rvWLzrRyP7yAPYALDVyKDGPNkDVMLvadfqDqKzpFvC+Ig4F/A+om1nFHzQBM2HtFB5MMKdc/lm0XXMLpOsd22x1oh+GAJ4j90h/fmVU2n30kILH3xxNGe8RZZI+u97dpKQ77rnJkPBYIZZ1QUcIRvVr/rpc1dIFQsn5G2kUAqx/xm2TdfNxsjlxCEzMyMrFA7uij4Vgbt1pdBmsp2KBBrahMysVWpXosGgAB7Ma0ER9GahH3uJE7oKGwcAINXg1twTB5k8emREi7x6SRugfStmgCIGrkgrZFlx/oXLazVScAME98bqP3SDEfoIMToyYc2hajtsJOAwIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "action": { "default_title": "Single item" },
+    "permissions": ["contextMenus"]
+}

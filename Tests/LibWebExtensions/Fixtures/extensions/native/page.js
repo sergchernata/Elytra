@@ -49,6 +49,28 @@ const cases = {
         const { got, error } = await exchange(host, messages, -1);
         return { error, received: got.length };
     },
+    // More hosts at once than the browser starts for one extension: the rest are refused.
+    async many() {
+        const results = await Promise.all(Array.from({ length: 20 }, () => exchange("com.ladybird.echo", [{ cmd: "info" }], 1)));
+        for (const result of results)
+            result.port.disconnect();
+        const errors = results.filter(result => result.error !== undefined).map(result => result.error);
+        return { answered: results.filter(result => result.got.length === 1).length, errors: [...new Set(errors)] };
+    },
+    // Hosts started and closed one after another, each slow to exit: those still exiting count, so the rest are refused.
+    async churn() {
+        let answered = 0;
+        const errors = [];
+        for (let i = 0; i < 24; ++i) {
+            const result = await exchange("com.ladybird.echo", [{ cmd: "linger" }], 1);
+            result.port.disconnect();
+            if (result.got.length === 1)
+                ++answered;
+            if (result.error !== undefined)
+                errors.push(result.error);
+        }
+        return { answered, errors: [...new Set(errors)] };
+    },
     exits: () => cases.disconnect("com.ladybird.exit"),
     exits_later: () => cases.disconnect("com.ladybird.echo", [{ cmd: "exit" }]),
     garbage: () => cases.disconnect("com.ladybird.echo", [{ cmd: "garbage" }]),

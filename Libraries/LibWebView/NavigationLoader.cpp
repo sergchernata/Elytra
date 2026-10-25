@@ -5,9 +5,14 @@
  */
 
 #include <AK/AnyOf.h>
+#include <AK/CharacterTypes.h>
+#include <LibCore/File.h>
+#include <LibCore/MimeData.h>
+#include <LibCore/System.h>
 #include <LibHTTP/HeaderList.h>
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
+#include <LibURL/Parser.h>
 #include <LibWebCommon/Fetch/Infrastructure/URL.h>
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/HTML/CrossOrigin/OpenerPolicyEnforcement.h>
@@ -22,6 +27,7 @@
 #include <LibWebView/CanonicalNavigable.h>
 #include <LibWebView/CanonicalTraversable.h>
 #include <LibWebView/CanonicalWindow.h>
+#include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/NavigationLoader.h>
 #include <LibWebView/RequestServerManager.h>
 
@@ -102,9 +108,218 @@ static Web::HTML::NavigationResponseBodyHandle* response_body_handle(Web::HTML::
     return response.body.get_pointer<Web::HTML::NavigationResponseBodyHandle>();
 }
 
+// NB: The process populating a history entry's document echoes the entry in its request. Its document state names the
+//     origins an about:blank or about:srcdoc document takes, and the requester an extension's file is read for, and its
+//     resource is an about:srcdoc document's body: the UI process takes the entry it holds instead.
+NonnullRefPtr<NavigationLoader> NavigationLoader::create_for_history_step(IsPrivate is_private, Web::HTML::NavigationPopulationRequest request, CanonicalSessionHistoryEntry const& target_entry)
+{
+    request.history_entry = Web::HTML::create_pending_session_history_entry_descriptor(target_entry.descriptor());
+    return create(is_private, move(request));
+}
+
 NavigationLoader::~NavigationLoader()
 {
     release_response_body();
+}
+
+static bool is_extension_url(URL::URL const& url)
+{
+    return url.scheme() == "chrome-extension"sv;
+}
+
+// The policies an extension's pages run under, as a response's Content-Security-Policy headers would give them.
+// https://w3c.github.io/webappsec-csp/#parse-serialized-policy
+static Web::ContentSecurityPolicy::SerializedPolicy serialized_policy_for_extension(StringView policy, URL::Origin const& self_origin)
+{
+    Vector<Web::ContentSecurityPolicy::Directives::SerializedDirective> directives;
+    for (auto token : policy.split_view(';')) {
+        token = token.trim_whitespace();
+        if (token.is_empty() || !all_of(token, is_ascii))
+            continue;
+        auto parts = token.split_view_if(is_ascii_space);
+        auto name = Utf16FlyString::from_utf8(parts.first().to_ascii_lowercase_string());
+        if (any_of(directives, [&](auto const& directive) { return directive.name == name; }))
+            continue;
+        Vector<Utf16String> value;
+        for (size_t i = 1; i < parts.size(); ++i)
+            value.append(Utf16String::from_utf8(parts[i]));
+        directives.append({ .name = move(name), .value = move(value) });
+    }
+    return {
+        .directives = move(directives),
+        .disposition = Web::Bindings::SecurityPolicyViolationEventDisposition::Enforce,
+        .source = Web::ContentSecurityPolicy::PolicySource::Header,
+        .self_origin = self_origin,
+        .pre_parsed_policy_string = MUST(String::from_utf8(policy)),
+    };
+}
+
+// NB: The process that fetched a navigation's response reports the URLs it reached, its headers, its policies and its
+//     body, and the response's URL gives the document its origin. A document of an extension's origin runs in the
+//     extension's process with the extension's API, so no process may make one up: a response at an extension's URL is
+//     one the browser reads from the extension's files itself, with the policies the browser gives the extension's
+//     pages. An extension's file never redirects, so its URL can only end the response's URL list, and a navigation the
+//     UI process admitted to one ends at that same URL. A navigation the UI process admitted elsewhere that redirects
+//     to an extension's file reaches what the extension makes web accessible to both the redirecting site and the
+//     navigation's requester, as Chrome allows.
+//     Returns false when the result names an extension's URL it can't have reached, or a file the browser won't serve.
+static bool take_extension_response_from_the_browser(IsPrivate is_private, Web::HTML::NavigationPopulationResult& result, URL::URL const& admitted_url, Optional<URL::Origin> const& requester, bool& read_extension_file)
+{
+    auto* navigation_params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>();
+    auto names_an_extension_url = is_extension_url(admitted_url) || (result.redirected_url.has_value() && is_extension_url(*result.redirected_url));
+    if (navigation_params) {
+        names_an_extension_url |= any_of(navigation_params->response.url_list, is_extension_url);
+        if (navigation_params->request.has_value())
+            names_an_extension_url |= any_of(navigation_params->request->url_list, is_extension_url);
+    }
+    if (!names_an_extension_url)
+        return true;
+    // Extensions don't run in private windows, nor do their pages open there.
+    if (is_private == IsPrivate::Yes)
+        return !navigation_params && (!result.redirected_url.has_value() || !is_extension_url(*result.redirected_url));
+
+    // An error document has an opaque origin of the UI process's making.
+    if (!navigation_params)
+        return !result.redirected_url.has_value() || !is_extension_url(*result.redirected_url);
+
+    auto const& response_url_list = navigation_params->response.url_list;
+    auto final_url = response_url_list.is_empty() ? admitted_url : response_url_list.last();
+    if (!is_extension_url(final_url))
+        return false;
+    auto ends_at_final_url = [&](Vector<URL::URL> const& url_list) {
+        if (url_list.is_empty())
+            return true;
+        for (size_t i = 0; i + 1 < url_list.size(); ++i) {
+            if (is_extension_url(url_list[i]))
+                return false;
+        }
+        return url_list.last().equals(final_url, URL::ExcludeFragment::Yes);
+    };
+    if (!ends_at_final_url(response_url_list))
+        return false;
+    if (navigation_params->request.has_value() && !ends_at_final_url(navigation_params->request->url_list))
+        return false;
+    if (result.redirected_url.has_value() && !result.redirected_url->equals(final_url, URL::ExcludeFragment::Yes))
+        return false;
+    auto is_redirect = !admitted_url.equals(final_url, URL::ExcludeFragment::Yes);
+    if (is_redirect && is_extension_url(admitted_url))
+        return false;
+
+    if (!Application::is_initialized())
+        return false;
+    auto const& registry = Application::extension_registry();
+    auto extension_id = final_url.serialized_host();
+    auto path = final_url.file_path();
+    auto const* extension = registry.find(extension_id);
+    if (!extension)
+        return false;
+    if (is_redirect && (!extension->may_be_loaded_by(path, admitted_url.origin()) || (requester.has_value() && !extension->may_be_loaded_by(path, requester))))
+        return false;
+
+    auto file = registry.open_file(extension_id, path, is_redirect ? Optional<URL::Origin> { admitted_url.origin() } : requester);
+    if (file.is_error())
+        return false;
+    auto stream = Core::File::adopt_fd(file.value().take_fd(), Core::File::OpenMode::Read);
+    if (stream.is_error())
+        return false;
+    static constexpr size_t maximum_size = 64 * MiB;
+    auto stat = Core::System::fstat(stream.value()->fd());
+    if (stat.is_error() || !S_ISREG(stat.value().st_mode) || static_cast<size_t>(stat.value().st_size) > maximum_size)
+        return false;
+    auto body = stream.value()->read_until_eof();
+    if (body.is_error() || body.value().size() > maximum_size)
+        return false;
+
+    NavigationLoader::discard(is_private, result);
+    auto& response = navigation_params->response;
+    response.status = 200;
+    response.status_message = "OK"sv;
+    response.network_error_message.clear();
+    response.body = body.release_value();
+
+    // The headers ResourceLoader gives an extension's file, and the policies they make.
+    response.headers.clear();
+    response.headers.append({ "Access-Control-Allow-Origin"sv, "*"sv });
+    response.headers.append({ "Content-Type"sv, Core::guess_mime_type_based_on_filename(path) });
+    // https://html.spec.whatwg.org/multipage/browsers.html#creating-a-policy-container-from-a-fetch-response
+    // NB: The UI process obtains the embedder policy from these headers (obtain_the_response_policies()).
+    navigation_params->policy_container = {
+        .csp_list = {},
+        .embedder_policy = {},
+        .referrer_policy = Web::ReferrerPolicy::DEFAULT_REFERRER_POLICY,
+        .force_load_at_top = false,
+    };
+    // The sandboxing flags are the navigable's (determine_the_origin_of_the_response()) and the CSP's, not the
+    // renderer's. A page the manifest lists as sandboxed runs under the sandbox CSP, with an opaque origin, as in Chrome.
+    navigation_params->final_sandboxing_flag_set = {};
+    auto is_sandboxed_page = extension->is_sandboxed_page(path);
+    auto policies = is_sandboxed_page ? Vector<String> { extension->manifest().sandbox_csp() } : extension->content_security_policies();
+    for (auto const& policy : policies) {
+        response.headers.append({ "Content-Security-Policy"sv, policy.to_byte_string() });
+        auto serialized_policy = serialized_policy_for_extension(policy, final_url.origin());
+        for (auto const& directive : serialized_policy.directives) {
+            if (directive.name == "sandbox"sv)
+                navigation_params->final_sandboxing_flag_set |= Web::HTML::parse_a_sandboxing_directive(directive.value.span());
+        }
+        navigation_params->policy_container.csp_list.append(move(serialized_policy));
+    }
+    if (is_sandboxed_page)
+        navigation_params->final_sandboxing_flag_set |= Web::HTML::SandboxingFlagSet::SandboxedOrigin;
+
+    // The referrer is the requester's origin, which the UI process holds, rather than what the renderer says.
+    if (navigation_params->request.has_value()) {
+        auto referrer = requester.has_value() && !requester->is_opaque() ? URL::Parser::basic_parse(requester->serialize()) : Optional<URL::URL> {};
+        navigation_params->request->referrer = referrer.has_value() ? Web::Fetch::Infrastructure::RequestReferrerType { referrer.release_value() } : Web::Fetch::Infrastructure::RequestReferrer::NoReferrer;
+    }
+    read_extension_file = true;
+    return true;
+}
+
+// NB: An about:blank document takes the origin of the navigation's initiator, and an about:srcdoc one its entry's, so a
+//     process may report only a response at such a URL the UI process admitted a navigation to. Neither redirects. The
+//     body is the browser's too: about:blank's is empty, and about:srcdoc's is the entry's resource.
+//     Returns false when the result names such a URL the navigation wasn't to.
+static bool take_about_response_from_the_browser(IsPrivate is_private, Web::HTML::NavigationPopulationResult& result, Web::HTML::PendingSessionHistoryEntryDescriptor const& admitted_entry)
+{
+    auto* navigation_params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>();
+    if (!navigation_params)
+        return true;
+    auto const& response_url_list = navigation_params->response.url_list;
+    auto final_url = response_url_list.is_empty() ? admitted_entry.url : response_url_list.last();
+    auto is_blank = Web::HTML::url_matches_about_blank(final_url);
+    auto is_srcdoc = Web::HTML::url_matches_about_srcdoc(final_url);
+    if (!is_blank && !is_srcdoc)
+        return true;
+
+    auto is_admitted_url = [&](URL::URL const& url) {
+        return is_blank ? Web::HTML::url_matches_about_blank(url) : Web::HTML::url_matches_about_srcdoc(url);
+    };
+    if (!is_admitted_url(admitted_entry.url) || response_url_list.size() > 1 || result.redirected_url.has_value() || result.replacement_document_state.has_value())
+        return false;
+    if (navigation_params->request.has_value() && (navigation_params->request->url_list.size() > 1 || !all_of(navigation_params->request->url_list, is_admitted_url)))
+        return false;
+
+    NavigationLoader::discard(is_private, result);
+    auto& response = navigation_params->response;
+    response.status = 200;
+    response.status_message = "OK"sv;
+    response.network_error_message.clear();
+    response.headers.clear();
+    if (is_blank) {
+        response.headers.append({ "Content-Type"sv, "text/html;charset=utf-8"sv });
+        response.body = ByteBuffer {};
+    } else {
+        // https://html.spec.whatwg.org/multipage/browsing-the-web.html#create-navigation-params-from-a-srcdoc-resource
+        response.headers.append({ "Content-Type"sv, "text/html"sv });
+        auto const* srcdoc = admitted_entry.document_state.resource.get_pointer<Utf16String>();
+        if (srcdoc) {
+            auto utf8 = srcdoc->to_utf8();
+            response.body = MUST(ByteBuffer::copy(utf8.bytes()));
+        } else {
+            response.body = ByteBuffer {};
+        }
+    }
+    return true;
 }
 
 void NavigationLoader::did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult result)
@@ -131,10 +346,86 @@ void NavigationLoader::did_finish_navigation_params_creation(Web::HTML::Navigati
         }
     }
 
+    // NB: A redirect replaces the entry's document state with a new one of the old one's fields but for its initiator
+    //     origin and about base URL, which it has none of, and its resource, which it may clear (create navigation params
+    //     by fetching, steps 21.19-20). The process reports that it did, and the UI process makes the new document state.
+    if (result.replacement_document_state.has_value()) {
+        if (!result.redirected_url.has_value()) {
+            result.replacement_document_state.clear();
+        } else {
+            auto replacement = m_request.history_entry.document_state;
+            replacement.id = result.replacement_document_state->id;
+            replacement.initiator_origin.clear();
+            replacement.about_base_url.clear();
+            replacement.reload_pending = false;
+            replacement.nested_histories.clear();
+            if (result.replacement_document_state->resource.has<Empty>())
+                replacement.resource = Empty {};
+            result.replacement_document_state = move(replacement);
+        }
+    }
+
+    // NB: The URL and requester the UI process admitted, before the result's replacement document state.
+    if (!take_extension_response_from_the_browser(m_is_private, result, m_request.history_entry.url, extension_file_requester(), m_response_is_an_extension_file)
+        || !take_about_response_from_the_browser(m_is_private, result, m_request.history_entry)) {
+        discard(m_is_private, result);
+        result.navigation_params = Web::HTML::NavigationParamsNullOrError {};
+        result.redirected_url.clear();
+        result.replacement_document_state.clear();
+        m_response_is_an_extension_file = false;
+    }
+
+    // NB: A policy container's referrer policy is never the empty string; one a renderer says is would crash the process
+    //     hosting the document as the policy applies (determine_requests_referrer() verifies it isn't).
+    if (auto* navigation_params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>()) {
+        if (navigation_params->policy_container.referrer_policy == Web::ReferrerPolicy::ReferrerPolicy::EmptyString)
+            navigation_params->policy_container.referrer_policy = Web::ReferrerPolicy::DEFAULT_REFERRER_POLICY;
+    }
+
     Web::HTML::apply_navigation_population_result(m_request, result);
     m_result = move(result);
     m_result->inline_content_origin = URL::Origin::create_opaque();
     determine_the_origin_of_the_response();
+    refuse_an_extension_origin_the_browser_did_not_give();
+}
+
+// NB: A document of an extension's origin runs in the extension's process, with the extension's API. It is one of the
+//     extension's files the browser read, or an about:blank or about:srcdoc document of the browser's making that takes
+//     the extension's origin from the navigation's initiator or its entry, both of which the UI process holds. Those
+//     run under the extension's CSP. A document of an extension the browser doesn't have, or any other, is refused.
+void NavigationLoader::refuse_an_extension_origin_the_browser_did_not_give()
+{
+    auto* navigation_params = m_result->navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>();
+    if (!navigation_params)
+        return;
+    auto const& origin = navigation_params->origin;
+    if (origin.is_opaque() || origin.scheme() != "chrome-extension"sv)
+        return;
+    auto const& response_url = navigation_params->response.url_list.is_empty() ? m_request.history_entry.url : navigation_params->response.url_list.last();
+    if (m_response_is_an_extension_file && is_extension_url(response_url) && response_url.origin().is_same_origin(origin))
+        return;
+
+    Extension const* extension = nullptr;
+    if (Application::is_initialized())
+        extension = Application::extension_registry().find(origin.host().serialize());
+    if (extension && (Web::HTML::url_matches_about_blank(response_url) || Web::HTML::url_matches_about_srcdoc(response_url))) {
+        navigation_params->policy_container.csp_list.clear();
+        for (auto const& policy : extension->content_security_policies())
+            navigation_params->policy_container.csp_list.append(serialized_policy_for_extension(policy, origin));
+        return;
+    }
+
+    discard(m_is_private, *m_result);
+    m_result->navigation_params = Web::HTML::NavigationParamsNullOrError {};
+    m_response_is_an_extension_file = false;
+}
+
+Optional<URL::Origin> NavigationLoader::extension_file_requester() const
+{
+    if (m_extension_file_requester.has_value())
+        return *m_extension_file_requester;
+    // NB: Only the UI process says the browser itself is the requester; a navigation without an initiator has the least.
+    return m_request.history_entry.document_state.initiator_origin.value_or(URL::Origin::create_opaque());
 }
 
 // NB: The process that created the navigation params determined responseOrigin for its own checks. The UI process
@@ -444,6 +735,17 @@ void NavigationLoader::set_document(CanonicalDocument const& document, Canonical
     if (!navigation_params)
         return;
     auto const& window = document.relevant_global_object();
+    // NB: An extension's file the browser read gets the environment the UI process knows of, not the renderer's.
+    if (m_response_is_an_extension_file) {
+        auto const& response_url = navigation_params->response.url_list.is_empty() ? m_request.history_entry.url : navigation_params->response.url_list.last();
+        auto const* top_level_document = navigable.is_top_level_traversable() ? nullptr : &navigable.top_level_traversable().active_document();
+        navigation_params->reserved_environment = Web::HTML::NavigationEnvironmentDescriptor {
+            .id = {},
+            .creation_url = response_url,
+            .top_level_creation_url = top_level_document ? top_level_document->creation_url() : response_url,
+            .top_level_origin = top_level_document ? top_level_document->origin() : navigation_params->origin,
+        };
+    }
     if (!navigation_params->reserved_environment.has_value()) {
         navigation_params->reserved_environment = Web::HTML::NavigationEnvironmentDescriptor {
             .id = {},

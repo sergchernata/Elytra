@@ -7,6 +7,7 @@ set(TEST_SOURCES
     TestCrx.cpp
     TestNativeMessaging.cpp
     TestStorageArea.cpp
+    TestDeclarativeNetRequest.cpp
 )
 
 foreach(source IN LISTS TEST_SOURCES)

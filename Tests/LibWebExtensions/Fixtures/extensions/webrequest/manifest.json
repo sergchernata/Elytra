@@ -1,0 +1,14 @@
+{
+    "manifest_version": 3,
+    "name": "webRequest test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2i7l2tVABRTkWe1d2QyQmlj/jn6amj3pTyy+WzX1Yck3s9Leg3KCFjODBKsgxV/gRCkgcmc0/kL7hwvFIN7dkOJwI7kU62XLRvSoWsq6B0fK+DO2L5qtGlOp0+DFoHA1vzOOVuOYjVhu1EA2AnsSV7o9euPk276OuxpL1MjYD9les0RkBUxqlXCDmdhk3PYa6bgH3obL2rWkXfndVofdLF4NEoPl7XIJL6OzrAhh52fC3UlRdHCf55tvekT8ludPmxJWWeXn5MjehbtlYRkOP45VorgxSsNQPjQxYP/+I7GQMT0WdvDXyCB9IBkghgDXhVOhoxJdEj91CBa9qy4T5wIDAQAB",
+    "permissions": ["webRequest", "webRequestAuthProvider", "declarativeNetRequestWithHostAccess", "tabs", "storage"],
+    "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+    "declarative_net_request": {
+        "rule_resources": [
+            { "id": "ruleset_1", "enabled": true, "path": "rules_1.json" },
+            { "id": "ruleset_2", "enabled": false, "path": "rules_2.json" }
+        ]
+    }
+}

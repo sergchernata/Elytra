@@ -109,6 +109,14 @@ steps.reload = async () => {
     report.reloaded = true;
 };
 
+// Removing another extension asks the user, once at a time, and only during the user's gesture.
+steps.uninstall_other = async () => {
+    const other = "njaomanglkphpmpbpgpbeolgfhgafipk";
+    const first = chrome.management.uninstall(other).then(() => "ok", e => `error: ${e.message}`);
+    await attempt("second", () => chrome.management.uninstall(other));
+    report.first = await first;
+};
+
 steps.uninstall = async () => {
     await attempt("bad_options", () => chrome.management.uninstallSelf("x"));
     await attempt("cancelled", () => chrome.management.uninstallSelf({ showConfirmDialog: true }));

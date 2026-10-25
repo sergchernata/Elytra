@@ -32,6 +32,10 @@ bool handle_extension_shortcut(QKeyEvent const&, BrowserWindow*);
 
 void show_extensions_window();
 
+// Whether the browser itself uses the keys (an extension's command can't take them): its menus' shortcuts, its other
+// shortcuts (Find Next and Previous), and those every Mac app has.
+bool is_browser_shortcut(QKeyCombination);
+
 // "Extensions…", for a menu.
 void add_extensions_action_to(QMenu&);
 

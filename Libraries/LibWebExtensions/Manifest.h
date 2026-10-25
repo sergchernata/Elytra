@@ -171,6 +171,8 @@ struct Manifest {
     Vector<WebAccessibleResource> web_accessible_resources;
     Vector<Command> commands;
     ContentSecurityPolicy content_security_policy;
+    // sandbox.pages: pages (paths, which may have * wildcards) served with the sandbox CSP and an opaque origin.
+    Vector<String> sandbox_pages;
     Optional<ExternallyConnectable> externally_connectable;
 
     Optional<String> options_page;

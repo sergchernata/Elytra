@@ -9,6 +9,8 @@
 
 #include "ExtensionTestHarness.h"
 
+#include <LibWebExtensions/Manifest.h>
+
 #include <AK/Base64.h>
 #include <AK/Hex.h>
 #include <AK/ScopeGuard.h>
@@ -427,6 +429,134 @@ void updates_replace_the_old_version_once_the_new_one_loads(ByteString const& di
     CHECK_EQ(registry.find(id)->manifest().version, "4.0"sv);
 }
 
+// An update that asks for more than the user agreed to is installed, but stays off until they approve it (as Chrome).
+void updates_asking_for_more_wait_for_approval(ByteString const& directory)
+{
+    auto const& key = first_key();
+    auto id = key.extension_id();
+    auto extensions_directory = extensions_directory_in(directory, "approval"sv);
+    auto with = [](StringView permissions, StringView hosts, StringView matches, StringView extra = {}) {
+        return ByteString::formatted(R"(, "permissions": [{}], "host_permissions": [{}], "content_scripts": [{{ "matches": [{}], "js": ["sub/a.txt"] }}]{})", permissions, hosts, matches, extra);
+    };
+    auto version = [&](StringView number, ByteString const& extra) { return extension_crx(key, number, extra); };
+    {
+        ExtensionRegistry registry;
+        registry.set_extensions_directory(extensions_directory);
+        MUST(install(registry, version("1.0"sv, with(R"("storage", "tabs")"sv, R"("https://a.example/*")"sv, R"("https://b.example/*")"sv))));
+        CHECK(!registry.installed_extension(id)->needs_approval());
+
+        // Optional permissions, and permissions without warnings, don't need approval.
+        MUST(install(registry, version("2.0"sv, with(R"("storage", "tabs", "alarms")"sv, R"("https://a.example/*")"sv, R"("https://b.example/*")"sv, R"(, "optional_permissions": ["history"], "optional_host_permissions": ["<all_urls>"])"sv))));
+        CHECK(registry.find(id) != nullptr);
+        CHECK(!registry.installed_extension(id)->needs_approval());
+        // Fewer don't either.
+        MUST(install(registry, version("2.1"sv, with(R"("tabs")"sv, ""sv, R"("https://b.example/*")"sv))));
+        CHECK(registry.find(id) != nullptr && registry.find(id)->manifest().version == "2.1"sv);
+        CHECK(!registry.installed_extension(id)->needs_approval());
+
+        // A new API permission, a new site and a new content script site.
+        MUST(install(registry, version("3.0"sv, with(R"("tabs", "history")"sv, R"("https://c.example/*")"sv, R"("https://b.example/*", "https://d.example/*")"sv))));
+        CHECK(registry.find(id) == nullptr);
+        auto record = registry.installed_extension(id);
+        CHECK(record.has_value() && record->version == "3.0"sv && !record->enabled && record->needs_approval());
+        CHECK(record->permissions_to_approve == Vector<String> { "history"_string });
+        CHECK(record->sites_to_approve == (Vector<String> { "https://c.example/*"_string, "https://d.example/*"_string }));
+        // Turning it on isn't approving it.
+        CHECK(registry.set_enabled(id, true).is_error());
+        CHECK(registry.find(id) == nullptr);
+    }
+    {
+        // It's remembered.
+        ExtensionRegistry registry;
+        registry.set_extensions_directory(extensions_directory);
+        MUST(registry.load_installed_extensions());
+        CHECK(registry.find(id) == nullptr);
+        auto record = registry.installed_extension(id);
+        CHECK(record.has_value() && !record->enabled && record->sites_to_approve.size() == 2 && record->permissions_to_approve.size() == 1);
+
+        // Another update before approval keeps what's still to approve, and adds to it: all sites, this time.
+        MUST(install(registry, version("4.0"sv, with(R"("tabs", "history", "downloads.open")"sv, R"("https://c.example/*", "http://*/*")"sv, R"("https://b.example/*")"sv))));
+        record = registry.installed_extension(id);
+        CHECK(record.has_value() && !record->enabled);
+        CHECK(record->permissions_to_approve == (Vector<String> { "history"_string, "downloads.open"_string }));
+        CHECK(record->sites_to_approve == (Vector<String> { "https://c.example/*"_string, "http://*/*"_string }));
+
+        CHECK(registry.approve_permissions("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"sv).is_error());
+        MUST(registry.approve_permissions(id));
+        CHECK(registry.find(id) != nullptr && registry.find(id)->manifest().version == "4.0"sv);
+        CHECK(registry.installed_extension(id)->enabled && !registry.installed_extension(id)->needs_approval());
+
+        // Once all sites are granted, more sites need nothing.
+        MUST(install(registry, version("5.0"sv, with(R"("tabs", "history", "downloads.open")"sv, R"("http://*/*", "https://e.example/*")"sv, R"("https://b.example/*")"sv))));
+        CHECK(registry.find(id) != nullptr && !registry.installed_extension(id)->needs_approval());
+    }
+    {
+        ExtensionRegistry registry;
+        registry.set_extensions_directory(extensions_directory);
+        MUST(registry.load_installed_extensions());
+        CHECK(registry.find(id) != nullptr && !registry.installed_extension(id)->needs_approval());
+        MUST(registry.uninstall(id));
+    }
+}
+
+// Removing a folder removes the links in it, never what they name.
+void removing_never_follows_links(ByteString const& directory)
+{
+    auto outside = ByteString::formatted("{}/outside", directory);
+    MUST(Core::Directory::create(ByteString::formatted("{}/inner", outside), Core::Directory::CreateDirectories::Yes));
+    write_temporary_file(outside, "keep.txt"sv, "keep"sv);
+    auto doomed = ByteString::formatted("{}/doomed", directory);
+    MUST(Core::Directory::create(ByteString::formatted("{}/a/b/c", doomed), Core::Directory::CreateDirectories::Yes));
+    write_temporary_file(ByteString::formatted("{}/a/b/c", doomed), "file.txt"sv, "x"sv);
+    MUST(Core::System::symlink(outside, ByteString::formatted("{}/a/link-to-folder", doomed)));
+    MUST(Core::System::symlink(ByteString::formatted("{}/keep.txt", outside), ByteString::formatted("{}/a/b/link-to-file", doomed)));
+    MUST(Core::System::symlink("/nonexistent"sv, ByteString::formatted("{}/dangling", doomed)));
+
+    CHECK(!ExtensionRegistry::remove_without_following_links(doomed).is_error());
+    CHECK(!FileSystem::exists(doomed) && !FileSystem::is_link(doomed));
+    CHECK(FileSystem::exists(ByteString::formatted("{}/keep.txt", outside)));
+    CHECK(FileSystem::is_directory(ByteString::formatted("{}/inner", outside)));
+
+    // A link given itself is removed, not followed.
+    auto link = ByteString::formatted("{}/link", directory);
+    MUST(Core::System::symlink(outside, link));
+    CHECK(!ExtensionRegistry::remove_without_following_links(link).is_error());
+    CHECK(!FileSystem::is_link(link));
+    CHECK(FileSystem::exists(ByteString::formatted("{}/keep.txt", outside)));
+    CHECK(ExtensionRegistry::remove_without_following_links(ByteString::formatted("{}/missing", directory)).is_error());
+}
+
+// What the install and permission prompts say an extension can do.
+void permissions_are_described()
+{
+    using WebView::summarize_permissions;
+    // Every permission the browser gates something on has words.
+    for (auto permission : { "alarms"sv, "contextMenus"sv, "declarativeNetRequest"sv, "declarativeNetRequestWithHostAccess"sv,
+             "declarativeNetRequestFeedback"sv, "downloads"sv, "downloads.open"sv, "management"sv, "nativeMessaging"sv,
+             "notifications"sv, "privacy"sv, "scripting"sv, "storage"sv, "tabs"sv, "unlimitedStorage"sv, "webNavigation"sv,
+             "webRequest"sv, "webRequestAuthProvider"sv, "activeTab"sv }) {
+        if (!WebView::permission_description(permission).has_value())
+            warnln("No description for {}", permission);
+        CHECK(WebView::permission_description(permission).has_value());
+    }
+    CHECK(!WebView::permission_description("madeUp"sv).has_value());
+
+    for (auto pattern : { "<all_urls>"sv, "*://*/*"sv, "https://*/*"sv, "http://*/*"sv, "https://*/path"sv }) {
+        auto summary = summarize_permissions({}, Vector<String> { MUST(String::from_utf8(pattern)) });
+        CHECK(summary.all_sites && summary.sites.is_empty());
+    }
+    // Every site is listed, once.
+    Vector<String> sites;
+    for (int i = 0; i < 8; ++i)
+        sites.append(MUST(String::formatted("https://site{}.example/*", i)));
+    sites.append("https://site0.example/*"_string);
+    auto summary = summarize_permissions(Vector<String> { "tabs"_string, "madeUp"_string, "tabs"_string }, sites);
+    CHECK(!summary.all_sites);
+    CHECK_EQ(summary.sites.size(), 8u);
+    CHECK_EQ(summary.descriptions.size(), 1u);
+    CHECK(summary.undescribed == Vector<String> { "madeUp"_string });
+}
+
 void installs_are_remembered(ByteString const& directory)
 {
     auto const& key = first_key();
@@ -715,6 +845,31 @@ void extensions_install_from_the_web_store(ByteString const& directory)
     CHECK(registry.installed_extension(id).has_value());
     MUST(registry.uninstall(id));
 
+    // The user sees what's asked for before anything installs, and saying no installs nothing.
+    {
+        store.respond(store_url_for(id), 302, blob);
+        Vector<String> asked_about;
+        Optional<ErrorOr<WebView::Extension const*>> result;
+        auto install_answering = [&](bool answer) {
+            result.clear();
+            registry.install_from_web_store(id, [&](ErrorOr<WebView::Extension const*> installed) { result = move(installed); },
+                [&](WebExtensions::Manifest const& manifest, Function<void(bool)> on_answer) {
+                    asked_about.append(manifest.version);
+                    on_answer(answer);
+                });
+            auto deadline = MonotonicTime::now() + AK::Duration::from_seconds(10);
+            Core::EventLoop::current().spin_until([&] { return result.has_value() || MonotonicTime::now() > deadline; });
+        };
+        install_answering(false);
+        CHECK(result.has_value() && result->is_error());
+        CHECK(!registry.installed_extension(id).has_value());
+        install_answering(true);
+        CHECK(result.has_value() && !result->is_error());
+        CHECK(registry.installed_extension(id).has_value());
+        CHECK_EQ(asked_about, (Vector<String> { "1.0"_string, "1.0"_string }));
+        MUST(registry.uninstall(id));
+    }
+
     // Downloads only over HTTPS, from Google's download hosts.
     auto refused = [&](StringView location) {
         store.respond(store_url_for(id), 302, location);
@@ -969,6 +1124,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
         crx_files_install_into_the_profile(harness.directory);
         updates_replace_the_old_version_once_the_new_one_loads(harness.directory);
+        updates_asking_for_more_wait_for_approval(harness.directory);
+        permissions_are_described();
+        removing_never_follows_links(harness.directory);
         installs_are_remembered(harness.directory);
         disabled_extensions_are_not_served(harness.directory);
         uninstalling_removes_only_crx_files(harness.directory);

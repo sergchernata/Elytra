@@ -14,6 +14,7 @@
 #include <AK/ScopeGuard.h>
 #include <LibCore/DirIterator.h>
 #include <LibCore/EventLoop.h>
+#include <LibCore/Directory.h>
 #include <LibCore/File.h>
 #include <LibCore/Timer.h>
 #include <LibCore/StandardPaths.h>
@@ -30,13 +31,55 @@
 #include <LibWebCommon/Loader/UserAgent.h>
 #include <LibWebExtensions/Crx.h>
 #include <LibWebExtensions/ExtensionId.h>
+#include <LibWebExtensions/Messages.h>
 #include <LibWebExtensions/MatchPattern.h>
 #include <LibWebExtensions/Zip.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/Utilities.h>
 
+#if defined(AK_OS_MACOS)
+#    include <sys/param.h>
+#endif
+#if !defined(AK_OS_WINDOWS)
+#    include <dirent.h>
+#    include <fcntl.h>
+#    include <sys/stat.h>
+#endif
+
 namespace WebView {
+
+// Opens a file real_path() resolved to below the root. A link put in place of a component since then mustn't lead the
+// reading out of the folder: the last component isn't followed, and the file opened must still be below the root.
+static ErrorOr<int> open_inside(ByteString const& root, ByteString const& real_path)
+{
+    if (!real_path.starts_with(ByteString::formatted("{}/", root)))
+        return Error::from_errno(EACCES);
+#if defined(AK_OS_WINDOWS)
+    return Core::System::open(real_path, O_RDONLY);
+#else
+    auto fd = TRY(Core::System::open(real_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW));
+    auto close_fd = ArmedScopeGuard([fd] { (void)Core::System::close(fd); });
+#    if defined(AK_OS_MACOS)
+    char opened_path[MAXPATHLEN] {};
+    if (::fcntl(fd, F_GETPATH, opened_path) < 0)
+        return Error::from_syscall("fcntl"sv, errno);
+    auto opened = ByteString { opened_path, strnlen(opened_path, sizeof(opened_path)) };
+#    else
+    auto opened = TRY(Core::System::readlink(ByteString::formatted("/proc/self/fd/{}", fd)));
+#    endif
+    if (!opened.starts_with(ByteString::formatted("{}/", root)))
+        return Error::from_errno(EACCES);
+    auto stat = TRY(Core::System::fstat(fd));
+    if (!S_ISREG(stat.st_mode))
+        return Error::from_errno(EACCES);
+    // Readers block.
+    auto flags = TRY(Core::System::fcntl(fd, F_GETFL));
+    TRY(Core::System::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK));
+    close_fd.disarm();
+    return fd;
+#endif
+}
 
 Extension::Extension(String id, ByteString root, WebExtensions::Manifest manifest, WebExtensions::MessageCatalog messages)
     : m_id(move(id))
@@ -63,9 +106,12 @@ Optional<ByteBuffer> Extension::read_file_bytes(StringView path, size_t maximum_
     if (relative_path.is_empty() || relative_path.contains('\\') || any_of(relative_path.split_view('/'), [](auto part) { return part == ".."sv; }))
         return {};
     auto real_path = FileSystem::real_path(ByteString::formatted("{}/{}", m_root, relative_path));
-    if (real_path.is_error() || !real_path.value().starts_with(ByteString::formatted("{}/", m_root)))
+    if (real_path.is_error())
         return {};
-    auto file = Core::File::open(real_path.value(), Core::File::OpenMode::Read);
+    auto fd = open_inside(m_root, real_path.value());
+    if (fd.is_error())
+        return {};
+    auto file = Core::File::adopt_fd(fd.value(), Core::File::OpenMode::Read);
     if (file.is_error())
         return {};
     auto stat = Core::System::fstat(file.value()->fd());
@@ -80,6 +126,22 @@ Optional<ByteBuffer> Extension::read_file_bytes(StringView path, size_t maximum_
 URL::Origin Extension::origin() const
 {
     return URL::Parser::basic_parse(MUST(String::formatted("chrome-extension://{}/", m_id)))->origin();
+}
+
+// Chrome's (csp_info.cc), as LibWeb's Extensions::content_security_policies_for() gives them to renderers.
+Vector<String> Extension::content_security_policies() const
+{
+    auto declared = m_manifest.content_security_policy.extension_pages.value_or("script-src 'self';"_string);
+    return { move(declared), "script-src 'self' 'wasm-unsafe-eval' 'inline-speculation-rules'; object-src 'self';"_string };
+}
+
+// Chrome matches each page as a URL pattern's path, in which * is a wildcard (sandboxed_page_info.cc).
+bool Extension::is_sandboxed_page(StringView path) const
+{
+    auto relative_path = path.trim("/"sv, TrimMode::Left);
+    return any_of(m_manifest.sandbox_pages, [&](auto const& page) {
+        return relative_path.matches(page.bytes_as_string_view().trim("/"sv, TrimMode::Left), CaseSensitivity::CaseSensitive);
+    });
 }
 
 Optional<URL::URL> Extension::background_page_url() const
@@ -147,6 +209,10 @@ bool Extension::may_be_loaded_by(StringView path, Optional<URL::Origin> const& r
     auto relative_path = path.trim("/"sv, TrimMode::Left);
 
     for (auto const& entry : m_manifest.web_accessible_resources) {
+        // FIXME: Serve these at Chrome's dynamic URL, a random ID of the session's (runtime.getURL() gives it). Until
+        //        then, they are only the extension's: others mustn't reach them at its static ID.
+        if (entry.use_dynamic_url)
+            continue;
         bool listed = any_of(entry.resources, [&](auto const& resource) {
             return WebExtensions::glob_matches(resource.bytes_as_string_view().trim("/"sv, TrimMode::Left), relative_path);
         });
@@ -336,6 +402,8 @@ String ExtensionRegistry::serialize_for_renderers() const
         entry.set("uiLocale"sv, extension->messages().ui_locale().is_empty() ? "en"_string : extension->messages().ui_locale());
         entry.set("allowFileAccess"sv, allows_file_access(id));
         entry.set("contentScripts"sv, move(content_scripts));
+        // The policies the browser gives the extension's pages, which its workers and subresources take too.
+        entry.set("contentSecurityPolicies"sv, json_strings(extension->content_security_policies()));
         extensions.must_append(move(entry));
     }
 
@@ -386,10 +454,131 @@ ErrorOr<IPC::File> ExtensionRegistry::open_file(StringView id, StringView path, 
 
     // Resolve links, and serve nothing outside the extension's folder.
     auto real_path = TRY(FileSystem::real_path(ByteString::formatted("{}{}", extension->root(), path)));
-    if (!real_path.starts_with(ByteString::formatted("{}/", extension->root())))
-        return Error::from_errno(EACCES);
+    return IPC::File::adopt_fd(TRY(open_inside(extension->root(), real_path)));
+}
 
-    return open_local_file_for_renderer(real_path);
+ErrorOr<IPC::File> ExtensionRegistry::open_stand_in_file(StringView id, StringView path, Optional<URL::Origin> const& requester) const
+{
+    (void)TRY(open_file(id, path, requester));
+    return open_generated_file({});
+}
+
+// Permission warnings.
+
+struct PermissionWords {
+    StringView name;
+    StringView description;
+    bool warns;
+};
+
+// Every permission the browser gates something on, and the ones Chrome's install prompt names.
+static constexpr PermissionWords permission_words[] = {
+    { "activeTab"sv, "Use the page you're on when you click it"sv, false },
+    { "alarms"sv, "Run on a schedule"sv, false },
+    { "bookmarks"sv, "Read and change your bookmarks"sv, true },
+    { "clipboardRead"sv, "Read what you copy"sv, true },
+    { "clipboardWrite"sv, "Change what you copy"sv, true },
+    { "contextMenus"sv, "Add items to menus"sv, false },
+    { "cookies"sv, "Read and change cookies of sites it can access"sv, true },
+    { "declarativeNetRequest"sv, "Block and change requests sites make"sv, true },
+    { "declarativeNetRequestFeedback"sv, "See which requests its rules blocked or changed, and so your browsing history"sv, true },
+    { "declarativeNetRequestWithHostAccess"sv, "Block and change requests to sites it can access"sv, true },
+    { "downloads"sv, "Manage your downloads"sv, true },
+    { "downloads.open"sv, "Open files you download"sv, true },
+    { "history"sv, "Read and change your browsing history"sv, true },
+    { "idle"sv, "Know when you're away"sv, false },
+    { "management"sv, "Manage your extensions"sv, true },
+    { "nativeMessaging"sv, "Talk to apps on this Mac"sv, true },
+    { "notifications"sv, "Show notifications"sv, true },
+    { "privacy"sv, "Change your privacy settings"sv, true },
+    { "scripting"sv, "Run scripts in pages it can access"sv, false },
+    { "storage"sv, "Store data"sv, false },
+    { "tabs"sv, "Read your tabs and the pages they show"sv, true },
+    { "unlimitedStorage"sv, "Store unlimited data"sv, false },
+    { "webNavigation"sv, "Know which pages you visit"sv, true },
+    { "webRequest"sv, "See the requests sites make"sv, true },
+    { "webRequestAuthProvider"sv, "Answer sites' sign-in prompts"sv, true },
+};
+
+static PermissionWords const* words_for(StringView permission)
+{
+    for (auto const& entry : permission_words) {
+        if (entry.name == permission)
+            return &entry;
+    }
+    return nullptr;
+}
+
+Optional<StringView> permission_description(StringView permission)
+{
+    if (auto const* words = words_for(permission))
+        return words->description;
+    return {};
+}
+
+bool permission_has_warning(StringView permission)
+{
+    auto const* words = words_for(permission);
+    return words && words->warns;
+}
+
+bool is_all_sites_pattern(StringView pattern)
+{
+    return pattern == "<all_urls>"sv || pattern.starts_with("*://*/"sv) || pattern.starts_with("https://*/"sv) || pattern.starts_with("http://*/"sv);
+}
+
+PermissionSummary summarize_permissions(ReadonlySpan<String> api_permissions, ReadonlySpan<String> site_patterns)
+{
+    PermissionSummary summary;
+    for (auto const& permission : api_permissions) {
+        if (auto description = permission_description(permission); description.has_value()) {
+            auto text = MUST(String::from_utf8(*description));
+            if (!summary.descriptions.contains_slow(text))
+                summary.descriptions.append(move(text));
+        } else if (!summary.undescribed.contains_slow(permission)) {
+            summary.undescribed.append(permission);
+        }
+    }
+    for (auto const& pattern : site_patterns) {
+        if (is_all_sites_pattern(pattern))
+            summary.all_sites = true;
+        else if (!summary.sites.contains_slow(pattern))
+            summary.sites.append(pattern);
+    }
+    if (summary.all_sites)
+        summary.sites.clear();
+    return summary;
+}
+
+static Vector<String> site_patterns_of(WebExtensions::Manifest const& manifest)
+{
+    Vector<String> sites = manifest.host_permissions;
+    for (auto const& script : manifest.content_scripts)
+        sites.extend(script.matches);
+    return sites;
+}
+
+PermissionSummary summarize_permissions(WebExtensions::Manifest const& manifest)
+{
+    return summarize_permissions(manifest.permissions, site_patterns_of(manifest));
+}
+
+// What the new manifest asks for that the old didn't, of what the user is asked about. Optional permissions don't
+// count: they're asked for when used.
+static void add_permissions_to_approve(WebExtensions::Manifest const& old_manifest, WebExtensions::Manifest const& new_manifest, Vector<String>& permissions, Vector<String>& sites)
+{
+    for (auto const& permission : new_manifest.permissions) {
+        if (permission_has_warning(permission) && !old_manifest.permissions.contains_slow(permission) && !permissions.contains_slow(permission))
+            permissions.append(permission);
+    }
+    auto old_sites = site_patterns_of(old_manifest);
+    bool had_all_sites = any_of(old_sites, [](auto const& pattern) { return is_all_sites_pattern(pattern); });
+    if (had_all_sites)
+        return;
+    for (auto const& pattern : site_patterns_of(new_manifest)) {
+        if (!old_sites.contains_slow(pattern) && !sites.contains_slow(pattern))
+            sites.append(pattern);
+    }
 }
 
 // Installs.
@@ -499,6 +688,16 @@ ErrorOr<void> ExtensionRegistry::save_installed_extensions() const
         entry.set("enabled"sv, record->enabled);
         entry.set("allowsFileAccess"sv, record->allows_file_access);
         entry.set("installTime"sv, record->install_time.milliseconds_since_epoch());
+        if (record->needs_approval()) {
+            JsonArray permissions;
+            for (auto const& permission : record->permissions_to_approve)
+                permissions.must_append(permission);
+            JsonArray sites;
+            for (auto const& site : record->sites_to_approve)
+                sites.must_append(site);
+            entry.set("permissionsToApprove"sv, move(permissions));
+            entry.set("sitesToApprove"sv, move(sites));
+        }
         extensions.must_append(move(entry));
     }
     JsonObject state;
@@ -587,6 +786,19 @@ ErrorOr<void> ExtensionRegistry::load_installed_extensions()
         record.enabled = entry.get_bool("enabled"sv).value_or(false);
         record.allows_file_access = entry.get_bool("allowsFileAccess"sv).value_or(false);
         record.install_time = UnixDateTime::from_milliseconds_since_epoch(entry.get_integer<i64>("installTime"sv).value_or(0));
+        auto read_strings = [&](StringView key, Vector<String>& strings) {
+            auto array = entry.get_array(key);
+            if (!array.has_value())
+                return;
+            for (auto const& item : array->values()) {
+                if (item.is_string() && strings.size() < 1000)
+                    strings.append(item.as_string());
+            }
+        };
+        read_strings("permissionsToApprove"sv, record.permissions_to_approve);
+        read_strings("sitesToApprove"sv, record.sites_to_approve);
+        if (record.needs_approval())
+            record.enabled = false;
 
         if (record.enabled) {
             auto extension = read_extension(record.path, record.install_type == InstalledExtension::InstallType::Normal ? Optional<String> { record.id } : OptionalNone {});
@@ -653,7 +865,7 @@ ErrorOr<Extension const*> ExtensionRegistry::install_crx(ReadonlyBytes bytes, Op
     bool is_new = existing == m_installed.end();
     ScopeGuard remove_on_failure = [&] {
         if (!installed)
-            (void)FileSystem::remove(is_new ? extension_directory : version_directory, FileSystem::RecursionMode::Allowed);
+            (void)remove_without_following_links(is_new ? extension_directory : version_directory);
     };
     TRY(WebExtensions::ZipArchive::extract_to_directory(crx.zip_archive, version_directory));
     TRY(make_private_tree(version_directory));
@@ -669,6 +881,30 @@ ErrorOr<Extension const*> ExtensionRegistry::install_crx(ReadonlyBytes bytes, Op
         record.enabled = true;
         record.allows_file_access = false;
         record.install_time = UnixDateTime::now();
+    }
+    if (existing != m_installed.end()) {
+        // What's still to approve, if the new version asks for it, and what it asks for that the old one didn't.
+        auto const& new_manifest = extension->manifest();
+        auto new_sites = site_patterns_of(new_manifest);
+        Vector<String> permissions;
+        Vector<String> sites;
+        for (auto const& permission : record.permissions_to_approve) {
+            if (new_manifest.permissions.contains_slow(permission))
+                permissions.append(permission);
+        }
+        for (auto const& site : record.sites_to_approve) {
+            if (new_sites.contains_slow(site))
+                sites.append(site);
+        }
+        auto old_extension = read_extension(record.path, id);
+        // An old version that's gone or broken agreed to nothing.
+        add_permissions_to_approve(old_extension.is_error() ? WebExtensions::Manifest {} : old_extension.value()->manifest(), new_manifest, permissions, sites);
+        record.permissions_to_approve = move(permissions);
+        record.sites_to_approve = move(sites);
+        if (record.needs_approval()) {
+            record.enabled = false;
+            m_extensions.remove(id);
+        }
     }
     record.version = extension->manifest().version;
     record.name = extension->messages().substitute_manifest_messages(extension->manifest().name);
@@ -687,7 +923,7 @@ ErrorOr<Extension const*> ExtensionRegistry::install_crx(ReadonlyBytes bytes, Op
     while (versions.has_next()) {
         auto name = versions.next_path();
         if (name != kept)
-            (void)FileSystem::remove(ByteString::formatted("{}/{}", extension_directory, name), FileSystem::RecursionMode::Allowed);
+            (void)remove_without_following_links(ByteString::formatted("{}/{}", extension_directory, name));
     }
 
     notify_change();
@@ -729,6 +965,8 @@ ErrorOr<void> ExtensionRegistry::set_enabled(StringView id, bool enabled)
     auto& record = installed->value;
     if (record.enabled == enabled)
         return {};
+    if (enabled && record.needs_approval())
+        return Error::from_string_literal("The extension's update asks for more permissions: approve them first");
 
     if (enabled) {
         auto extension = TRY(read_extension(record.path, record.install_type == InstalledExtension::InstallType::Normal ? Optional<String> { record.id } : OptionalNone {}));
@@ -741,6 +979,26 @@ ErrorOr<void> ExtensionRegistry::set_enabled(StringView id, bool enabled)
     record.enabled = enabled;
     save_installed_extensions_or_complain();
     notify_change();
+    return {};
+}
+
+ErrorOr<void> ExtensionRegistry::approve_permissions(StringView id)
+{
+    auto installed = m_installed.find(id);
+    if (installed == m_installed.end())
+        return Error::from_errno(ENOENT);
+    auto& record = installed->value;
+    if (!record.needs_approval())
+        return set_enabled(id, true);
+    auto permissions = move(record.permissions_to_approve);
+    auto sites = move(record.sites_to_approve);
+    record.permissions_to_approve.clear();
+    record.sites_to_approve.clear();
+    if (auto result = set_enabled(id, true); result.is_error()) {
+        record.permissions_to_approve = move(permissions);
+        record.sites_to_approve = move(sites);
+        return result;
+    }
     return {};
 }
 
@@ -759,13 +1017,102 @@ ErrorOr<void> ExtensionRegistry::uninstall(StringView id)
         auto directory = TRY(private_extensions_directory());
         auto extension_directory = ByteString::formatted("{}/{}", directory, record.id);
         if (WebExtensions::is_valid_extension_id(record.id) && FileSystem::exists(extension_directory)) {
-            if (auto result = FileSystem::remove(extension_directory, FileSystem::RecursionMode::Allowed); result.is_error())
+            if (auto result = remove_without_following_links(extension_directory); result.is_error())
                 dbgln("Extensions: Can't remove {}: {}", extension_directory, result.error());
         }
     }
     save_installed_extensions_or_complain();
     notify_change();
+    for (auto& observer : m_uninstall_observers)
+        observer(record.id);
     return {};
+}
+
+#if !defined(AK_OS_WINDOWS)
+// Removes what's in the open folder by names relative to it, opening each folder below it without following a link:
+// a folder swapped for a link meanwhile is removed as the link it is, and what it names is never reached.
+static ErrorOr<void> remove_directory_contents(int directory_fd, size_t depth)
+{
+    if (depth > 128)
+        return Error::from_string_literal("Folders nested too deeply to remove");
+    Vector<ByteString> names;
+    {
+        auto listing_fd = TRY(Core::System::dup(directory_fd));
+        auto* directory = ::fdopendir(listing_fd);
+        if (!directory) {
+            auto error = errno;
+            (void)Core::System::close(listing_fd);
+            return Error::from_errno(error);
+        }
+        ::rewinddir(directory);
+        while (auto* entry = ::readdir(directory)) {
+            StringView name { entry->d_name, strlen(entry->d_name) };
+            if (name != "."sv && name != ".."sv)
+                names.append(name);
+        }
+        ::closedir(directory);
+    }
+    for (auto const& name : names) {
+        struct stat st;
+        if (::fstatat(directory_fd, name.characters(), &st, AT_SYMLINK_NOFOLLOW) < 0) {
+            if (errno == ENOENT)
+                continue;
+            return Error::from_syscall("fstatat"sv, errno);
+        }
+        if (S_ISDIR(st.st_mode)) {
+            auto child_fd = ::openat(directory_fd, name.characters(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (child_fd < 0) {
+                // No longer a folder: a link or file now, removed as such.
+                if (errno != ELOOP && errno != ENOTDIR)
+                    return Error::from_syscall("openat"sv, errno);
+                if (::unlinkat(directory_fd, name.characters(), 0) < 0 && errno != ENOENT)
+                    return Error::from_syscall("unlinkat"sv, errno);
+                continue;
+            }
+            auto result = remove_directory_contents(child_fd, depth + 1);
+            (void)Core::System::close(child_fd);
+            TRY(result);
+            if (::unlinkat(directory_fd, name.characters(), AT_REMOVEDIR) < 0 && errno != ENOENT)
+                return Error::from_syscall("unlinkat"sv, errno);
+        } else if (::unlinkat(directory_fd, name.characters(), 0) < 0 && errno != ENOENT) {
+            return Error::from_syscall("unlinkat"sv, errno);
+        }
+    }
+    return {};
+}
+#endif
+
+ErrorOr<void> ExtensionRegistry::remove_without_following_links(ByteString const& path)
+{
+    auto stat = TRY(Core::System::lstat(path));
+    if (!S_ISDIR(stat.st_mode))
+        return Core::System::unlink(path);
+
+#if defined(AK_OS_WINDOWS)
+    Vector<ByteString> entries;
+    {
+        auto directory = TRY(Core::Directory::create(path, Core::Directory::CreateDirectories::No));
+        TRY(directory.for_each_entry(Core::DirIterator::Flags::SkipParentAndBaseDir, [&](auto const& entry, auto const&) -> ErrorOr<IterationDecision> {
+            entries.append(ByteString::formatted("{}/{}", path, entry.name));
+            return IterationDecision::Continue;
+        }));
+    }
+    for (auto const& entry : entries)
+        TRY(remove_without_following_links(entry));
+    return Core::System::rmdir(path);
+#else
+    auto fd = ::open(path.characters(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        // Swapped for a link since: only the link goes.
+        if (errno == ELOOP || errno == ENOTDIR)
+            return Core::System::unlink(path);
+        return Error::from_syscall("open"sv, errno);
+    }
+    auto result = remove_directory_contents(fd, 0);
+    (void)Core::System::close(fd);
+    TRY(result);
+    return Core::System::rmdir(path);
+#endif
 }
 
 Vector<InstalledExtension> ExtensionRegistry::installed_extensions() const
@@ -959,9 +1306,35 @@ void ExtensionRegistry::fetch_following_redirects(URL::URL url, size_t maximum_s
 
 static constexpr u32 maximum_redirects = 10;
 
-void ExtensionRegistry::download_and_install(URL::URL const& url, String id, Optional<ByteBuffer> expected_sha256, Function<void(ErrorOr<Extension const*>)> callback)
+// The manifest in a package, as it would install, for the user to look at first.
+static ErrorOr<WebExtensions::Manifest> manifest_in_crx(ReadonlyBytes crx)
 {
-    fetch_following_redirects(url, m_maximum_download_size, maximum_redirects, [this, id = move(id), expected_sha256 = move(expected_sha256), callback = move(callback)](ErrorOr<ByteBuffer> crx) mutable {
+    auto file = TRY(WebExtensions::CrxFile::parse_and_verify(crx));
+    auto archive = TRY(WebExtensions::ZipArchive::parse(file.zip_archive));
+    auto entry = archive.find("manifest.json"sv);
+    if (!entry.has_value())
+        return Error::from_string_literal("The package has no manifest");
+    auto json = TRY(archive.read(*entry));
+    auto manifest = TRY(WebExtensions::Manifest::parse(json));
+
+    // Its name may come from its messages.
+    if (manifest.default_locale.has_value()) {
+        auto locale = WebExtensions::normalize_locale_name(*manifest.default_locale);
+        auto messages_entry = locale.has_value() ? archive.find(ByteString::formatted("_locales/{}/messages.json", *locale)) : Optional<WebExtensions::ZipArchive::Entry const&> {};
+        if (messages_entry.has_value()) {
+            if (auto messages_json = archive.read(*messages_entry); !messages_json.is_error()) {
+                WebExtensions::MessageCatalog catalog;
+                if (!catalog.add_catalog(*locale, messages_json.value()).is_error())
+                    WebExtensions::localize(manifest, catalog);
+            }
+        }
+    }
+    return manifest;
+}
+
+void ExtensionRegistry::download_and_install(URL::URL const& url, String id, Optional<ByteBuffer> expected_sha256, Function<void(ErrorOr<Extension const*>)> callback, ConfirmInstall confirm)
+{
+    fetch_following_redirects(url, m_maximum_download_size, maximum_redirects, [this, id = move(id), expected_sha256 = move(expected_sha256), callback = move(callback), confirm = move(confirm)](ErrorOr<ByteBuffer> crx) mutable {
         if (crx.is_error()) {
             callback(crx.release_error());
             return;
@@ -970,11 +1343,26 @@ void ExtensionRegistry::download_and_install(URL::URL const& url, String id, Opt
             callback(Error::from_string_literal("The download isn't the one the Chrome Web Store named"));
             return;
         }
-        callback(install_crx(crx.value(), id));
+        if (!confirm) {
+            callback(install_crx(crx.value(), id));
+            return;
+        }
+        auto manifest = manifest_in_crx(crx.value());
+        if (manifest.is_error()) {
+            callback(manifest.release_error());
+            return;
+        }
+        confirm(manifest.value(), [this, id = move(id), crx = crx.release_value(), callback = move(callback)](bool install) mutable {
+            if (!install) {
+                callback(Error::from_string_literal("Not installed"));
+                return;
+            }
+            callback(install_crx(crx, id));
+        });
     });
 }
 
-void ExtensionRegistry::install_from_web_store(StringView id_or_url, Function<void(ErrorOr<Extension const*>)> callback)
+void ExtensionRegistry::install_from_web_store(StringView id_or_url, Function<void(ErrorOr<Extension const*>)> callback, ConfirmInstall confirm)
 {
     auto id = extension_id_from_web_store_input(id_or_url);
     if (!id.has_value()) {
@@ -983,7 +1371,7 @@ void ExtensionRegistry::install_from_web_store(StringView id_or_url, Function<vo
     }
     auto url = URL::Parser::basic_parse(ByteString::formatted("https://clients2.google.com/service/update2/crx?response=redirect&prodversion={}&acceptformat=crx3&x=id%3D{}%26uc", web_store_product_version, *id));
     VERIFY(url.has_value());
-    download_and_install(*url, id.release_value(), {}, move(callback));
+    download_and_install(*url, id.release_value(), {}, move(callback), move(confirm));
 }
 
 // What the update service's answer (Chrome's update2 protocol) says of one extension:

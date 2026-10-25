@@ -10,14 +10,27 @@
 //   { type: "unlisten", event, listener }
 //   { type: "message_response", message_id, response?, handled }        an answer to a runtime/tabs message
 //   { type: "port_post", port_id, message } / { type: "port_disconnect", port_id }
+//   { type: "blocking_response", blocking, response }                   a blocking webRequest listener's answer
 // Messages from the browser:
 //   { type: "reply", id, result? , error? }
 //   { type: "event", event, args, listener? }                           to every listener, or only the one named
+//   { type: "event", event, args, listener, blocking, async }           to a blocking listener, which answers
 //   { type: "message", message_id, message, sender }                    runtime.onMessage
 //   { type: "port_connect", port_id, name, sender }                     runtime.onConnect
 //   { type: "port_message", port_id, message } / { type: "port_disconnected", port_id, error? }
 (() => {
     "use strict";
+
+    // The builtins this script uses, as they were when the context started. Script in the context (or a page that got
+    // into a content script's world) may replace the globals later, and mustn't hear what the browser and the
+    // extension tell each other. NB: Their prototypes' methods are still the realm's own.
+    const { apply } = Reflect;
+    const functionToString = Function.prototype.toString;
+    const Object = (O => O.freeze({ assign: O.assign, defineProperty: O.defineProperty, entries: O.entries, freeze: O.freeze, keys: O.keys }))(globalThis.Object);
+    const JSON = Object.freeze({ parse: globalThis.JSON.parse, stringify: globalThis.JSON.stringify });
+    const Array = (A => Object.freeze({ from: A.from, isArray: A.isArray }))(globalThis.Array);
+    const Number = (N => Object.freeze({ isInteger: N.isInteger }))(globalThis.Number);
+    const { Error, Map, Promise, String, TypeError } = globalThis;
 
     const bridge = globalThis.__extensionBridge;
     delete globalThis.__extensionBridge;
@@ -97,6 +110,8 @@
         addListener(callback, ...extra) {
             if (typeof callback !== "function")
                 throw new TypeError("The listener must be a function");
+            if (this._name.startsWith("webRequest."))
+                checkRequestFilter(this._name, extra);
             if (this.hasListener(callback))
                 return;
             const listener = nextListenerId++;
@@ -121,6 +136,31 @@
         hasListeners() {
             return this._listeners.size > 0;
         }
+        // A blocking webRequest listener's answer (onAuthRequired): what it returns, resolves, or passes to the callback
+        // it's given when "asyncBlocking".
+        _dispatchBlocking(args, only, blocking, async) {
+            const callback = this._listeners.get(only);
+            const answer = response => post({ type: "blocking_response", blocking, response: toJSON(response) ?? null });
+            if (!callback)
+                return answer(null);
+            let answered = false;
+            const once = response => {
+                if (answered)
+                    return;
+                answered = true;
+                answer(response);
+            };
+            try {
+                const result = callback(...args, ...(async ? [once] : []));
+                if (result && typeof result.then === "function")
+                    result.then(once, () => once(null));
+                else if (!async || result !== undefined)
+                    once(result);
+            } catch (error) {
+                console.error(`Error in event handler for ${this._name}:`, error);
+                once(null);
+            }
+        }
         _dispatch(args, only) {
             const results = [];
             for (const [listener, callback] of Array.from(this._listeners)) {
@@ -134,6 +174,25 @@
             }
             return results;
         }
+    }
+
+    // webRequest listeners take a filter ({ urls, types?, tabId?, windowId? }) and what to include, as Chrome checks them.
+    const resourceTypes = ["main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object", "xmlhttprequest", "ping", "csp_report", "media", "websocket", "webtransport", "webbundle", "other"];
+    const extraInfoSpecs = ["blocking", "asyncBlocking", "requestHeaders", "responseHeaders", "extraHeaders", "requestBody"];
+    function checkRequestFilter(name, [filter, extraInfoSpec]) {
+        const fail = why => { throw new TypeError(`Error in invocation of ${name}.addListener: ${why}`); };
+        if (!filter || typeof filter !== "object")
+            fail("No matching signature: a filter is required.");
+        if (!Array.isArray(filter.urls) || !filter.urls.every(url => typeof url === "string"))
+            fail("'urls' must be a list of match patterns.");
+        if (filter.types !== undefined && (!Array.isArray(filter.types) || !filter.types.every(type => resourceTypes.includes(type))))
+            fail("Invalid value for 'types'.");
+        for (const key of ["tabId", "windowId"]) {
+            if (filter[key] !== undefined && !Number.isInteger(filter[key]))
+                fail(`Invalid value for '${key}'.`);
+        }
+        if (extraInfoSpec !== undefined && (!Array.isArray(extraInfoSpec) || !extraInfoSpec.every(spec => extraInfoSpecs.includes(spec))))
+            fail("Invalid value for 'extraInfoSpec'.");
     }
 
     // A namespace of browser functions and events, plus what's given.
@@ -288,8 +347,14 @@
         }
         case "event": {
             const event = events.get(message.event);
-            if (event)
+            if (message.blocking !== undefined) {
+                if (event)
+                    event._dispatchBlocking(message.args || [], message.listener, message.blocking, !!message.async);
+                else
+                    post({ type: "blocking_response", blocking: message.blocking, response: null });
+            } else if (event) {
                 event._dispatch(message.args || [], message.listener);
+            }
             return;
         }
         case "message":
@@ -338,7 +403,7 @@
                 withLastError(error.message, () => callback());
                 return;
             }
-            injection = { ...rest, js: `(${Function.prototype.toString.call(func)})(...${serialized})` };
+            injection = { ...rest, js: `(${apply(functionToString, func, [])})(...${serialized})` };
         }
         return call("scripting.executeScript", callback ? [injection, callback] : [injection]);
     }
@@ -438,7 +503,11 @@
         inIncognitoContext: false,
     };
 
-    const chrome = { runtime, i18n, storage, extension: extensionNamespace };
+    // As in Chrome, chrome.storage is there only with the "storage" permission (or the chance of it).
+    const declares = key => Array.isArray(manifest[key]) && manifest[key].includes("storage");
+    const chrome = { runtime, i18n, extension: extensionNamespace };
+    if (declares("permissions") || declares("optional_permissions"))
+        chrome.storage = storage;
 
     if (isContentScript) {
         // Closed shadow roots, which only content scripts may open.
@@ -449,6 +518,12 @@
             alarms: namespace("alarms", ["create", "get", "getAll", "clear", "clearAll"], ["onAlarm"]),
             commands: namespace("commands", ["getAll"], ["onCommand"]),
             contextMenus: namespace("contextMenus", ["create", "update", "remove", "removeAll"], ["onClicked"], {
+                // As in Chrome, create() returns the item's ID rather than a promise, and its callback hears of errors. An item
+                // created without an ID gets one from the browser, which only onClicked tells of.
+                create(properties, callback) {
+                    call("contextMenus.create", [properties, typeof callback === "function" ? callback : () => {}]);
+                    return properties?.id;
+                },
                 ACTION_MENU_TOP_LEVEL_LIMIT: 6,
                 ContextType: { ALL: "all", PAGE: "page", FRAME: "frame", SELECTION: "selection", LINK: "link", EDITABLE: "editable", IMAGE: "image", VIDEO: "video", AUDIO: "audio", LAUNCHER: "launcher", BROWSER_ACTION: "browser_action", PAGE_ACTION: "page_action", ACTION: "action" },
                 ItemType: { NORMAL: "normal", CHECKBOX: "checkbox", RADIO: "radio", SEPARATOR: "separator" },

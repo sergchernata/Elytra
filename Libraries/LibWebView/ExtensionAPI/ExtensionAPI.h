@@ -17,6 +17,7 @@
 namespace WebView {
 
 class ExtensionRuntime;
+class WebContentPage;
 
 // One part of the chrome.* API (a namespace or a few), with whatever it keeps. Its constructor registers its functions
 // with the runtime (ExtensionRuntime::register_function()), which owns it.
@@ -34,8 +35,14 @@ public:
     virtual void listeners_changed(u64 /* context_id */, StringView /* event */) { }
     // An extension was installed, replaced or removed.
     virtual void extensions_changed() { }
+    // The user removed an extension: forget what's kept for it.
+    virtual void extension_uninstalled(StringView /* extension_id */) { }
     // The browser is shutting down, while the rest of the application is still whole.
     virtual void shut_down() { }
+    // A page (in a page process) was made, or its process changed: what it needs to know before it loads anything.
+    virtual void page_created(WebContentPage&) { }
+    // A page closed: forget what's kept for it.
+    virtual void page_gone(WebContentPage&) { }
 
 protected:
     explicit ExtensionAPI(ExtensionRuntime& runtime)
@@ -56,6 +63,10 @@ NonnullOwnPtr<ExtensionAPI> create_alarms_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_native_messaging_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_tabs_api(ExtensionRuntime&);
 NonnullOwnPtr<ExtensionAPI> create_management_api(ExtensionRuntime&);
+NonnullOwnPtr<ExtensionAPI> create_notifications_api(ExtensionRuntime&);
+NonnullOwnPtr<ExtensionAPI> create_context_menus_api(ExtensionRuntime&);
+NonnullOwnPtr<ExtensionAPI> create_downloads_api(ExtensionRuntime&);
+NonnullOwnPtr<ExtensionAPI> create_web_request_api(ExtensionRuntime&);
 
 // For tests (ExtensionAPI/Alarms.cpp): until called, chrome.alarms keeps Chrome's 30-second minimum and chrome.idle
 // asks the system.
@@ -65,5 +76,11 @@ struct IdleState {
 };
 WEBVIEW_API void set_minimum_alarm_delay_for_testing(AK::Duration);
 WEBVIEW_API void set_idle_state_source_for_testing(Function<IdleState()>, AK::Duration poll_interval);
+
+// For tests (ExtensionAPI/WebRequest.cpp): what the page is told of webRequest and declarativeNetRequest.
+WEBVIEW_API String web_request_config_for_testing(WebContentPage&);
+// For tests (ExtensionRuntime.cpp), which run where any page counts as having the user's activation: until cleared,
+// whether a context has it (and uses it up) is the source's answer.
+WEBVIEW_API void set_user_activation_for_testing(Function<bool()>);
 
 }

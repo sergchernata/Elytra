@@ -1,0 +1,8 @@
+{
+    "manifest_version": 2,
+    "name": "Navigation test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvsqCDm2oXMdfPa8iI4ZbzW70cz8hW4ZnOzQIitBCsi4ODGRdbxlJk4knvCu0RUQwZq3oE5gn0a00CKY44jMNLKCU6UfjkRsrlEGaugj4g1RnbyqcKFGMNPKXBCvASS2DC0X37Tu2/QXo3VNCumPKkjPShnPaBAO96ulZoJxYeiZZQaQi/9UzosYtnPw/iJZ/N0wWY4rcejVEzT59Q3h/7xq76gZIFdU/uZ9uWryfXMQFpZCEReGcuxeRbrW+gClygoAxBWiXhm6cCbnA1GwzH4V/jrNTx2IUE56i3uUP03rksyj/o+djmIvj55O/TFSnd3zO+NdMZuw/btudmKfEdQIDAQAB",
+    "content_security_policy": "script-src 'self'; connect-src 'none'; object-src 'self'",
+    "sandbox": { "pages": ["sandboxed/*.html"] }
+}

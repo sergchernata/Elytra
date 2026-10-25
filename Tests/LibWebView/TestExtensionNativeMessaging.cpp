@@ -55,6 +55,30 @@ bool wait_for_file(ByteString const& path)
     return FileSystem::exists(path);
 }
 
+// An extension can't start hosts without end: past 16 at once, it's refused.
+void hosts_are_limited(WebView::HeadlessWebView& view)
+{
+    auto report = run_case(view, "many"sv);
+    CHECK_EQ(report.get_integer<i64>("answered"sv).value_or(0), 16);
+    CHECK_EQ(report.get_array("errors"sv).value_or({}).serialized(), R"(["Too many native messaging hosts are running."])"sv);
+}
+
+// Closing hosts as fast as they start doesn't get around the limit: those still exiting count.
+void closed_hosts_count_until_they_exit(WebView::HeadlessWebView& view)
+{
+    auto report = run_case(view, "churn"sv);
+    auto answered = report.get_integer<i64>("answered"sv).value_or(0);
+    CHECK(answered >= 1 && answered <= 16);
+    CHECK_EQ(report.get_array("errors"sv).value_or({}).serialized(), R"(["Too many native messaging hosts are running."])"sv);
+    // They exit, and hosts start again.
+    auto deadline = MonotonicTime::now() + AK::Duration::from_seconds(4);
+    auto wake = Core::Timer::create_repeating(AK::Duration::from_milliseconds(100), [] { });
+    wake->start();
+    Core::EventLoop::current().spin_until([&] { return MonotonicTime::now() > deadline; });
+    wake->stop();
+    CHECK(run_case(view, "echo"sv).get_object("info"sv).has_value());
+}
+
 void ports_talk_to_the_host(WebView::HeadlessWebView& view)
 {
     auto report = run_case(view, "echo"sv);
@@ -171,6 +195,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         MUST(harness.registry.load_unpacked(fixture("native"sv)));
 
         ports_talk_to_the_host(harness.view);
+        hosts_are_limited(harness.view);
         hosts_are_found_in_every_directory_in_order(harness.view);
         many_messages_keep_their_order(harness.view);
         ports_close_with_chromes_errors(harness.view);
@@ -178,5 +203,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         one_message_to_a_host(harness.view, harness.directory);
         content_scripts_have_no_native_messaging(harness.view, harness.registry, harness.directory);
         extensions_without_the_permission_have_no_native_messaging(harness.view, harness.registry);
+        closed_hosts_count_until_they_exit(harness.view);
     });
 }

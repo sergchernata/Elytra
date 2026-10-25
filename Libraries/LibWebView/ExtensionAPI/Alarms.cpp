@@ -135,6 +135,11 @@ private:
     void poll_idle_state();
 
     // Extension ID -> its alarms, in the order they were made; read from disk as an extension is first seen.
+    virtual void extension_uninstalled(StringView extension_id) override
+    {
+        m_alarms.remove(extension_id);
+    }
+
     HashMap<String, Vector<Alarm>> m_alarms;
     RefPtr<Core::Timer> m_alarm_timer;
 

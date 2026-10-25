@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Downloads test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyApwyzQGQyH+ngpmrVBABMlanEHuPhllXNR5f/AGVu2m3oiKqEV0uYKwKA0QUXeyXt6z07qAiFJRBlxYfvVLIQ7hdFpcdV19Nb7CpPvKSWP/+4pLcA4p8mC0a0OsG3e8/B+VRV38CH/TJIzArDD4x2x16uDoOceO1uD7sCYvsbNmmF7vqUAzxn4zpJZO/cGezbT/VHDO1c3N6zzT82a+u0wkBRWToxnvjQZIvWMQd9/fcVOmbCriV6vKK8wvxP+LUEJ7prNSCg8sX9uqYpyqrNt/xtEDXRZA7ZKuUXQNVSKNCceLxV28ehunjLDOktOatTtVzMV5qxq7Qdqa9/mx1wIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "permissions": ["downloads", "storage"]
+}

@@ -75,6 +75,9 @@ public:
     // Whether the UI process populated local file content for this document state. Only then may the process populating
     // it again read the file its entry names: a process reports an entry's URL, but not this.
     bool held_local_file_content { false };
+    // Likewise, the extension whose page, of the browser's reading, the UI process populated for this document state.
+    // The browser opens it again for a history step to its entry.
+    Optional<String> held_extension_content;
 
 private:
     explicit CanonicalDocumentState(Web::HTML::CrossProcessId);

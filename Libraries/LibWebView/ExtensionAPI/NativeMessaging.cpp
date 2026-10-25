@@ -5,6 +5,7 @@
  */
 
 #include <AK/HashMap.h>
+#include <signal.h>
 #include <LibWebExtensions/Manifest.h>
 #include <LibWebExtensions/NativeMessaging.h>
 #include <LibWebView/ExtensionAPI/ExtensionAPI.h>
@@ -66,7 +67,7 @@ public:
         if (!host_id.has_value())
             return;
         if (auto host = m_hosts.take(*host_id); host.has_value())
-            host->process->close();
+            close_host(*host);
     }
 
     virtual void context_destroyed(u64 context_id) override
@@ -81,7 +82,7 @@ public:
             auto host = m_hosts.take(id);
             if (host->port.has_value())
                 m_host_of_port.remove(*host->port);
-            host->process->close();
+            close_host(*host);
         }
     }
 
@@ -95,8 +96,30 @@ public:
     }
 
 private:
+    static constexpr size_t MAXIMUM_HOSTS_PER_EXTENSION = 16;
+    static constexpr size_t MAXIMUM_HOSTS = 64;
+    static constexpr auto too_many_error = "Too many native messaging hosts are running."sv;
+
+    // Hosts told to quit live on for up to a couple of seconds (NativeHostProcess::close()): they count until they're
+    // gone, or an extension could start hosts without end by closing them at once. And starting is limited in rate.
+    static constexpr auto ending_host_lifetime = AK::Duration::from_seconds(3);
+    static constexpr double MAXIMUM_LAUNCH_BURST = 64;
+    static constexpr double LAUNCHES_PER_SECOND = 4;
+    static constexpr auto launched_too_often_error = "Native messaging hosts are being started too often."sv;
+
+    struct EndingHost {
+        String extension_id;
+        pid_t pid { -1 };
+        MonotonicTime closed_at;
+    };
+    struct LaunchBudget {
+        double launches { MAXIMUM_LAUNCH_BURST };
+        MonotonicTime refilled;
+    };
+
     struct Host {
         NonnullRefPtr<WebExtensions::NativeHostProcess> process;
+        String extension_id;
         u64 context_id { 0 };
         // A port's, or else sendNativeMessage's reply.
         Optional<u64> port;
@@ -125,6 +148,28 @@ private:
             return not_found_error;
         if (!manifest.value()->allows_extension(caller.extension_id))
             return forbidden_error;
+
+        // Each host is a process: an extension starting them in a loop would use up the user's.
+        size_t running = 0;
+        for (auto const& [id, host] : m_hosts) {
+            if (host.extension_id == caller.extension_id)
+                ++running;
+        }
+        forget_ended_hosts();
+        for (auto const& host : m_ending) {
+            if (host.extension_id == caller.extension_id)
+                ++running;
+        }
+        if (running >= MAXIMUM_HOSTS_PER_EXTENSION || m_hosts.size() + m_ending.size() >= MAXIMUM_HOSTS)
+            return too_many_error;
+
+        auto now = MonotonicTime::now();
+        auto& budget = m_launch_budgets.ensure(caller.extension_id, [&] { return LaunchBudget { MAXIMUM_LAUNCH_BURST, now }; });
+        budget.launches = min(MAXIMUM_LAUNCH_BURST, budget.launches + static_cast<double>((now - budget.refilled).to_milliseconds()) * LAUNCHES_PER_SECOND / 1000.0);
+        budget.refilled = now;
+        if (budget.launches < 1)
+            return launched_too_often_error;
+        budget.launches -= 1;
 
         auto process = WebExtensions::NativeHostProcess::launch(*manifest.value(), caller.extension_id);
         if (process.is_error()) {
@@ -156,7 +201,7 @@ private:
         host_process.on_end = [this, id](WebExtensions::NativeHostProcess::Ending ending) {
             end_host(id, ending == WebExtensions::NativeHostProcess::Ending::Exited ? exited_error : io_error);
         };
-        m_hosts.set(id, Host { .process = process.release_value(), .context_id = caller.id, .port = *port, .reply = {} });
+        m_hosts.set(id, Host { .process = process.release_value(), .extension_id = caller.extension_id, .context_id = caller.id, .port = *port, .reply = {} });
         m_host_of_port.set(*port, id);
     }
 
@@ -166,6 +211,7 @@ private:
         if (process.is_error())
             return reply(MUST(String::from_utf8(process.error())));
         if (process.value()->send(message).is_error()) {
+            m_ending.append({ caller.extension_id, process.value()->pid(), MonotonicTime::now() });
             process.value()->close();
             return reply(MUST(String::from_utf8(io_error)));
         }
@@ -176,13 +222,13 @@ private:
             auto host = m_hosts.take(id);
             if (!host.has_value())
                 return;
-            host->process->close();
+            close_host(*host);
             host->reply(move(message));
         };
         host_process.on_end = [this, id](WebExtensions::NativeHostProcess::Ending ending) {
             end_host(id, ending == WebExtensions::NativeHostProcess::Ending::Exited ? exited_error : io_error);
         };
-        m_hosts.set(id, Host { .process = process.release_value(), .context_id = caller.id, .port = {}, .reply = move(reply) });
+        m_hosts.set(id, Host { .process = process.release_value(), .extension_id = caller.extension_id, .context_id = caller.id, .port = {}, .reply = move(reply) });
     }
 
     // The host ended or failed: its port closes, or its message is answered, with the error.
@@ -191,7 +237,7 @@ private:
         auto host = m_hosts.take(id);
         if (!host.has_value())
             return;
-        host->process->close();
+        close_host(*host);
         auto message = MUST(String::from_utf8(error));
         if (host->port.has_value()) {
             m_host_of_port.remove(*host->port);
@@ -201,7 +247,24 @@ private:
         }
     }
 
+    void close_host(Host& host)
+    {
+        if (!host.process->is_closed() && host.process->pid() > 0)
+            m_ending.append({ host.extension_id, host.process->pid(), MonotonicTime::now() });
+        host.process->close();
+    }
+
+    void forget_ended_hosts()
+    {
+        auto now = MonotonicTime::now();
+        m_ending.remove_all_matching([&](EndingHost const& host) {
+            return now - host.closed_at > ending_host_lifetime || ::kill(host.pid, 0) < 0;
+        });
+    }
+
     HashMap<u64, Host> m_hosts;
+    Vector<EndingHost> m_ending;
+    HashMap<String, LaunchBudget> m_launch_budgets;
     HashMap<u64, u64> m_host_of_port;
     u64 m_next_host_id { 1 };
 };

@@ -93,6 +93,13 @@ public:
     Optional<bool> hosted_environment_has_cross_site_ancestor(Web::HTML::EnvironmentId const& environment_id) const;
     bool hosts_an_environment_with_storage_key(Web::StorageAPI::StorageKey const&) const;
     void spoof_document_origin_for_testing(Web::HTML::EnvironmentId const& environment_id, URL::Origin);
+    // An extension's file the page's renderer asks for, naming the requester it loads the file for.
+    ErrorOr<IPC::File> extension_file_for_renderer(StringView extension_id, ByteString const& path, Optional<URL::Origin> requester) const;
+    // Fork hook (extensions): what the requests a page's renderer reports to webRequest are checked against
+    // (ExtensionAPI/WebRequest.cpp): the origins of the documents it hosts, and the navigations it populates.
+    bool hosts_a_document_with_origin(URL::Origin const&) const;
+    bool hosts_a_document_same_site_with(URL::Origin const&) const;
+    Optional<URL::URL> url_of_navigation_populated_in(Web::HTML::CrossProcessId navigable_id) const;
     // The process and page hosting the document of a navigable that a page represents. A page represents every
     // navigable of its tab whose document it does not host, so those are the ones it can ask to navigate or post to.
     RefPtr<WebContentPage> endpoint_hosting_navigable_represented_by(Web::HTML::CrossProcessId navigable_id) const;
@@ -161,7 +168,10 @@ private:
     bool continue_navigation_population_in_selected_process(Web::HTML::CrossProcessId navigable_id, Utf16String navigation_id);
     void for_each_hosted_document(Function<IterationDecision(CanonicalDocument&)> const&) const;
     bool populates_a_navigation_to_local_file(ByteString const& path) const;
-    bool populates_a_navigation_to_extension_file(StringView extension_id, ByteString const& path) const;
+    // The requester a navigation the page populates reads an extension's file for, if it populates one to the file.
+    Optional<Optional<URL::Origin>> requester_of_navigation_to_extension_file(StringView extension_id, ByteString const& path) const;
+    // The requester a renderer claims, if a document the page hosts has its origin; otherwise a new opaque origin.
+    URL::Origin hosted_requester(Optional<URL::Origin> const& claimed_requester) const;
     Optional<CanonicalDocument&> document_with_hosted_environment(Web::HTML::EnvironmentId const& environment_id) const;
     StorageJar* storage_jar(Web::StorageAPI::StorageEndpointType) const;
     Optional<String> canonical_storage_key(Web::HTML::EnvironmentId const&) const;

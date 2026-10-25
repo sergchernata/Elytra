@@ -155,6 +155,8 @@ public:
     void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab);
     void open_url_in_new_window(URL::URL const&, IsPrivate);
     void load(Web::HTML::PreparedNavigationDescriptor);
+    // NB: A navigation of the browser's UI, which load(URL) begins, rather than one a page asked the UI to begin.
+    void load(Web::HTML::PreparedNavigationDescriptor, CanonicalNavigable::IsBrowserUINavigation);
     void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab);
     void open_navigation_in_new_window(Web::HTML::PreparedNavigationDescriptor, IsPrivate);
     void set_next_history_visit_transition(HistoryVisitTransition transition) { m_history_visit_transition_for_next_load = transition; }
@@ -596,6 +598,16 @@ public:
     Menu& image_context_menu() { return *m_image_context_menu; }
     Menu& media_context_menu() { return *m_media_context_menu; }
 
+    // Fork hook (extensions): what the context menu being opened is for, for extensions' items (chrome.contextMenus).
+    struct ContextMenuTarget {
+        Optional<URL::URL> link_url;
+        Optional<URL::URL> src_url;
+        Optional<StringView> media_type; // "image", "video" or "audio"
+        Optional<String> selection_text;
+        bool editable { false };
+    };
+    ContextMenuTarget const& context_menu_target() const { return m_context_menu_target; }
+
     Menu& bookmarks_bar_context_menu() { return *m_bookmarks_bar_context_menu; }
     Menu& bookmark_context_menu() { return *m_bookmark_context_menu; }
     Menu& bookmark_folder_context_menu() { return *m_bookmark_folder_context_menu; }
@@ -862,6 +874,7 @@ protected:
     RefPtr<Action> m_copy_url_action;
     URL::URL m_context_menu_url;
     Optional<Web::HTML::PreparedNavigationDescriptor> m_context_menu_navigation;
+    ContextMenuTarget m_context_menu_target; // Fork hook (extensions)
 
     RefPtr<Action> m_open_image_action;
     RefPtr<Action> m_save_image_action;

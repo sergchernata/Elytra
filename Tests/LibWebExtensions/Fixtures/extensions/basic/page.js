@@ -15,4 +15,9 @@ try {
 } catch (e) {
     report.fetch = String(e);
 }
+try {
+    report.dynamic = (await (await fetch("dynamic/d.txt")).text()).trim();
+} catch (e) {
+    report.dynamic = String(e);
+}
 document.title = JSON.stringify(report);

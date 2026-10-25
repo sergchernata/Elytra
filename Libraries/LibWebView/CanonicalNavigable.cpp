@@ -129,7 +129,7 @@ static bool navigation_must_be_a_replace(URL::URL const& url, CanonicalDocument 
 // NB: This is a navigation from the browser's UI, whose sourceDocument is null.
 void CanonicalNavigable::navigate(URL::URL url, Web::HTML::DocumentResource document_resource, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
-    begin_navigation(prepare_navigation(move(url), move(document_resource), history_handling));
+    begin_navigation(prepare_navigation(move(url), move(document_resource), history_handling), IsBrowserUINavigation::Yes);
 }
 
 // Steps 1 to 7 of navigate, for a navigation from the browser's UI.
@@ -180,7 +180,7 @@ Web::HTML::PreparedNavigationDescriptor CanonicalNavigable::prepare_navigation(U
 }
 
 // Continue the navigate algorithm at step 9 with the values prepared by steps 1-7.
-void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescriptor navigation)
+void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescriptor navigation, IsBrowserUINavigation is_browser_ui_navigation)
 {
     auto& traversable = top_level_traversable();
     auto const& url = navigation.url;
@@ -293,6 +293,8 @@ void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescripto
         clear_ongoing_navigation();
         return;
     }
+    auto has_source_document = navigation.source_snapshot_params.fetch_client.has_value();
+    auto is_the_browsers_own_navigation = is_browser_ui_navigation == IsBrowserUINavigation::Yes && !has_source_document;
     auto start_request = Web::HTML::NavigationStartRequest {
         .navigable_id = id(),
         .url = url,
@@ -323,6 +325,8 @@ void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescripto
         .sequence_number = traversable.next_sequence_number(),
         .state = CanonicalNavigation::CheckingIfUnloadingIsCanceled { move(start_request) },
         .page = worker,
+        .history_entry = {},
+        .is_browser_ui_navigation = is_the_browsers_own_navigation,
     });
     worker->async_set_ongoing_navigation(id(), navigation_id);
     worker->begin_navigation_unload_check(*this, navigation_id);
@@ -879,6 +883,8 @@ void CanonicalNavigable::populate_document(NonnullRefPtr<CanonicalDocumentState>
     document->determine_whether_it_is_local_file_content(blob_url_store());
     if (document->is_local_file_content())
         document_state->held_local_file_content = true;
+    if (document->extension_host().has_value())
+        document_state->held_extension_content = document->extension_host();
     abandon_populated_document(document_state);
     auto is_for_navigation = any_of(m_navigations, [&](auto const& navigation) {
         return navigation->history_entry && navigation->history_entry->document_state == document_state;
@@ -901,6 +907,9 @@ void CanonicalNavigable::populate_document_for_javascript_url(CanonicalNavigatio
     if (document->is_local_file_content() && !active_document().is_local_file_content())
         return;
     if (document->web_ui_host().has_value() && document->web_ui_host() != active_document().web_ui_host())
+        return;
+    // NB: Nor is it an extension's page unless the active document is one of the extension's.
+    if (document->extension_host().has_value() && document->extension_host() != active_document().extension_host())
         return;
     navigation.history_entry = move(history_entry);
     populate_document(navigation.history_entry->document_state, move(document));

@@ -278,6 +278,14 @@ bool ManagementAPI::has_host_permission(StringView extension_id, URL::URL const&
     return false;
 }
 
+Vector<String> ManagementAPI::host_permission_patterns(StringView extension_id) const
+{
+    auto const* extension = runtime().registry().find(extension_id);
+    if (!extension)
+        return {};
+    return host_permissions(*extension);
+}
+
 bool ManagementAPI::is_enabled(StringView extension_id) const
 {
     return runtime().registry().find(extension_id) != nullptr;
@@ -361,7 +369,8 @@ void ManagementAPI::register_permissions_functions()
         reply(JsonValue { true });
     });
 
-    // FIXME: Chrome only lets a request through during a user gesture.
+    // Chrome lets a request through only during a user gesture. One question at a time; after the user says no, a
+    // request for any of what they refused is refused for a while without asking (a deviation: Chrome asks again).
     runtime().register_function("permissions.request"sv, [this](Context const& context, JsonArray const& arguments, Reply reply) {
         auto const* extension = runtime().registry().find(context.extension_id);
         if (!extension || is_content_script(context))
@@ -397,10 +406,28 @@ void ManagementAPI::register_permissions_functions()
         }
         if (new_permissions.is_empty() && new_origins.is_empty())
             return reply(JsonValue { true });
+        if (m_asking_for_permissions.contains(extension->id()))
+            return reply(error("A permission request is already showing"sv));
+        if (!runtime().consume_user_activation(context))
+            return reply(error("This function must be called during a user gesture"sv));
+        if (auto denial = m_denials.find(extension->id()); denial != m_denials.end()) {
+            if (MonotonicTime::now() >= denial->value.until) {
+                m_denials.remove(denial);
+            } else if (any_of(new_permissions, [&](auto const& permission) { return denial->value.permissions.contains_slow(permission); })
+                || any_of(new_origins, [&](auto const& origin) { return denial->value.origins.contains_slow(origin); })) {
+                return reply(JsonValue { false });
+            }
+        }
         if (!runtime().request_permissions_prompt)
             return reply(JsonValue { false });
 
+        m_asking_for_permissions.set(extension->id());
         runtime().request_permissions_prompt(*extension, new_permissions, new_origins, [this, id = extension->id(), new_permissions, new_origins, reply = move(reply)](bool granted) mutable {
+            m_asking_for_permissions.remove(id);
+            if (!granted) {
+                static constexpr auto denial_cooldown = AK::Duration::from_seconds(10);
+                m_denials.set(id, Denial { new_permissions, new_origins, MonotonicTime::now() + denial_cooldown });
+            }
             if (!granted || !runtime().registry().find(id))
                 return reply(JsonValue { false });
             auto& state = this->state(id);
@@ -738,7 +765,7 @@ void ManagementAPI::register_management_functions()
         auto show = confirm_dialog(arguments, 0, false);
         if (show.is_error())
             return reply(show.release_error());
-        uninstall(context.extension_id, show.value(), move(reply));
+        uninstall(context.extension_id, show.value(), move(reply), {});
     });
 
     // Another extension's uninstall is always the user's to confirm.
@@ -752,12 +779,21 @@ void ManagementAPI::register_management_functions()
         auto show = confirm_dialog(arguments, 1, !self);
         if (show.is_error())
             return reply(show.release_error());
-        uninstall(id.release_value().release_value(), show.value() || !self, move(reply));
+        // As Chrome, only during the user's gesture.
+        if (!runtime().consume_user_activation(context))
+            return reply(error("chrome.management.uninstall requires a user gesture."sv));
+        uninstall(id.release_value().release_value(), show.value() || !self, move(reply), self ? Optional<String> {} : Optional<String> { context.extension_id });
     });
 }
 
-void ManagementAPI::uninstall(String id, bool show_confirm_dialog, Reply reply)
+void ManagementAPI::uninstall(String id, bool show_confirm_dialog, Reply reply, Optional<String> requester_id)
 {
+    auto const* extension = runtime().registry().find(id);
+    // One question at a time from each extension.
+    auto asker = requester_id.value_or(id);
+    if (show_confirm_dialog && runtime().confirm_uninstall && extension && m_asking_to_uninstall.contains(asker))
+        return reply(error("The user is already being asked to remove an extension."sv));
+
     auto finish = [this, id, reply = move(reply)](bool confirmed) mutable {
         if (!confirmed)
             return reply(error("User cancelled uninstall of extension."sv));
@@ -767,10 +803,14 @@ void ManagementAPI::uninstall(String id, bool show_confirm_dialog, Reply reply)
     };
     if (!show_confirm_dialog)
         return finish(true);
-    auto const* extension = runtime().registry().find(id);
     if (!runtime().confirm_uninstall || !extension)
         return finish(false);
-    runtime().confirm_uninstall(*extension, move(finish));
+    auto const* requester = requester_id.has_value() ? runtime().registry().find(*requester_id) : nullptr;
+    m_asking_to_uninstall.set(asker);
+    runtime().confirm_uninstall(*extension, requester, [this, asker, finish = move(finish)](bool confirmed) mutable {
+        m_asking_to_uninstall.remove(asker);
+        finish(confirmed);
+    });
 }
 
 static PrivacySetting const* find_privacy_setting(StringView name)

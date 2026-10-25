@@ -140,7 +140,7 @@ if (NOT WIN32)
         target_compile_definitions(TestFavicon PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
     endif()
 
-    foreach(extension_test IN ITEMS TestExtensions TestExtensionAction TestExtensionAlarms TestExtensionManagement TestExtensionNativeMessaging TestExtensionTabs TestExtensionInstall)
+    foreach(extension_test IN ITEMS TestExtensions TestExtensionAction TestExtensionAlarms TestExtensionManagement TestExtensionNativeMessaging TestExtensionTabs TestExtensionInstall TestExtensionNotifications TestExtensionContextMenus TestExtensionDownloads TestExtensionWebRequest TestExtensionSecurity)
         add_executable(${extension_test} ${extension_test}.cpp)
         add_dependencies(${extension_test} ladybird_build_resource_files ${ladybird_helper_processes})
         target_link_libraries(${extension_test} PRIVATE AK LibCore LibFileSystem LibGfx LibIPC LibMain LibRequests LibURL LibWeb LibWebView)

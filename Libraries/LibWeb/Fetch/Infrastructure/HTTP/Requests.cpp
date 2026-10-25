@@ -259,6 +259,8 @@ GC::Ref<Request> Request::clone(JS::Realm& realm) const
     new_request->set_done(m_done);
     new_request->set_timing_allow_failed(m_timing_allow_failed);
     new_request->m_navigation_timing_allow_values_list = m_navigation_timing_allow_values_list;
+    // Fork hook (extensions): a clone is the same request to webRequest.
+    new_request->m_extension_request_id = m_extension_request_id;
 
     // 2. If request’s body is non-null, set newRequest’s body to the result of cloning request’s body.
     if (auto const* body = m_body.get_pointer<GC::Ref<Body>>())

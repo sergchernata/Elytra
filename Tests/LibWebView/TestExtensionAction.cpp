@@ -23,7 +23,7 @@ public:
             ++changes;
     }
 
-    virtual ErrorOr<void, String> open_popup(StringView id, URL::URL const& popup, Optional<i64>) override
+    virtual ErrorOr<void, String> open_popup(StringView id, URL::URL const& popup, Optional<i64>, ByUser) override
     {
         if (id == extension_id)
             opened_popups.append(popup.serialize());

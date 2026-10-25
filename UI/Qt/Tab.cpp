@@ -18,6 +18,7 @@
 #include <LibWebView/Utilities.h>
 #include <LibWebView/WebContentClient.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/Arc/ExtensionServices.h> // Fork hook (extensions)
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -885,6 +886,10 @@ void Tab::initialize(Optional<WebView::CanonicalTraversable&> traversable)
     m_selected_text_link_context_menu = create_context_menu(*this, view(), view().selected_text_link_context_menu());
     m_image_context_menu = create_context_menu(*this, view(), view().image_context_menu());
     m_media_context_menu = create_context_menu(*this, view(), view().media_context_menu());
+    // Fork hook (extensions): extensions' items (chrome.contextMenus) join these menus as they open; not in private
+    // windows, which extensions stay out of.
+    if (view().is_private() == WebView::IsPrivate::No)
+        Arc::add_extension_items_to_context_menus(view(), { { &view().page_context_menu(), m_page_context_menu }, { &view().link_context_menu(), m_link_context_menu }, { &view().selected_text_link_context_menu(), m_selected_text_link_context_menu }, { &view().image_context_menu(), m_image_context_menu }, { &view().media_context_menu(), m_media_context_menu } });
 
     auto* navigation_button_cluster = new QWidget(m_toolbar);
     navigation_button_cluster->setProperty(WINDOW_DRAG_REGION_PROPERTY, true);

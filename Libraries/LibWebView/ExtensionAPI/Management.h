@@ -33,6 +33,8 @@ public:
     bool has_permission(StringView extension_id, StringView permission) const;
     // Whether the extension's host permissions (with those granted, and its content scripts' matches) cover the URL.
     bool has_host_permission(StringView extension_id, URL::URL const&) const;
+    // Those host permissions, as match patterns.
+    Vector<String> host_permission_patterns(StringView extension_id) const;
 
     // Enabled: loaded by the registry (a disabled extension stays installed, unloaded).
     bool is_enabled(StringView extension_id) const;
@@ -80,7 +82,7 @@ private:
     JsonObject disabled_extension_info(StringView id) const;
     Optional<JsonObject> info_of(StringView id) const;
     void open_url(URL::URL const&);
-    void uninstall(String id, bool show_confirm_dialog, ExtensionRuntime::Reply);
+    void uninstall(String id, bool show_confirm_dialog, ExtensionRuntime::Reply, Optional<String> requester_id);
     void dispatch_to_managers(StringView event, JsonValue const& argument, Optional<StringView> skip = {});
 
     // The extension controlling a privacy setting, if any: the last enabled one to set it.
@@ -88,6 +90,8 @@ private:
     void privacy_setting_changed(StringView name, JsonValue const& previous_value, Optional<String> const& previous_controller);
     JsonObject privacy_details(StringView name, Extension const& viewer) const;
     void apply_privacy_setting_to_browser(StringView name);
+
+    virtual void extension_uninstalled(StringView extension_id) override { m_states.remove(extension_id); }
 
     mutable HashMap<String, NonnullOwnPtr<State>> m_states;
     mutable u64 m_next_privacy_sequence { 1 };
@@ -97,6 +101,16 @@ private:
     HashTable<String> m_known_extensions;
     // The user's own search suggestions setting, while an extension controls it.
     Optional<bool> m_user_search_suggestions;
+
+    // Questions to the user: one at a time per extension, and what they just refused isn't asked again at once.
+    struct Denial {
+        Vector<String> permissions;
+        Vector<String> origins;
+        MonotonicTime until;
+    };
+    HashTable<String> m_asking_for_permissions;
+    HashMap<String, Denial> m_denials;
+    HashTable<String> m_asking_to_uninstall;
 };
 
 }

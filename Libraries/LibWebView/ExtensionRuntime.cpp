@@ -8,13 +8,21 @@
 #include <AK/LexicalPath.h>
 #include <LibCore/Directory.h>
 #include <LibCore/StandardPaths.h>
+#include <LibURL/Parser.h>
+#include <LibWebExtensions/MatchPattern.h>
 #include <LibWebExtensions/NativeMessaging.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
 #include <LibWebCommon/Loader/UserAgent.h>
+#include <LibWebExtensions/ExtensionId.h>
+#include <LibWebView/CanonicalDocument.h>
+#include <LibWebView/CanonicalNavigable.h>
 #include <LibWebView/ExtensionAPI/Action.h>
+#include <LibWebView/ExtensionAPI/ContextMenus.h>
+#include <LibWebView/ExtensionAPI/Downloads.h>
 #include <LibWebView/ExtensionAPI/ExtensionAPI.h>
 #include <LibWebView/ExtensionAPI/Management.h>
+#include <LibWebView/ExtensionAPI/Notifications.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/ViewImplementation.h>
@@ -29,6 +37,19 @@ ExtensionRuntime::ExtensionRuntime(ExtensionRegistry& registry)
     register_runtime_functions();
     register_messaging_functions();
 
+    // What's kept for an extension goes with it, so another installed later with its ID starts afresh.
+    m_registry.add_uninstall_observer([this](StringView id) {
+        stop_background(id);
+        set_content_scripts_may_use_session_storage(id, false);
+        for (auto& api : m_apis)
+            api->extension_uninstalled(id);
+        if (m_storage_directory.has_value() && WebExtensions::is_valid_extension_id(id)) {
+            auto directory = LexicalPath::join(*m_storage_directory, id).string();
+            if (auto result = ExtensionRegistry::remove_without_following_links(directory); result.is_error() && result.error().code() != ENOENT)
+                dbgln("Extensions: Can't remove {}: {}", directory, result.error());
+        }
+    });
+
     m_apis.append(create_storage_api(*this));
     m_apis.append(create_action_api(*this));
     m_action = static_cast<ActionAPI*>(m_apis.last().ptr());
@@ -37,12 +58,33 @@ ExtensionRuntime::ExtensionRuntime(ExtensionRegistry& registry)
     m_apis.append(create_tabs_api(*this));
     m_apis.append(create_management_api(*this));
     m_management = static_cast<ManagementAPI*>(m_apis.last().ptr());
+    m_apis.append(create_notifications_api(*this));
+    m_notifications = static_cast<NotificationsAPI*>(m_apis.last().ptr());
+    m_apis.append(create_context_menus_api(*this));
+    m_context_menus = static_cast<ContextMenusAPI*>(m_apis.last().ptr());
+    m_apis.append(create_downloads_api(*this));
+    m_downloads = static_cast<DownloadsAPI*>(m_apis.last().ptr());
+    m_apis.append(create_web_request_api(*this));
 }
 
 ExtensionRuntime::~ExtensionRuntime() = default;
 
+bool ExtensionRuntime::is_private_page(WebContentPage const& page)
+{
+    return page.view().is_private() == IsPrivate::Yes || (page.is_open() && page.client().is_private() == IsPrivate::Yes);
+}
+
+String ExtensionRuntime::installed_extensions_for(WebContentPage const& page) const
+{
+    if (is_private_page(page))
+        return R"({"extensions":[]})"_string;
+    return m_registry.serialize_for_renderers();
+}
+
 void ExtensionRuntime::context_created(WebContentPage& page, u64 page_context_id, String extension_id, String type, URL::URL url, bool is_top_level)
 {
+    if (is_private_page(page))
+        return;
     // A page process may only speak for an extension that's installed, and only one hosting the extension's pages may
     // have its pages' API: any other gets a content script's at most.
     if (!m_registry.find(extension_id))
@@ -53,6 +95,11 @@ void ExtensionRuntime::context_created(WebContentPage& page, u64 page_context_id
     }
     if (type != "content_script"sv && type != "page"sv && type != "background"sv && type != "popup"sv)
         return;
+    // A page's context IDs are its own, each used once.
+    if (find_context(page, page_context_id) || find_unverified_context(page, page_context_id).has_value()) {
+        dbgln("Extensions: A page created context {} twice", page_context_id);
+        return;
+    }
 
     auto context = make<Context>();
     context->id = m_next_context_id++;
@@ -62,11 +109,170 @@ void ExtensionRuntime::context_created(WebContentPage& page, u64 page_context_id
     context->type = move(type);
     context->url = move(url);
     context->is_top_level = is_top_level;
+    // A content script is one once its frame is verified ("frame" message), with the browser's URL for it. A page has
+    // only so many waiting: one per extension per document it shows.
+    if (context->type == "content_script"sv) {
+        static constexpr size_t maximum_unverified_contexts_per_page = 64;
+        size_t waiting = 0;
+        for (auto const& unverified : m_unverified_contexts)
+            waiting += unverified->page.ptr() == &page ? 1 : 0;
+        if (waiting >= maximum_unverified_contexts_per_page) {
+            dbgln("Extensions: A page made too many content script contexts");
+            return;
+        }
+        m_unverified_contexts.append(move(context));
+        return;
+    }
     m_contexts.set(context->id, move(context));
+}
+
+Optional<size_t> ExtensionRuntime::find_unverified_context(WebContentPage const& page, u64 page_context_id) const
+{
+    for (size_t i = 0; i < m_unverified_contexts.size(); ++i) {
+        if (m_unverified_contexts[i]->page.ptr() == &page && m_unverified_contexts[i]->page_context_id == page_context_id)
+            return i;
+    }
+    return {};
+}
+
+static Optional<Web::HTML::CrossProcessId> cross_process_id_in(JsonObject const& message, StringView key)
+{
+    auto object = message.get_object(key);
+    if (!object.has_value())
+        return {};
+    auto namespace_id = object->get_u64("ns"sv);
+    auto local_id = object->get_u64("id"sv);
+    if (!namespace_id.has_value() || !local_id.has_value())
+        return {};
+    return Web::HTML::CrossProcessId { .namespace_id = *namespace_id, .local_id = *local_id };
+}
+
+static bool needs_creator(URL::URL const& url)
+{
+    return url.scheme().is_one_of("about"sv, "data"sv, "blob"sv, "filesystem"sv);
+}
+
+Optional<URL::URL> ExtensionRuntime::creator_url_for_matching(CanonicalNavigable const& navigable)
+{
+    auto const& origin = navigable.active_document().origin();
+    bool is_about = navigable.active_document_url().scheme() == "about"sv;
+    for (auto const* frame = navigable.parent(); frame; frame = frame->parent()) {
+        // An about:blank or srcdoc document another document made has that one's origin, not its parent's.
+        // FIXME: Look at the opener too, and use an opaque origin's precursor, which origins don't keep yet.
+        if (is_about && !frame->active_document().origin().is_same_origin(origin))
+            break;
+        if (!needs_creator(frame->active_document_url()))
+            return frame->active_document_url();
+    }
+    if (is_about && !origin.is_opaque())
+        return URL::Parser::basic_parse(ByteString::formatted("{}/", origin.serialize()));
+    return {};
+}
+
+bool ExtensionRuntime::content_scripts_are_for(Extension const& extension, CanonicalNavigable const& navigable) const
+{
+    // As the page process matches them (LibWeb/Extensions/ExtensionContexts.cpp), with the browser's URL.
+    auto const& frame_url = navigable.active_document_url();
+    auto creator_url = creator_url_for_matching(navigable);
+    auto allows_file_access = m_registry.allows_file_access(extension.id());
+    auto patterns = [](Vector<String> const& strings) {
+        WebExtensions::MatchPatternSet set;
+        for (auto const& string : strings) {
+            if (auto pattern = WebExtensions::MatchPattern::parse(string); !pattern.is_error())
+                set.add(pattern.release_value());
+        }
+        return set;
+    };
+    for (auto const& script : extension.manifest().content_scripts) {
+        // Scripts of the page's own world make no context.
+        if (script.world == WebExtensions::ContentScript::World::Main)
+            continue;
+        if (!script.all_frames && !navigable.is_top_level_traversable())
+            continue;
+        auto url = WebExtensions::url_for_matching(frame_url, creator_url, script.match_about_blank, script.match_origin_as_fallback);
+        if (!url.has_value() || WebExtensions::is_restricted_url(*url, allows_file_access, extension.id().bytes_as_string_view()))
+            continue;
+        if (WebExtensions::should_inject_content_script(*url, patterns(script.matches), patterns(script.exclude_matches), script.include_globs, script.exclude_globs))
+            return true;
+    }
+    return false;
+}
+
+void ExtensionRuntime::verify_content_script(size_t unverified_index, WebContentPage& page, JsonObject const& message)
+{
+    auto context = m_unverified_contexts.take(unverified_index);
+    auto navigable_id = cross_process_id_in(message, "navigable"sv);
+    auto document_id = cross_process_id_in(message, "document"sv);
+    if (!navigable_id.has_value() || !document_id.has_value() || !page.is_open())
+        return;
+    auto navigable = page.hosted_navigable(*navigable_id);
+    if (!navigable.has_value() || navigable->active_document().id() != *document_id)
+        return;
+    auto const* extension = m_registry.find(context->extension_id);
+    if (!extension)
+        return;
+    bool injecting = tabs_hooks.is_injecting && tabs_hooks.is_injecting(page, *navigable_id, *document_id, context->extension_id);
+    if (!injecting && !content_scripts_are_for(*extension, *navigable)) {
+        dbgln("Extensions: A page said it has a content script of {} where it has none", context->extension_id);
+        return;
+    }
+    // An extension has one isolated world, so one content script context, in a document.
+    for (auto const& [id, existing] : m_contexts) {
+        if (existing->type == "content_script"sv && existing->page.ptr() == &page && existing->extension_id == context->extension_id
+            && existing->navigable_id == navigable_id && existing->document_id == document_id) {
+            dbgln("Extensions: A page made a second content script context of {} in a document", context->extension_id);
+            return;
+        }
+    }
+    context->url = navigable->active_document_url();
+    context->is_top_level = navigable->is_top_level_traversable();
+    context->navigable_id = *navigable_id;
+    context->document_id = *document_id;
+    m_contexts.set(context->id, move(context));
+}
+
+// The frame a content script's context is in, while its document is the frame's active one.
+CanonicalNavigable* ExtensionRuntime::content_script_frame(Context const& context) const
+{
+    if (!context.page || !context.page->is_open() || !context.navigable_id.has_value() || !context.document_id.has_value())
+        return nullptr;
+    auto navigable = context.page->hosted_navigable(*context.navigable_id);
+    if (!navigable.has_value() || navigable->active_document().id() != *context.document_id)
+        return nullptr;
+    return navigable.ptr();
+}
+
+void ExtensionRuntime::set_content_scripts_may_use_session_storage(StringView extension_id, bool allowed)
+{
+    auto id = MUST(String::from_utf8(extension_id));
+    if (allowed)
+        m_session_storage_for_content_scripts.set(id);
+    else
+        m_session_storage_for_content_scripts.remove(id);
+}
+
+// Content scripts have runtime.onMessage and onConnect (which aren't events here), and the storage changes they may see.
+static bool is_content_script_event(StringView event)
+{
+    return event.is_one_of("runtime.onMessage"sv, "runtime.onConnect"sv, "storage.onChanged"sv, "storage.local.onChanged"sv,
+        "storage.sync.onChanged"sv, "storage.session.onChanged"sv, "storage.managed.onChanged"sv);
+}
+
+bool ExtensionRuntime::content_script_may_hear(Context const& context, StringView event, JsonArray const& arguments) const
+{
+    if (!is_content_script_event(event) || !m_management->has_permission(context.extension_id, "storage"sv))
+        return false;
+    bool session = event == "storage.session.onChanged"sv
+        || (event == "storage.onChanged"sv && (arguments.size() < 2 || !arguments.at(1).is_string() || arguments.at(1).as_string() == "session"sv));
+    return !session || content_scripts_may_use_session_storage(context.extension_id);
 }
 
 void ExtensionRuntime::context_destroyed(WebContentPage& page, u64 page_context_id)
 {
+    if (auto unverified = find_unverified_context(page, page_context_id); unverified.has_value()) {
+        m_unverified_contexts.remove(*unverified);
+        return;
+    }
     auto* context = find_context(page, page_context_id);
     if (!context)
         return;
@@ -81,6 +287,7 @@ void ExtensionRuntime::page_closed(WebContentPage& page)
 {
     if (tabs_hooks.page_closed)
         tabs_hooks.page_closed(page);
+    m_unverified_contexts.remove_all_matching([&](auto const& context) { return context->page.ptr() == &page; });
     Vector<u64> closed;
     for (auto const& [id, context] : m_contexts) {
         if (context->page.ptr() == &page)
@@ -92,6 +299,8 @@ void ExtensionRuntime::page_closed(WebContentPage& page)
             api->context_destroyed(id);
         m_contexts.remove(id);
     }
+    for (auto& api : m_apis)
+        api->page_gone(page);
 }
 
 ExtensionRuntime::Context* ExtensionRuntime::find_context(WebContentPage& page, u64 page_context_id)
@@ -109,6 +318,22 @@ ExtensionRuntime::Context const* ExtensionRuntime::find_context(u64 id) const
     return it == m_contexts.end() ? nullptr : it->value.ptr();
 }
 
+void ExtensionRuntime::register_page_message(StringView type, PageMessageHandler handler)
+{
+    m_page_message_handlers.set(MUST(String::from_utf8(type)), move(handler));
+}
+
+void ExtensionRuntime::register_context_message(StringView type, ContextMessageHandler handler)
+{
+    m_context_message_handlers.set(MUST(String::from_utf8(type)), move(handler));
+}
+
+void ExtensionRuntime::page_created(WebContentPage& page)
+{
+    for (auto& api : m_apis)
+        api->page_created(page);
+}
+
 void ExtensionRuntime::send(Context const& context, JsonObject const& message)
 {
     if (!context.page || !context.page->is_open())
@@ -118,8 +343,11 @@ void ExtensionRuntime::send(Context const& context, JsonObject const& message)
 
 void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_id, StringView text)
 {
+    if (is_private_page(page))
+        return;
     auto* context = find_context(page, page_context_id);
-    if (!context && page_context_id != 0)
+    auto unverified = context ? Optional<size_t> {} : find_unverified_context(page, page_context_id);
+    if (!context && !unverified.has_value() && page_context_id != 0)
         return;
 
     auto json = JsonParser::parse(text);
@@ -130,9 +358,27 @@ void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_i
     if (!type.has_value())
         return;
 
+    // Until its frame is verified, a content script's context says nothing but which frame it's in.
+    if (unverified.has_value()) {
+        if (type == "frame"sv)
+            verify_content_script(*unverified, page, message);
+        return;
+    }
+
     if (!context) {
-        if (tabs_hooks.page_message)
+        if (auto handler = m_page_message_handlers.find(*type); handler != m_page_message_handlers.end())
+            handler->value(page, message);
+        else if (tabs_hooks.page_message)
             tabs_hooks.page_message(page, message);
+        return;
+    }
+
+    // A content script whose document is no longer its frame's active one is gone, whatever its page says.
+    if (context->type == "content_script"sv && !content_script_frame(*context))
+        return;
+
+    if (auto handler = m_context_message_handlers.find(*type); handler != m_context_message_handlers.end()) {
+        handler->value(*context, message);
         return;
     }
 
@@ -165,6 +411,8 @@ void ExtensionRuntime::message_received(WebContentPage& page, u64 page_context_i
     } else if (type == "listen"sv) {
         auto event = message.get_string("event"sv);
         auto listener = message.get_integer<i64>("listener"sv);
+        if (context->type == "content_script"sv && event.has_value() && !is_content_script_event(*event))
+            return;
         if (event.has_value() && listener.has_value()) {
             context->listeners.ensure(*event).set(*listener, message.get_array("extra"sv).value_or({}));
             for (auto& api : m_apis)
@@ -232,6 +480,8 @@ void ExtensionRuntime::dispatch_event(StringView extension_id, StringView event,
             continue;
         auto listeners = context->listeners.find(event);
         if (listeners == context->listeners.end() || listeners->value.is_empty())
+            continue;
+        if (context->type == "content_script"sv && !content_script_may_hear(*context, event, arguments))
             continue;
         JsonObject message;
         message.set("type"sv, "event"sv);
@@ -451,6 +701,28 @@ ViewImplementation* ExtensionRuntime::background_view(StringView extension_id) c
     return background == m_backgrounds.end() ? nullptr : background->value.view.ptr();
 }
 
+static Function<bool()>& user_activation_for_testing()
+{
+    static auto* source = new Function<bool()>;
+    return *source;
+}
+
+void set_user_activation_for_testing(Function<bool()> source)
+{
+    user_activation_for_testing() = move(source);
+}
+
+bool ExtensionRuntime::consume_user_activation(Context const& context)
+{
+    if (context.type != "page"sv && context.type != "popup"sv)
+        return false;
+    if (auto& source = user_activation_for_testing())
+        return source();
+    if (!context.page || !context.page->is_open())
+        return false;
+    return context.page->consume_transient_user_activation();
+}
+
 bool ExtensionRuntime::is_background_page(WebContentPage const& page) const
 {
     for (auto const& [id, background] : m_backgrounds) {
@@ -465,8 +737,12 @@ JsonObject ExtensionRuntime::sender_of(Context const& context) const
 {
     JsonObject sender;
     sender.set("id"sv, context.extension_id);
-    sender.set("url"sv, context.url.serialize());
-    sender.set("origin"sv, context.url.origin().serialize());
+    // A content script's document's URL, as the browser knows it now (it may have changed with the history API).
+    auto url = context.url;
+    if (auto* frame = context.type == "content_script"sv ? content_script_frame(context) : nullptr)
+        url = frame->active_document_url();
+    sender.set("url"sv, url.serialize());
+    sender.set("origin"sv, url.origin().serialize());
     if (m_tabs_delegate && tabs_hooks.describe_sender) {
         tabs_hooks.describe_sender(context, sender);
     } else if (context.page && !is_background_page(*context.page)) {

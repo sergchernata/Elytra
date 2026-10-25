@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "webRequest test extension without auth or localhost",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwEp0wDF5qPDuJsc4wYGgigLSxMVq4lXILa53TQVb9VRcaQgZFRV158xsZBPmBRCdva8Flpj/vivazh6axogqlqUNbE9PBqed90NbNr5Dh0OTWqpzvemgrjHxxUp51Aq2cfHkajcAzEv8xGPIng7MUyv1TYh/arqMR0dnfiDJUcjAwA86MajuVhzGiWK1jo7FOt1Ak0LuXBEibS99ClUjDugq+bCbLaRrutnCx580A0uJYJBw7DVI9YbsQdPXXm0gkSxRUTgVXnQKawhWfJ5UV2Y9QszCqmKuM/IjTJ3tKWG20KsrbBdB/m7FBc7Wy/aioo4xxx8yEa/16He4T3oM7wIDAQAB",
+    "permissions": ["webRequest", "declarativeNetRequest", "storage"],
+    "host_permissions": ["http://127.0.0.1/*"],
+    "background": { "service_worker": "background.js" }
+}

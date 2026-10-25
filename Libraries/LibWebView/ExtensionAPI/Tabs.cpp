@@ -134,6 +134,12 @@ private:
     };
     struct ScriptRequest {
         RefPtr<WebContentPage> page;
+        Web::HTML::CrossProcessId navigable_id;
+        // The document it was sent to: only a context in that one counts as the script's, and only for a while.
+        Web::HTML::CrossProcessId document_id;
+        MonotonicTime sent_at;
+        String extension_id;
+        bool main_world { false };
         u64 run { 0 };
         size_t frame { 0 };
         bool is_last { false };
@@ -276,6 +282,38 @@ TabsAPI::TabsAPI(ExtensionRuntime& extension_runtime)
     runtime().tabs_hooks.tabs_changed = [this] { tabs_changed(); };
     runtime().tabs_hooks.page_message = [this](WebContentPage& page, JsonObject const& message) { page_message(page, message); };
     runtime().tabs_hooks.page_closed = [this](WebContentPage& page) { page_closed(page); };
+    // chrome.webRequest's frames (ExtensionAPI/WebRequest.cpp): the same tab and frame IDs as here.
+    runtime().tabs_hooks.describe_frame = [this](WebContentPage& page, Web::HTML::CrossProcessId navigable_id) -> Optional<ExtensionRuntime::TabsHooks::Frame> {
+        if (!page.is_open())
+            return {};
+        auto navigable = page.hosted_navigable(navigable_id);
+        if (!navigable.has_value())
+            return {};
+        ExtensionRuntime::TabsHooks::Frame frame;
+        frame.is_top_level = !navigable->parent();
+        frame.frame_id = frame_id_of(*navigable);
+        frame.parent_frame_id = navigable->parent() ? frame_id_of(*navigable->parent()) : -1;
+        frame.document_id = document_id_of(*navigable);
+        if (navigable->parent())
+            frame.parent_document_id = document_id_of(*navigable->parent());
+        if (!runtime().is_background_page(page)) {
+            if (auto tab = tab_of(page.view()); tab.has_value()) {
+                frame.tab_id = tab->id;
+                frame.window_id = tab->window_id;
+            }
+        }
+        return frame;
+    };
+    runtime().tabs_hooks.is_injecting = [this](WebContentPage const& page, Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id, StringView extension_id) {
+        static constexpr auto injection_window = AK::Duration::from_seconds(10);
+        auto now = MonotonicTime::now();
+        for (auto const& [id, request] : m_script_requests) {
+            if (request.page.ptr() == &page && request.navigable_id == navigable_id && request.document_id == document_id
+                && request.extension_id == extension_id && !request.main_world && now - request.sent_at < injection_window)
+                return true;
+        }
+        return false;
+    };
     runtime().tabs_hooks.describe_sender = [this](Context const& context, JsonObject& sender) {
         auto const* extension = runtime().registry().find(context.extension_id);
         auto tab = tab_of(context);
@@ -1020,13 +1058,14 @@ String TabsAPI::document_id_of(CanonicalNavigable const& navigable)
     return id_string(navigable.active_document().id());
 }
 
-// The URL whose access decides whether a frame may be scripted: an about:blank or srcdoc frame's creator's.
+// The URL whose access decides whether a frame may be scripted: an about:blank or srcdoc frame's creator's, when it has
+// its creator's origin, or else its origin's.
 URL::URL TabsAPI::url_for_access(CanonicalNavigable const& navigable) const
 {
-    auto const* frame = &navigable;
-    while (frame->parent() && frame->active_document_url().scheme() == "about"sv)
-        frame = frame->parent();
-    return frame->active_document_url();
+    auto const& url = navigable.active_document_url();
+    if (url.scheme() != "about"sv)
+        return url;
+    return ExtensionRuntime::creator_url_for_matching(navigable).value_or(url);
 }
 
 JsonObject TabsAPI::frame_json(CanonicalNavigable& navigable)
@@ -1265,7 +1304,7 @@ void TabsAPI::inject(Extension const& extension, Injection injection, Function<v
             continue;
         for (size_t source = 0; source < injection.sources.size(); ++source) {
             auto request_id = m_next_request_id++;
-            m_script_requests.set(request_id, { .page = host, .run = run_id, .frame = index, .is_last = source + 1 == injection.sources.size() });
+            m_script_requests.set(request_id, { .page = host, .navigable_id = frame->id(), .document_id = frame->active_document().id(), .sent_at = MonotonicTime::now(), .extension_id = extension.id(), .main_world = injection.main_world, .run = run_id, .frame = index, .is_last = source + 1 == injection.sources.size() });
             to_send.append({ request_id, host, frame->id(), source });
             ++run.remaining;
         }

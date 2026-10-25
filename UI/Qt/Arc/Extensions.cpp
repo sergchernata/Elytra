@@ -13,6 +13,7 @@
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/Arc/ExtensionServices.h>
 #include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/StringUtils.h>
@@ -31,6 +32,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -179,17 +181,15 @@ public:
 
     virtual Optional<i64> last_focused_window_id() const override
     {
-        if (auto* window = Application::the().active_window_if_any())
+        // Never a private window: extensions don't run there.
+        if (auto* window = Application::the().non_private_window_if_any())
             return id_of(*window);
-        auto windows = browser_windows();
-        if (windows.isEmpty())
-            return {};
-        return id_of(*windows.first());
+        return {};
     }
 
     virtual ErrorOr<i64, String> create_tab(CreateTab details) override
     {
-        auto* window = details.window_id.has_value() ? window_with_id(*details.window_id) : Application::the().active_window_if_any();
+        auto* window = details.window_id.has_value() ? window_with_id(*details.window_id) : Application::the().non_private_window_if_any();
         if (!window)
             return details.window_id.has_value() ? MUST(String::formatted("No window with id: {}.", *details.window_id)) : "No window to open the tab in"_string;
         auto location = details.index.has_value() && *details.index >= 0 && *details.index <= window->tab_count()
@@ -337,10 +337,10 @@ static TabsDelegate& tabs_delegate()
     return *delegate;
 }
 
-// The tab a window shows, as extensions know it.
+// The tab a window shows, as extensions know it. None in a private window: extensions don't see its tabs.
 static Optional<i64> current_tab_id(BrowserWindow* window)
 {
-    if (!window || !window->current_tab())
+    if (!window || !window->current_tab() || window->is_private() == WebView::IsPrivate::Yes)
         return {};
     return tabs_delegate().id_of(*window->current_tab());
 }
@@ -563,8 +563,10 @@ public:
         }
         m_buttons.clear();
 
+        // Extensions don't run in private windows, so they have no buttons there.
+        bool is_private = m_window && m_window->is_private() == WebView::IsPrivate::Yes;
         registry().for_each_extension([&](WebView::Extension const& extension) {
-            if (!extension.manifest().action.has_value())
+            if (is_private || !extension.manifest().action.has_value())
                 return;
             auto* button = new ExtensionButton(this, extension.id());
             connect(button, &QToolButton::clicked, this, [this, id = extension.id()] {
@@ -578,6 +580,8 @@ public:
                     name->setEnabled(false);
                     menu.addSeparator();
                 }
+                // The extension's own items (chrome.contextMenus' "action" context).
+                add_extension_action_items(menu, id, qobject_cast<BrowserWindow*>(button->window()));
                 menu.addAction("Manage Extensions…", [] { show_extensions_window(); });
                 menu.exec(button->mapToGlobal(position));
             });
@@ -655,10 +659,10 @@ public:
         }
     }
 
-    virtual ErrorOr<void, String> open_popup(StringView extension_id, URL::URL const& popup, Optional<i64> window_id) override
+    virtual ErrorOr<void, String> open_popup(StringView extension_id, URL::URL const& popup, Optional<i64> window_id, ByUser by_user) override
     {
-        auto* window = window_id.has_value() ? tabs_delegate().window_with_id(*window_id) : Application::the().active_window_if_any();
-        if (!window)
+        auto* window = window_id.has_value() ? tabs_delegate().window_with_id(*window_id) : Application::the().non_private_window_if_any();
+        if (!window || window->is_private() == WebView::IsPrivate::Yes)
             return "No window to open the popup in"_string;
         QWidget* anchor = nullptr;
         for (auto const& row : all_button_rows()) {
@@ -667,8 +671,8 @@ public:
         }
         if (!anchor)
             anchor = window;
-        // Only in the window the user is in, and one at a time: a popup takes the keyboard.
-        if (!window->isActiveWindow())
+        // One at a time, and when the extension asks, only in the window the user is in: a popup takes the keyboard.
+        if (by_user == ByUser::No && !window->isActiveWindow())
             return "The window isn't active"_string;
         ExtensionPopup::close_all();
         auto* popup_window = new ExtensionPopup(anchor, popup);
@@ -740,7 +744,7 @@ static Optional<QKeyCombination> parse_shortcut(StringView shortcut)
 }
 
 // Keys the browser itself uses, which no extension may take.
-static bool is_browser_shortcut(QKeyCombination keys)
+bool is_browser_shortcut(QKeyCombination keys)
 {
     // Those every Mac app has, whether or not a menu shows them.
     static constexpr QKeyCombination reserved[] = {
@@ -757,11 +761,17 @@ static bool is_browser_shortcut(QKeyCombination keys)
         if (key == keys)
             return true;
     }
-    // And every menu item's.
+    // And every menu item's, and the browser's other shortcuts (Find Next and Previous are QShortcuts).
     for (auto* widget : QApplication::topLevelWidgets()) {
         for (auto* action : widget->findChildren<QAction*>()) {
             for (auto const& shortcut : action->shortcuts()) {
                 if (shortcut.count() == 1 && shortcut[0] == keys)
+                    return true;
+            }
+        }
+        for (auto* shortcut : widget->findChildren<QShortcut*>()) {
+            for (auto const& sequence : shortcut->keys()) {
+                if (sequence.count() == 1 && sequence[0] == keys)
                     return true;
             }
         }
@@ -779,6 +789,9 @@ bool handle_extension_shortcut(QKeyEvent const& event, BrowserWindow* window)
         && pressed.key() != Qt::Key_MediaTogglePlayPause && pressed.key() != Qt::Key_MediaStop)
         return false;
     if (is_browser_shortcut(pressed))
+        return false;
+    // Extensions don't run in private windows: their commands don't either.
+    if (window && window->is_private() == WebView::IsPrivate::Yes)
         return false;
 
     // When two extensions want the same keys, the one installed first has them, as in Chrome.
@@ -807,6 +820,35 @@ bool handle_extension_shortcut(QKeyEvent const& event, BrowserWindow* window)
         }
     }
     return false;
+}
+
+// What the user is told an extension can do, a line each. Sites beyond the first few are counted, and all of them
+// listed in the details.
+static QStringList permission_lines(WebView::PermissionSummary const& summary, QString& details)
+{
+    static constexpr size_t sites_shown = 5;
+    QStringList lines;
+    if (summary.all_sites) {
+        lines.append("Read and change your data on all websites");
+    } else if (!summary.sites.is_empty()) {
+        QStringList sites;
+        QStringList all;
+        for (auto const& site : summary.sites) {
+            auto text = qstring_from_ak_string(site).simplified().left(200);
+            if (static_cast<size_t>(sites.size()) < sites_shown)
+                sites.append(text);
+            all.append(text);
+        }
+        auto line = QString("Read and change your data on %1").arg(sites.join(", "));
+        if (summary.sites.size() > sites_shown) {
+            line += QString(" and %1 more sites").arg(summary.sites.size() - sites_shown);
+            details += QString("Sites:\n%1\n").arg(all.join('\n'));
+        }
+        lines.append(line);
+    }
+    for (auto const& description : summary.descriptions)
+        lines.append(qstring_from_ak_string(description));
+    return lines;
 }
 
 // The Extensions window: what's installed, and installing more.
@@ -863,8 +905,13 @@ public:
                 for (auto const& result : results) {
                     if (result.error.has_value())
                         lines.append(QString("%1: %2").arg(qstring_from_ak_string(result.id), qstring_from_ak_string(*result.error)));
-                    else if (result.updated_to.has_value())
-                        lines.append(QString("%1 updated to %2").arg(qstring_from_ak_string(result.id), qstring_from_ak_string(*result.updated_to)));
+                    else if (result.updated_to.has_value()) {
+                        auto installed = registry().installed_extension(result.id);
+                        auto name = installed.has_value() && !installed->name.is_empty() ? installed->name : result.id;
+                        lines.append(installed.has_value() && installed->needs_approval()
+                                ? QString("%1 updated to %2, and asks for more permissions: it's off until you approve them").arg(qstring_from_ak_string(name), qstring_from_ak_string(*result.updated_to))
+                                : QString("%1 updated to %2").arg(qstring_from_ak_string(name), qstring_from_ak_string(*result.updated_to)));
+                    }
                 }
                 self->set_status(lines.isEmpty() ? QString("Everything is up to date.") : lines.join('\n'));
             });
@@ -891,7 +938,7 @@ public:
             auto* row_layout = new QHBoxLayout(row);
             auto* text = new QLabel(row);
             text->setTextFormat(Qt::PlainText);
-            text->setText(QString("%1  %2%3").arg(qstring_from_ak_string(entry.name), qstring_from_ak_string(entry.version), entry.install_type == WebView::InstalledExtension::InstallType::Development ? QString("  (unpacked)") : QString()));
+            text->setText(QString("%1  %2%3").arg(qstring_from_ak_string(entry.name), qstring_from_ak_string(entry.version), entry.install_type == WebView::InstalledExtension::InstallType::Development ? QString("  (unpacked)") : entry.needs_approval() ? QString("  (needs approval)") : QString()));
             text->setToolTip(qstring_from_ak_string(entry.id));
             auto* enabled = new QCheckBox("On", row);
             enabled->setChecked(entry.enabled);
@@ -900,6 +947,35 @@ public:
             file_access->setChecked(entry.allows_file_access);
             auto* remove = new QPushButton("Remove", row);
             row_layout->addWidget(text, 1);
+            // An update that asks for more stays off until the user approves what it asks for.
+            if (entry.needs_approval()) {
+                enabled->setEnabled(false);
+                enabled->setToolTip("The update asks for more permissions");
+                auto* approve = new QPushButton("Approve…", row);
+                approve->setToolTip("The update asks for more permissions");
+                row_layout->addWidget(approve);
+                connect(approve, &QPushButton::clicked, this, [this, id = entry.id, name = entry.name, permissions = entry.permissions_to_approve, sites = entry.sites_to_approve] {
+                    QString details;
+                    auto lines = permission_lines(WebView::summarize_permissions(permissions, sites), details);
+                    auto text = QString("The update of \u201C%1\u201D asks for more. It stays off until you approve it.\n\nIt can now also:\n\u2022 %2")
+                                    .arg(qstring_from_ak_string(name).simplified().left(80), lines.join("\n\u2022 "));
+                    auto* box = new QMessageBox(QMessageBox::Question, "Approve Extension Update", text, QMessageBox::Yes | QMessageBox::No, this);
+                    box->setTextFormat(Qt::PlainText);
+                    if (!details.isEmpty())
+                        box->setDetailedText(details);
+                    box->setAttribute(Qt::WA_DeleteOnClose);
+                    box->button(QMessageBox::Yes)->setText("Approve and Turn On");
+                    box->button(QMessageBox::No)->setText("Keep Off");
+                    box->setDefaultButton(QMessageBox::No);
+                    QObject::connect(box, &QMessageBox::finished, this, [this, id](int result) {
+                        if (result != QMessageBox::Yes)
+                            return;
+                        if (auto approved = registry().approve_permissions(id); approved.is_error())
+                            set_status(qstring_from_ak_string(MUST(String::formatted("{}", approved.error()))));
+                    });
+                    box->open();
+                });
+            }
             row_layout->addWidget(enabled);
             row_layout->addWidget(file_access);
             row_layout->addWidget(remove);
@@ -936,6 +1012,30 @@ private:
             return;
         }
         set_status("Downloading…");
+        auto confirm = [self = QPointer(this)](WebExtensions::Manifest const& manifest, Function<void(bool)> on_answer) {
+            if (!self)
+                return on_answer(false);
+            QString details;
+            auto can = permission_lines(WebView::summarize_permissions(manifest), details);
+
+            auto text = QString("Add \u201C%1\u201D?").arg(qstring_from_ak_string(manifest.name).simplified().left(80));
+            if (!can.isEmpty())
+                text += QString("\n\nIt can:\n\u2022 %1").arg(can.join("\n\u2022 "));
+            auto* box = new QMessageBox(QMessageBox::Question, "Add Extension", text, QMessageBox::Yes | QMessageBox::No, self);
+            box->setTextFormat(Qt::PlainText);
+            if (!details.isEmpty())
+                box->setDetailedText(details);
+            box->setAttribute(Qt::WA_DeleteOnClose);
+            box->button(QMessageBox::Yes)->setText("Add Extension");
+            box->button(QMessageBox::No)->setText("Cancel");
+            box->setDefaultButton(QMessageBox::No);
+            auto* answer = new Function<void(bool)>(AK::move(on_answer));
+            QObject::connect(box, &QMessageBox::finished, [answer](int result) {
+                (*answer)(result == QMessageBox::Yes);
+                delete answer;
+            });
+            box->open();
+        };
         registry().install_from_web_store(input, [self = QPointer(this)](ErrorOr<WebView::Extension const*> result) {
             if (!self)
                 return;
@@ -945,7 +1045,8 @@ private:
             }
             self->m_store_input->clear();
             self->set_status(result.value() ? QString("Added %1.").arg(qstring_from_ak_string(result.value()->manifest().name)) : QString("Added."));
-        });
+        },
+            AK::move(confirm));
     }
 
     QLineEdit* m_store_input { nullptr };
@@ -981,46 +1082,11 @@ void add_extensions_action_to(QMenu& menu)
         menu.addAction(action);
 }
 
-// What an API permission lets an extension do, as the permission prompt says it; nothing for what isn't one.
-static Optional<QString> permission_description(StringView permission)
-{
-    static constexpr struct {
-        StringView name;
-        StringView description;
-    } descriptions[] = {
-        { "alarms"sv, "Run on a schedule"sv },
-        { "bookmarks"sv, "Read and change your bookmarks"sv },
-        { "clipboardRead"sv, "Read what you copy"sv },
-        { "clipboardWrite"sv, "Change what you copy"sv },
-        { "contextMenus"sv, "Add items to menus"sv },
-        { "cookies"sv, "Read and change cookies of sites it can access"sv },
-        { "declarativeNetRequest"sv, "Block and change requests sites make"sv },
-        { "declarativeNetRequestWithHostAccess"sv, "Block and change requests to sites it can access"sv },
-        { "downloads"sv, "Manage your downloads"sv },
-        { "history"sv, "Read and change your browsing history"sv },
-        { "idle"sv, "Know when you're away"sv },
-        { "management"sv, "Manage your extensions"sv },
-        { "nativeMessaging"sv, "Talk to apps on this Mac"sv },
-        { "notifications"sv, "Show notifications"sv },
-        { "privacy"sv, "Change your privacy settings"sv },
-        { "scripting"sv, "Run scripts in pages it can access"sv },
-        { "storage"sv, "Store data"sv },
-        { "tabs"sv, "Read your tabs and the pages they show"sv },
-        { "unlimitedStorage"sv, "Store unlimited data"sv },
-        { "webNavigation"sv, "Know which pages you visit"sv },
-        { "webRequest"sv, "See the requests sites make"sv },
-    };
-    for (auto const& entry : descriptions) {
-        if (entry.name == permission)
-            return QString::fromUtf8(entry.description.characters_without_null_termination(), static_cast<qsizetype>(entry.description.length()));
-    }
-    return {};
-}
-
 void install_extensions_ui()
 {
     static ActionDelegate action_delegate;
     runtime().action().set_delegate(&action_delegate);
+    install_extension_services();
     runtime().set_tabs_delegate(&tabs_delegate());
 
     runtime().on_document_size = [](WebView::ExtensionRuntime::Context const& context, i32 width, i32 height) {
@@ -1031,7 +1097,7 @@ void install_extensions_ui()
     };
 
     runtime().open_options_page = [](WebView::Extension const&, URL::URL const& url) {
-        if (auto* window = Application::the().active_window_if_any())
+        if (auto* window = Application::the().non_private_window_if_any())
             window->new_tab_from_url(url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
     };
     runtime().request_permissions_prompt = [](WebView::Extension const& extension, Vector<String> permissions, Vector<String> origins, Function<void(bool)> on_answer) {
@@ -1041,22 +1107,22 @@ void install_extensions_ui()
         if (asking->contains(id))
             return on_answer(false);
 
-        QStringList wanted;
-        for (auto const& permission : permissions) {
-            auto description = permission_description(permission);
-            // What the browser can't describe, it won't grant.
-            if (!description.has_value())
-                return on_answer(false);
-            wanted.append(*description);
-        }
-        for (auto const& origin : origins)
-            wanted.append(origin == "<all_urls>"sv || origin == "*://*/*"sv ? QString("Read and change your data on all websites") : QString("Read and change your data on %1").arg(qstring_from_ak_string(origin).left(200)));
+        auto summary = WebView::summarize_permissions(permissions, origins);
+        // What the browser can't describe, it won't grant.
+        if (!summary.undescribed.is_empty())
+            return on_answer(false);
+        QString details;
+        auto wanted = permission_lines(summary, details);
+        if (wanted.isEmpty())
+            return on_answer(false);
 
         auto name = qstring_from_ak_string(extension.manifest().name).simplified().left(80);
         auto* box = new QMessageBox(QMessageBox::Question, "Extension Permissions",
             QString("\u201C%1\u201D asks to:\n\n\u2022 %2").arg(name, wanted.join("\n\u2022 ")),
-            QMessageBox::Yes | QMessageBox::No, Application::the().active_window_if_any());
+            QMessageBox::Yes | QMessageBox::No, Application::the().non_private_window_if_any());
         box->setTextFormat(Qt::PlainText);
+        if (!details.isEmpty())
+            box->setDetailedText(details);
         box->setAttribute(Qt::WA_DeleteOnClose);
         box->button(QMessageBox::Yes)->setText("Allow");
         box->button(QMessageBox::No)->setText("Deny");
@@ -1070,10 +1136,22 @@ void install_extensions_ui()
         });
         box->open();
     };
-    runtime().confirm_uninstall = [](WebView::Extension const& extension, Function<void(bool)> on_answer) {
-        QMessageBox box(QMessageBox::Question, "Remove Extension", QString("Remove %1?").arg(qstring_from_ak_string(extension.manifest().name)), QMessageBox::Yes | QMessageBox::No);
-        box.setTextFormat(Qt::PlainText);
-        on_answer(box.exec() == QMessageBox::Yes);
+    runtime().confirm_uninstall = [](WebView::Extension const& extension, WebView::Extension const* requester, Function<void(bool)> on_answer) {
+        auto name = qstring_from_ak_string(extension.manifest().name).simplified().left(80);
+        // When another extension asks, the question says so.
+        auto question = requester
+            ? QString("\u201C%1\u201D wants to remove \u201C%2\u201D. Remove it?").arg(qstring_from_ak_string(requester->manifest().name).simplified().left(80), name)
+            : QString("Remove \u201C%1\u201D?").arg(name);
+        auto* box = new QMessageBox(QMessageBox::Question, "Remove Extension", question, QMessageBox::Yes | QMessageBox::No, Application::the().non_private_window_if_any());
+        box->setTextFormat(Qt::PlainText);
+        box->setAttribute(Qt::WA_DeleteOnClose);
+        box->setDefaultButton(QMessageBox::No);
+        auto* answer = new Function<void(bool)>(AK::move(on_answer));
+        QObject::connect(box, &QMessageBox::finished, [answer](int result) {
+            (*answer)(result == QMessageBox::Yes);
+            delete answer;
+        });
+        box->open();
     };
 
     // The registry tells the application of changes; the buttons and the Extensions window follow.

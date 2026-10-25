@@ -32,10 +32,14 @@ set(SOURCES
     DownloadStore.cpp
     ExtensionAPI/Action.cpp
     ExtensionAPI/Alarms.cpp
+    ExtensionAPI/ContextMenus.cpp
+    ExtensionAPI/Downloads.cpp
     ExtensionAPI/Management.cpp
     ExtensionAPI/NativeMessaging.cpp
+    ExtensionAPI/Notifications.cpp
     ExtensionAPI/Storage.cpp
     ExtensionAPI/Tabs.cpp
+    ExtensionAPI/WebRequest.cpp
     ExtensionRegistry.cpp
     ExtensionRuntime.cpp
     ExternalURLHandler.cpp

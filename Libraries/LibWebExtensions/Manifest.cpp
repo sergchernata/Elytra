@@ -587,6 +587,10 @@ ErrorOr<Manifest> Manifest::parse(StringView input)
             return Error::from_string_literal("The 'sandbox.content_security_policy' key cannot be used in manifest version 3 and higher.");
         manifest.content_security_policy.sandbox = TRY(optional_string(*sandbox, "content_security_policy"sv, "Invalid value for 'sandbox.content_security_policy'."sv));
     }
+    if (auto sandbox = object.get_object("sandbox"sv); sandbox.has_value()) {
+        if (auto pages = TRY(optional_string_list(*sandbox, "pages"sv, "Invalid value for 'sandbox.pages'."sv)); pages.has_value())
+            manifest.sandbox_pages = pages.release_value();
+    }
 
     if (auto connectable = object.get("externally_connectable"sv); connectable.has_value())
         manifest.externally_connectable = TRY(parse_externally_connectable(*connectable));

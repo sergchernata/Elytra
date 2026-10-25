@@ -33,6 +33,7 @@
 #include <LibJS/Runtime/Date.h>
 #include <LibUnicode/TimeZone.h>
 #include <LibWeb/Extensions/ExtensionContexts.h>
+#include <LibWeb/Extensions/WebRequests.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
@@ -427,8 +428,14 @@ void ConnectionFromClient::set_installed_extensions(Web::PageId, String extensio
     Web::Extensions::set_installed_extensions(extensions);
 }
 
-void ConnectionFromClient::deliver_extension_message(Web::PageId, u64 context_id, String message)
+void ConnectionFromClient::deliver_extension_message(Web::PageId page_id, u64 context_id, String message)
 {
+    // Fork hook (extensions): a message for the page itself (context 0) is about its network requests.
+    if (context_id == 0) {
+        if (auto page = this->page(page_id); page.has_value())
+            Web::Extensions::page_message_from_browser(page->page(), message);
+        return;
+    }
     Web::Extensions::deliver_message(context_id, message);
 }
 

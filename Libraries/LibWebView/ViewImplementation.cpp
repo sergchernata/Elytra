@@ -31,6 +31,7 @@
 #include <LibWebView/BookmarkStore.h>
 #include <LibWebView/CrashReportReview.h>
 #include <LibWebView/ErrorHTML.h>
+#include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/FaviconStore.h>
 #include <LibWebView/HelperProcess.h>
 #include <LibWebView/HistoryDebug.h>
@@ -339,12 +340,17 @@ void ViewImplementation::set_has_system_focus(bool has_system_focus)
 
 void ViewImplementation::load(URL::URL const& url, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
-    load(traversable().prepare_navigation(url, {}, history_handling));
+    load(traversable().prepare_navigation(url, {}, history_handling), CanonicalNavigable::IsBrowserUINavigation::Yes);
 }
 
 // A navigation a page asked the browser's UI to start for it — a link opened with a middle-click, e.g. — whose
 // source is still that page.
 void ViewImplementation::load(Web::HTML::PreparedNavigationDescriptor navigation)
+{
+    load(move(navigation), CanonicalNavigable::IsBrowserUINavigation::No);
+}
+
+void ViewImplementation::load(Web::HTML::PreparedNavigationDescriptor navigation, CanonicalNavigable::IsBrowserUINavigation is_browser_ui_navigation)
 {
     if (on_before_browser_initiated_navigation)
         on_before_browser_initiated_navigation();
@@ -356,7 +362,7 @@ void ViewImplementation::load(Web::HTML::PreparedNavigationDescriptor navigation
             m_text_fragment_indication_is_visible = true;
         m_browser_ui_load = BrowserUILoad { navigation.navigation_id, navigation.url };
     }
-    traversable().begin_navigation(move(navigation));
+    traversable().begin_navigation(move(navigation), is_browser_ui_navigation);
     if (traversable().has_uncommitted_navigation())
         set_loading_state(true);
     dump_session_history("load"sv);
@@ -1332,7 +1338,10 @@ void ViewImplementation::send_preferences_to_page(WebContentPage& page)
     page.async_set_spell_checking_available(Application::the().spell_checker() != nullptr);
     send_geolocation_emulated_position(page);
     page.async_set_has_picture_in_picture_support(Application::the().supports_picture_in_picture());
-    page.async_set_installed_extensions(Application::extension_registry().serialize_for_renderers());
+    // Fork hook (extensions): none for a private page (ExtensionRuntime::is_private_page()).
+    page.async_set_installed_extensions(Application::extension_runtime().installed_extensions_for(page));
+    // Fork hook (extensions): what extensions do to the page's requests (ExtensionAPI/WebRequest.cpp).
+    Application::extension_runtime().page_created(page);
 }
 
 void ViewImplementation::notify_cookies_changed(HashTable<String> const& changed_domains, ReadonlySpan<HTTP::Cookie::Cookie> page_cookies, ReadonlySpan<HTTP::Cookie::Cookie> host_cookies)
@@ -3432,7 +3441,7 @@ void ViewImplementation::load_for_webdriver_navigation(URL::URL const& url)
 {
     auto navigation = traversable().prepare_navigation(url);
     prepare_for_navigation_after_crash(NavigationToRetry { url, prepare_navigation_to_retry(navigation) });
-    traversable().begin_navigation(move(navigation));
+    traversable().begin_navigation(move(navigation), CanonicalNavigable::IsBrowserUINavigation::Yes);
 }
 
 void ViewImplementation::did_start_webdriver_navigation()
@@ -4811,6 +4820,8 @@ void ViewImplementation::did_request_page_context_menu(Badge<WebContentPage>, We
                 weak_this->m_search_selected_text_action->set_visible(false);
             }
 
+            weak_this->m_context_menu_target = { .link_url = {}, .src_url = {}, .media_type = {}, .selection_text = selected_text, .editable = for_input_events_target == Web::ContextMenuForInputEventsTarget::Yes }; // Fork hook (extensions)
+
             if (selected_text_url.has_value() && weak_this->m_selected_text_link_context_menu->on_activation) {
                 weak_this->set_context_menu_url_actions_enabled(true);
                 weak_this->m_context_menu_url = selected_text_url.release_value();
@@ -4844,6 +4855,7 @@ void ViewImplementation::did_request_link_context_menu(Badge<WebContentPage>, Gf
     m_context_menu_url = navigation.url;
     m_context_menu_navigation = move(navigation);
 
+    m_context_menu_target = { .link_url = m_context_menu_url, .src_url = {}, .media_type = {}, .selection_text = {}, .editable = false }; // Fork hook (extensions)
     m_open_in_new_tab_action->set_text("Open in New Tab"sv);
 
     switch (url_type(m_context_menu_url)) {
@@ -4888,6 +4900,7 @@ void ViewImplementation::did_request_image_context_menu(Badge<WebContentPage>, G
     m_context_menu_url = navigation.url;
     m_context_menu_navigation = move(navigation);
     m_image_context_menu_bitmap = move(bitmap);
+    m_context_menu_target = { .link_url = {}, .src_url = m_context_menu_url, .media_type = "image"sv, .selection_text = {}, .editable = false }; // Fork hook (extensions)
 
     m_open_in_new_tab_action->set_text("Open Image in New Tab"sv);
     m_copy_url_action->set_text("Copy Image URL"sv);
@@ -4922,6 +4935,7 @@ void ViewImplementation::did_request_media_context_menu(Badge<WebContentPage>, W
     set_context_menu_url_actions_enabled(menu.media_url.has_value());
     m_context_menu_url = move(menu.media_url).value_or({});
     m_context_menu_navigation = move(navigation);
+    m_context_menu_target = { .link_url = {}, .src_url = m_context_menu_url.scheme().is_empty() ? Optional<URL::URL> {} : Optional<URL::URL> { m_context_menu_url }, .media_type = menu.is_video ? "video"sv : "audio"sv, .selection_text = {}, .editable = false }; // Fork hook (extensions)
 
     m_open_in_new_tab_action->set_text(menu.is_video ? "Open Video in New Tab"sv : "Open Audio in new Tab"sv);
     m_copy_url_action->set_text(menu.is_video ? "Copy Video URL"sv : "Copy Audio URL"sv);

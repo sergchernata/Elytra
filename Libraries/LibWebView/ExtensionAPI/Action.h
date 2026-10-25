@@ -24,8 +24,13 @@ public:
     // The extension's button looks different now, or the extension came or went: ask ActionAPI::state_for() again.
     virtual void action_changed(StringView extension_id) = 0;
 
-    // Opens the extension's popup, for the window (the focused one without), as clicking the button would.
-    virtual ErrorOr<void, String> open_popup(StringView extension_id, URL::URL const& popup, Optional<i64> window_id) = 0;
+    enum class ByUser : u8 {
+        No,
+        Yes,
+    };
+    // Opens the extension's popup, for the window (the focused one without): as the user clicked the button or pressed
+    // its keys, or as the extension asked (action.openPopup), which only an active window allows.
+    virtual ErrorOr<void, String> open_popup(StringView extension_id, URL::URL const& popup, Optional<i64> window_id, ByUser) = 0;
 };
 
 // chrome.action, and chrome.commands, whose _execute_action command works the button.
@@ -63,6 +68,7 @@ public:
     void command(StringView extension_id, StringView name, Optional<i64> tab_id, Optional<i64> window_id = {});
 
     virtual void extensions_changed() override;
+    virtual void extension_uninstalled(StringView extension_id) override { m_states.remove(extension_id); }
 
 private:
     struct Values {

@@ -272,6 +272,11 @@ public:
     [[nodiscard]] bool render_blocking() const { return m_render_blocking; }
     void set_render_blocking(bool render_blocking) { m_render_blocking = render_blocking; }
 
+    // Fork hook (extensions): the webRequest requestId, the same across redirects and authentication
+    // (LibWeb/Extensions/WebRequests).
+    Optional<u64> extension_request_id() const { return m_extension_request_id; }
+    void set_extension_request_id(u64 id) { m_extension_request_id = id; }
+
     [[nodiscard]] Vector<URL::URL> const& url_list() const { return m_url_list; }
     [[nodiscard]] Vector<URL::URL>& url_list() { return m_url_list; }
     void set_url_list(Vector<URL::URL> url_list) { m_url_list = move(url_list); }
@@ -510,6 +515,8 @@ private:
     // https://fetch.spec.whatwg.org/#request-render-blocking
     // A request has an associated boolean render-blocking. Unless stated otherwise, it is false.
     bool m_render_blocking { false };
+
+    Optional<u64> m_extension_request_id;
 
     // https://fetch.spec.whatwg.org/#concept-request-url-list
     // A request has an associated URL list (a list of one or more URLs). Unless stated otherwise, it is a list

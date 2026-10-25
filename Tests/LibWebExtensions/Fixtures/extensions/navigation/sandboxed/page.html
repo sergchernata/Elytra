@@ -1,0 +1,6 @@
+<!doctype html>
+<script>
+    let evaluated = "blocked";
+    try { evaluated = eval("'ran'"); } catch (e) {}
+    document.title = JSON.stringify({ origin: String(window.origin), eval: evaluated, chrome: typeof chrome, storage: typeof chrome === "undefined" ? "undefined" : typeof chrome.storage });
+</script>

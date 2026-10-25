@@ -719,6 +719,7 @@ set(SOURCES
     Infra/JSON.cpp
     Extensions/ExtensionBridge.cpp
     Extensions/ExtensionContexts.cpp
+    Extensions/WebRequests.cpp
     Internals/FakeXRDevice.cpp
     Internals/InternalAnimationTimeline.cpp
     Internals/InternalGamepad.cpp

@@ -8,6 +8,8 @@
 
 #include "ExtensionTestHarness.h"
 #include <LibWebCommon/Loader/UserAgent.h>
+#include <LibCore/Timer.h>
+#include <LibWebView/ExtensionAPI/ExtensionAPI.h>
 #include <LibWebView/ExtensionAPI/Management.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/Settings.h>
@@ -89,6 +91,20 @@ void update_event(Harness& harness)
 
     auto report = report_of(harness.view, page(management_id, "lifecycle"sv));
     CHECK_EQ(string_in(report, "events"sv), R"([{"onInstalled":{"reason":"update","previousVersion":"1.0"}}])"sv);
+}
+
+struct RefCountedFunction : RefCounted<RefCountedFunction> {
+    explicit RefCountedFunction(Function<void(bool)> f)
+        : function(move(f))
+    {
+    }
+    Function<void(bool)> function;
+};
+
+Vector<NonnullRefPtr<Core::Timer>>& pending_timers()
+{
+    static auto* timers = new Vector<NonnullRefPtr<Core::Timer>>;
+    return *timers;
 }
 
 struct PermissionPrompt {
@@ -354,7 +370,7 @@ void uninstall_self(Harness& harness)
     Vector<String> asked;
     Vector<String> opened;
     bool confirm = false;
-    runtime().confirm_uninstall = [&](WebView::Extension const& extension, Function<void(bool)> done) {
+    runtime().confirm_uninstall = [&](WebView::Extension const& extension, WebView::Extension const*, Function<void(bool)> done) {
         asked.append(extension.id());
         done(confirm);
         confirm = true;
@@ -377,6 +393,82 @@ void uninstall_self(Harness& harness)
     runtime().management().open_url_in_new_tab = nullptr;
 }
 
+// What asks the user needs the user's gesture in the extension's page, and doesn't pile up questions.
+void prompts_need_a_gesture(Harness& harness)
+{
+    size_t prompts = 0;
+    // The user answers a little later, saying no.
+    auto answer_later = [](Function<void(bool)> answer) {
+        auto shared = make_ref_counted<RefCountedFunction>(move(answer));
+        auto timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(400), [shared] { shared->function(false); });
+        timer->start();
+        pending_timers().append(move(timer));
+    };
+    runtime().request_permissions_prompt = [&](WebView::Extension const&, Vector<String>, Vector<String>, Function<void(bool)> answer) {
+        ++prompts;
+        answer_later(move(answer));
+    };
+
+    WebView::set_user_activation_for_testing([] { return false; });
+    auto report = report_of(harness.view, page(permissions_id, "gesture"sv));
+    CHECK_EQ(string_in(report, "request"sv), "error: This function must be called during a user gesture"sv);
+    CHECK_EQ(prompts, 0u);
+
+    WebView::set_user_activation_for_testing([] { return true; });
+    report = report_of(harness.view, page(permissions_id, "prompts"sv));
+    CHECK_EQ(string_in(report, "while_asking"sv), "error: A permission request is already showing"sv);
+    CHECK_EQ(string_in(report, "first"sv), "false"sv);
+    // Asking again for what the user just refused doesn't ask them.
+    CHECK(!report.get_bool("after_denial"sv).value_or(true));
+    CHECK(!report.get_bool("other_after_denial"sv).value_or(true));
+    CHECK_EQ(prompts, 2u);
+    runtime().request_permissions_prompt = nullptr;
+
+    // management.uninstall of another extension.
+    size_t asked = 0;
+    runtime().confirm_uninstall = [&](WebView::Extension const&, WebView::Extension const*, Function<void(bool)> done) {
+        ++asked;
+        answer_later(move(done));
+    };
+    WebView::set_user_activation_for_testing([] { return false; });
+    report = report_of(harness.view, page(management_id, "uninstall_other"sv));
+    CHECK_EQ(string_in(report, "first"sv), "error: chrome.management.uninstall requires a user gesture."sv);
+    CHECK_EQ(asked, 0u);
+    WebView::set_user_activation_for_testing([] { return true; });
+    report = report_of(harness.view, page(management_id, "uninstall_other"sv));
+    CHECK_EQ(string_in(report, "second"sv), "error: The user is already being asked to remove an extension."sv);
+    CHECK_EQ(string_in(report, "first"sv), "error: User cancelled uninstall of extension."sv);
+    CHECK_EQ(asked, 1u);
+    CHECK(harness.registry.find(other_id));
+    runtime().confirm_uninstall = nullptr;
+    WebView::set_user_activation_for_testing({});
+}
+
+// Uninstalling forgets what the extension stored and was granted: an extension installed later with the same ID
+// (the same one again, or one copying its key) starts afresh.
+void uninstalling_forgets_storage_and_grants(Harness& harness)
+{
+    constexpr auto id = "ofhkpcbnbblidbdoohghmanghnlljfip"sv;
+    MUST(harness.registry.install_unpacked(fixture("uninstall-forgets"sv)));
+    runtime().request_permissions_prompt = [](auto const&, auto, auto, Function<void(bool)> on_answer) { on_answer(true); };
+    auto page = [&](StringView step) { return url(MUST(String::formatted("chrome-extension://{}/page.html?step={}", id, step))); };
+
+    auto report = report_of(harness.view, page("set"sv));
+    CHECK(report.get_bool("granted"sv).value_or(false));
+    CHECK_EQ(report.get_integer<i64>("stored"sv).value_or(0), 1);
+    runtime().request_permissions_prompt = nullptr;
+
+    (void)report_of(harness.view, url("data:text/html,<script>document.title = JSON.stringify({ away: true });</script>"sv));
+    MUST(harness.registry.uninstall(id));
+    CHECK(!FileSystem::exists(ByteString::formatted("{}/{}", storage_directory(harness), id)));
+
+    MUST(harness.registry.install_unpacked(fixture("uninstall-forgets"sv)));
+    report = report_of(harness.view, page("check"sv));
+    CHECK(report.get("stored"sv).has_value() && report.get("stored"sv)->is_null());
+    CHECK(!report.get_bool("alarms"sv).value_or(true));
+    (void)harness.registry.uninstall(id);
+}
+
 }
 
 }
@@ -393,7 +485,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         privacy(harness);
         runtime_functions(harness);
         reload(harness);
+        prompts_need_a_gesture(harness);
         update_event(harness);
         uninstall_self(harness);
+        uninstalling_forgets_storage_and_grants(harness);
     });
 }

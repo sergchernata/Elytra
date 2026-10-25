@@ -114,6 +114,8 @@ public:
     bool represents(CanonicalNavigable const&, WebContentPage const&) const;
     bool page_hosts_any(WebContentPage const&) const;
     bool page_populates_a_history_entry_for_local_file(WebContentPage const&, ByteString const& path) const;
+    // The initiator origin of a history entry for an extension's file the page populates, if it populates one.
+    Optional<Optional<URL::Origin>> requester_of_history_entry_for_extension_file(WebContentPage const&, StringView extension_id, ByteString const& path) const;
     void stop_hosting_in_page(CanonicalNavigable&, NonnullRefPtr<WebContentPage>);
     void release_page_if_unused(NonnullRefPtr<WebContentPage>);
     void end_history_jobs(CanonicalNavigable const&, CanonicalDocument const* populated_document = nullptr);

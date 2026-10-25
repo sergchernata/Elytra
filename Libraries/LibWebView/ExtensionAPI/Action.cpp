@@ -260,7 +260,7 @@ ActionAPI::ActionAPI(ExtensionRuntime& extension_runtime)
             return reply("The extension has no popup"_string);
         if (!m_delegate)
             return reply("Popups can't be opened here"_string);
-        auto result = m_delegate->open_popup(context.extension_id, *current->popup, window_id);
+        auto result = m_delegate->open_popup(context.extension_id, *current->popup, window_id, ExtensionActionDelegate::ByUser::No);
         if (result.is_error())
             return reply(result.release_error());
         reply(JsonValue {});
@@ -366,7 +366,7 @@ void ActionAPI::clicked(StringView extension_id, Optional<i64> tab_id, Optional<
         return;
     if (current->popup.has_value()) {
         if (m_delegate)
-            (void)m_delegate->open_popup(extension_id, *current->popup, window_id);
+            (void)m_delegate->open_popup(extension_id, *current->popup, window_id, ExtensionActionDelegate::ByUser::Yes);
         return;
     }
     runtime().dispatch_event(extension_id, "action.onClicked"sv, JsonArray { Vector<JsonValue> { tab_object(tab_id) } });

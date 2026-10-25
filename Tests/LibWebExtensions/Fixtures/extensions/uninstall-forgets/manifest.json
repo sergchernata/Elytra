@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Forgotten on uninstall",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuxjYKDKaRgbeC5RhIa/RFiWKDJdm+gyZUO/8C1zBnBHLRRUnk/jajyChPkE/jR+DwkhzY2Ch5KJYjEyQPgy61uFfI8WCEPRN6F8sOJqHsrCW4dFCjN7bzbh1QtSF/Ivhqh/jcAHJj4WNlfMUI+DMDNFl9H0bmFstWsLUreQqhuPNF6RH1MdY39GW8Qng0TNpgRA0PLmHq/AK61sk2oCftuXCLIcdQ+9WFx0/Rb7x9/JzYKTs4mftJJOddoABtWVCTUz8Cc9Xqo58+sdValwU5+2ZH+sSvx7+dF81ewfQOmd6E8BVSFZeG3NpEk+J6NcsHNa7861nbuvwq7nI86NpfwIDAQAB",
+    "permissions": ["storage"],
+    "optional_permissions": ["alarms"]
+}

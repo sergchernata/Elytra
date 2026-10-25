@@ -9,6 +9,7 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Extensions/ExtensionBridge.h>
+#include <LibWeb/Extensions/WebRequests.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Page/Page.h>
@@ -45,7 +46,10 @@ void ExtensionBridge::post_message(Utf16String const& message)
 {
     if (m_closed)
         return;
-    m_window->page().client().page_did_post_extension_message(m_context_id, message.to_utf8());
+    auto text = message.to_utf8();
+    // A webRequest listener hears of this process's requests from now on, not once the browser has replied.
+    listener_may_have_been_added(text);
+    m_window->page().client().page_did_post_extension_message(m_context_id, text);
 }
 
 void ExtensionBridge::set_message_handler(WebIDL::CallbackType& handler)

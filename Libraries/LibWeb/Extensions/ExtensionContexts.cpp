@@ -71,11 +71,15 @@ struct InstalledExtension {
     String ui_locale;
     bool allow_file_access { false };
     Vector<ContentScript> content_scripts;
+    // The browser's, as it gives them to the extension's pages.
+    Vector<String> content_security_policies;
 };
 
 struct Context {
     GC::Root<ExtensionBridge> bridge;
     GC::Weak<DOM::Document> document;
+    // The page the browser knows the context by, which its end is reported to even once the document is gone.
+    GC::Weak<Page> page;
     String extension_id;
     // Content scripts' worlds; extension pages use their own, main, world.
     GC::Root<Bindings::WrapperWorld> world;
@@ -152,6 +156,7 @@ void set_installed_extensions(StringView json)
             extension.messages = object.get("messages"sv).value_or(JsonObject {});
             extension.ui_locale = object.get_string("uiLocale"sv).value_or("en"_string);
             extension.allow_file_access = object.get_bool("allowFileAccess"sv).value_or(false);
+            extension.content_security_policies = strings_in(object, "contentSecurityPolicies"sv);
 
             if (auto scripts = object.get_array("contentScripts"sv); scripts.has_value()) {
                 scripts->for_each([&](JsonValue const& script_value) {
@@ -195,16 +200,11 @@ Vector<String> content_security_policies_for(StringView extension_id)
     if (!extension)
         return {};
 
-    // Chrome's (csp_info.cc).
-    auto declared = "script-src 'self';"_string;
-    if (extension->manifest.is_object()) {
-        auto const& manifest = extension->manifest.as_object();
-        if (auto policy = manifest.get_object("content_security_policy"sv); policy.has_value()) {
-            if (auto pages = policy->get_string("extension_pages"sv); pages.has_value())
-                declared = *pages;
-        }
-    }
-    return { move(declared), "script-src 'self' 'wasm-unsafe-eval' 'inline-speculation-rules'; object-src 'self';"_string };
+    // The browser's (Extension::content_security_policies()), which read the manifest's for its version. A list without
+    // them gets Chrome's minimum.
+    if (!extension->content_security_policies.is_empty())
+        return extension->content_security_policies;
+    return { "script-src 'self' 'wasm-unsafe-eval' 'inline-speculation-rules'; object-src 'self';"_string };
 }
 
 static String const& api_source()
@@ -294,16 +294,18 @@ static void start_context(DOM::Document& document, InstalledExtension const& ext
 
     context.bridge = GC::make_root(bridge);
     context.document = document;
+    context.page = document.page();
     context.extension_id = extension.id;
     auto* execution_context = context.execution_context.ptr();
     s_contexts.set(context_id, move(context));
 
     document.page().client().page_did_create_extension_context(context_id, extension.id, MUST(String::from_utf8(context_type)), document.url(), is_top_level(document));
-    // The frame it's in, for the browser to know its tab and frame.
+    // The frame and document it's in, for the browser to know its tab and frame, and to check a content script's.
     if (auto navigable = document.navigable()) {
         JsonObject frame;
         frame.set("type"sv, "frame"sv);
         frame.set("navigable"sv, json_of(navigable->id()));
+        frame.set("document"sv, json_of(document.id()));
         document.page().client().page_did_post_extension_message(context_id, frame.serialized());
     }
     run_script(realm, execution_context, api_source(), "chrome-api.js"sv);
@@ -360,11 +362,24 @@ static Context* content_script_context(DOM::Document& document, InstalledExtensi
 // The URL a document's content scripts are matched with, or nothing when none may run in it.
 static Optional<URL::URL> url_to_match(DOM::Document const& document, ContentScript const& script, InstalledExtension const& extension)
 {
+    // As the browser does (WebView::ExtensionRuntime::creator_url_for_matching): an about:blank or srcdoc document is
+    // matched with the URL of its nearest ancestor of its origin, or else with its origin; one another site made isn't
+    // its parent's.
+    // FIXME: Look at the opener too, and use an opaque origin's precursor, which origins don't keep yet; and the parent
+    //        when it's in another process.
     Optional<URL::URL> creator_url;
-    // FIXME: Use the creator (or opener) when that's not the parent, and the precursor origin when the parent is in
-    //        another process.
-    if (auto parent_document = document.container_document())
-        creator_url = parent_document->url();
+    bool is_about = document.url().scheme() == "about"sv;
+    bool found = false;
+    for (auto ancestor = document.container_document(); ancestor && !found; ancestor = ancestor->container_document()) {
+        if (is_about && !ancestor->origin().is_same_origin(document.origin()))
+            break;
+        if (!ancestor->url().scheme().is_one_of("about"sv, "data"sv, "blob"sv, "filesystem"sv)) {
+            creator_url = ancestor->url();
+            found = true;
+        }
+    }
+    if (!found && is_about && !document.origin().is_opaque())
+        creator_url = URL::Parser::basic_parse(ByteString::formatted("{}/", document.origin().serialize()));
     auto url = WebExtensions::url_for_matching(document.url(), creator_url, script.match_about_blank, script.match_origin_as_fallback);
     if (!url.has_value() || WebExtensions::is_restricted_url(*url, extension.allow_file_access, extension.id.bytes_as_string_view()))
         return {};
@@ -404,7 +419,12 @@ void document_is_ready_to_run_scripts(DOM::Document& document)
 {
     report_navigation(document, "committed"sv);
     auto const& url = document.url();
-    if (url.scheme() == "chrome-extension"sv && document.window()) {
+    // A sandboxed page of the extension's (sandbox.pages) has an opaque origin, and no extension API, as in Chrome.
+    auto const& origin = document.origin();
+    auto has_the_extensions_origin = [&] {
+        return !origin.is_opaque() && origin.scheme() == "chrome-extension"sv && origin.host().serialize() == url.serialized_host();
+    };
+    if (url.scheme() == "chrome-extension"sv && has_the_extensions_origin() && document.window()) {
         if (auto const* extension = find_extension(url.serialized_host())) {
             auto context_type = url.serialize_path() == "/_generated_background_page.html"sv ? "background"sv : "page"sv;
             start_context(document, *extension, context_type, document.window()->principal_realm(), {});
@@ -436,7 +456,8 @@ void document_is_going_away(DOM::Document& document)
         context.bridge->close();
         if (context.world)
             context.world->detach();
-        document.page().client().page_did_destroy_extension_context(id);
+        if (context.page)
+            context.page->client().page_did_destroy_extension_context(id);
     }
 }
 

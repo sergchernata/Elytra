@@ -36,6 +36,8 @@ public:
     {
         return adopt_ref(*new NavigationLoader(is_private, move(request)));
     }
+    // For a history step to the entry: the process populating it echoes its request, but the entry is the UI process's.
+    static NonnullRefPtr<NavigationLoader> create_for_history_step(IsPrivate, Web::HTML::NavigationPopulationRequest, CanonicalSessionHistoryEntry const&);
 
     ~NavigationLoader();
 
@@ -65,6 +67,10 @@ public:
     void move_response_body_to(RequestServerInstance&, Function<void(bool)> completion_steps);
     bool response_body_matches(int request_server_client_id, u64 request_server_request_id) const;
     Web::HTML::NavigationPopulationRequest const& request() const { return m_request; }
+    // The requester the browser reads an extension's file for, when the response is one: the initiator origin the UI
+    // process admitted the navigation with, unless it says otherwise (nothing: the browser itself).
+    void set_extension_file_requester(Optional<URL::Origin> requester) { m_extension_file_requester = move(requester); }
+    Optional<URL::Origin> extension_file_requester() const;
     Web::HTML::NavigationPopulationResult const& result() const;
     Web::HTML::NavigationPopulationResult take_result();
     void reclaim_response_body_after_failed_handoff();
@@ -79,6 +85,7 @@ private:
     }
 
     void determine_the_origin_of_the_response();
+    void refuse_an_extension_origin_the_browser_did_not_give();
     void did_acquire(bool succeeded);
     void set_response_body_callbacks(Requests::Request&);
     void release_response_body();
@@ -86,6 +93,9 @@ private:
     IsPrivate m_is_private { IsPrivate::No };
     Web::HTML::NavigationPopulationRequest m_request;
     Optional<Web::HTML::NavigationPopulationResult> m_result;
+    Optional<Optional<URL::Origin>> m_extension_file_requester;
+    // Whether the response is an extension's file the browser read.
+    bool m_response_is_an_extension_file { false };
     RefPtr<Requests::Request> m_response_body_request;
     RefPtr<HTTP::HeaderList> m_response_header_list;
     RefPtr<RequestServerInstance> m_response_body_request_server;

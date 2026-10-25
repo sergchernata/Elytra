@@ -740,6 +740,10 @@ CanonicalTraversable& CanonicalTraversable::create_a_new_top_level_traversable(W
     //    about base URL: document's about base URL
     // NB: initialHistoryEntry carries targetName, document's about base URL, and the entry's navigation API key and ID.
     auto history_entry = MUST(CanonicalSessionHistoryEntry::create_from_descriptor(initial_history_entry));
+    // NB: The initial entry is about:blank's. One a process says is an extension's file or a local file would be shown
+    //     as the tab's URL, and read again by a history step.
+    if (history_entry->url.scheme() == "chrome-extension"sv || history_entry->url.scheme() == "file"sv)
+        history_entry->url = URL::about_blank();
     history_entry->document_state->document = document;
     history_entry->document_state->initiator_origin = opener.has_value() ? Optional<URL::Origin> { document->origin() } : Optional<URL::Origin> {};
     history_entry->document_state->origin = document->origin();
@@ -1276,6 +1280,18 @@ void CanonicalTraversable::add_history_operation_completion_endpoint(HistoryOper
     operation.completion_endpoints.append(move(endpoint));
 }
 
+// The requester the browser reads an extension's file for in a history step to the entry: none (the browser itself) for
+// a page of the extension it read before, as it read it for an admitted navigation. Otherwise a new opaque origin, which
+// reaches only what the extension makes web accessible to all: a renderer reports an entry's URL, and the initiator
+// origin of an entry it made, so neither is the browser's say-so.
+static Optional<URL::Origin> extension_file_requester_for(CanonicalSessionHistoryEntry const& entry)
+{
+    auto const& held = entry.document_state->held_extension_content;
+    if (held.has_value() && *held == entry.url.serialized_host())
+        return {};
+    return URL::Origin::create_opaque();
+}
+
 void CanonicalTraversable::did_finish_history_navigation_params_creation(WebContentPage& source_page, Web::HTML::CrossProcessId operation_id, Web::HTML::HistoryNavigationPopulation population)
 {
     auto navigable_id = population.request.navigable_id;
@@ -1294,10 +1310,21 @@ void CanonicalTraversable::did_finish_history_navigation_params_creation(WebCont
         did_fail_history_navigation_population(*operation, *changing_navigable);
         return;
     }
+    // NB: Likewise, an extension's URL that is not the entry's would give the process a document of an extension's origin
+    //     the UI process did not admit. The browser reads an extension's file for the entry's initiator origin, which the
+    //     UI process holds (NavigationLoader).
+    auto const& target_url = changing_navigable->target_entry->url;
+    if ((population.request.history_entry.url.scheme() == "chrome-extension"sv || target_url.scheme() == "chrome-extension"sv) && population.request.history_entry.url != target_url) {
+        discard();
+        did_fail_history_navigation_population(*operation, *changing_navigable);
+        return;
+    }
     // The document's sandboxing flags are at least those the UI process snapshots for the navigable.
     population.request.target_snapshot_params.sandboxing_flags |= changing_navigable->navigable().snapshot_target_snapshot_params().sandboxing_flags;
     auto& loader = changing_navigable->population_loader;
-    loader = NavigationLoader::create(source_page.client().is_private(), move(population.request));
+    loader = NavigationLoader::create_for_history_step(source_page.client().is_private(), move(population.request), *changing_navigable->target_entry);
+    if (target_url.scheme() == "chrome-extension"sv)
+        loader->set_extension_file_requester(extension_file_requester_for(*changing_navigable->target_entry));
     loader->did_finish_navigation_params_creation(move(population.result));
     loader->acquire_response_body([this, operation_id, navigable_id](bool succeeded) {
         auto* operation = find_history_operation(operation_id);
@@ -1735,6 +1762,25 @@ bool CanonicalTraversable::page_populates_a_history_entry_for_local_file(WebCont
     return false;
 }
 
+Optional<Optional<URL::Origin>> CanonicalTraversable::requester_of_history_entry_for_extension_file(WebContentPage const& page, StringView extension_id, ByteString const& path) const
+{
+    for (auto const& [operation_id, operation] : m_history_operations) {
+        if (!operation->algorithm)
+            continue;
+        for (auto const& changing_navigable : operation->algorithm->changing_navigables()) {
+            if (!changing_navigable->has_pending_job())
+                continue;
+            auto const& target_entry = *changing_navigable->target_entry;
+            if (target_entry.url.scheme() == "chrome-extension"sv
+                && target_entry.url.serialized_host() == extension_id
+                && target_entry.url.file_path() == path
+                && changing_job_endpoint(*changing_navigable) == &page)
+                return extension_file_requester_for(target_entry);
+        }
+    }
+    return {};
+}
+
 RefPtr<WebContentPage> CanonicalTraversable::changing_job_endpoint(CanonicalNavigable const& navigable, CanonicalDocumentState const& target_document_state) const
 {
     if (auto const& populated_document = target_document_state.populated_document; populated_document.has_value() && populated_document->document->host())
@@ -1905,6 +1951,18 @@ NonnullRefPtr<CanonicalSessionHistoryEntry> CanonicalTraversable::session_histor
     return entry;
 }
 
+// NB: The process hosting the document reports the URL a pushState(), document.open() or fragment navigation gives its
+//     entry. The tab shows it, and a history step to an entry at an extension's URL reads the extension's file, so the
+//     UI process takes one only from a document of the extension's origin, which it holds. Any other URL goes as the
+//     process reports it (the UI process holds a local file's entry by held_local_file_content).
+static bool document_may_take_the_url(CanonicalDocument const& document, URL::URL const& target_url)
+{
+    if (target_url.scheme() != "chrome-extension"sv)
+        return true;
+    auto const& origin = document.origin();
+    return !origin.is_opaque() && origin.is_same_origin(target_url.origin());
+}
+
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigate
 // NB: The page conducting a navigation reports historyEntry once attempting to populate its document is over. The
 //     completion steps, which append the steps finalizing the navigation, run here.
@@ -1928,10 +1986,15 @@ void CanonicalTraversable::did_attempt_to_populate_the_history_entry_document(We
     if (!is_javascript_url_navigation) {
         if (!navigation->history_entry)
             return;
+        // NB: The entry's URL is the one the UI process admitted the navigation to, after the redirects it saw.
+        auto admitted_url = navigation->history_entry->url;
         if (history_entry_descriptor.document_state.id == navigation->history_entry->document_state->id
             && navigation->history_entry->update_from_descriptor(history_entry_descriptor).is_error()) {
             return;
         }
+        auto const& reported_url = navigation->history_entry->url;
+        if (reported_url != admitted_url && (reported_url.scheme() == "chrome-extension"sv || reported_url.scheme() == "file"sv))
+            navigation->history_entry->url = move(admitted_url);
         navigation->history_entry->document_state->save_the_origin_of_the_populated_document();
         return;
     }
@@ -2031,6 +2094,9 @@ void CanonicalTraversable::enqueue_history_operation(Web::HTML::CrossProcessId o
             if (parameters.previous_entry_persisted_state.has_value())
                 update_session_history_entry_persisted_state(*navigable, *parameters.previous_entry_persisted_state);
             target_entry = session_history_entry_for(*navigable, parameters.target_entry);
+            // NB: An extension's URL a document of another origin reports is refused: the entry keeps the URL it had.
+            if (!document_may_take_the_url(navigable->active_document(), target_entry->url))
+                target_entry->url = navigable->active_session_history_entry()->url;
             session_history_changed();
         }
     }

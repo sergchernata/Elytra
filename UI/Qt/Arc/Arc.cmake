@@ -11,6 +11,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/CommandBar.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CustomGlyphs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DownloadsFormat.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ExtensionServices.cpp
     ${CMAKE_CURRENT_LIST_DIR}/Extensions.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FloatingPanel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/LittleArc.cpp

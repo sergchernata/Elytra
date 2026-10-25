@@ -41,6 +41,11 @@ public:
 
     URL::Origin origin() const;
 
+    // The content security policies its pages and workers run under: the manifest's, and Chrome's minimum.
+    Vector<String> content_security_policies() const;
+    // Whether the manifest lists the page (a path starting with "/") as sandboxed.
+    bool is_sandboxed_page(StringView path) const;
+
     // The page the background runs in, when the extension has a background: Chrome's service worker (or MV2's
     // scripts) in a page of its own, at chrome-extension://<id>/_generated_background_page.html.
     static constexpr StringView background_page_path = "/_generated_background_page.html"sv;
@@ -74,9 +79,30 @@ struct WEBVIEW_API InstalledExtension {
     bool enabled { true };
     bool allows_file_access { false };
     UnixDateTime install_time;
+    // An update asked for more than the user agreed to: it stays off until they approve these (as Chrome).
+    Vector<String> permissions_to_approve;
+    Vector<String> sites_to_approve;
 
+    bool needs_approval() const { return !permissions_to_approve.is_empty() || !sites_to_approve.is_empty(); }
     StringView install_type_name() const { return install_type == InstallType::Normal ? "normal"sv : "development"sv; }
 };
+
+// What an extension's permissions let it do, as the browser tells the user (Chrome's permission warnings).
+struct WEBVIEW_API PermissionSummary {
+    bool all_sites { false };
+    Vector<String> sites;           // Every site pattern, once, unless it's all sites.
+    Vector<String> descriptions;    // What its API permissions let it do.
+    Vector<String> undescribed;     // API permissions the browser doesn't know of.
+};
+// What an API permission lets an extension do; nothing for what isn't one the browser knows.
+WEBVIEW_API Optional<StringView> permission_description(StringView permission);
+// Whether the user is asked about the permission (Chrome warns of it); "alarms" or "storage" they aren't.
+WEBVIEW_API bool permission_has_warning(StringView permission);
+// <all_urls>, and *, http or https on every host.
+WEBVIEW_API bool is_all_sites_pattern(StringView);
+WEBVIEW_API PermissionSummary summarize_permissions(ReadonlySpan<String> api_permissions, ReadonlySpan<String> site_patterns);
+// What it asks for on install: its permissions, its host permissions and where its content scripts run.
+WEBVIEW_API PermissionSummary summarize_permissions(WebExtensions::Manifest const&);
 
 class WEBVIEW_API ExtensionRegistry {
 public:
@@ -104,9 +130,16 @@ public:
     Function<void()> on_change;
     // Others to tell, after on_change (the UI).
     void add_change_observer(Function<void()> observer) { m_change_observers.append(move(observer)); }
+    // Told of an extension the user removed, after its files are gone: what's kept for it goes too.
+    void add_uninstall_observer(Function<void(StringView id)> observer) { m_uninstall_observers.append(move(observer)); }
+
+    // Removes a folder and what's in it, never following a link out of it (a link is removed, not what it names).
+    static ErrorOr<void> remove_without_following_links(ByteString const& path);
 
     // Opens a file of an extension for a renderer that asked for it on behalf of the requester.
     ErrorOr<IPC::File> open_file(StringView id, StringView path, Optional<URL::Origin> const& requester) const;
+    // An empty file in place of the one open_file() would give: for a renderer whose fetch the browser answers itself.
+    ErrorOr<IPC::File> open_stand_in_file(StringView id, StringView path, Optional<URL::Origin> const& requester) const;
 
     // Installs: the profile's folder for them, <profile data>/Extensions. CRX installs unpack into <id>/<version>_<n>/
     // there (as Chrome), and Installed.json remembers what's installed. Nothing is installed or remembered without it.
@@ -124,8 +157,10 @@ public:
     // A development install: loads the user's folder where it is, and remembers it by its path.
     ErrorOr<Extension const*> install_unpacked(ByteString const& directory);
 
-    // A disabled extension stays installed, but isn't loaded, served or run.
+    // A disabled extension stays installed, but isn't loaded, served or run. One that needs approval isn't enabled.
     ErrorOr<void> set_enabled(StringView id, bool);
+    // The user agrees to what an update asked for: the extension is turned on.
+    ErrorOr<void> approve_permissions(StringView id);
 
     // Forgets an installed extension, and removes its files when it was installed from a CRX (not an unpacked folder).
     ErrorOr<void> uninstall(StringView id);
@@ -152,7 +187,9 @@ public:
     static Optional<String> extension_id_from_web_store_input(StringView);
 
     // Downloads the extension from the Web Store and installs it (or updates it).
-    void install_from_web_store(StringView id_or_url, Function<void(ErrorOr<Extension const*>)>);
+    // Asks the user whether to install what's downloaded, from its manifest; the install goes ahead on a yes.
+    using ConfirmInstall = Function<void(WebExtensions::Manifest const&, Function<void(bool)>)>;
+    void install_from_web_store(StringView id_or_url, Function<void(ErrorOr<Extension const*>)>, ConfirmInstall = {});
 
     // Asks the Web Store for newer versions of the installed CRX extensions, and installs them.
     struct UpdateResult {
@@ -173,11 +210,12 @@ private:
     ErrorOr<ByteString> private_extensions_directory() const;
 
     void fetch_following_redirects(URL::URL, size_t maximum_size, u32 redirects_left, Function<void(ErrorOr<ByteBuffer>)>);
-    void download_and_install(URL::URL const&, String id, Optional<ByteBuffer> expected_sha256, Function<void(ErrorOr<Extension const*>)>);
+    void download_and_install(URL::URL const&, String id, Optional<ByteBuffer> expected_sha256, Function<void(ErrorOr<Extension const*>)>, ConfirmInstall = {});
 
     HashMap<String, NonnullOwnPtr<Extension>> m_extensions;
     HashTable<String> m_file_access_allowed;
     Vector<Function<void()>> m_change_observers;
+    Vector<Function<void(StringView)>> m_uninstall_observers;
     mutable Optional<String> m_serialized_for_renderers;
 
     Optional<ByteString> m_extensions_directory;

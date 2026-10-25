@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Notifications test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt1MjPqTjNN0VKiN4erK0aErAQ77APJyJScac4/fpq+9vYu65oSW2ZgDNI4Vj3uMmDETrXqxr89fpmISKL49IFgTbsIbzMaNzoCLVJ79cLBmjqzyP6og/PRnlLrq4ngXBYKIznNZD60W99MqaO/XZj2PJr9CcSfvhPxCwhAb8nnvPgyb4LTj0M8Mzna6PmP02cB5YcAB/wKrnUqW+9s35p4aNmlWdWdGqNxq1CWhT+ll2AiPRR9S5Oa+NnX+a+DUbsbCIlL+hQz+TpNoPakixZQ7EXmEUKnueu6UuzrL1uBa9AblXzJ0N7jkC4PIutOLC2rX/+PYv9+kOmMeP0YsCPwIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "permissions": ["notifications", "storage"]
+}

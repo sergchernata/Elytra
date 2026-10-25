@@ -23,6 +23,7 @@
 #include <LibWebView/CanonicalBrowsingContextGroup.h>
 #include <LibWebView/CanonicalDocument.h>
 #include <LibWebView/CanonicalEnvironmentSettingsObject.h>
+#include <LibWebView/CanonicalNavigation.h>
 #include <LibWebView/CanonicalTraversable.h>
 #include <LibWebView/CanonicalWindow.h>
 #include <LibWebView/CookieJar.h>
@@ -809,7 +810,8 @@ void WebContentPage::did_create_child_frame(Web::HTML::CrossProcessId parent_fra
     // https://html.spec.whatwg.org/multipage/document-sequences.html#create-a-new-child-navigable
     // NB: The process creating the navigable reports the entry that initializing it, in step 8, created.
     auto initial_entry = CanonicalSessionHistoryEntry::create_from_descriptor(Web::HTML::create_session_history_entry_descriptor(move(initial_history_entry), 0));
-    if (initial_entry.is_error()) {
+    // NB: Its URL is about:blank. Another of an extension's file, or a local file, would be read by a history step.
+    if (initial_entry.is_error() || initial_entry.value()->url.scheme() == "chrome-extension"sv || initial_entry.value()->url.scheme() == "file"sv) {
         client().did_misbehave("did_create_child_frame"sv, "invalid initial session history entry"sv);
         return;
     }
@@ -935,6 +937,10 @@ static Optional<Web::HTML::PreparedNavigationDescriptor> navigation_from_page(We
     if (!initiator_origin.has_value())
         return {};
     if (navigation.url.scheme() == "file"sv && !may_navigate_to_a_local_file(requesting_client))
+        return {};
+    // NB: The browser reads an extension's file for the source document's origin, so a page's navigation to one names
+    //     its source document.
+    if (navigation.url.scheme() == "chrome-extension"sv && !navigation.source_snapshot_params.fetch_client.has_value())
         return {};
     navigation.initiator_origin_snapshot = initiator_origin.release_value();
     return navigation;
@@ -1486,20 +1492,77 @@ bool WebContentPage::populates_a_navigation_to_local_file(ByteString const& path
     return result;
 }
 
-// FIXME: Also a history entry's, as for local files.
-bool WebContentPage::populates_a_navigation_to_extension_file(StringView extension_id, ByteString const& path) const
+// NB: The initiator origin is the one the UI process admitted the navigation with, or a history entry's.
+Optional<Optional<URL::Origin>> WebContentPage::requester_of_navigation_to_extension_file(StringView extension_id, ByteString const& path) const
 {
-    bool result = false;
+    auto names_the_file = [&](URL::URL const& url) {
+        return url.scheme() == "chrome-extension"sv && url.serialized_host() == extension_id && url.file_path() == path;
+    };
+    Optional<Optional<URL::Origin>> requester;
     traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
         auto navigation = navigable.uncommitted_navigation();
-        result = navigation
-            && navigation->worker() == this
-            && navigation->url.scheme() == "chrome-extension"sv
-            && navigation->url.serialized_host() == extension_id
-            && navigation->url.file_path() == path;
-        return result ? IterationDecision::Break : IterationDecision::Continue;
+        if (!navigation || navigation->worker() != this || !names_the_file(navigation->url))
+            return IterationDecision::Continue;
+        auto const* creating = navigation->state.get_pointer<CanonicalNavigation::CreatingNavigationParams>();
+        if (!creating)
+            return IterationDecision::Continue;
+        requester = creating->loader->extension_file_requester();
+        return IterationDecision::Break;
     });
-    return result;
+    if (requester.has_value())
+        return requester;
+    return traversable().requester_of_history_entry_for_extension_file(*this, extension_id, path);
+}
+
+URL::Origin WebContentPage::hosted_requester(Optional<URL::Origin> const& claimed_requester) const
+{
+    if (!claimed_requester.has_value())
+        return URL::Origin::create_opaque();
+    // An opaque origin has the least a requester can have.
+    if (claimed_requester->is_opaque() && !claimed_requester->is_file_origin())
+        return *claimed_requester;
+    bool is_hosted = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        auto const& origin = document.origin();
+        is_hosted = claimed_requester->is_file_origin() ? origin.is_file_origin() : origin.is_same_origin(*claimed_requester);
+        return is_hosted ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return is_hosted ? *claimed_requester : URL::Origin::create_opaque();
+}
+
+bool WebContentPage::hosts_a_document_with_origin(URL::Origin const& origin) const
+{
+    if (origin.is_opaque())
+        return false;
+    bool found = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        found = document.origin().is_same_origin(origin);
+        return found ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return found;
+}
+
+bool WebContentPage::hosts_a_document_same_site_with(URL::Origin const& origin) const
+{
+    if (origin.is_opaque())
+        return false;
+    bool found = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        found = !document.origin().is_opaque() && document.origin().is_same_site(origin);
+        return found ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return found;
+}
+
+Optional<URL::URL> WebContentPage::url_of_navigation_populated_in(Web::HTML::CrossProcessId navigable_id) const
+{
+    auto navigable = population_worker_navigable(navigable_id);
+    if (!navigable.has_value())
+        return {};
+    auto navigation = navigable->uncommitted_navigation();
+    if (!navigation || navigation->worker() != this)
+        return {};
+    return navigation->url;
 }
 
 void WebContentPage::did_request_file(ByteString path, i32 request_id)
@@ -1534,13 +1597,34 @@ void WebContentPage::did_post_extension_message(u64 context_id, String message)
     Application::extension_runtime().message_received(*this, context_id, message);
 }
 
+ErrorOr<IPC::File> WebContentPage::extension_file_for_renderer(StringView extension_id, ByteString const& path, Optional<URL::Origin> requester) const
+{
+    // Fork hook (extensions): extensions don't run in private windows, nor do their files load there.
+    if (client().is_private() == IsPrivate::Yes)
+        return Error::from_errno(ENOENT);
+    auto const& registry = Application::extension_registry();
+    auto const* extension = registry.find(extension_id);
+    if (!extension)
+        return Error::from_errno(ENOENT);
+
+    // NB: A process the extension's pages run in speaks for the extension, and hosts nothing else.
+    if (client().may_speak_for_extension(extension_id))
+        return registry.open_file(extension_id, path, extension->origin());
+
+    // NB: The browser reads the file a navigation's document is made from itself (NavigationLoader), for the requester
+    //     the UI process holds. The process populating the navigation fetches an empty stand-in: it may host another
+    //     site.
+    if (auto navigation_requester = requester_of_navigation_to_extension_file(extension_id, path); navigation_requester.has_value())
+        return registry.open_stand_in_file(extension_id, path, *navigation_requester);
+
+    // NB: Anything else is for a document the page hosts. The registry gives it only the files the extension makes web
+    //     accessible to its origin, so the renderer names it, but it must be one the page hosts.
+    return registry.open_file(extension_id, path, hosted_requester(requester));
+}
+
 void WebContentPage::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
 {
-    // NB: The registry gives a page that isn't the extension's only the files it makes web accessible to that page. A
-    //     renderer names the requester itself, though: only a process hosting the extension's pages may speak for it.
-    if (!client().may_speak_for_extension(extension_id) && !populates_a_navigation_to_extension_file(extension_id, path) && (!requester.has_value() || (!requester->is_opaque() && requester->scheme() == "chrome-extension"sv && requester->host().serialize() == extension_id)))
-        requester = URL::Origin::create_opaque();
-    auto file = Application::extension_registry().open_file(extension_id, path, requester);
+    auto file = extension_file_for_renderer(extension_id, path, move(requester));
     if (file.is_error())
         async_handle_file_return(file.error().code(), {}, request_id);
     else
@@ -2126,6 +2210,8 @@ void WebContentPage::did_complete_navigation_unload_check(Web::HTML::CrossProces
     population_request.target_snapshot_params.sandboxing_flags |= navigable->snapshot_target_snapshot_params().sandboxing_flags;
     ongoing_navigation->history_entry = MUST(CanonicalSessionHistoryEntry::create_from_descriptor(Web::HTML::create_session_history_entry_descriptor(population_request.history_entry, 0)));
     ongoing_navigation->state = CanonicalNavigation::CreatingNavigationParams { NavigationLoader::create(client().is_private(), move(population_request)) };
+    if (ongoing_navigation->is_browser_ui_navigation)
+        ongoing_navigation->loader()->set_extension_file_requester({});
     async_create_navigation_params(ongoing_navigation->loader()->request());
 
     // Requesting navigation params starts the fetch, so a view's top-level population begins its recorded

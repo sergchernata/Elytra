@@ -49,6 +49,19 @@ steps.deny = async () => {
     await attempt("still_granted", () => has({ permissions: ["idle"], origins: ["https://www.optional.example/*"] }));
 };
 
+// permissions.request needs the user's gesture; while the user is asked, and just after they said no, it doesn't ask again.
+steps.gesture = async () => {
+    await attempt("request", () => chrome.permissions.request({ permissions: ["notifications"] }));
+};
+
+steps.prompts = async () => {
+    const first = chrome.permissions.request({ permissions: ["notifications"] }).then(String, e => `error: ${e.message}`);
+    await attempt("while_asking", () => chrome.permissions.request({ origins: ["https://w.optional.example/*"] }));
+    report.first = await first;
+    await attempt("after_denial", () => chrome.permissions.request({ permissions: ["notifications", "idle"] }));
+    await attempt("other_after_denial", () => chrome.permissions.request({ origins: ["https://x.optional.example/*"] }));
+};
+
 steps.privacy = async () => {
     await attempt("get", privacyState);
     await attempt("set", () => privacy.set({ value: false }));

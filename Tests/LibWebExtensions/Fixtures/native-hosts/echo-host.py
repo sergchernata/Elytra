@@ -6,6 +6,7 @@
 #   {"cmd": "garbage"}                     -> a frame that isn't JSON
 #   {"cmd": "oversized"}                   -> a frame over Chrome's 1 MiB limit
 #   {"cmd": "exit"}                        -> exits at once
+#   {"cmd": "linger"}                      -> {"lingering": true}; once its stdin closes, takes 1.5 seconds to exit
 #   anything else                          -> {"echo": message}
 import json
 import os
@@ -15,6 +16,7 @@ import sys
 stdin = sys.stdin.buffer
 stdout = sys.stdout.buffer
 exit_note = None
+linger = False
 
 
 def frame(payload):
@@ -37,7 +39,7 @@ def read_exactly(count):
 
 
 def serve():
-    global exit_note
+    global exit_note, linger
     while True:
         header = read_exactly(4)
         if header is None:
@@ -63,6 +65,9 @@ def serve():
             stdout.flush()
         elif command == "exit":
             sys.exit(0)
+        elif command == "linger":
+            linger = True
+            send({"lingering": True})
         else:
             send({"echo": message})
 
@@ -72,6 +77,10 @@ try:
 except BrokenPipeError:
     # The browser closed the pipe, as it does with a host that misbehaves.
     sys.exit(0)
+
+if linger:
+    import time
+    time.sleep(1.5)
 
 if exit_note:
     with open(exit_note, "w") as file:
