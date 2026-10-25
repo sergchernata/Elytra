@@ -29,7 +29,7 @@ extensions in `Tests/LibWebExtensions/Fixtures/extensions` in real WebContent pr
 
 ## Not yet
 
-- `notifications`, `contextMenus`, `downloads`, `offscreen`, `scripting.registerContentScripts`, `activeTab`.
+- `offscreen`, `scripting.registerContentScripts`, `activeTab`; incognito access for extensions the user allows (none run in private windows).
 - webRequest and declarativeNetRequest don't see workers' requests, WebSockets, responses Fetch's own memory cache
   serves, or requests the browser process makes; blocking webRequest listeners other than onAuthRequired's (MV3 has
   none); `getMatchedRules` (always empty), `testMatchOutcome`, `updateStaticRules`, response-header conditions; rules

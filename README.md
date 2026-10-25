@@ -38,8 +38,9 @@ in the sidebar's top strip, with their badge and popup, and their keyboard comma
 What works: installing, updating and removing extensions; `chrome-extension://` pages in processes of their own,
 under the extension's CSP; background service workers; content scripts in isolated worlds; and the `runtime`
 (messaging, ports, native messaging), `storage`, `tabs`, `windows`, `scripting`, `webNavigation`, `action`,
-`commands`, `alarms`, `idle`, `i18n`, `permissions`, `management` and `privacy` APIs. Not yet: `webRequest`,
-`declarativeNetRequest`, `notifications`, `contextMenus` and `downloads`. How it fits together:
+`commands`, `alarms`, `idle`, `i18n`, `permissions`, `management`, `privacy`, `webRequest`, `declarativeNetRequest`,
+`notifications`, `contextMenus` and `downloads` APIs. Extensions stay out of private windows. The work has been
+through two adversarial security reviews. How it fits together, and what's left:
 [Documentation/Elytra/WebExtensions.md](Documentation/Elytra/WebExtensions.md).
 
 ## Install
