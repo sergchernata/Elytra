@@ -799,6 +799,11 @@ TEST_CASE(extension_urls_have_the_extension_as_their_origin)
     EXPECT(!page.origin().is_same_origin(other_extension.origin()));
     EXPECT(!page.origin().is_same_site(other_extension.origin()));
 
+    // Only an extension ID names an extension: other hosts, and ports, keep the opaque origin the URL standard gives.
+    EXPECT(URL::Parser::basic_parse("chrome-extension://x:0"sv)->origin().is_opaque());
+    EXPECT(URL::Parser::basic_parse("chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa:80/"sv)->origin().is_opaque());
+    EXPECT(URL::Parser::basic_parse("chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoq/"sv)->origin().is_opaque());
+
     // Blob URLs an extension makes belong to it.
     auto blob = URL::Parser::basic_parse("blob:chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/0b6e4f3c-1d2a-4c55-9e57-1a2b3c4d5e6f"sv).value();
     EXPECT(blob.origin().is_same_origin(page.origin()));

@@ -632,6 +632,8 @@ void WebContentPage::fail_renderer_owned_downloads()
 void WebContentPage::close()
 {
     PictureInPictureManager::the().close_window(*this);
+    if (Application::is_initialized())
+        Application::extension_runtime().page_closed(*this);
     m_is_open = false;
     // NB: Nothing finishes the input this page held, including a page discarded while its process hosts other pages.
     if (m_traversable) {
@@ -1499,6 +1501,21 @@ void WebContentPage::did_request_file(ByteString path, i32 request_id)
         async_handle_file_return(file.error().code(), {}, request_id);
     else
         async_handle_file_return(0, file.release_value(), request_id);
+}
+
+void WebContentPage::did_create_extension_context(u64 context_id, String extension_id, String context_type, URL::URL url, bool is_top_level)
+{
+    Application::extension_runtime().context_created(*this, context_id, move(extension_id), move(context_type), move(url), is_top_level);
+}
+
+void WebContentPage::did_destroy_extension_context(u64 context_id)
+{
+    Application::extension_runtime().context_destroyed(*this, context_id);
+}
+
+void WebContentPage::did_post_extension_message(u64 context_id, String message)
+{
+    Application::extension_runtime().message_received(*this, context_id, message);
 }
 
 void WebContentPage::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)

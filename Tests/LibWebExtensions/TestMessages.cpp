@@ -303,3 +303,15 @@ TEST_CASE(localize_manifest)
     EXPECT_EQ(manifest.action->default_title, "Open 1Password"sv);
     EXPECT_EQ(manifest.command("lock"sv)->description, "Lock"sv);
 }
+
+TEST_CASE(resolved_messages_prefer_the_first_locale_and_fill_in_named_placeholders)
+{
+    WebExtensions::MessageCatalog catalog;
+    MUST(catalog.add_catalog("en_US"sv, R"~({"Color": {"message": "color, $who$", "placeholders": {"who": {"content": "$1"}}}})~"sv));
+    MUST(catalog.add_catalog("en"sv, R"~({"color": {"message": "colour"}, "only_en": {"message": "en"}})~"sv));
+
+    auto messages = catalog.resolved_messages();
+    EXPECT_EQ(messages.size(), 2u);
+    EXPECT_EQ(messages.get("color"sv), "color, $1"sv);
+    EXPECT_EQ(messages.get("only_en"sv), "en"sv);
+}

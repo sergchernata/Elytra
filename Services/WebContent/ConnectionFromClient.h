@@ -109,6 +109,8 @@ private:
     virtual void run_webdriver_user_prompt_handling(Web::PageId page_id, u64 request_id) override;
     virtual void did_handle_webdriver_mouse_event(Web::PageId page_id, u64 request_id) override;
     virtual void connect_to_web_ui(Web::PageId page_id, IPC::TransportHandle handle) override;
+    virtual void set_installed_extensions(Web::PageId page_id, String extensions) override;
+    virtual void deliver_extension_message(Web::PageId page_id, u64 context_id, String message) override;
     virtual void connect_to_request_server(IPC::TransportHandle handle, int client_id) override;
     virtual void connect_to_test_endpoint(IPC::TransportHandle handle) override;
     virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;

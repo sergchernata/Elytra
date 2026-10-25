@@ -717,6 +717,8 @@ set(SOURCES
     IndexedDB/Internal/RequestList.cpp
     Infra/ByteSequences.cpp
     Infra/JSON.cpp
+    Extensions/ExtensionBridge.cpp
+    Extensions/ExtensionContexts.cpp
     Internals/FakeXRDevice.cpp
     Internals/InternalAnimationTimeline.cpp
     Internals/InternalGamepad.cpp
@@ -1126,6 +1128,7 @@ ladybird_lib(LibWeb web EXPLICIT_SYMBOL_EXPORT)
 target_sources(LibWeb PRIVATE $<TARGET_OBJECTS:LibJSObjects>)
 target_compile_definitions(LibWeb PRIVATE LibJS_EXPORTS)
 target_link_libraries(LibWeb PUBLIC LibCompositing LibWebCommon LibJSHeaders)
+target_link_libraries(LibWeb PRIVATE LibWebExtensions)
 
 target_link_libraries(LibWeb PRIVATE LibCore LibCrypto LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibAudio LibMedia LibMediaClient LibWasm LibXML LibURL LibTLS LibRequests LibGC LibImageDecoderClient LibThreading LibXml2::LibXml2)
 

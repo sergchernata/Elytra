@@ -1,0 +1,12 @@
+{
+    "manifest_version": 3,
+    "name": "Content script test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3Ae+t5i0/oM2fK/xOhSVm79aWHQHbtHKNvchY1RN0iH8rKdjOXqtzpuwysrGb0bTlBsP9I4eTVoPV34P3V+xcCTsnib++RikqwXoTHcS7Ocyt9ky3VDwhd3B0k6WKeau2hRrqkS+ylQKEBlYe+KpY4OETkvrcnzqnnlBpql8++PCymJtDVnZgJIkraLInwIrMxSeo99jTifUvtRqe8eIFSp9wzR9HTHZovP3NtsJ7i9Z1zk/72/WpcIn4LrPu5JxfQ8FvBAI8kQyrPpovkpzR7nUOoOndQzpyv1LoDjDwK/GxETa7npCf59gnH1WWaDtnykYzggCBRUQJzBtbUYDdQIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "content_scripts": [
+        { "matches": ["file:///*"], "js": ["start.js"], "run_at": "document_start", "all_frames": true },
+        { "matches": ["file:///*"], "js": ["main-world.js"], "run_at": "document_start", "world": "MAIN" },
+        { "matches": ["file:///*"], "exclude_matches": ["file:///*/excluded.html"], "js": ["end.js"], "run_at": "document_end" }
+    ]
+}

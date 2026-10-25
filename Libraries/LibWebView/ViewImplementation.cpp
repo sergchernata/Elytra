@@ -1332,6 +1332,7 @@ void ViewImplementation::send_preferences_to_page(WebContentPage& page)
     page.async_set_spell_checking_available(Application::the().spell_checker() != nullptr);
     send_geolocation_emulated_position(page);
     page.async_set_has_picture_in_picture_support(Application::the().supports_picture_in_picture());
+    page.async_set_installed_extensions(Application::extension_registry().serialize_for_renderers());
 }
 
 void ViewImplementation::notify_cookies_changed(HashTable<String> const& changed_domains, ReadonlySpan<HTTP::Cookie::Cookie> page_cookies, ReadonlySpan<HTTP::Cookie::Cookie> host_cookies)

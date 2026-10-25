@@ -32,6 +32,7 @@
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibUnicode/TimeZone.h>
+#include <LibWeb/Extensions/ExtensionContexts.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
@@ -419,6 +420,16 @@ void ConnectionFromClient::connect_to_web_ui(Web::PageId page_id, IPC::Transport
         if (auto result = page->connect_to_web_ui(move(handle)); result.is_error())
             dbgln("Unable to connect to the WebUI host: {}", result.error());
     }
+}
+
+void ConnectionFromClient::set_installed_extensions(Web::PageId, String extensions)
+{
+    Web::Extensions::set_installed_extensions(extensions);
+}
+
+void ConnectionFromClient::deliver_extension_message(Web::PageId, u64 context_id, String message)
+{
+    Web::Extensions::deliver_message(context_id, message);
 }
 
 void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)

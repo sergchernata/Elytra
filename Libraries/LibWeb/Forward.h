@@ -910,6 +910,12 @@ class XRTest;
 
 }
 
+namespace Web::Extensions {
+
+class ExtensionBridge;
+
+}
+
 namespace Web::IntersectionObserver {
 
 class IntersectionObserver;

@@ -45,6 +45,10 @@ public:
     Vector<String> const& loaded_locales() const { return m_loaded_locales; }
     bool is_empty() const { return m_catalogs.is_empty(); }
 
+    // Every message, lowercase name -> message with named placeholders replaced, the most preferred locale's winning.
+    // Pages answer chrome.i18n.getMessage from these, filling in $1..$9 themselves.
+    HashMap<String, String> resolved_messages() const;
+
 private:
     Optional<String> lookup(StringView lowercase_name) const;
 

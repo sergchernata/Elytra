@@ -1,0 +1,11 @@
+callback ExtensionMessageHandler = undefined (DOMString message);
+
+// What an extension's chrome.* API talks to the browser through. Only extension contexts get one, and the API script
+// takes it out of reach of everything else.
+[Exposed=Nobody]
+interface ExtensionBridge {
+    readonly attribute DOMString info;
+    undefined postMessage(DOMString message);
+    undefined setMessageHandler(ExtensionMessageHandler handler);
+    ShadowRoot? openOrClosedShadowRoot(Element element);
+};

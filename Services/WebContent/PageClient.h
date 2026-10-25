@@ -381,6 +381,9 @@ private:
     virtual void page_did_change_accessibility_tree() override;
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot) override;
     virtual void received_message_from_web_ui(Utf16String const& name, JS::Value data) override;
+    virtual void page_did_create_extension_context(u64 context_id, String const& extension_id, String const& context_type, URL::URL const& url, bool is_top_level) override;
+    virtual void page_did_destroy_extension_context(u64 context_id) override;
+    virtual void page_did_post_extension_message(u64 context_id, String const& message) override;
     virtual void page_did_block_resource() override;
     virtual void page_did_start_network_request(u64 request_id, URL::URL const&, ByteString const&, Vector<HTTP::Header> const&, ReadonlyBytes, Optional<String>, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority) override;
     virtual void page_did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String>, Vector<HTTP::Header> const&, Requests::CacheState) override;

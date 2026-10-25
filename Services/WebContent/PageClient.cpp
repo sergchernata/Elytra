@@ -2196,6 +2196,21 @@ void PageClient::received_message_from_web_ui(Utf16String const& name, JS::Value
         m_web_ui->received_message_from_web_ui(name, data);
 }
 
+void PageClient::page_did_create_extension_context(u64 context_id, String const& extension_id, String const& context_type, URL::URL const& url, bool is_top_level)
+{
+    client().async_did_create_extension_context(m_id, context_id, extension_id, context_type, url, is_top_level);
+}
+
+void PageClient::page_did_destroy_extension_context(u64 context_id)
+{
+    client().async_did_destroy_extension_context(m_id, context_id);
+}
+
+void PageClient::page_did_post_extension_message(u64 context_id, String const& message)
+{
+    client().async_did_post_extension_message(m_id, context_id, message);
+}
+
 void PageClient::page_did_block_resource()
 {
     client().async_did_block_resource(id());

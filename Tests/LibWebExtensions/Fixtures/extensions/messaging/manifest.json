@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Messaging test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3vz5GbvxC/kCricvWUk8Rs8HzeOmsHn9NhumRedw71TeuNO0g3PmHIZ2r/EEkFLKD1V9BFW9WAy5Et0mU7/xb5KUY5YT708a+HkSJyExJtqdZomoLI5UUP0/NOqc7xUAeLrm8Fyi5bUO7xrqMbJKx6nT3USNa4ew5PiZkuvBo5WM1i7NdSKWPznMOYt/u1NhwAycVjEYWXSwuHgdnWUNBbfpx3WHAPGbZXXdgqOw/fcJKY8lOzM42bbZerMElZoUaHckbjMMcjy8OcoSYn3vh+fp8D5WQFAamxgcoQxRniLI1eZjesmVR5GxhQ1bSp7m1gJBx9p3c5Ji8J5J1JRYwwIDAQAB",
+    "permissions": ["storage"],
+    "background": { "service_worker": "background/background.js", "type": "module" }
+}

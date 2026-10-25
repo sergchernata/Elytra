@@ -104,6 +104,7 @@
 #include <LibWeb/DOM/CustomEvent.h>
 #include <LibWeb/DOM/DOMImplementation.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Extensions/ExtensionContexts.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/DocumentObserver.h>
 #include <LibWeb/DOM/DocumentOrShadowRoot.h>
@@ -5041,6 +5042,9 @@ void Document::update_readiness(HTML::DocumentReadyState readiness_value)
 
     // 2. Set document's current document readiness to readinessValue.
     m_readiness = readiness_value;
+
+    // AD-HOC: Extensions' content scripts run at document_end and document_idle.
+    Extensions::document_readiness_changed(*this, readiness_value);
     set_rendering_pending(*this, RenderingPendingReason::DocumentLoads, readiness_value != HTML::DocumentReadyState::Complete);
 
     if (readiness_value != HTML::DocumentReadyState::Loading) {
@@ -6389,6 +6393,8 @@ void Document::run_unloading_cleanup_steps()
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document
 void Document::destroy()
 {
+    Extensions::document_is_going_away(*this);
+
     // FIXME: 1. Assert: this is running as part of a task queued on document's relevant agent's event loop.
 
     // 2. Abort document.
@@ -6918,6 +6924,8 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
 
 void Document::did_stop_being_active_document_in_navigable()
 {
+    Extensions::document_is_going_away(*this);
+
     stop_compositor_animation_timers();
     tear_down_layout_tree();
 
@@ -7919,6 +7927,8 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
 
 void Document::set_ready_to_run_scripts()
 {
+    if (!m_ready_to_run_scripts)
+        Extensions::document_is_ready_to_run_scripts(*this);
     m_ready_to_run_scripts = true;
     if (auto callback = m_deferred_parser_start) {
         m_deferred_parser_start = nullptr;

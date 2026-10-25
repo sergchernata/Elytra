@@ -224,6 +224,16 @@ Optional<String> MessageCatalog::lookup(StringView lowercase_name) const
     return {};
 }
 
+HashMap<String, String> MessageCatalog::resolved_messages() const
+{
+    HashMap<String, String> messages;
+    for (auto const& catalog : m_catalogs) {
+        for (auto const& [name, message] : catalog)
+            messages.ensure(name, [&] { return message; });
+    }
+    return messages;
+}
+
 Optional<String> MessageCatalog::get_message(StringView name, Vector<String> const& substitutions) const
 {
     if (substitutions.size() > 9)

@@ -211,6 +211,9 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
 
 Application::~Application()
 {
+    // Extensions' background views go first: closing a view needs the rest of the application.
+    m_extension_runtime.shut_down();
+
 #if !defined(AK_OS_WINDOWS)
     // No event loop runs the handlers during teardown, so a signal from here on takes its default action again.
     for (auto handler : m_session_signal_handlers)
@@ -619,6 +622,30 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     auto platform_languages = enable_test_mode ? Vector<String> {} : platform_preferred_languages();
     m_settings = make<Settings>(Settings::create(LexicalPath::join(profile().paths().config, "Settings.json"sv).string(), move(platform_languages)));
     m_bookmark_store = make<BookmarkStore>(BookmarkStore::create(LexicalPath::join(profile().paths().config, "Bookmarks.json"sv).string()));
+
+    // Extensions: page processes learn of a change at once, and new pages as they start (send_preferences_to_page()).
+    m_extension_runtime.create_background_view = []() -> OwnPtr<ViewImplementation> {
+        auto theme_path = LexicalPath::join(s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
+        auto theme = Gfx::load_system_theme(theme_path.string());
+        if (theme.is_error()) {
+            dbgln("Extensions: Can't load the theme for a background page: {}", theme.error());
+            return {};
+        }
+        return HeadlessWebView::create(theme.release_value(), { 800, 600 });
+    };
+    m_extension_registry.on_change = [] {
+        auto extensions = extension_registry().serialize_for_renderers();
+        WebContentClient::for_each_client([&](WebContentClient& client) {
+            client.for_each_page([&](WebContentPage& page) {
+                page.async_set_installed_extensions(extensions);
+                return IterationDecision::Continue;
+            });
+            return IterationDecision::Continue;
+        });
+        extension_runtime().extensions_changed();
+    };
+    if (m_browser_options.disable_sql_database == DisableSQLDatabase::No)
+        m_extension_runtime.set_storage_directory(LexicalPath::join(profile().paths().data, "Extensions"sv, "Storage"sv).string());
 
     if (!dns_server_port.has_value())
         dns_server_port = use_dns_over_tls ? 853 : 53;

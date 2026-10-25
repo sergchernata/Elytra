@@ -918,6 +918,11 @@ public:
 
     virtual void received_message_from_web_ui([[maybe_unused]] Utf16String const& name, [[maybe_unused]] JS::Value data) { }
 
+    // Extension contexts (LibWeb/Extensions): their start and end, and their messages to the browser.
+    virtual void page_did_create_extension_context([[maybe_unused]] u64 context_id, [[maybe_unused]] String const& extension_id, [[maybe_unused]] String const& context_type, [[maybe_unused]] URL::URL const& url, [[maybe_unused]] bool is_top_level) { }
+    virtual void page_did_destroy_extension_context([[maybe_unused]] u64 context_id) { }
+    virtual void page_did_post_extension_message([[maybe_unused]] u64 context_id, [[maybe_unused]] String const& message) { }
+
     virtual bool is_headless() const = 0;
 
     virtual bool is_svg_page_client() const { return false; }

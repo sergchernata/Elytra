@@ -254,6 +254,9 @@ private:
     virtual void did_change_picture_in_picture_video_size(Gfx::IntSize video_size) override;
     virtual void did_change_picture_in_picture_player_controls_visibility(bool shown) override;
     virtual void did_request_file(ByteString path, i32 request_id) override;
+    virtual void did_create_extension_context(u64 context_id, String extension_id, String context_type, URL::URL url, bool is_top_level) override;
+    virtual void did_destroy_extension_context(u64 context_id) override;
+    virtual void did_post_extension_message(u64 context_id, String message) override;
     virtual void did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id) override;
     virtual void did_request_color_picker(Color current_color) override;
     virtual void did_request_geolocation_position(u64 request_id) override;
