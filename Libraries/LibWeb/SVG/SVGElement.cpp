@@ -114,6 +114,8 @@ static ReadonlySpan<NamedPropertyID> attribute_style_properties()
     static auto const& properties = *new Array {
         // FIXME: The `fill` attribute and CSS `fill` property are not the same! But our support is limited enough that they are equivalent for now.
         NamedPropertyID(CSS::PropertyID::Fill),
+        NamedPropertyID(CSS::PropertyID::AlignmentBaseline),
+        NamedPropertyID(CSS::PropertyID::BaselineShift),
         // FIXME: The `stroke` attribute and CSS `stroke` property are not the same! But our support is limited enough that they are equivalent for now.
         NamedPropertyID(CSS::PropertyID::ClipPath),
         NamedPropertyID(CSS::PropertyID::ClipRule),
@@ -422,6 +424,7 @@ void SVGElement::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_class_name_animated_string);
     visitor.visit(m_reflected_attribute_cache);
+    visitor.visit(m_reflected_enumeration_cache);
 }
 
 void SVGElement::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
@@ -734,6 +737,13 @@ GC::Ref<SVGAnimatedLength> SVGElement::svg_animated_length_for_attribute(Utf16Fl
     auto animated_length = SVGAnimatedLength::create(base_length, anim_length);
     m_reflected_attribute_cache.set(attribute_name, animated_length);
     return animated_length;
+}
+
+GC::Ref<SVGAnimatedEnumeration> SVGElement::svg_animated_enumeration_for_attribute(Utf16FlyString const& attribute_name, ReadonlySpan<SVGAnimatedEnumeration::Keyword> keywords, u16 initial_value)
+{
+    return m_reflected_enumeration_cache.ensure(attribute_name, [&] {
+        return SVGAnimatedEnumeration::create(*this, attribute_name, keywords, initial_value);
+    });
 }
 
 }

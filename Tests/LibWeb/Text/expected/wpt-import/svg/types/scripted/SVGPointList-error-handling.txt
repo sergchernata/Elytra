@@ -1,0 +1,21 @@
+Harness status: OK
+
+Found 16 tests
+
+16 Pass
+Pass	polyline with an odd number of coordinates drops the last one and keeps the rest
+Pass	polyline whose points value begins with a non-numeric token renders nothing
+Pass	polyline whose points value begins with a separator renders nothing
+Pass	polyline with a points value of a single separator renders nothing
+Pass	polyline with an empty points value renders nothing
+Pass	polyline with a whitespace-only points value renders nothing
+Pass	polyline with no points attribute renders nothing
+Pass	polyline with a points value in error does not rewrite the content attribute
+Pass	polygon with an odd number of coordinates drops the last one and keeps the rest
+Pass	polygon whose points value begins with a non-numeric token renders nothing
+Pass	polygon whose points value begins with a separator renders nothing
+Pass	polygon with a points value of a single separator renders nothing
+Pass	polygon with an empty points value renders nothing
+Pass	polygon with a whitespace-only points value renders nothing
+Pass	polygon with no points attribute renders nothing
+Pass	polygon with a points value in error does not rewrite the content attribute

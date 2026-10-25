@@ -10,14 +10,21 @@
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use libcompositing_rust::display_list::canvas_2d_recorder::{AlphaType, Transport};
+use libcompositing_rust::display_list::canvas_2d_recorder::{AlphaType, ColorSpace, Transport};
 use libcompositing_rust::display_list::commands::{CanvasId, FontResourceId, ImageFrameResourceId};
 use libgfx_rust::image_frame::ImageFrameHandle;
 use libgfx_rust::{IntRect, IntSize};
 
 unsafe extern "C" {
     fn web_canvas_2d_transport_unref(transport: *mut c_void);
-    fn web_canvas_2d_transport_create_context(transport: *mut c_void, width: i32, height: i32, alpha: bool) -> bool;
+    fn web_canvas_2d_transport_create_context(
+        transport: *mut c_void,
+        width: i32,
+        height: i32,
+        alpha: bool,
+        will_read_frequently: bool,
+        color_space: ColorSpace,
+    ) -> bool;
     fn web_canvas_2d_transport_canvas_id(transport: *const c_void, out_canvas_id: *mut u64) -> bool;
     fn web_canvas_2d_transport_destroy_context(transport: *mut c_void);
     fn web_canvas_2d_transport_append_command(transport: *mut c_void, record: ak::Span<'_, u8>);
@@ -34,11 +41,12 @@ unsafe extern "C" {
         width: i32,
         height: i32,
         alpha_type: AlphaType,
+        color_space: ColorSpace,
     ) -> *mut c_void;
     fn web_canvas_2d_bitmap_ref(bitmap: *mut c_void);
     fn web_canvas_2d_bitmap_unref(bitmap: *mut c_void);
     fn web_canvas_2d_bitmap_size_in_bytes(bitmap: *mut c_void) -> usize;
-    fn web_canvas_2d_image_frame_from_bitmap(bitmap: *mut c_void) -> *mut c_void;
+    fn web_canvas_2d_image_frame_from_bitmap(bitmap: *mut c_void, color_space: ColorSpace) -> *mut c_void;
     fn web_canvas_2d_bitmap_unpremultiplied_rgba_pixels(
         bitmap: *mut c_void,
         out_pixels: *mut *const u8,
@@ -77,9 +85,9 @@ impl Bitmap {
         bitmap
     }
 
-    /// A frame of the bitmap, which the frame keeps alive.
-    pub(crate) fn into_image_frame(self) -> ImageFrameHandle {
-        let frame = unsafe { web_canvas_2d_image_frame_from_bitmap(self.into_raw()) };
+    /// A frame of the bitmap, whose pixels are in the color space, which the frame keeps alive.
+    pub(crate) fn into_image_frame(self, color_space: ColorSpace) -> ImageFrameHandle {
+        let frame = unsafe { web_canvas_2d_image_frame_from_bitmap(self.into_raw(), color_space) };
         // SAFETY: LibWeb hands over a frame that it allocated with new, which took over the reference to the bitmap.
         unsafe { ImageFrameHandle::adopt(frame) }
     }
@@ -157,8 +165,17 @@ impl Transport for CppTransport {
     type VideoFrameHold = LentVideoFrameHold;
     type Bitmap = Bitmap;
 
-    fn create_context(&self, size: IntSize, alpha: bool) -> bool {
-        unsafe { web_canvas_2d_transport_create_context(self.as_ptr(), size.width, size.height, alpha) }
+    fn create_context(&self, size: IntSize, alpha: bool, will_read_frequently: bool, color_space: ColorSpace) -> bool {
+        unsafe {
+            web_canvas_2d_transport_create_context(
+                self.as_ptr(),
+                size.width,
+                size.height,
+                alpha,
+                will_read_frequently,
+                color_space,
+            )
+        }
     }
 
     fn canvas_id(&self) -> Option<CanvasId> {
@@ -198,9 +215,17 @@ impl Transport for CppTransport {
         unsafe { web_canvas_2d_transport_flush(self.as_ptr()) };
     }
 
-    fn read_back_pixels(&self, rect: IntRect, alpha_type: AlphaType) -> Option<Bitmap> {
+    fn read_back_pixels(&self, rect: IntRect, alpha_type: AlphaType, color_space: ColorSpace) -> Option<Bitmap> {
         let bitmap = unsafe {
-            web_canvas_2d_transport_read_back_pixels(self.as_ptr(), rect.x, rect.y, rect.width, rect.height, alpha_type)
+            web_canvas_2d_transport_read_back_pixels(
+                self.as_ptr(),
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                alpha_type,
+                color_space,
+            )
         };
         NonNull::new(bitmap).map(Bitmap)
     }

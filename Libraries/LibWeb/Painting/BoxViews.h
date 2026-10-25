@@ -44,6 +44,7 @@ WEB_API CSSPixels content_height(Layout::Node const&);
 WEB_API CSSPixels border_box_width(Layout::Node const&);
 WEB_API CSSPixels border_box_height(Layout::Node const&);
 WEB_API BoxModelMetrics box_model(Layout::Node const&);
+WEB_API Optional<CSSPixels> anchor_resolved_size(Layout::Node const&, CSS::PropertyID);
 WEB_API CSSPixelRect transform_reference_box(Layout::Node const&);
 WEB_API Optional<CSSPixelRect> scrollable_overflow_rect(Layout::Node const&);
 WEB_API bool has_scrollable_overflow(Layout::Node const&);
@@ -68,7 +69,7 @@ WEB_API Compositing::ContextRef accumulated_visual_context(Layout::Node const&);
 WEB_API Compositing::ContextRef accumulated_visual_context_for_descendants(Layout::Node const&);
 WEB_API Compositing::SpatialNodeIndex own_scroll_node_index(Layout::Node const&);
 
-WEB_API Gfx::Path const* committed_svg_path(Layout::Node const&);
+WEB_API Optional<Gfx::FloatRect> committed_svg_path_bounding_box(Layout::Node const&);
 WEB_API Vector<Layout::RustFFI::FfiSvgTextCharacterCell> svg_text_character_cells(Layout::Node const&);
 WEB_API CSSPixelSize svg_viewport_size(Layout::Node const&);
 WEB_API Optional<Gfx::AffineTransform> svg_viewport_transform(Layout::Node const&);

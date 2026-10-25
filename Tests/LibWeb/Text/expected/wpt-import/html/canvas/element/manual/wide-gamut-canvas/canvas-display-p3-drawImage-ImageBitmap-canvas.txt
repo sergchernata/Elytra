@@ -1,0 +1,21 @@
+Harness status: OK
+
+Found 16 tests
+
+16 Pass
+Pass	Source srgb, destination display-p3, color 255,0,0,255, cropSource=false
+Pass	Source srgb, destination display-p3, color 255,0,0,255, cropSource=true
+Pass	Source srgb, destination display-p3, color 255,0,0,204, cropSource=false
+Pass	Source srgb, destination display-p3, color 255,0,0,204, cropSource=true
+Pass	Source srgb, destination display-p3, color 187,0,0,255, cropSource=false
+Pass	Source srgb, destination display-p3, color 187,0,0,255, cropSource=true
+Pass	Source srgb, destination display-p3, color 187,0,0,204, cropSource=false
+Pass	Source srgb, destination display-p3, color 187,0,0,204, cropSource=true
+Pass	Source display-p3, destination srgb, color 255,0,0,255, cropSource=false
+Pass	Source display-p3, destination srgb, color 255,0,0,255, cropSource=true
+Pass	Source display-p3, destination srgb, color 255,0,0,204, cropSource=false
+Pass	Source display-p3, destination srgb, color 255,0,0,204, cropSource=true
+Pass	Source display-p3, destination srgb, color 187,0,0,255, cropSource=false
+Pass	Source display-p3, destination srgb, color 187,0,0,255, cropSource=true
+Pass	Source display-p3, destination srgb, color 187,0,0,204, cropSource=false
+Pass	Source display-p3, destination srgb, color 187,0,0,204, cropSource=true

@@ -438,6 +438,7 @@ set(SOURCES
     HTML/Canvas/Canvas2DContextBase.cpp
     HTML/Canvas/CanvasHost.cpp
     HTML/Canvas/CanvasDrawImage.cpp
+    HTML/Canvas/PredefinedColorSpace.cpp
     HTML/Canvas/RemoteCanvas2DTransportFFI.cpp
     HTML/Canvas/SerializeBitmap.cpp
     HTML/CanvasRenderingContext2D.cpp
@@ -854,12 +855,16 @@ set(SOURCES
     SVG/SMILAnimation.cpp
     SVG/SMILTimeContainer.cpp
     SVG/SVGAElement.cpp
+    SVG/SVGAngle.cpp
+    SVG/SVGAnimatedAngle.cpp
+    SVG/SVGAnimatedBoolean.cpp
     SVG/SVGAnimatedEnumeration.cpp
     SVG/SVGAnimatedInteger.cpp
     SVG/SVGAnimatedLength.cpp
     SVG/SVGAnimatedLengthList.cpp
     SVG/SVGAnimatedNumber.cpp
     SVG/SVGAnimatedNumberList.cpp
+    SVG/SVGAnimatedPreserveAspectRatio.cpp
     SVG/SVGAnimatedRect.cpp
     SVG/SVGAnimatedString.cpp
     SVG/SVGAnimatedTransformList.cpp
@@ -877,7 +882,10 @@ set(SOURCES
     SVG/SVGFEColorMatrixElement.cpp
     SVG/SVGFEComponentTransferElement.cpp
     SVG/SVGFECompositeElement.cpp
+    SVG/SVGFEConvolveMatrixElement.cpp
+    SVG/SVGFEDiffuseLightingElement.cpp
     SVG/SVGFEDisplacementMapElement.cpp
+    SVG/SVGFEDistantLightElement.cpp
     SVG/SVGFEDropShadowElement.cpp
     SVG/SVGFEFloodElement.cpp
     SVG/SVGFEFuncAElement.cpp
@@ -890,6 +898,9 @@ set(SOURCES
     SVG/SVGFEMergeNodeElement.cpp
     SVG/SVGFEMorphologyElement.cpp
     SVG/SVGFEOffsetElement.cpp
+    SVG/SVGFEPointLightElement.cpp
+    SVG/SVGFESpecularLightingElement.cpp
+    SVG/SVGFESpotLightElement.cpp
     SVG/SVGFETurbulenceElement.cpp
     SVG/SVGFilterElement.cpp
     SVG/SVGFilterPrimitiveStandardAttributes.cpp
@@ -906,6 +917,7 @@ set(SOURCES
     SVG/SVGLinearGradientElement.cpp
     SVG/SVGLineElement.cpp
     SVG/SVGList.cpp
+    SVG/SVGMarkerElement.cpp
     SVG/SVGMaskElement.cpp
     SVG/SVGMetadataElement.cpp
     SVG/SVGMPathElement.cpp
@@ -913,13 +925,16 @@ set(SOURCES
     SVG/SVGNumberList.cpp
     SVG/SVGPathElement.cpp
     SVG/SVGPatternElement.cpp
+    SVG/SVGPointList.cpp
     SVG/SVGPolygonElement.cpp
     SVG/SVGPolylineElement.cpp
+    SVG/SVGPreserveAspectRatio.cpp
     SVG/SVGRadialGradientElement.cpp
     SVG/SVGRectElement.cpp
     SVG/SVGScriptElement.cpp
     SVG/SVGSetElement.cpp
     SVG/SVGStopElement.cpp
+    SVG/SVGStringList.cpp
     SVG/SVGStyleElement.cpp
     SVG/SVGSVGElement.cpp
     SVG/SVGSwitchElement.cpp

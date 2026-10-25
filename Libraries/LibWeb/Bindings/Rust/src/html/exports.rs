@@ -57,7 +57,7 @@ pub unsafe extern "C" fn web_image_data_create(
     // SAFETY: The caller passes the live VM and a live realm.
     let (vm, realm) = unsafe { realm_arguments(vm, realm) };
     let mut cx = CallContext::new(vm, realm);
-    let result = ImageData::create(&mut cx, width, height, None).map(|image_data| {
+    let result = ImageData::create(&mut cx, width, height, None, None).map(|image_data| {
         *out_image_data = cell_into_abi(image_data);
         Value::UNDEFINED
     });
@@ -89,6 +89,17 @@ pub unsafe extern "C" fn web_image_data_height(image_data: *mut c_void) -> u32 {
 pub unsafe extern "C" fn web_image_data_is_detached(image_data: *mut c_void) -> bool {
     // SAFETY: The caller passes a live cell.
     unsafe { object_from_abi::<ImageData>(image_data) }.is_detached()
+}
+
+/// The colorSpace of the ImageData, as the underlying value of a Web::Bindings::PredefinedColorSpace.
+///
+/// # Safety
+///
+/// `image_data` must be a live cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_data_color_space(image_data: *mut c_void) -> u8 {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<ImageData>(image_data) }.predefined_color_space() as u8
 }
 
 /// The first byte of the pixels of the ImageData, or null if its buffer is detached or its data has no room for them.

@@ -4530,14 +4530,14 @@ pub(crate) unsafe fn drive_property_computation(
                     clear_longhand_bit(&mut inherited_words, prop::OVERFLOW_Y);
                 }
             }
-        } else if property_id == prop::TEXT_ALIGN
+        } else if matches!(property_id, prop::TEXT_ALIGN | prop::TEXT_ALIGN_LAST)
             && let StyleValueData::Keyword { keyword: text_align } = value_data
         {
             let (has_parent_with_computed_values, parent_text_align, parent_direction_is_ltr) =
                 if let Some(snapshot) = snapshot {
-                    let parent_text_align = match snapshot.value(prop::TEXT_ALIGN) {
+                    let parent_text_align = match snapshot.value(property_id) {
                         Some(StyleValueData::Keyword { keyword }) => *keyword,
-                        _ => unreachable!("parent text-align must be a keyword"),
+                        _ => unreachable!("parent text-align and text-align-last must be keywords"),
                     };
                     let parent_direction_is_ltr = match snapshot.value(prop::DIRECTION) {
                         Some(StyleValueData::Keyword {
@@ -4549,9 +4549,11 @@ pub(crate) unsafe fn drive_property_computation(
                 } else {
                     (false, 0, true)
                 };
+            // https://drafts.csswg.org/css-text-4/#propdef-text-align-last
+            // Computed value: keyword as specified, except for match-parent which computes as defined above
             let adjustment = compute_text_align_adjustment(
                 *text_align,
-                is_th_element,
+                is_th_element && property_id == prop::TEXT_ALIGN,
                 has_parent_with_computed_values,
                 parent_text_align,
                 parent_direction_is_ltr,
@@ -4566,11 +4568,13 @@ pub(crate) unsafe fn drive_property_computation(
                     set_longhand_bit(&mut inherited_words, property_id);
                 }
             }
-            computed_text_align = Some(if adjustment.changed {
-                adjustment.keyword
-            } else {
-                *text_align
-            });
+            if property_id == prop::TEXT_ALIGN {
+                computed_text_align = Some(if adjustment.changed {
+                    adjustment.keyword
+                } else {
+                    *text_align
+                });
+            }
         } else if property_id == prop::COLOR_SCHEME
             && let StyleValueData::ColorScheme { scheme_codes, .. } = value_data
         {
@@ -8003,60 +8007,6 @@ pub(crate) mod ffi_test_stubs {
         if domain.is_ascii() {
             unsafe { on_success(context, domain.as_ptr(), domain.len()) };
         }
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_destroy(path: *mut std::ffi::c_void) {
-        if !path.is_null() {
-            // SAFETY: Every stand-in path comes from the `Box<u8>` the deserializer stub leaked to the caller.
-            drop(unsafe { Box::from_raw(path.cast::<u8>()) });
-        }
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_serialize(
-        _path: *const std::ffi::c_void,
-        append: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize),
-        context: *mut std::ffi::c_void,
-    ) {
-        let stand_in_path_bytes = [7u8, 8, 9];
-        // SAFETY: The serializer hands its own sink and append function; the bytes are live for the call.
-        unsafe { append(context, stand_in_path_bytes.as_ptr(), stand_in_path_bytes.len()) };
-    }
-    // A stand-in path remembers the first byte it was created from, so tests can tell paths apart.
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_create_from_serialized_bytes(
-        bytes: *const u8,
-        count: usize,
-    ) -> *mut std::ffi::c_void {
-        // SAFETY: The caller hands `count` readable bytes.
-        let content = if count == 0 { 0u8 } else { unsafe { *bytes } };
-        Box::into_raw(Box::new(content)).cast()
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_equals(a: *const std::ffi::c_void, b: *const std::ffi::c_void) -> bool {
-        // SAFETY: Both stand-in paths are the leaked `Box<u8>` the stub above created.
-        unsafe { *a.cast::<u8>() == *b.cast::<u8>() }
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_bounding_box(_path: *const std::ffi::c_void, out_x_y_width_height: *mut f32) {
-        let stand_in_bounding_box = [0.0f32, 0.0, 1.0, 1.0];
-        // SAFETY: The caller hands a writable array of four floats.
-        unsafe { std::ptr::copy_nonoverlapping(stand_in_bounding_box.as_ptr(), out_x_y_width_height, 4) };
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_contains(
-        _path: *const std::ffi::c_void,
-        _x: f32,
-        _y: f32,
-        _winding_rule: i32,
-    ) -> bool {
-        false
-    }
-    #[unsafe(no_mangle)]
-    extern "C" fn ladybird_gfx_path_append_svg_string(
-        _path: *const std::ffi::c_void,
-        _append: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize),
-        _context: *mut std::ffi::c_void,
-    ) {
     }
     #[unsafe(no_mangle)]
     extern "C" fn ladybird_gfx_process_next_structural_epoch() -> u64 {

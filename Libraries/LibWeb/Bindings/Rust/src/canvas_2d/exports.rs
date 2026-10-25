@@ -11,13 +11,15 @@ use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use libcompositing_rust::display_list::canvas_2d_recorder::AlphaType;
+use libcompositing_rust::display_list::canvas_2d_recorder::{AlphaType, ColorSpace};
 use libgfx_rust::{IntRect, IntSize};
 
 use super::canvas::Canvas;
 use super::context::{ContextParameters, ContextState, Offscreen, OnScreen, RenderingContext2D};
+use crate::bindings::conversions::CppInterface;
 use crate::bindings::interface::{Interface, allocate, cell_from_abi, cell_into_abi};
 use crate::html::canvas_draw_image::CanvasImageSource;
+use crate::html::canvas_pattern::read_back_current_video_frame;
 use crate::html::canvas_rendering_context2d_settings::{CanvasColorType, CanvasRenderingContext2DSettings};
 use crate::html::image_bitmap::ImageBitmap;
 use crate::html::predefined_color_space::PredefinedColorSpace;
@@ -165,15 +167,22 @@ pub extern "C" fn web_canvas_2d_context_canvas_id(context: &ContextCell, out_can
     true
 }
 
+/// https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-color-space
+#[unsafe(no_mangle)]
+pub extern "C" fn web_canvas_2d_context_color_space(context: &ContextCell) -> ColorSpace {
+    with_context(context, |context| context.context_attributes.color_space.into())
+}
+
 /// A Gfx::Bitmap with a reference that the caller takes over, or null. Unpremultiplied pixels come back as RGBA8888,
-/// and premultiplied pixels as BGRA8888.
+/// and premultiplied pixels as BGRA8888, in the color space.
 #[unsafe(no_mangle)]
 pub extern "C" fn web_canvas_2d_context_read_pixels(
     context: &ContextCell,
     rect: IntRect,
     alpha_type: AlphaType,
+    color_space: ColorSpace,
 ) -> *mut c_void {
-    with_context(context, |context| context.read_pixels(rect, alpha_type))
+    with_context(context, |context| context.read_pixels(rect, alpha_type, color_space))
         .map_or(core::ptr::null_mut(), super::host::Bitmap::into_raw)
 }
 
@@ -208,4 +217,30 @@ pub unsafe extern "C" fn web_canvas_2d_context_draw_image_bitmap(
             .draw_image_internal(image, 0.0, 0.0, width, height, x, y, width, height)
             .is_ok()
     })
+}
+
+unsafe extern "C" {
+    /// Sets the Optional<Gfx::DecodedImageFrame> to a copy of the frame, which is lent for the call.
+    fn web_canvas_2d_set_video_frame_copy(out_frame: *mut c_void, frame: *const c_void);
+}
+
+/// Sets the Optional<Gfx::DecodedImageFrame> to a copy of the frame of the video at its current playback position, and
+/// returns whether the video has one.
+///
+/// # Safety
+///
+/// `video` must be a live wrapper of an HTMLVideoElement, and `out_frame` an Optional<Gfx::DecodedImageFrame>.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_canvas_2d_read_back_video_frame(video: *mut c_void, out_frame: *mut c_void) -> bool {
+    let video = NonNull::new(video.cast::<libjs_rust::api::Object>()).expect("C++ passes the video");
+    // SAFETY: The caller passes a live wrapper of an HTMLVideoElement.
+    let video = unsafe { CppInterface::from_wrapper(libjs_rust::api::Gc::from_non_null(video)) };
+    // NB: The colors of a video can be outside the gamut of sRGB, so the frame is read back in the widest color space of
+    //     a canvas.
+    let Some(frame) = read_back_current_video_frame(video, ColorSpace::DisplayP3) else {
+        return false;
+    };
+    // SAFETY: The handle keeps the frame alive for the call, and the caller passes the optional.
+    unsafe { web_canvas_2d_set_video_frame_copy(out_frame, frame.as_raw()) };
+    true
 }

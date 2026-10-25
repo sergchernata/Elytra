@@ -14,6 +14,7 @@
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/Geometry/DOMRectReadOnly.h>
 #include <LibWeb/SVG/AttributeParsing.h>
+#include <LibWeb/SVG/SVGAngle.h>
 #include <LibWeb/SVG/SVGFitToViewBox.h>
 #include <LibWeb/SVG/SVGGraphicsElement.h>
 #include <LibWeb/SVG/SVGLength.h>
@@ -68,10 +69,12 @@ public:
 
     GC::Ref<SVGNumber> create_svg_number() const;
     GC::Ref<SVGLength> create_svg_length() const;
+    GC::Ref<SVGAngle> create_svg_angle() const;
     GC::Ref<Geometry::DOMPoint> create_svg_point() const;
     GC::Ref<Geometry::DOMMatrix> create_svg_matrix() const;
     GC::Ref<Geometry::DOMRect> create_svg_rect() const;
     GC::Ref<SVGTransform> create_svg_transform() const;
+    WebIDL::ExceptionOr<GC::Ref<SVGTransform>> create_svg_transform_from_matrix(Bindings::DOMMatrix2DInit const&) const;
 
     // Deprecated methods that have no effect when called, but which are kept for compatibility reasons.
     WebIDL::UnsignedLong suspend_redraw(WebIDL::UnsignedLong max_wait_milliseconds) const

@@ -39,13 +39,8 @@ void SVGComponentTransferFunctionElement::attribute_changed(Utf16FlyString const
 {
     Base::attribute_changed(name, old_value, value, namespace_);
 
-    // FIXME: Support reflection instead of invalidating the enumeration.
-    if (name == AttributeNames::type)
-        m_type = {};
-
-    // FIXME: Support reflection instead of invalidating the list.
-    if (name == AttributeNames::tableValues)
-        m_table_values = {};
+    if (name == AttributeNames::tableValues && m_table_values)
+        m_table_values->synchronize();
 
     // Clear our cached color table on any attribute change.
     m_cached_color_table.clear();
@@ -54,7 +49,6 @@ void SVGComponentTransferFunctionElement::attribute_changed(Utf16FlyString const
 void SVGComponentTransferFunctionElement::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_type);
     visitor.visit(m_table_values);
     visitor.visit(m_slope);
     visitor.visit(m_intercept);
@@ -67,26 +61,22 @@ void SVGComponentTransferFunctionElement::visit_edges(Visitor& visitor)
 // https://drafts.fxtf.org/filter-effects-1/#element-attrdef-fecomponenttransfer-type
 GC::Ref<SVGAnimatedEnumeration> SVGComponentTransferFunctionElement::type()
 {
-    if (!m_type)
-        m_type = SVGAnimatedEnumeration::create(to_underlying(type_from_attribute()));
-    return *m_type;
+    static constexpr Array keywords {
+        SVGAnimatedEnumeration::Keyword { "identity"sv, to_underlying(Type::Identity) },
+        SVGAnimatedEnumeration::Keyword { "table"sv, to_underlying(Type::Table) },
+        SVGAnimatedEnumeration::Keyword { "discrete"sv, to_underlying(Type::Discrete) },
+        SVGAnimatedEnumeration::Keyword { "linear"sv, to_underlying(Type::Linear) },
+        SVGAnimatedEnumeration::Keyword { "gamma"sv, to_underlying(Type::Gamma) },
+    };
+    return svg_animated_enumeration_for_attribute(AttributeNames::type, keywords, to_underlying(Type::Identity));
 }
 
 // https://www.w3.org/TR/filter-effects-1/#dom-svgcomponenttransferfunctionelement-tablevalues
 // https://drafts.fxtf.org/filter-effects-1/#element-attrdef-fecomponenttransfer-tablevalues
 GC::Ref<SVGAnimatedNumberList> SVGComponentTransferFunctionElement::table_values()
 {
-    if (!m_table_values) {
-        auto numbers = parse_table_values(get_attribute_value(AttributeNames::tableValues));
-
-        auto items = GC::Heap::the().allocate<SVGNumberList::List>();
-        items->elements().ensure_capacity(numbers.size());
-        for (auto number : numbers)
-            items->elements().unchecked_append(SVGNumber::create(number, SVGNumber::ReadOnly::Yes));
-
-        auto number_list = SVGNumberList::create(items, ReadOnlyList::Yes);
-        m_table_values = SVGAnimatedNumberList::create(number_list);
-    }
+    if (!m_table_values)
+        m_table_values = SVGAnimatedNumberList::create(*this, AttributeNames::tableValues);
     return *m_table_values;
 }
 

@@ -257,6 +257,18 @@
       "align-self"
     ]
   },
+  "alignment-baseline": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "initial": "baseline",
+    "requires-computation": "never",
+    "valid-types": [
+      "baseline-metric"
+    ],
+    "valid-identifiers": [
+      "baseline"
+    ]
+  },
   "all": {
     "affects-layout": true,
     "affects-stacking-context": true,
@@ -720,6 +732,35 @@
       "contain"
     ],
     "percentages-resolve-to": "length"
+  },
+  "baseline-shift": {
+    "animation-type": "by-computed-value",
+    "inherited": false,
+    "initial": "0",
+    "percentages-resolve-to": "length",
+    "requires-computation": "cascaded-value",
+    "valid-types": [
+      "length [-∞,∞]",
+      "percentage [-∞,∞]"
+    ],
+    "valid-identifiers": [
+      "sub",
+      "super",
+      "top",
+      "center",
+      "bottom"
+    ]
+  },
+  "baseline-source": {
+    "animation-type": "discrete",
+    "inherited": false,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "first",
+      "last"
+    ]
   },
   "block-ellipsis": {
     "style-group": "InheritedTextValues",
@@ -2508,6 +2549,47 @@
     "requires-computation": "cascaded-value",
     "valid-types": [
       "font-style"
+    ]
+  },
+  "font-synthesis-position": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "none"
+    ]
+  },
+  "font-synthesis-small-caps": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "none"
+    ]
+  },
+  "font-synthesis-style": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "none",
+      "oblique-only"
+    ]
+  },
+  "font-synthesis-weight": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "none"
     ]
   },
   "font-variant": {
@@ -5077,6 +5159,22 @@
     "requires-computation": "never",
     "valid-types": [
       "text-align"
+    ]
+  },
+  "text-align-last": {
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-identifiers": [
+      "auto",
+      "start",
+      "end",
+      "left",
+      "right",
+      "center",
+      "justify",
+      "match-parent"
     ]
   },
   "text-anchor": {

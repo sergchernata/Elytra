@@ -169,7 +169,7 @@ def indexed_property_getter_value_mode(interface: Interface) -> str:
         return "empty_string"
     if interface.name in ("CSSUnparsedValue", "DOMStringList", "DOMTokenList", "MediaList"):
         return "optional"
-    if interface.name in ("SVGLengthList", "SVGNumberList", "SVGTransformList"):
+    if interface.name in ("SVGLengthList", "SVGNumberList", "SVGPointList", "SVGStringList", "SVGTransformList"):
         return "svg_list"
     if interface.name in ("SourceBufferList",):
         return "value"
@@ -293,7 +293,7 @@ def indexed_property_setter_call(interface: Interface, operation: SpecialOperati
         return f"impl.set_value_of_indexed_property(index, {value_name})"
     if interface.name in ("HTMLOptionsCollection", "HTMLSelectElement"):
         return f"impl.set_value_of_indexed_property(index, {value_name})"
-    if interface.name in ("SVGLengthList", "SVGNumberList", "SVGTransformList"):
+    if interface.name in ("SVGLengthList", "SVGNumberList", "SVGPointList", "SVGStringList", "SVGTransformList"):
         return f"impl.replace_item({value_name}, index)"
     return f"impl.{hook_name}(index, {value_name})"
 
@@ -303,7 +303,7 @@ def svg_list_indexed_property_setter_conversion(
     includes: GeneratedIncludes,
     value_parameter: OperationParameter,
 ) -> Optional[str]:
-    if value_parameter.type.name not in ("SVGLength", "SVGNumber", "SVGTransform"):
+    if value_parameter.type.name not in ("DOMPoint", "SVGLength", "SVGNumber", "SVGTransform"):
         return None
 
     value_interface = context.interface(value_parameter.type)
@@ -345,6 +345,8 @@ def write_indexed_property_setter_implementation(
     value_parameter = operation.parameters[1]
     value_name = "idl_value"
     call = indexed_property_setter_call(interface, operation, hook_name)
+    # SVG lists implement the setter with replaceItem(), whose returned item the setter does not need.
+    discard = "(void)" if call.startswith("impl.replace_item(") else ""
 
     if interface.name in ("HTMLOptionsCollection", "HTMLSelectElement"):
         includes.add("LibWeb/DOM/Element.h")
@@ -362,7 +364,7 @@ def write_indexed_property_setter_implementation(
             f"    if (maybe_element)\n"
             f"        {value_name} = GC::Ref {{ *maybe_element }};\n"
         )
-    elif interface.name in ("SVGLengthList", "SVGNumberList", "SVGTransformList"):
+    elif interface.name in ("SVGLengthList", "SVGNumberList", "SVGPointList", "SVGTransformList"):
         conversion = svg_list_indexed_property_setter_conversion(context, includes, value_parameter)
         if conversion is None:
             raise RuntimeError(f"Unsupported SVG list indexed property setter type on '{interface.name}'")
@@ -375,7 +377,7 @@ def write_indexed_property_setter_implementation(
 {{
     auto& vm = realm.vm();
     auto& impl = wrapped_implementation_of<{fully_qualified_name_for_interface(interface)}>(wrapper);
-{conversion_steps}    TRY({call});
+{conversion_steps}    {discard}TRY({call});
     return {{}};
 }}
 

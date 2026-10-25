@@ -7,8 +7,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AllOf.h>
 #include <LibWeb/Bindings/SVGGraphicsElement.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/Geometry/DOMMatrix.h>
@@ -16,6 +18,8 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/Viewport.h>
+#include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Painting/BoxViews.h>
 #include <LibWeb/SVG/AttributeNames.h>
@@ -31,6 +35,117 @@ namespace Web::SVG {
 SVGGraphicsElement::SVGGraphicsElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : SVGElement(document, move(qualified_name))
 {
+}
+
+void SVGGraphicsElement::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_required_extensions);
+    visitor.visit(m_system_language);
+    visitor.visit(m_transform);
+}
+
+void SVGGraphicsElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
+{
+    Base::attribute_changed(name, old_value, value, namespace_);
+
+    // https://svgwg.org/svg2-draft/types.html#SynchronizingReflectedValues
+    // Whenever a reflected content attribute's base value changes, then the reflecting object must be synchronized,
+    // immediately after the value changed.
+    if (namespace_.has_value())
+        return;
+    if (name == AttributeNames::requiredExtensions || name == AttributeNames::systemLanguage) {
+        if (name == AttributeNames::requiredExtensions && m_required_extensions)
+            m_required_extensions->synchronize();
+        else if (name == AttributeNames::systemLanguage && m_system_language)
+            m_system_language->synchronize();
+
+        // NB: Whether the conditional processing attributes evaluate to true decides whether the element has a box.
+        CSS::record_element_box_kind(*this);
+        set_needs_layout_tree_update(true, DOM::SetNeedsLayoutTreeUpdateReason::StyleChange);
+        return;
+    }
+    if (name == AttributeNames::transform && m_transform)
+        m_transform->synchronize();
+}
+
+// https://svgwg.org/svg2-draft/struct.html#ConditionalProcessingRequiredExtensionsAttribute
+static bool required_extensions_evaluate_to_true(Utf16View value)
+{
+    // The value is a list of URL references which identify the required extensions, with the individual values
+    // separated by white space. Determines whether all of the named extensions are supported by the user agent. If all
+    // of the given extensions are supported, then the attribute evaluates to true; otherwise, the current element and
+    // its children are skipped and thus will not be rendered.
+    // If a null string or empty string value is given to attribute ‘requiredExtensions’, the attribute evaluates to
+    // "false".
+    auto extensions = SVGStringList::parse(value, SVGStringList::Separator::Whitespace);
+    if (extensions.is_empty())
+        return false;
+
+    // INTEROP: Other browsers treat the HTML and MathML namespaces as supported extensions, since their content can be
+    //          embedded with foreignObject.
+    return all_of(extensions, [](auto const& extension) {
+        return extension == Namespace::HTML || extension == Namespace::MathML;
+    });
+}
+
+// https://svgwg.org/svg2-draft/struct.html#ConditionalProcessingSystemLanguageAttribute
+static bool system_language_evaluates_to_true(Utf16View value)
+{
+    // If a null string or empty string value is given to attribute ‘systemLanguage’, the attribute evaluates to
+    // "false".
+    if (value.is_empty())
+        return false;
+
+    // Evaluates to "true" if one of the language tags indicated by user preferences is a case-insensitive match of one
+    // of the language tags given in the value of this parameter, or if one of the language tags indicated by user
+    // preferences is a case-insensitive prefix of one of the language tags given in the value of this parameter such
+    // that the first tag character following the prefix is "-".
+    auto language_tags = SVGStringList::parse(value, SVGStringList::Separator::Comma);
+    for (auto const& preferred_language : ResourceLoader::the().preferred_languages()) {
+        auto preferred_tag = Utf16String::from_utf8(preferred_language);
+        for (auto const& language_tag : language_tags) {
+            if (language_tag.equals_ignoring_ascii_case(preferred_tag))
+                return true;
+            if (language_tag.length_in_code_units() > preferred_tag.length_in_code_units()
+                && language_tag.code_unit_at(preferred_tag.length_in_code_units()) == '-'
+                && language_tag.utf16_view().substring_view(0, preferred_tag.length_in_code_units()).equals_ignoring_ascii_case(preferred_tag))
+                return true;
+        }
+    }
+
+    // Evaluates to "false" otherwise.
+    return false;
+}
+
+bool SVGGraphicsElement::conditional_processing_attributes_evaluate_to_true() const
+{
+    // If the attribute is not present, then it implicitly evaluates to "true".
+    if (auto required_extensions = attribute(AttributeNames::requiredExtensions); required_extensions.has_value() && !required_extensions_evaluate_to_true(*required_extensions))
+        return false;
+    if (auto system_language = attribute(AttributeNames::systemLanguage); system_language.has_value() && !system_language_evaluates_to_true(*system_language))
+        return false;
+    return true;
+}
+
+// https://svgwg.org/svg2-draft/types.html#__svg__SVGTests__requiredExtensions
+GC::Ref<SVGStringList> SVGGraphicsElement::required_extensions_for_bindings()
+{
+    // The requiredExtensions IDL attribute reflects the ‘requiredExtensions’ content attribute.
+    // NB: The attribute's value is a set of space-separated tokens.
+    if (!m_required_extensions)
+        m_required_extensions = SVGStringList::create(*this, AttributeNames::requiredExtensions, SVGStringList::Separator::Whitespace);
+    return *m_required_extensions;
+}
+
+// https://svgwg.org/svg2-draft/types.html#__svg__SVGTests__systemLanguage
+GC::Ref<SVGStringList> SVGGraphicsElement::system_language_for_bindings()
+{
+    // The systemLanguage IDL attribute reflects the ‘systemLanguage’ content attribute.
+    // NB: The attribute's value is a set of comma-separated tokens.
+    if (!m_system_language)
+        m_system_language = SVGStringList::create(*this, AttributeNames::systemLanguage, SVGStringList::Separator::Comma);
+    return *m_system_language;
 }
 
 GC::Ptr<DOM::Element> SVGGraphicsElement::resolve_url_to_element(CSS::URL const& url) const
@@ -165,8 +280,8 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMRect>> SVGGraphicsElement::get_b_box(Bi
 
     // A path-like element's bounding box covers its geometry alone; the committed content rect is
     // inflated by the visible stroke width, so take the unstroked path bounds directly.
-    if (auto const* committed_path = Painting::committed_svg_path(*self_layout_node))
-        return Geometry::DOMRect::create(committed_path->bounding_box());
+    if (auto committed_path_bounding_box = Painting::committed_svg_path_bounding_box(*self_layout_node); committed_path_bounding_box.has_value())
+        return Geometry::DOMRect::create(*committed_path_bounding_box);
 
     auto rect = Painting::absolute_rect(*self_layout_node).to_type<float>();
     // An element with a non-positive geometry dimension is not rendered and
@@ -177,12 +292,15 @@ WebIDL::ExceptionOr<GC::Ref<Geometry::DOMRect>> SVGGraphicsElement::get_b_box(Bi
     return Geometry::DOMRect::create(rect);
 }
 
-GC::Ref<SVGAnimatedTransformList> SVGGraphicsElement::transform() const
+// https://svgwg.org/svg2-draft/types.html#__svg__SVGGraphicsElement__transform
+GC::Ref<SVGAnimatedTransformList> SVGGraphicsElement::transform()
 {
-    dbgln("(STUBBED) SVGGraphicsElement::transform(). Called on: {}", debug_description());
-    auto base_val = SVGTransformList::create(ReadOnlyList::Yes);
-    auto anim_val = SVGTransformList::create(ReadOnlyList::Yes);
-    return SVGAnimatedTransformList::create(base_val, anim_val);
+    // The transform IDL attribute reflects the computed value of the transform property and its corresponding
+    // ‘transform’ presentation attribute.
+    // FIXME: Reflect the computed value of the transform property rather than only the presentation attribute.
+    if (!m_transform)
+        m_transform = SVGAnimatedTransformList::create(*this, AttributeNames::transform);
+    return *m_transform;
 }
 
 // https://svgwg.org/svg2-draft/types.html#__svg__SVGGraphicsElement__getScreenCTM

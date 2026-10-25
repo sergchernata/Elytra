@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	Property baseline-shift value '-10px'
+Pass	Property baseline-shift value '20%'
+Pass	Property baseline-shift value 'calc(10px - 0.5em)'
+Pass	Property baseline-shift value 'sub'
+Pass	Property baseline-shift value 'super'
+Pass	Property baseline-shift value 'bottom'
+Pass	Property baseline-shift value 'center'
+Pass	Property baseline-shift value 'top'

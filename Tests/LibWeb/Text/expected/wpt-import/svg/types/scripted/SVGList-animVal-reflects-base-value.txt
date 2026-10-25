@@ -1,0 +1,26 @@
+Harness status: OK
+
+Found 20 tests
+
+19 Pass
+1 Fail
+Pass	SVGNumberList (rotate on text): animVal read before an attribute change reports the new item count
+Pass	SVGNumberList (rotate on text): animVal read before an attribute change reports the new value
+Pass	SVGNumberList (rotate on text): the animVal list object survives an attribute change
+Pass	SVGNumberList (rotate on text): animVal reports the new item count after a baseVal DOM change
+Pass	SVGNumberList (rotate on text): animVal items are read only
+Pass	SVGLengthList (x on text): animVal read before an attribute change reports the new item count
+Pass	SVGLengthList (x on text): animVal read before an attribute change reports the new value
+Pass	SVGLengthList (x on text): the animVal list object survives an attribute change
+Pass	SVGLengthList (x on text): animVal reports the new item count after a baseVal DOM change
+Pass	SVGLengthList (x on text): animVal items are read only
+Pass	SVGPointList (points on polyline, animatedPoints): animVal read before an attribute change reports the new item count
+Pass	SVGPointList (points on polyline, animatedPoints): animVal read before an attribute change reports the new value
+Pass	SVGPointList (points on polyline, animatedPoints): the animVal list object survives an attribute change
+Pass	SVGPointList (points on polyline, animatedPoints): animVal reports the new item count after a baseVal DOM change
+Fail	SVGPointList (points on polyline, animatedPoints): animVal items are read only
+Pass	SVGTransformList (gradientTransform on linearGradient): animVal read before an attribute change reports the new item count
+Pass	SVGTransformList (gradientTransform on linearGradient): animVal read before an attribute change reports the new value
+Pass	SVGTransformList (gradientTransform on linearGradient): the animVal list object survives an attribute change
+Pass	SVGTransformList (gradientTransform on linearGradient): animVal reports the new item count after a baseVal DOM change
+Pass	SVGTransformList (gradientTransform on linearGradient): animVal items are read only

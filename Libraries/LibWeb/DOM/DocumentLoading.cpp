@@ -203,19 +203,24 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
         content_encoding = *maybe_encoding;
 
     auto process_body = GC::create_function(GC::Heap::the(), [document, url = navigation_params.response->url().value(), response_header_list = navigation_params.response->header_list(), content_encoding = move(content_encoding), mime = type](ByteBuffer data) {
-        Optional<TextCodec::Decoder> decoder;
+        Optional<StringView> encoding;
         // The actual HTTP headers and other metadata, not the headers as mutated or implied by the algorithms given in this specification,
         // are the ones that must be used when determining the character encoding according to the rules given in the above specifications.
         if (content_encoding.has_value())
-            decoder = TextCodec::decoder_for(content_encoding->bytes_as_string_view());
+            encoding = TextCodec::get_standardized_encoding(content_encoding->bytes_as_string_view());
         // https://www.w3.org/TR/xml/#charencoding
         // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
         // declaration to use an encoding other than UTF-8.
-        if (!decoder.has_value())
-            decoder = TextCodec::decoder_for("UTF-8"sv);
-        VERIFY(decoder.has_value());
+        if (!encoding.has_value())
+            encoding = "UTF-8"sv;
+
+        // Once the character encoding is established, the document's character encoding must be set to that character encoding.
+        // NB: Decoding lets a BOM override the encoding.
+        auto bom_encoding = HTML::run_bom_sniff(data);
+        document->set_encoding(Utf16String::from_utf8(bom_encoding.has_value() ? bom_encoding->view() : *encoding));
+
         // Well-formed XML documents contain only properly encoded characters
-        auto source = TextCodec::decode_to_utf8(data, *decoder, TextCodec::ErrorMode::Fatal);
+        auto source = TextCodec::decode_to_utf8(data, *TextCodec::decoder_for(*encoding), TextCodec::ErrorMode::Fatal);
         if (source.is_error()) {
             // FIXME: Insert error message into the document.
             dbgln("Failed to decode XML document: {}", source.error());
@@ -283,7 +288,15 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_text_document(HTML::Navi
     // FIXME: Parse as we receive the document data, instead of waiting for the whole document to be fetched first.
     auto container_document = navigation_params.navigable ? navigation_params.navigable->container_document() : nullptr;
     auto process_body = GC::create_function(GC::Heap::the(), [document, container_document, url = navigation_params.response->url().value(), response_header_list = navigation_params.response->header_list(), mime = type](ByteBuffer data) {
-        auto [encoding, confidence] = HTML::run_encoding_sniffing_algorithm(document, data, mime, container_document);
+        // The rules for how to convert the bytes of the plain text document into actual characters, and the rules for
+        // actually rendering the text to the user, are defined by the specifications for the computed MIME type of the
+        // resource (i.e., type).
+        // NB: JSON text is UTF-8 [RFC8259]. Like other browsers, honor a BOM or an explicit charset parameter.
+        ByteString encoding;
+        if (mime.is_json())
+            encoding = HTML::run_bom_sniff(data).value_or(Fetch::Infrastructure::legacy_extract_an_encoding(mime, "UTF-8"sv));
+        else
+            encoding = HTML::run_encoding_sniffing_algorithm(document, data, mime, container_document).encoding;
         dbgln_if(HTML_PARSER_DEBUG, "The encoding sniffing algorithm returned encoding '{}'", encoding);
 
         auto run_text_parser = [document, data = move(data), url, response_header_list, encoding = move(encoding)] {

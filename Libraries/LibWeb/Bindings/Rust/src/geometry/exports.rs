@@ -74,6 +74,28 @@ pub unsafe extern "C" fn web_dom_point_read_only_create(
     cell_into_abi(allocate(vm, DOMPointReadOnly::new(x, y, z, w)))
 }
 
+/// Stores the coordinates x, y, z and w of the point, in that order.
+///
+/// # Safety
+///
+/// `point` must be the live cell of a DOMPoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_dom_point_coordinates(point: *mut c_void, out_coordinates: &mut [f64; 4]) {
+    // SAFETY: The caller passes a live cell.
+    *out_coordinates = unsafe { object_from_abi::<DOMPoint>(point) }.parent().coordinates();
+}
+
+/// Sets the x and y coordinates of the point.
+///
+/// # Safety
+///
+/// `point` must be the live cell of a DOMPoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_dom_point_set_x_and_y(point: *mut c_void, x: f64, y: f64) {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<DOMPoint>(point) }.set_x_and_y(x, y);
+}
+
 /// # Safety
 ///
 /// `vm` must be the live VM.
@@ -206,6 +228,19 @@ pub unsafe extern "C" fn web_dom_matrix_read_only_to_string(matrix: *mut c_void,
     };
     *out_string = string.into_raw();
     true
+}
+
+/// Sets the elements m11, m12, m13, m14, m21, ..., m44 of the matrix, in that order, and whether it is 2D.
+///
+/// # Safety
+///
+/// `matrix` must be the live cell of a DOMMatrix.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_dom_matrix_set_elements(matrix: *mut c_void, elements: &[f64; 16], is_2d: bool) {
+    // SAFETY: The caller passes a live cell.
+    let matrix = unsafe { object_from_abi::<DOMMatrix>(matrix) }.parent();
+    matrix.set_matrix(Matrix4::from_column_major(*elements));
+    matrix.set_is_2d(is_2d);
 }
 
 /// Post-multiplies the other matrix to the matrix, as multiplySelf() does with the DOMMatrix of a dictionary.

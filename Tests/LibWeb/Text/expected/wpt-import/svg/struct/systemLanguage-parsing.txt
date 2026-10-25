@@ -1,0 +1,18 @@
+Harness status: OK
+
+Found 13 tests
+
+13 Pass
+Pass	Comma-separated tokens are split into individual items
+Pass	Whitespace after comma is stripped
+Pass	Whitespace before comma is stripped
+Pass	Whitespace around commas is stripped
+Pass	Leading and trailing whitespace on the value is stripped
+Pass	Tabs and newlines as leading/trailing whitespace are stripped
+Pass	Single token without commas
+Pass	BCP 47 subtags are preserved within tokens
+Pass	Double comma produces an empty token between the two commas
+Pass	Empty string results in a single empty token
+Pass	A single comma separates two empty tokens
+Pass	Numeric tokens are parsed without validation
+Pass	Invalid language tags are stored as tokens without validation

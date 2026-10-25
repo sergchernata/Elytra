@@ -401,13 +401,17 @@ ResizeObserverEntry
 ResizeObserverSize
 Response
 SVGAElement
+SVGAngle
 SVGAnimateMotionElement
+SVGAnimatedAngle
+SVGAnimatedBoolean
 SVGAnimatedEnumeration
 SVGAnimatedInteger
 SVGAnimatedLength
 SVGAnimatedLengthList
 SVGAnimatedNumber
 SVGAnimatedNumberList
+SVGAnimatedPreserveAspectRatio
 SVGAnimatedRect
 SVGAnimatedString
 SVGAnimatedTransformList
@@ -423,7 +427,10 @@ SVGFEBlendElement
 SVGFEColorMatrixElement
 SVGFEComponentTransferElement
 SVGFECompositeElement
+SVGFEConvolveMatrixElement
+SVGFEDiffuseLightingElement
 SVGFEDisplacementMapElement
+SVGFEDistantLightElement
 SVGFEDropShadowElement
 SVGFEFloodElement
 SVGFEFuncAElement
@@ -436,6 +443,9 @@ SVGFEMergeElement
 SVGFEMergeNodeElement
 SVGFEMorphologyElement
 SVGFEOffsetElement
+SVGFEPointLightElement
+SVGFESpecularLightingElement
+SVGFESpotLightElement
 SVGFETurbulenceElement
 SVGFilterElement
 SVGForeignObjectElement
@@ -449,6 +459,7 @@ SVGLengthList
 SVGLineElement
 SVGLinearGradientElement
 SVGMPathElement
+SVGMarkerElement
 SVGMaskElement
 SVGMatrix
 SVGMetadataElement
@@ -457,8 +468,10 @@ SVGNumberList
 SVGPathElement
 SVGPatternElement
 SVGPoint
+SVGPointList
 SVGPolygonElement
 SVGPolylineElement
+SVGPreserveAspectRatio
 SVGRadialGradientElement
 SVGRect
 SVGRectElement
@@ -466,6 +479,7 @@ SVGSVGElement
 SVGScriptElement
 SVGSetElement
 SVGStopElement
+SVGStringList
 SVGStyleElement
 SVGSwitchElement
 SVGSymbolElement

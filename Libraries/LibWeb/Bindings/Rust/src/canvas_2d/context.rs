@@ -14,17 +14,18 @@ use core::ptr::NonNull;
 
 use ak::Utf16String;
 use libcompositing_rust::display_list::canvas_2d::{Compositing, Paint, Stroke};
-use libcompositing_rust::display_list::canvas_2d_recorder::{AlphaType, Recorder};
+use libcompositing_rust::display_list::canvas_2d_recorder::{AlphaType, ColorSpace, Recorder};
 use libcompositing_rust::display_list::commands::CanvasId;
-use libgfx_rust::path::{OwnedPath, PathBuilder};
+use libgfx_rust::path::Path;
 use libgfx_rust::{AffineTransform, Color, CompositingAndBlendingOperator, FloatRect, IntRect, IntSize, WindingRule};
 use libjs_rust::api::{ForeignCellSlot, Gc, Realm, Trace, Visitor, Vm};
 
 use super::canvas::{Canvas, FontMetricsSource, ResolvedFont, StyleValue, parse_color};
-use super::drawing_state::{DrawingState, FillOrStrokeStyle};
+use super::drawing_state::{CanvasColor, DrawingState, FillOrStrokeStyle};
 use super::host::{Bitmap, CppTransport, LentImageFrame};
 use crate::bindings::interface::Wrappable;
 use crate::html::canvas_rendering_context2d_settings::CanvasRenderingContext2DSettings;
+use crate::html::predefined_color_space::PredefinedColorSpace;
 
 pub(crate) type CanvasRecorder = Recorder<CppTransport>;
 
@@ -104,6 +105,7 @@ struct CachedReadback {
     pixels: Bitmap,
     rect: IntRect,
     alpha_type: AlphaType,
+    color_space: ColorSpace,
 }
 
 /// A color that a context was given as a string. Context-independent simple colors store a resolved color. Other
@@ -112,7 +114,7 @@ struct CachedReadback {
 struct ColorCacheEntry {
     input: Utf16String,
     parsed_value: Option<StyleValue>,
-    resolved_color: Option<Color>,
+    resolved_color: Option<CanvasColor>,
 }
 
 const MAX_COLOR_CACHE_SIZE: usize = 8;
@@ -145,7 +147,7 @@ pub(crate) struct ContextState {
     states: RefCell<Vec<DrawingState>>,
     /// The current default path, in the coordinates of the current transformation matrix.
     #[gc(untraced)]
-    path: RefCell<OwnedPath>,
+    path: RefCell<Path>,
     /// The matrix in whose coordinates the current default path is.
     ///
     /// NB: This is the current transformation matrix while that matrix is invertible. A path cannot be kept in the
@@ -162,16 +164,21 @@ pub(crate) struct ContextState {
     color_cache: RefCell<Vec<ColorCacheEntry>>,
 }
 
-fn empty_path() -> OwnedPath {
-    PathBuilder::new().build()
+fn empty_path() -> Path {
+    Path::new()
 }
 
-/// The paint of a draw with the style, with the image of a pattern added to the stream of the recorder.
-pub(crate) fn paint_of<'a>(recorder: &CanvasRecorder, style: &'a FillOrStrokeStyle) -> Paint<'a> {
+/// The paint of a draw with the style in a context of the color space, with the image of a pattern added to the stream
+/// of the recorder.
+pub(crate) fn paint_of<'a>(
+    recorder: &CanvasRecorder,
+    style: &'a FillOrStrokeStyle,
+    color_space: PredefinedColorSpace,
+) -> Paint<'a> {
     match style {
-        FillOrStrokeStyle::Color(color) => Paint::Color(*color),
+        FillOrStrokeStyle::Color(color) => Paint::Color(color.in_color_space),
         // SAFETY: Nothing adds a stop to the gradient while the recorder records the paint.
-        FillOrStrokeStyle::Gradient(gradient) => unsafe { gradient.paint_unguarded() },
+        FillOrStrokeStyle::Gradient(gradient) => unsafe { gradient.paint_unguarded(color_space) },
         FillOrStrokeStyle::Pattern(pattern) => Paint::Pattern {
             image: pattern.image().map(|frame| {
                 let frame = NonNull::new(frame.as_raw().cast_mut()).expect("an image frame has a frame");
@@ -262,11 +269,11 @@ impl ContextState {
     }
 
     /// The current default path, which nothing may change while the borrow lasts.
-    pub(crate) fn path(&self) -> CellRef<'_, OwnedPath> {
+    pub(crate) fn path(&self) -> CellRef<'_, Path> {
         self.path.borrow()
     }
 
-    pub(crate) fn path_mut(&self) -> RefMut<'_, OwnedPath> {
+    pub(crate) fn path_mut(&self) -> RefMut<'_, Path> {
         self.path.borrow_mut()
     }
 
@@ -341,12 +348,15 @@ impl ContextState {
         let Some(transport) = self.canvas.create_transport() else {
             return false;
         };
-        // FIXME: implement context attribute .color_space
         // FIXME: implement context attribute .color_type
         // FIXME: implement context attribute .desynchronized
-        // FIXME: implement context attribute .will_read_frequently
         let recorder = Recorder::new(transport);
-        if !recorder.create_context(self.size.get(), self.context_attributes.alpha) {
+        if !recorder.create_context(
+            self.size.get(),
+            self.context_attributes.alpha,
+            self.context_attributes.will_read_frequently,
+            self.context_attributes.color_space.into(),
+        ) {
             return false;
         }
         self.backing_storage.replace(Some(BackingStorage { recorder }));
@@ -409,15 +419,16 @@ impl ContextState {
         self.canvas.did_change_content();
     }
 
-    /// The pixels of the rectangle of the canvas, read back from the Compositor. Unpremultiplied pixels come back as
-    /// RGBA8888, and premultiplied pixels as BGRA8888.
-    pub(crate) fn read_pixels(&self, rect: IntRect, alpha_type: AlphaType) -> Option<Bitmap> {
+    /// The pixels of the rectangle of the canvas, read back from the Compositor and converted to the color space.
+    /// Unpremultiplied pixels come back as RGBA8888, and premultiplied pixels as BGRA8888.
+    pub(crate) fn read_pixels(&self, rect: IntRect, alpha_type: AlphaType, color_space: ColorSpace) -> Option<Bitmap> {
         if !self.has_backing_storage() {
             return None;
         }
         if let Some(readback) = self.cached_readback.borrow().as_ref()
             && readback.rect == rect
             && readback.alpha_type == alpha_type
+            && readback.color_space == color_space
         {
             return Some(readback.pixels.clone());
         }
@@ -428,13 +439,14 @@ impl ContextState {
                 .expect("the canvas has backing storage")
                 .recorder;
             recorder.flush();
-            recorder.read_back_pixels(rect, alpha_type)
+            recorder.read_back_pixels(rect, alpha_type, color_space)
         };
         if let Some(pixels) = &pixels {
             self.cached_readback.replace(Some(CachedReadback {
                 pixels: pixels.clone(),
                 rect,
                 alpha_type,
+                color_space,
             }));
         }
         pixels
@@ -538,7 +550,8 @@ impl ContextState {
     }
 
     /// https://drafts.csswg.org/css-color-4/#parse-a-css-color-value
-    pub(crate) fn parse_a_css_color_value(&self, value: &Utf16String) -> Option<Color> {
+    /// NB: The color is resolved in sRGB and in the color space of the context.
+    pub(crate) fn parse_a_css_color_value(&self, value: &Utf16String) -> Option<CanvasColor> {
         // To parse a CSS <color> value, given a string input, and an optional context element element:
 
         // 1. Parse input as a <color>. If the result is failure, return failure; otherwise, let color be the result.
@@ -560,7 +573,16 @@ impl ContextState {
                     ak::Utf16StringUnits::Ascii(units) => libweb_rust::parse_simple_color_ascii(units),
                     ak::Utf16StringUnits::Utf16(units) => libweb_rust::parse_simple_color_utf16(units),
                 }
-                .map(|[red, green, blue, alpha]| Color::from_rgba(red, green, blue, alpha));
+                .map(|srgb| {
+                    let color_space = self.context_attributes.color_space as u8;
+                    let [red, green, blue, alpha] =
+                        libweb_rust::srgb_color_in_predefined_color_space(srgb, color_space);
+                    let [srgb_red, srgb_green, srgb_blue, srgb_alpha] = srgb;
+                    CanvasColor {
+                        srgb: Color::from_rgba(srgb_red, srgb_green, srgb_blue, srgb_alpha),
+                        in_color_space: Color::from_rgba(red, green, blue, alpha),
+                    }
+                });
                 let color = if resolved_color.is_none() {
                     parse_color(value)
                 } else {
@@ -594,7 +616,9 @@ impl ContextState {
         //         lengths are absolutized (i.e. using the canvas' font rather than the element's) in other canvas values
         //         (e.g. letterSpacing) so we instead use a computation context based on the drawing state. See
         //         https://github.com/whatwg/html/issues/12505.
-        let used_color = self.canvas.resolve_color(&color, self.font_metrics_source());
+        let used_color =
+            self.canvas
+                .resolve_color(&color, self.font_metrics_source(), self.context_attributes.color_space);
 
         // 3. Return used color.
         Some(used_color)
@@ -688,7 +712,7 @@ impl ContextState {
             ),
             state.transform,
         );
-        Some((state.shadow_color.with_opacity(alpha), transform))
+        Some((state.shadow_color.in_color_space.with_opacity(alpha), transform))
     }
 
     /// https://html.spec.whatwg.org/multipage/canvas.html#drawing-model
@@ -699,7 +723,7 @@ impl ContextState {
         state.current_compositing_and_blending_operator == CompositingAndBlendingOperator::SourceOver
     }
 
-    pub(crate) fn fill_internal(&self, path: &OwnedPath, winding_rule: WindingRule) {
+    pub(crate) fn fill_internal(&self, path: &Path, winding_rule: WindingRule) {
         if !self.recorder_is_ready() {
             return;
         }
@@ -716,7 +740,7 @@ impl ContextState {
         {
             let state = self.drawing_state();
             self.record(|recorder| {
-                let paint = paint_of(recorder, &state.fill_style);
+                let paint = paint_of(recorder, &state.fill_style, self.context_attributes.color_space);
                 recorder.fill_path(&path_bytes, &paint, winding_rule, 0.0, &Self::compositing(&state));
             });
         }
@@ -746,7 +770,7 @@ impl ContextState {
         self.did_draw();
     }
 
-    pub(crate) fn stroke_internal(&self, path: &OwnedPath) {
+    pub(crate) fn stroke_internal(&self, path: &Path) {
         if !self.recorder_is_ready() {
             return;
         }
@@ -772,7 +796,7 @@ impl ContextState {
                 dash_offset: state.line_dash_offset,
             };
             self.record(|recorder| {
-                let paint = paint_of(recorder, &state.stroke_style);
+                let paint = paint_of(recorder, &state.stroke_style, self.context_attributes.color_space);
                 recorder.stroke_path(&path_bytes, &paint, &stroke, 0.0, &Self::compositing(&state));
             });
         }
@@ -810,7 +834,7 @@ impl ContextState {
         self.did_draw();
     }
 
-    pub(crate) fn clip_internal(&self, path: &OwnedPath, winding_rule: WindingRule) {
+    pub(crate) fn clip_internal(&self, path: &Path, winding_rule: WindingRule) {
         if !self.recorder_is_ready() {
             return;
         }

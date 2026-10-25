@@ -1,0 +1,18 @@
+Harness status: OK
+
+Found 13 tests
+
+13 Pass
+Pass	SVGGeometryElement.prototype.isPointInStroke, no arguments.
+Pass	SVGGeometryElement.prototype.isPointInStroke, null/undefined.
+Pass	SVGGeometryElement.prototype.isPointInStroke, non-finite argument.
+Pass	SVGGeometryElement.prototype.isPointInStroke, functional test.
+Pass	SVGGeometryElement.prototype.isPointInStroke, functional test with zoom.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'stroke-dasharray'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'stroke-dashoffset'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'stroke-miterlimit'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'stroke-linejoin'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'stroke-linecap'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'pathLength'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'vector-effect'.
+Pass	SVGGeometryElement.prototype.isPointInStroke, 'visibility' and 'pointer-events' have no effect.

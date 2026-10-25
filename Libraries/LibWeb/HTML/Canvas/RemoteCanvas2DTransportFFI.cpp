@@ -10,6 +10,7 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/Font/Font.h>
+#include <LibWeb/HTML/Canvas/PredefinedColorSpace.h>
 #include <LibWeb/HTML/Canvas/RemoteCanvas2DTransport.h>
 
 // The C ABI of RemoteCanvas2DTransport, for the 2D canvas command recorder in Libraries/LibWeb/Bindings/Rust/src/canvas_2d,
@@ -34,7 +35,7 @@ static_assert(to_underlying(Gfx::AlphaType::Unpremultiplied) == 1);
 extern "C" {
 
 void web_canvas_2d_transport_unref(void* transport);
-bool web_canvas_2d_transport_create_context(void* transport, i32 width, i32 height, bool alpha);
+bool web_canvas_2d_transport_create_context(void* transport, i32 width, i32 height, bool alpha, bool will_read_frequently, u8 color_space);
 bool web_canvas_2d_transport_canvas_id(void const* transport, u64* out_canvas_id);
 void web_canvas_2d_transport_destroy_context(void* transport);
 void web_canvas_2d_transport_append_command(void* transport, ReadonlyBytes record);
@@ -44,12 +45,12 @@ void web_canvas_2d_transport_retain_video_frame_hold(void* transport, void* hold
 void web_canvas_2d_transport_record_present(void* transport);
 size_t web_canvas_2d_transport_pending_command_count(void const* transport);
 void web_canvas_2d_transport_flush(void* transport);
-void* web_canvas_2d_transport_read_back_pixels(void* transport, i32 x, i32 y, i32 width, i32 height, u8 alpha_type);
+void* web_canvas_2d_transport_read_back_pixels(void* transport, i32 x, i32 y, i32 width, i32 height, u8 alpha_type, u8 color_space);
 void web_canvas_2d_bitmap_ref(void* bitmap);
 void web_canvas_2d_bitmap_unref(void* bitmap);
 size_t web_canvas_2d_bitmap_size_in_bytes(void* bitmap);
 bool web_canvas_2d_bitmap_unpremultiplied_rgba_pixels(void* bitmap, u8 const** out_pixels, size_t* out_pitch, i32* out_width, i32* out_height);
-void* web_canvas_2d_image_frame_from_bitmap(void* bitmap);
+void* web_canvas_2d_image_frame_from_bitmap(void* bitmap, u8 color_space);
 }
 
 static RemoteCanvas2DTransport& transport_from(void* transport)
@@ -62,9 +63,10 @@ void web_canvas_2d_transport_unref(void* transport)
     transport_from(transport).unref();
 }
 
-bool web_canvas_2d_transport_create_context(void* transport, i32 width, i32 height, bool alpha)
+// NB: A color space is the underlying value of a Bindings::PredefinedColorSpace.
+bool web_canvas_2d_transport_create_context(void* transport, i32 width, i32 height, bool alpha, bool will_read_frequently, u8 color_space)
 {
-    return transport_from(transport).create_context({ width, height }, alpha);
+    return transport_from(transport).create_context({ width, height }, alpha, will_read_frequently, gfx_color_space_for(predefined_color_space_from_underlying(color_space)));
 }
 
 bool web_canvas_2d_transport_canvas_id(void const* transport, u64* out_canvas_id)
@@ -116,10 +118,10 @@ void web_canvas_2d_transport_flush(void* transport)
     transport_from(transport).flush();
 }
 
-void* web_canvas_2d_transport_read_back_pixels(void* transport, i32 x, i32 y, i32 width, i32 height, u8 alpha_type)
+void* web_canvas_2d_transport_read_back_pixels(void* transport, i32 x, i32 y, i32 width, i32 height, u8 alpha_type, u8 color_space)
 {
     VERIFY(Gfx::is_valid_alpha_type(alpha_type));
-    auto bitmap = transport_from(transport).read_back_pixels({ x, y, width, height }, static_cast<Gfx::AlphaType>(alpha_type));
+    auto bitmap = transport_from(transport).read_back_pixels({ x, y, width, height }, static_cast<Gfx::AlphaType>(alpha_type), gfx_color_space_for(predefined_color_space_from_underlying(color_space)));
     if (!bitmap)
         return nullptr;
     return &bitmap.release_nonnull().leak_ref();
@@ -152,11 +154,12 @@ bool web_canvas_2d_bitmap_unpremultiplied_rgba_pixels(void* bitmap, u8 const** o
     return true;
 }
 
-// A Gfx::DecodedImageFrame of the bitmap, allocated with new, which takes over the reference to the bitmap.
-void* web_canvas_2d_image_frame_from_bitmap(void* bitmap)
+// A Gfx::DecodedImageFrame of the bitmap, whose pixels are in the color space, allocated with new, which takes over the
+// reference to the bitmap.
+void* web_canvas_2d_image_frame_from_bitmap(void* bitmap, u8 color_space)
 {
     NonnullRefPtr<Gfx::Bitmap const> adopted_bitmap = adopt_ref(*static_cast<Gfx::Bitmap*>(bitmap));
-    return new Gfx::DecodedImageFrame { move(adopted_bitmap) };
+    return new Gfx::DecodedImageFrame { move(adopted_bitmap), gfx_color_space_for(predefined_color_space_from_underlying(color_space)) };
 }
 
 }

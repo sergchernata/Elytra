@@ -7,8 +7,8 @@ interface SVGTextContentElement : SVGGraphicsElement {
     const unsigned short LENGTHADJUST_SPACING = 1;
     const unsigned short LENGTHADJUST_SPACINGANDGLYPHS = 2;
 
-    [FIXME, SameObject] readonly attribute SVGAnimatedLength textLength;
-    [FIXME, SameObject] readonly attribute SVGAnimatedEnumeration lengthAdjust;
+    [SameObject] readonly attribute SVGAnimatedLength textLength;
+    [SameObject] readonly attribute SVGAnimatedEnumeration lengthAdjust;
 
     long getNumberOfChars();
     float getComputedTextLength();
@@ -17,7 +17,7 @@ interface SVGTextContentElement : SVGGraphicsElement {
     [FIXME] DOMPoint getEndPositionOfChar(unsigned long charnum);
     DOMRect getExtentOfChar(unsigned long charnum);
     [FIXME] float getRotationOfChar(unsigned long charnum);
-    [FIXME] long getCharNumAtPosition(optional DOMPointInit point = {});
+    long getCharNumAtPosition(optional DOMPointInit point = {});
     [FIXME] undefined selectSubString(unsigned long charnum, unsigned long nchars);
 
 };
