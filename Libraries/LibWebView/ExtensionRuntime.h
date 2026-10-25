@@ -17,13 +17,13 @@
 #include <AK/RefPtr.h>
 #include <AK/String.h>
 #include <LibURL/URL.h>
-#include <LibWebExtensions/StorageArea.h>
 #include <LibWebView/Export.h>
 #include <LibWebView/Forward.h>
 
 namespace WebView {
 
 class Extension;
+class ExtensionAPI;
 class ExtensionRegistry;
 class ViewImplementation;
 class WebContentPage;
@@ -44,6 +44,8 @@ public:
         bool is_top_level { false };
         // Event name -> listener IDs (with what was passed after the callback).
         HashMap<String, HashMap<i64, JsonArray>> listeners;
+
+        bool has_listener(StringView event) const;
     };
 
     using Reply = Function<void(ErrorOr<JsonValue, String>)>;
@@ -78,18 +80,38 @@ public:
 
     Context const* find_context(u64 id) const;
 
+    template<typename Callback>
+    void for_each_context(Callback callback) const
+    {
+        for (auto const& [id, context] : m_contexts)
+            callback(*context);
+    }
+
+    ExtensionRegistry& registry() const { return m_registry; }
+    Optional<ByteString> const& storage_directory() const { return m_storage_directory; }
+
+    // A message to a context, in chrome-api.js's protocol.
+    void send(Context const&, JsonObject const& message);
+
+    // runtime.MessageSender, for a context.
+    JsonObject sender_of(Context const&) const;
+    bool is_background_page(WebContentPage const&) const;
+
+    // While an extension's background is loading, what it should hear waits.
+    bool background_is_starting(StringView extension_id) const;
+    void wait_for_background(StringView extension_id, Function<void()>);
+
+    // Ports (runtime.connect and its kind): a channel from an opener's end to each receiver's.
+    void open_channel(Context const& opener, String opener_port_id, Vector<Context const*> receivers, StringView name);
+
 private:
     Context* find_context(WebContentPage&, u64 page_context_id);
-    void send(Context const&, JsonObject const& message);
     void handle_call(Context&, JsonObject const& message);
 
     void register_runtime_functions();
-    void register_storage_functions();
     void register_messaging_functions();
 
     void start_background(Extension const&);
-    bool is_background_page(WebContentPage const&) const;
-    JsonObject sender_of(Context const&) const;
 
     void message_response_received(Context&, JsonObject const&);
     void context_stopped_answering(u64 context_id);
@@ -104,13 +126,10 @@ private:
         Vector<PortEnd> receivers;
     };
     Optional<u64> channel_of(PortEnd const&) const;
-    void open_channel(Context const& opener, String opener_port_id, Vector<Context const*> receivers, StringView name);
     void post_to_port(Context const&, JsonObject const&);
     void disconnect_port(PortEnd const&, Optional<String> error = {});
     void send_port_disconnected(PortEnd const&, Optional<String> error);
 
-    WebExtensions::StorageArea& storage_area(StringView extension_id, StringView area);
-    void save_storage_area(StringView extension_id, StringView area);
 
     ExtensionRegistry& m_registry;
     HashMap<u64, NonnullOwnPtr<Context>> m_contexts;
@@ -136,13 +155,11 @@ private:
         // What waits for the background to have started: messages sent before anything could hear them.
         Vector<Function<void()>> waiting;
     };
-    bool background_is_starting(StringView extension_id) const;
-    void wait_for_background(StringView extension_id, Function<void()>);
     HashMap<String, Background> m_backgrounds;
 
     Optional<ByteString> m_storage_directory;
-    // "<extension id>/<area>" -> area.
-    HashMap<String, WebExtensions::StorageArea> m_storage_areas;
+
+    Vector<NonnullOwnPtr<ExtensionAPI>> m_apis;
 };
 
 }

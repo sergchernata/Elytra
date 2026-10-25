@@ -30,6 +30,11 @@ set(SOURCES
     DownloadPresentation.cpp
     DownloadSegmentation.cpp
     DownloadStore.cpp
+    ExtensionAPI/Alarms.cpp
+    ExtensionAPI/Management.cpp
+    ExtensionAPI/NativeMessaging.cpp
+    ExtensionAPI/Storage.cpp
+    ExtensionAPI/Tabs.cpp
     ExtensionRegistry.cpp
     ExtensionRuntime.cpp
     ExternalURLHandler.cpp

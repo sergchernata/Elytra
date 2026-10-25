@@ -7,6 +7,7 @@
 #include <AK/JsonParser.h>
 #include <AK/LexicalPath.h>
 #include <LibCore/Directory.h>
+#include <LibWebView/ExtensionAPI/ExtensionAPI.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/ViewImplementation.h>
@@ -18,8 +19,13 @@ ExtensionRuntime::ExtensionRuntime(ExtensionRegistry& registry)
     : m_registry(registry)
 {
     register_runtime_functions();
-    register_storage_functions();
     register_messaging_functions();
+
+    m_apis.append(create_storage_api(*this));
+    m_apis.append(create_alarms_api(*this));
+    m_apis.append(create_native_messaging_api(*this));
+    m_apis.append(create_tabs_api(*this));
+    m_apis.append(create_management_api(*this));
 }
 
 ExtensionRuntime::~ExtensionRuntime() = default;
@@ -49,6 +55,8 @@ void ExtensionRuntime::context_destroyed(WebContentPage& page, u64 page_context_
         return;
     auto id = context->id;
     context_stopped_answering(id);
+    for (auto& api : m_apis)
+        api->context_destroyed(id);
     m_contexts.remove(id);
 }
 
@@ -61,6 +69,8 @@ void ExtensionRuntime::page_closed(WebContentPage& page)
     }
     for (auto id : closed) {
         context_stopped_answering(id);
+        for (auto& api : m_apis)
+            api->context_destroyed(id);
         m_contexts.remove(id);
     }
 }
@@ -202,116 +212,9 @@ void ExtensionRuntime::register_runtime_functions()
     });
 }
 
-// chrome.storage: local and sync are saved per extension, session lasts as long as the browser runs.
 void ExtensionRuntime::set_storage_directory(ByteString directory)
 {
     m_storage_directory = move(directory);
-}
-
-WebExtensions::StorageArea& ExtensionRuntime::storage_area(StringView extension_id, StringView area)
-{
-    auto key = MUST(String::formatted("{}/{}", extension_id, area));
-    return m_storage_areas.ensure(key, [&] {
-        auto const* extension = m_registry.find(extension_id);
-        bool unlimited = extension && extension->manifest().has_permission("unlimitedStorage"sv);
-        auto quota = area == "sync"sv ? WebExtensions::StorageQuota::sync()
-            : area == "session"sv     ? WebExtensions::StorageQuota::session()
-                                      : WebExtensions::StorageQuota::local(unlimited);
-
-        if (m_storage_directory.has_value() && area != "session"sv) {
-            auto path = LexicalPath::join(*m_storage_directory, extension_id, ByteString::formatted("{}.json", area)).string();
-            auto loaded = WebExtensions::StorageArea::load_from_file(path, quota);
-            if (!loaded.is_error())
-                return loaded.release_value();
-            dbgln("Extensions: Can't read {}'s {} storage: {}", extension_id, area, loaded.error());
-        }
-        return WebExtensions::StorageArea { quota };
-    });
-}
-
-void ExtensionRuntime::save_storage_area(StringView extension_id, StringView area)
-{
-    if (!m_storage_directory.has_value() || area == "session"sv)
-        return;
-    auto directory = LexicalPath::join(*m_storage_directory, extension_id).string();
-    if (auto result = Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes); result.is_error()) {
-        dbgln("Extensions: Can't make {}: {}", directory, result.error());
-        return;
-    }
-    auto path = LexicalPath::join(directory, ByteString::formatted("{}.json", area)).string();
-    if (auto result = storage_area(extension_id, area).save_to_file(path); result.is_error())
-        dbgln("Extensions: Can't save {}'s {} storage: {}", extension_id, area, result.error());
-}
-
-static ErrorOr<JsonValue, String> error_string(Error const& error)
-{
-    return MUST(String::formatted("{}", error));
-}
-
-void ExtensionRuntime::register_storage_functions()
-{
-    for (auto area : { "local"sv, "sync"sv, "session"sv }) {
-        auto name = [area](StringView function) { return MUST(String::formatted("storage.{}.{}", area, function)); };
-
-        register_function(name("get"sv), [this, area](Context const& context, JsonArray const& arguments, Reply reply) {
-            auto keys = arguments.is_empty() ? JsonValue {} : arguments.at(0);
-            auto items = storage_area(context.extension_id, area).get(keys);
-            if (items.is_error())
-                return reply(error_string(items.error()));
-            reply(JsonValue { items.release_value() });
-        });
-
-        auto report_changes = [this, area](StringView extension_id, JsonObject changes) {
-            if (changes.is_empty())
-                return;
-            save_storage_area(extension_id, area);
-            dispatch_event(extension_id, MUST(String::formatted("storage.{}.onChanged", area)), JsonArray { Vector<JsonValue> { changes } });
-            dispatch_event(extension_id, "storage.onChanged"sv, JsonArray { Vector<JsonValue> { move(changes), JsonValue { MUST(String::from_utf8(area)) } } });
-        };
-
-        register_function(name("set"sv), [this, area, report_changes](Context const& context, JsonArray const& arguments, Reply reply) {
-            if (arguments.is_empty() || !arguments.at(0).is_object())
-                return reply("storage.set needs an object of items"_string);
-            auto changes = storage_area(context.extension_id, area).set(arguments.at(0).as_object());
-            if (changes.is_error())
-                return reply(error_string(changes.error()));
-            report_changes(context.extension_id, changes.release_value());
-            reply(JsonValue {});
-        });
-
-        register_function(name("remove"sv), [this, area, report_changes](Context const& context, JsonArray const& arguments, Reply reply) {
-            auto keys = arguments.is_empty() ? JsonValue {} : arguments.at(0);
-            auto changes = storage_area(context.extension_id, area).remove(keys);
-            if (changes.is_error())
-                return reply(error_string(changes.error()));
-            report_changes(context.extension_id, changes.release_value());
-            reply(JsonValue {});
-        });
-
-        register_function(name("clear"sv), [this, area, report_changes](Context const& context, JsonArray const&, Reply reply) {
-            report_changes(context.extension_id, storage_area(context.extension_id, area).clear());
-            reply(JsonValue {});
-        });
-
-        register_function(name("getBytesInUse"sv), [this, area](Context const& context, JsonArray const& arguments, Reply reply) {
-            auto keys = arguments.is_empty() ? JsonValue {} : arguments.at(0);
-            auto bytes = storage_area(context.extension_id, area).get_bytes_in_use(keys);
-            if (bytes.is_error())
-                return reply(error_string(bytes.error()));
-            reply(JsonValue { static_cast<u64>(bytes.value()) });
-        });
-
-        register_function(name("getKeys"sv), [this, area](Context const& context, JsonArray const&, Reply reply) {
-            JsonArray keys;
-            for (auto const& key : storage_area(context.extension_id, area).get_keys())
-                keys.must_append(key);
-            reply(JsonValue { move(keys) });
-        });
-
-        register_function(name("setAccessLevel"sv), [](Context const&, JsonArray const&, Reply reply) {
-            reply(JsonValue {});
-        });
-    }
 }
 
 // Backgrounds: each runs in a hidden view of its own, from the extension's install until it's removed.
@@ -323,6 +226,8 @@ void ExtensionRuntime::extensions_changed()
             return;
         start_background(extension);
     });
+    for (auto& api : m_apis)
+        api->extensions_changed();
 }
 
 void ExtensionRuntime::start_background(Extension const& extension)
@@ -355,6 +260,8 @@ void ExtensionRuntime::start_background(Extension const& extension)
 
 void ExtensionRuntime::shut_down()
 {
+    for (auto& api : m_apis)
+        api->shut_down();
     m_backgrounds.clear();
 }
 
@@ -405,10 +312,10 @@ JsonObject ExtensionRuntime::sender_of(Context const& context) const
     return sender;
 }
 
-static bool has_listener(ExtensionRuntime::Context const& context, StringView event)
+bool ExtensionRuntime::Context::has_listener(StringView event) const
 {
-    auto listeners = context.listeners.find(event);
-    return listeners != context.listeners.end() && !listeners->value.is_empty();
+    auto it = listeners.find(event);
+    return it != listeners.end() && !it->value.is_empty();
 }
 
 static constexpr auto no_receiver_error = "Could not establish connection. Receiving end does not exist."sv;
@@ -426,7 +333,7 @@ void ExtensionRuntime::register_messaging_functions()
 
         Vector<Context const*> receivers;
         for (auto const& [id, context] : m_contexts) {
-            if (context->id != caller.id && context->extension_id == target && context->type != "content_script"sv && has_listener(*context, "runtime.onMessage"sv))
+            if (context->id != caller.id && context->extension_id == target && context->type != "content_script"sv && context->has_listener("runtime.onMessage"sv))
                 receivers.append(context.ptr());
         }
         if (receivers.is_empty()) {
@@ -467,7 +374,7 @@ void ExtensionRuntime::register_messaging_functions()
         Vector<Context const*> receivers;
         if (target == caller.extension_id) {
             for (auto const& [id, context] : m_contexts) {
-                if (context->id != caller.id && context->extension_id == target && context->type != "content_script"sv && has_listener(*context, "runtime.onConnect"sv))
+                if (context->id != caller.id && context->extension_id == target && context->type != "content_script"sv && context->has_listener("runtime.onConnect"sv))
                     receivers.append(context.ptr());
             }
         }
