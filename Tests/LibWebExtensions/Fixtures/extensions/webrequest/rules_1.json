@@ -1,0 +1,14 @@
+[
+    {
+        "id": 1,
+        "priority": 1,
+        "action": {
+            "type": "modifyHeaders",
+            "requestHeaders": [
+                { "header": "user-agent", "operation": "remove" },
+                { "header": "x-dnr", "operation": "set", "value": "static" }
+            ]
+        },
+        "condition": { "urlFilter": "/echo?static", "isUrlFilterCaseSensitive": false, "resourceTypes": ["xmlhttprequest"] }
+    }
+]

@@ -416,7 +416,10 @@ fn visit_node(
     match node.op {
         Op::CheckObject => {
             let value = input(0);
-            remove = removable && facts.is_object(value);
+            let is_object_constant = graph
+                .constant_value(value)
+                .is_some_and(|bits| crate::ir::value::tag(bits) == crate::ir::value::OBJECT_TAG);
+            remove = removable && (is_object_constant || facts.is_object(value));
             facts.set_object(value);
         }
         Op::CheckShape { ref shapes } => {
@@ -502,7 +505,7 @@ fn visit_node(
             };
             facts.set_contents(location, input(1));
         }
-        Op::StoreNamed { offset } => {
+        Op::StoreNamed { offset, .. } => {
             let (object, value) = (input(0), input(1));
             facts.forget_named_properties_at(offset);
             facts.set_contents(Location::Named { object, offset }, value);
@@ -606,7 +609,7 @@ fn loaded_location(graph: &Graph, decisions: &Decisions, load: NodeId) -> Option
     let node = graph.node(load);
     let input = |index: usize| decisions.value(graph, node.inputs[index]);
     Some(match node.op {
-        Op::LoadNamed { offset } => Location::Named {
+        Op::LoadNamed { offset, .. } => Location::Named {
             object: input(0),
             offset,
         },

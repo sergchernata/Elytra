@@ -259,7 +259,8 @@ JS::Value window_named_item_value(WrapperWorld& wrapper_world, JS::Realm& realm,
 {
     return window.named_item(name).visit(
         [](Empty) -> JS::Value { return JS::js_undefined(); },
-        [](GC::Ref<HTML::WindowProxy> const& value) -> JS::Value { return &value->object(); },
+        // Elytra: A named frame's WindowProxy for the world that asks.
+        [&realm](GC::Ref<HTML::WindowProxy> const& value) -> JS::Value { return Bindings::value_for_world(realm, &value->object()); },
         [&wrapper_world, &realm](GC::Ref<DOM::Element> const& value) -> JS::Value { return wrap(wrapper_world, realm, value); },
         [&wrapper_world, &realm](GC::Ref<DOM::HTMLCollection> const& value) -> JS::Value { return wrap(wrapper_world, realm, value); });
 }
@@ -393,6 +394,7 @@ void Window::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_statusbar);
     visitor.visit(m_toolbar);
     visitor.visit(m_external);
+    m_event_timing_state.visit_edges(visitor);
 }
 
 void Window::finalize()
@@ -575,7 +577,7 @@ WebIDL::ExceptionOr<Window::OpenedWindow> Window::window_open_steps_internal(Utf
 
 bool Window::dispatch_event(DOM::Event& event)
 {
-    return DOM::EventDispatcher::dispatch(*this, event, true);
+    return DOM::EventDispatcher::dispatch(*this, event);
 }
 
 Page& Window::page()
@@ -771,7 +773,7 @@ void Window::fire_a_page_transition_event(Utf16FlyString const& event_name, bool
     event->set_is_trusted(true);
 
     // and legacy target override flag set.
-    dispatch_event(event);
+    DOM::EventDispatcher::dispatch(*this, event, true);
 }
 
 // https://html.spec.whatwg.org/multipage/webstorage.html#dom-localstorage
@@ -1402,12 +1404,20 @@ u32 Window::length()
     return associated_document().document_tree_child_navigables().size();
 }
 
+// INTEROP: Browsers discard the navigables of a removed navigable container right away, while the spec only destroys
+//          their documents in a later task. So we treat a navigable in a destroyed subtree as discarded, except while
+//          the document is being unloaded: browsers unload it during the removal, when it is not discarded yet.
+static bool has_been_discarded(Navigable const& navigable, DOM::Document const& document)
+{
+    return navigable.is_in_a_destroyed_subtree() && document.unload_counter() == 0;
+}
+
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-top
 GC::Ptr<WindowProxy const> Window::top() const
 {
     // 1. If this's navigable is null, then return null.
     auto navigable = this->navigable();
-    if (!navigable)
+    if (!navigable || has_been_discarded(*navigable, associated_document()))
         return {};
 
     // 2. Return this's navigable's top-level traversable's active WindowProxy.
@@ -1433,7 +1443,7 @@ JS::Value Window::opener() const
     return &opener_window_proxy->object();
 }
 
-WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
+WebIDL::ExceptionOr<void> Window::set_opener(JS::Realm& realm, JS::Value value)
 {
     // 1. If the given value is null and this's browsing context is non-null, then set this's browsing context's opener browsing context to null.
     auto browsing_context = this->browsing_context();
@@ -1446,7 +1456,8 @@ WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
     // 2. If the given value is non-null, then perform ? DefinePropertyOrThrow(this, "opener", { [[Value]]: the given value, [[Writable]]: true, [[Enumerable]]: true, [[Configurable]]: true }).
     if (!value.is_null()) {
         JS::PropertyDescriptor descriptor { .value = value, .writable = true, .enumerable = true, .configurable = true };
-        TRY(relevant_global_object(*this).define_property_or_throw(vm().names.opener, descriptor));
+        // Elytra: On the global of the world that set it (as for a [Replaceable] attribute), not the main world's.
+        TRY(Bindings::platform_object_for_window(*this, realm).define_property_or_throw(vm().names.opener, descriptor));
     }
 
     return {};
@@ -1459,7 +1470,7 @@ GC::Ptr<WindowProxy const> Window::parent() const
     GC::Ptr<Navigable> navigable = this->navigable();
 
     // 2. If navigable is null, then return null.
-    if (!navigable)
+    if (!navigable || has_been_discarded(*navigable, associated_document()))
         return {};
 
     // 3. If navigable's parent is not null, then set navigable to navigable's parent.
@@ -1567,6 +1578,30 @@ void Window::alert(Utf16String const& message)
 
     // FIXME: Make the remaining steps fully spec compliant.
     page().did_request_alert(message);
+}
+
+// https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#dom-print
+void Window::print()
+{
+    // 1. Let document be this's associated Document.
+    auto& document = associated_document();
+
+    // 2. If document is not fully active, then return.
+    if (!document.is_fully_active())
+        return;
+
+    // 3. If document's unload counter is greater than 0, then return.
+    if (document.unload_counter() > 0)
+        return;
+
+    // 4. If document is ready for post-load tasks, then run the printing steps for document.
+    if (document.ready_for_post_load_tasks()) {
+        document.run_the_printing_steps();
+        return;
+    }
+
+    // 5. Otherwise, set document's print when loaded flag.
+    document.set_print_when_loaded();
 }
 
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#dom-confirm
@@ -1681,10 +1716,13 @@ void Window::deliver_posted_message(SerializedTransferRecord serialize_with_tran
     if (source)
         source_for_event = GC::Ref { *source };
 
-    TemporaryExecutionContext temporary_execution_context { target_realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
-
     // 4. Let deserializeRecord be StructuredDeserializeWithTransfer(serializeWithTransferResult, targetRealm).
-    auto deserialize_record_or_error = structured_deserialize_with_transfer(serialize_with_transfer_result, target_realm);
+    // NB: The execution context must not stay on the stack while the event is dispatched, so that a microtask
+    //     checkpoint can be performed after each listener.
+    auto deserialize_record_or_error = [&] {
+        TemporaryExecutionContext temporary_execution_context { target_realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+        return structured_deserialize_with_transfer(serialize_with_transfer_result, target_realm);
+    }();
 
     // If this throws an exception, catch it, fire an event named messageerror at targetWindow, using MessageEvent,
     // with its origin initialized to origin and the source attribute initialized to source, and then return.
@@ -2280,6 +2318,14 @@ GC::Ref<CustomElementRegistry> Window::custom_elements()
 
     // 2. Return this's associated Document's custom element registry.
     return *registry;
+}
+
+// Elytra: As in Chrome, other worlds than the main one (an extension's content scripts) have no custom elements.
+GC::Ptr<CustomElementRegistry> Window::custom_elements_for_world(JS::Realm& realm)
+{
+    if (realm.host_defined() && !Bindings::host_defined_wrapper_world(realm).is_main_world())
+        return nullptr;
+    return custom_elements();
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#document-tree-child-navigable-target-name-property-set

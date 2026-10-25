@@ -19,9 +19,12 @@ use libgfx_rust::font::FontCascadeListHandle;
 use libgfx_rust::image_frame::ImageFrameHandle;
 use libjs_rust::api::{Gc, Object, Realm};
 
-use super::drawing_state::CanvasColor;
+use super::drawing_state::{CanvasColor, DrawingState};
 use super::host::CppTransport;
 use crate::bindings::conversions::CppInterface;
+use crate::html::canvas_text_drawing_styles::{
+    CanvasFontKerning, CanvasFontStretch, CanvasFontVariantCaps, CanvasTextRendering,
+};
 use crate::html::predefined_color_space::PredefinedColorSpace;
 
 unsafe extern "C" {
@@ -31,10 +34,12 @@ unsafe extern "C" {
     fn web_canvas_2d_canvas_wrapper(canvas: *mut c_void, canvas_is_offscreen: bool, realm: *mut c_void) -> *mut c_void;
     fn web_canvas_2d_canvas_relevant_realm(canvas_host: *mut c_void) -> *mut c_void;
     fn web_canvas_2d_canvas_font_environment_generation(canvas_host: *mut c_void) -> u64;
+    fn web_canvas_2d_canvas_directionality_is_rtl(canvas: *mut c_void, canvas_is_offscreen: bool) -> bool;
     fn web_canvas_2d_canvas_resolve_font(
         canvas: *mut c_void,
         canvas_is_offscreen: bool,
         font: usize,
+        font_selection: FontSelection,
         out_font: *mut ResolvedFontAbi,
     ) -> bool;
     fn web_canvas_2d_canvas_resolve_color(
@@ -130,6 +135,28 @@ struct ResolvedFontAbi {
     font_size: i32,
     /// An AK::Utf16String that the caller takes over.
     serialized: usize,
+}
+
+/// `CanvasFontSelection` of Canvas2DContextBase.cpp: the text drawing styles of a context that select the fonts of
+/// its text beside its font, by the values of their enumerations.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct FontSelection {
+    font_kerning: CanvasFontKerning,
+    font_stretch: CanvasFontStretch,
+    font_variant_caps: CanvasFontVariantCaps,
+    text_rendering: CanvasTextRendering,
+}
+
+impl FontSelection {
+    pub(crate) fn of(state: &DrawingState) -> Self {
+        Self {
+            font_kerning: state.font_kerning,
+            font_stretch: state.font_stretch,
+            font_variant_caps: state.font_variant_caps,
+            text_rendering: state.text_rendering,
+        }
+    }
 }
 
 /// The font of a context: the cascade of fonts that its text is drawn with, the font environment that chose them, and
@@ -269,9 +296,14 @@ impl Canvas {
         unsafe { web_canvas_2d_canvas_font_environment_generation(self.host.as_ptr()) }
     }
 
+    /// Whether the directionality of a canvas element, or the inherited direction of an OffscreenCanvas, is 'rtl'.
+    pub(crate) fn directionality_is_rtl(self) -> bool {
+        unsafe { web_canvas_2d_canvas_directionality_is_rtl(self.cell.as_ptr(), self.is_offscreen) }
+    }
+
     /// The font that a value of the font attribute describes, resolved against the canvas, unless the value is not a
     /// CSS font.
-    pub(crate) fn resolve_font(self, font: &Utf16String) -> Option<ResolvedFont> {
+    pub(crate) fn resolve_font(self, font: &Utf16String, font_selection: FontSelection) -> Option<ResolvedFont> {
         let mut resolved = ResolvedFontAbi {
             cascade: core::ptr::null(),
             environment_generation: 0,
@@ -283,6 +315,7 @@ impl Canvas {
                 self.cell.as_ptr(),
                 self.is_offscreen,
                 font.raw_identity(),
+                font_selection,
                 &raw mut resolved,
             )
         };

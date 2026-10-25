@@ -473,6 +473,7 @@ scalar_accessors! {
     }
     inherited_box: {
         writing_mode: u8 => writing_mode,
+        text_orientation: u8 => text_orientation,
         direction: u8 => direction,
         visibility: u8 => visibility,
     }
@@ -517,6 +518,8 @@ scalar_accessors! {
         justify_content: u8 => justify_content,
         justify_items: u8 => justify_items,
         justify_self: u8 => justify_self,
+        align_self_overflow: u8 => align_self_overflow,
+        justify_self_overflow: u8 => justify_self_overflow,
         flex_basis_is_content: bool => flex_basis.is_content,
     }
 }

@@ -363,9 +363,7 @@ impl<'pass> BlockFormattingContext<'pass> {
             clamped_content_is_scrollable_overflow,
             // NB: Measurements at a definite inline size need the clamped block size, just like committed layout.
             max_lines: Cell::new(
-                ((!run.purpose.is_measurement()
-                    || run.records.used_values(run.box_).has_definite_inline_size()
-                    || style.writing_mode() != writing_mode::HORIZONTAL_TB)
+                ((!run.purpose.is_measurement() || run.records.used_values(run.box_).has_definite_inline_size())
                     && is_line_clamp_container
                     && style.max_lines() > 0)
                     .then_some(style.max_lines() as usize),
@@ -454,10 +452,12 @@ impl<'pass> BlockFormattingContext<'pass> {
         self.table_box_in_wrapper_border_box_block_size.get()
     }
 
+    #[inline]
     fn facts(&self, node: Node) -> NodeFacts<'_> {
         NodeFacts::new(&self.run.callbacks, node)
     }
 
+    #[inline]
     fn style(&self, node: Node) -> StyleValues<'pass> {
         StyleValues::for_node(&self.run.callbacks, node)
     }
@@ -522,6 +522,7 @@ impl<'pass> BlockFormattingContext<'pass> {
         ancestor == node || self.is_ancestor_of(ancestor, node)
     }
 
+    #[inline]
     pub(crate) fn sizing(&self) -> sizing_context::SizingContext<'pass> {
         sizing_context::SizingContext::new(self.run.purpose, self.run.records, self.run.callbacks)
     }
@@ -843,6 +844,11 @@ impl<'pass> BlockFormattingContext<'pass> {
         let containing_block_direction = self.style(self.containing_block(node)).direction();
         let computed_margin_left = style.margin_left();
         let computed_margin_right = style.margin_right();
+        // NB: A box that establishes an orthogonal flow and has an automatic inline size is sized to its content, not
+        //     over-constrained: its margins keep their values, unless the line-right margin has to place it at the
+        //     inline start of a right-to-left containing block.
+        let is_content_sized_orthogonal_flow =
+            sizing.establishes_orthogonal_flow(node) && sizing.should_treat_inline_size_as_auto(node, available_space);
         let compute = |input: Option<CssPixels>,
                        margin_left: &mut CssPixels,
                        margin_right: &mut CssPixels,
@@ -904,7 +910,7 @@ impl<'pass> BlockFormattingContext<'pass> {
                 } else if !*margin_left_is_auto && !*margin_right_is_auto {
                     if containing_block_direction == direction::RTL {
                         *margin_left += underflow;
-                    } else {
+                    } else if !is_content_sized_orthogonal_flow {
                         *margin_right += underflow;
                     }
                 } else if !*margin_left_is_auto && *margin_right_is_auto {
@@ -944,6 +950,11 @@ impl<'pass> BlockFormattingContext<'pass> {
             // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
             // If the computed value of 'inline-size' is 'auto', then the used value is the fit-content inline size.
             Some(sizing.calculate_fit_content_size(node, SizingAxis::Inline, available_space, constraints))
+        } else if is_content_sized_orthogonal_flow {
+            // https://drafts.csswg.org/css-writing-modes-4/#orthogonal-shrink-to-fit
+            // Note that this section requires that when a child box auto-sized in its block axis establishes an
+            // orthogonal flow, the used block size of the child is calculated to fit its content
+            Some(sizing.calculate_fit_content_size(node, SizingAxis::Inline, remaining_available_space, constraints))
         } else if sizing.should_treat_inline_size_as_auto(node, available_space) {
             None
         } else {
@@ -4787,32 +4798,6 @@ impl<'pass> BlockFormattingContext<'pass> {
     }
 
     pub(crate) fn automatic_content_inline_size(&self) -> CssPixels {
-        if self.style(self.run.box_).writing_mode() != writing_mode::HORIZONTAL_TB && self.line_clamp_reached() {
-            let used = self.used(self.run.box_);
-            if let Some(line) = used
-                .line_data_ref()
-                .as_ref()
-                .and_then(|data| data.building().line_boxes.last())
-            {
-                // https://drafts.csswg.org/css-overflow-4/#block-ellipsis
-                // The block overflow ellipsis is wrapped in an anonymous inline whose parent is the block
-                // container's root inline box. This inline is assigned line-height: 0.
-                let line_block_size = line
-                    .visible_fragments()
-                    .filter(|fragment| !fragment.is_block_ellipsis)
-                    .map(|fragment| {
-                        if fragment.is_atomic_inline {
-                            self.used(fragment.layout_node).margin_box_block_size(false)
-                        } else {
-                            fragment.block_length
-                        }
-                    })
-                    .max()
-                    .unwrap_or_default()
-                    .max(self.style(self.run.box_).line_height());
-                return line.block_start + line_block_size;
-            }
-        }
         let root_facts = self.facts(self.run.box_);
         if root_facts.children_are_inline() {
             let content_inline_size = self.used(self.run.box_).content_inline_size.get();
@@ -5057,9 +5042,14 @@ pub(crate) fn automatic_block_size_for_bfc_root(
             let (first, last) = laid_out_children.unwrap_or_else(|| (callbacks.first_child(root), Node::INVALID));
             callbacks.siblings_from(first, last).collect()
         };
+        let participates = |child: Node| {
+            let child_facts = NodeFacts::new(&callbacks, child);
+            child_facts.is_flow_layout_participant() && !child_facts.is_floating()
+        };
+        let last_participant = flow_children.iter().copied().rev().find(|&child| participates(child));
         for child in flow_children {
             let child_facts = NodeFacts::new(&callbacks, child);
-            if !child_facts.is_flow_layout_participant() || child_facts.is_floating() {
+            if !participates(child) {
                 continue;
             }
             let Some(child_used) = records.used_values_if_owned(child) else {
@@ -5071,13 +5061,22 @@ pub(crate) fn automatic_block_size_for_bfc_root(
             // Margins cannot collapse out of a BFC root: below the last real in-flow
             // child, the run's trailing collapsed margin (which folds in any trailing
             // collapse-through siblings) replaces that child's own bottom margin.
+            let collapsed = child_used.uses_collapsing_borders_model.get();
             let margin_bottom = match trailing_collapsed_margin {
                 Some((last_real_child, aggregate)) if last_real_child == child => aggregate,
+                // NB: The margins of an empty box collapse through it into those of the boxes after it, which
+                //     are placed past them, so its own bottom margin reaches no further than theirs.
+                _ if Some(child) != last_participant
+                    && child_used.border_box_block_size(collapsed) == CssPixels::default()
+                    && formatting_context::formatting_context_type_created_by_box(child_facts).is_none() =>
+                {
+                    CssPixels::default()
+                }
                 _ => child_used.margin_bottom.get(),
             };
             let child_bottom = child_used.content_offset.get().y
                 + child_used.content_block_size.get()
-                + child_used.border_box_bottom(child_used.uses_collapsing_borders_model.get())
+                + child_used.border_box_bottom(collapsed)
                 + margin_bottom;
             bottom = Some(bottom.map_or(child_bottom, |value: CssPixels| value.max(child_bottom)));
         }

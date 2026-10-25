@@ -10,6 +10,7 @@
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
+#include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/Arc/ArcImporter.h>
 #include <UI/Qt/Arc/ArcShortcuts.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
@@ -132,6 +133,9 @@ static void add_import_action_to(QMenu& menu)
     if (!anchor || !menu.actions().contains(anchor) || menu.actions().contains(import_action()))
         return;
     menu.insertAction(anchor, import_action());
+    // "Extensions…" ends the same menu.
+    menu.addSeparator();
+    add_extensions_action_to(menu);
 }
 
 // Watches app-wide events: File menus being built, and browser windows being shown.
@@ -145,6 +149,14 @@ public:
             // Arc's shortcuts. Where upstream binds the same keys (Cmd+D, Cmd+Shift+C, next/previous tab), claiming
             // the shortcut override makes Qt deliver a plain key press, below, instead of firing upstream's action.
             auto& key_event = *static_cast<QKeyEvent*>(event);
+            // Extensions' commands, for keys the browser doesn't use itself.
+            if (!arc_shortcut_for(key_event.key(), key_event.modifiers()).has_value()) {
+                auto* widget = qobject_cast<QWidget*>(watched);
+                if (widget && (widget == QApplication::focusWidget() || widget->isWindow()) && handle_extension_shortcut(key_event, qobject_cast<BrowserWindow*>(widget->window()))) {
+                    event->accept();
+                    return true;
+                }
+            }
             if (auto shortcut = arc_shortcut_for(key_event.key(), key_event.modifiers()); shortcut.has_value()) {
                 auto* widget = qobject_cast<QWidget*>(watched);
                 auto* window = widget ? qobject_cast<BrowserWindow*>(widget->window()) : nullptr;
@@ -379,6 +391,7 @@ void install()
     route_new_tab_to_command_bar();
     route_location_editing_to_command_bar();
     route_links_from_other_apps_to_little_arc();
+    install_extensions_ui();
     Tab::animates_loading_spinner = false;
     Tab::hides_sidebar_toggle_while_expanded = true;
     // The sidebar's windows line the toolbar's buttons up with the page from the start, rather than correcting

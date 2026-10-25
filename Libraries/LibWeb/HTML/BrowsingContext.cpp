@@ -18,6 +18,7 @@
 #include <LibWeb/HTML/HTMLIFrameElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
+#include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/RemoteNavigable.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/Window.h>
@@ -27,6 +28,7 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
 
 namespace Web::HTML {
@@ -77,6 +79,13 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // 1. Let browsingContext be a new browsing context.
     GC::Ref<BrowsingContext> browsing_context = *GC::Heap::the().allocate<BrowsingContext>(page);
 
+    // NB: Upgrade Insecure Requests has a nested browsing context inherit its embedding document's insecure requests
+    //     policy when it is created.
+    if (embedder) {
+        auto const& embedding_document_settings = embedder->document().relevant_settings_object();
+        UpgradeInsecureRequests::inherit_the_insecure_requests_policy_into_a_nested_browsing_context(*browsing_context, embedding_document_settings.insecure_requests_policy(), embedding_document_settings.upgrade_insecure_navigations_set());
+    }
+
     // 2. Let unsafeContextCreationTime be the unsafe shared current time.
     [[maybe_unused]] auto unsafe_context_creation_time = HighResolutionTime::unsafe_shared_current_time();
 
@@ -105,7 +114,8 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // NB: The UI process determined the origin of a document it held first.
     auto origin = determined_origin.has_value() ? determined_origin.release_value() : determine_the_origin(URL::about_blank(), sandbox_flags, creator_origin);
 
-    // FIXME: 8. Let permissionsPolicy be the result of creating a permissions policy given embedder and origin. [PERMISSIONSPOLICY]
+    // 8. Let permissionsPolicy be the result of creating a permissions policy given embedder and origin. [PERMISSIONSPOLICY]
+    auto permissions_policy = NavigableContainer::create_a_permissions_policy(as_if<NavigableContainer>(embedder.ptr()), origin);
 
     // 9. Let agent be the result of obtaining a similar-origin window agent given origin, group, and false.
     // NB: The UI process obtains the agent. For creator's origin, that is creator's agent. Any other origin is a new
@@ -139,8 +149,19 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
 
     auto& realm = *realm_execution_context->realm;
 
-    // 11. Let topLevelCreationURL be about:blank if embedder is null; otherwise embedder's relevant settings object's top-level creation URL.
-    auto top_level_creation_url = !embedder ? URL::about_blank() : relevant_settings_object(*embedder).top_level_creation_url.value();
+    // 11. Let topLevelCreationURL be the return value of running these steps:
+    auto top_level_creation_url = [&] {
+        // 1. If embedder is non-null, then return embedder's relevant settings object's top-level creation URL.
+        if (embedder)
+            return relevant_settings_object(*embedder).top_level_creation_url.value();
+
+        // 2. If creator is non-null, then return creator's relevant settings object's top-level creation URL.
+        if (creator)
+            return creator->relevant_settings_object().top_level_creation_url.value();
+
+        // 3. Return about:blank.
+        return URL::about_blank();
+    }();
 
     // 12. Let topLevelOrigin be origin if embedder is null; otherwise embedder's relevant settings object's top-level origin.
     auto top_level_origin = !embedder ? origin : relevant_settings_object(*embedder).top_level_origin.value();
@@ -186,7 +207,8 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // browsing context: browsingContext
     document->set_browsing_context(browsing_context);
 
-    // FIXME: permissions policy: permissionsPolicy
+    // permissions policy: permissionsPolicy
+    document->set_permissions_policy(move(permissions_policy));
 
     // active sandboxing flag set: sandboxFlags
     document->set_active_sandboxing_flag_set(sandbox_flags);
@@ -207,6 +229,9 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
 
     // custom element registry: A new CustomElementRegistry object.
     document->set_custom_element_registry(CustomElementRegistry::create_global(*document));
+
+    // NB: Upgrade Insecure Requests has a new Document inherit its browsing context's insecure requests policy.
+    UpgradeInsecureRequests::inherit_the_insecure_requests_policy_into_a_new_document(document->relevant_settings_object(), browsing_context);
 
     // 16. Let iframeReferrerPolicy be the result of determining the iframe element referrer policy given embedder.
     auto iframe_referrer_policy = determine_iframe_element_referrer_policy(embedder);
@@ -311,6 +336,7 @@ void BrowsingContext::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_window_proxy);
     visitor.visit(m_active_document);
     visitor.visit(m_opener_browsing_context_window_proxy);
+    visitor.visit(m_the_one_permitted_sandboxed_navigator);
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#top-level-browsing-context

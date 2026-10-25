@@ -298,7 +298,21 @@ impl RetainedState {
                 None => self.batch_custom_property_answers.remove(&node),
             };
         }
-        if let Some(matches) = self.batch_backing_pseudo_matches_of(node, answers, answer) {
+        let backing_pseudo_matches = self.batch_backing_pseudo_matches_of(node, answers, answer);
+        if self.tree.shadow_root_of(node).is_some() {
+            match &backing_pseudo_matches {
+                Some(matches) => {
+                    self.shadow_host_backing_pseudo_matches
+                        .insert(node, (self.program.version(), matches.clone()));
+                }
+                None => {
+                    self.shadow_host_backing_pseudo_matches.remove(&node);
+                }
+            }
+        }
+        if let Some(matches) = backing_pseudo_matches
+            && !matches.is_empty()
+        {
             self.batch_backing_pseudo_matches.insert(node, matches);
         }
         if let Some(complete) = self.answer_is_complete_but_for_custom_properties(node, answers, answer) {
@@ -534,6 +548,11 @@ impl StyleEngine {
                         | InputKey::CustomPropertyRegistration(_)
                 )
             });
+        // A shadow host's matches may move with any input that reaches a selector, and only the transactions that
+        // publish the host's answer note them again.
+        if !transaction_reaches_no_selector {
+            self.retained.shadow_host_backing_pseudo_matches.clear();
+        }
         let match_identity_is_complete_output = !transaction.has_coarsened_markers()
             && transaction.inputs.iter().all(|input| {
                 !matches!(
@@ -2613,7 +2632,9 @@ impl StyleEngine {
         &mut self,
         mut pass: StylePass,
         mut emit: impl FnMut(StyleTransactionVersion, ProgramVersion, &[PublishedStyleDeltaRecord]),
+        clock: &mut TransactionClock,
     ) -> bool {
+        clock.enter(Counter::ComputationPublicationMicroseconds, &self.retained.counters);
         // A record the host did not install from the last wave is gone, as at a transaction
         // boundary: the host answered that row from its demand, or skipped it.
         self.discard_engine_computed_records();
@@ -2639,8 +2660,10 @@ impl StyleEngine {
             self.retained
                 .counters
                 .add(Counter::PublishedMatchAnswerRecords, style_deltas.len() as u64);
+            clock.enter(Counter::EmitMicroseconds, &self.retained.counters);
             emit(pass.transaction_version, pass.program_version, &style_deltas);
         }
+        clock.enter(Counter::TransactionRemainderMicroseconds, &self.retained.counters);
 
         self.retained.published_match_answers = std::mem::take(&mut pass.published_match_answers);
         let scoped = pass.scoped;
@@ -2870,7 +2893,7 @@ impl StyleEngine {
                     && !self.host.program_staging.is_dirty()
                     && self.host.sheet_rule_replacement.is_none() =>
             {
-                self.continue_style_pass(pass, emit)
+                self.continue_style_pass(pass, emit, &mut clock)
             }
             pass => {
                 if let Some(pass) = pass {

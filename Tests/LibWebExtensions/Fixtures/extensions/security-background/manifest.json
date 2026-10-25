@@ -1,0 +1,11 @@
+{
+    "manifest_version": 3,
+    "name": "Security: a background with secrets",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqpUrC5C9rRxiU4TCvYGlicl/s7G97uKL9RT8g8W4jM4UxWm/eOrN7C9PoUIc6/U5MKQbEPtYsUPHMuBX0dBJ555zUL05zQhyd26bDyU+Q4yL9uIhOyWXd/CO18UE5+Phq2YjNyVP0O7uE2k5VtjLFGD6g3qv5gFGg+nQqCCl7CxKl1//P8V6liaMdEV6FJktoWl0liNHJI16qE73D12lTAWKMOZ2DRWQ2zUw9ID7c+TYk/mncf2I2XUS2E9eqFRu5K61Tsst4X6fM+e6YK6CwJT47BPbkYMof/RCUzmOAnoP224t5Mt85pRh6NzJnBemfS5lbb7EGvqv1eD56x1cNQIDAQAB",
+    "permissions": ["storage"],
+    "background": { "service_worker": "background.js" },
+    "content_scripts": [
+        { "matches": ["https://bank.example/*"], "js": ["content.js"] }
+    ]
+}

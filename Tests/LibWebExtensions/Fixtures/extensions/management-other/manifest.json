@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Other management test extension",
+    "version": "3.1",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwz1EiOR2tEvOPq1w7KSyX66noTDTasG99k3yFUu32IFz5EcCzFICy7viSy7WB0dQxo1cqI2Zl9ucQG/o0kyJ9KEkPnVe7BfJkUx8WmpUhycV4PdAontJkp7bDU5xi5dcj/Cf82shAWlR9u5VjLYPVH77aEY6iqKKYi/6fwg7J/s+zR7ehjxzWBI3LjUTk5F3xwXOS8PnYSwKz7oedc12ODHN9ZO95Kri9ndCFZKiVjtpj3/1cAbCVV6+gaNG5gXZPWrcdxtTEgQHUm/jwA/8B1LasnW+HVJQulkW1r66JDyUErHu9l22qVqzSIKjWaiAPXUOGMZe4B6aatkrSazF5wIDAQAB",
+    "permissions": ["privacy", "storage"],
+    "background": { "service_worker": "background.js" }
+}

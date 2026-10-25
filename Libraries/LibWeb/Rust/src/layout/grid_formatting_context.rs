@@ -1204,13 +1204,16 @@ impl<'pass> GridFormattingContext<'pass> {
             row_alignment_container_size: CssPixels::default(),
             use_row_alignment_container_size: false,
             use_row_sizes_for_column_percentages: false,
-            grid_axes_are_transposed: container_style.writing_mode() != writing_mode::HORIZONTAL_TB,
-            columns_are_reversed: !geometry::start_is_left_or_top(
+            grid_axes_are_transposed: geometry::Frame::of(container_style.writing_mode())
+                .is_orthogonal_to(run.callbacks.frame),
+            columns_are_reversed: !geometry::start_is_low_side_in_frame(
+                run.callbacks.frame,
                 container_style.writing_mode(),
                 container_style.direction(),
                 true,
             ),
-            rows_are_reversed: !geometry::start_is_left_or_top(
+            rows_are_reversed: !geometry::start_is_low_side_in_frame(
+                run.callbacks.frame,
                 container_style.writing_mode(),
                 container_style.direction(),
                 false,
@@ -1265,10 +1268,12 @@ impl<'pass> GridFormattingContext<'pass> {
     fn used(&self, item: GridItem) -> &'pass UsedValues {
         self.run.records.used_values(item.box_)
     }
+    #[inline]
     fn style(&self, node: Node) -> StyleValues<'pass> {
         StyleValues::for_node(&self.run.callbacks, node)
     }
 
+    #[inline]
     fn facts(&self, node: Node) -> NodeFacts<'_> {
         NodeFacts::new(&self.run.callbacks, node)
     }
@@ -1297,13 +1302,14 @@ impl<'pass> GridFormattingContext<'pass> {
     /// Picks whichever of the per-grid-axis values of a grid item that is itself a grid container belongs to the given
     /// physical axis, following the item's own writing mode, as select_grid_axis() does for the grid container.
     fn select_item_grid_axis<T>(&self, item: Node, axis: Axis, column: T, row: T) -> T {
-        if self.style(item).writing_mode() != writing_mode::HORIZONTAL_TB {
+        if self.sizing().establishes_orthogonal_flow(item) {
             axis.select(row, column)
         } else {
             axis.select(column, row)
         }
     }
 
+    #[inline]
     fn sizing(&self) -> sizing_context::SizingContext<'pass> {
         sizing_context::SizingContext::new(self.run.purpose, self.run.records, self.run.callbacks)
     }
@@ -3274,8 +3280,12 @@ impl<'pass> GridFormattingContext<'pass> {
             // corresponding to the alignment subject’s end side in the appropriate axis.
             Alignment::SelfStart | Alignment::SelfEnd => {
                 let horizontal = axis.is_column();
-                let item_start_is_left_or_top =
-                    geometry::start_is_left_or_top(item_style.writing_mode(), item_style.direction(), horizontal);
+                let item_start_is_left_or_top = geometry::start_is_low_side_in_frame(
+                    self.run.callbacks.frame,
+                    item_style.writing_mode(),
+                    item_style.direction(),
+                    horizontal,
+                );
                 let shares_start_side = item_start_is_left_or_top == self.axis_start_is_left_or_top(axis);
                 if shares_start_side == (alignment == Alignment::SelfStart) {
                     Alignment::Start
@@ -3317,10 +3327,15 @@ impl<'pass> GridFormattingContext<'pass> {
     // right: Aligns the alignment subject to be flush with the alignment container’s line-right or physical right
     // edge, whichever is in the appropriate axis.
     fn resolve_left_or_right(&self, axis: Axis, alignment: Alignment) -> Alignment {
-        // NB: The Row axis of a grid container in a vertical writing mode is its inline axis, whose line-left side is
-        //     the top, except in sideways-lr, where it is the bottom.
-        let line_left_is_left_or_top =
-            axis.is_column() || self.style(self.run.box_).writing_mode() != writing_mode::SIDEWAYS_LR;
+        // NB: The Column axis is the inline axis of the frame, whose line-left side is its left side. Along the Row
+        //     axis, left and right are physical sides, which a transposed frame may run either way.
+        let frame = self.run.callbacks.frame;
+        let line_left_is_left_or_top = axis.is_column()
+            || !frame.is_transposed()
+            || matches!(
+                frame.frame_side(geometry::Side::Left),
+                geometry::Side::Left | geometry::Side::Top
+            );
         let aligns_to_left_or_top = (alignment == Alignment::Left) == line_left_is_left_or_top;
         if self.axis_start_is_left_or_top(axis) == aligns_to_left_or_top {
             Alignment::Start
@@ -3542,7 +3557,7 @@ impl<'pass> GridFormattingContext<'pass> {
             //     at that width, so block contents must be measured against the same basis. Orthogonal items with
             //     inline contents instead contribute their inline-axis size to the physical row axis.
             let use_resolved_content_width = !axis.is_column()
-                && (style.writing_mode() == writing_mode::HORIZONTAL_TB || !facts.children_are_inline());
+                && (!self.sizing().establishes_orthogonal_flow(item.box_) || !facts.children_are_inline());
             let available_inline = if use_resolved_content_width {
                 self.used(item).content_inline_size.get()
             } else {
@@ -4061,7 +4076,9 @@ impl<'pass> GridFormattingContext<'pass> {
             // Resolve relative-position insets before placement seals the
             // item's committed metrics.
             abspos_engine::compute_inset_native(run, item.box_, area.size.inline_size, area.size.block_size);
-            if self.item_participates_in_row_baseline_alignment(item) {
+            if self.item_participates_in_row_baseline_alignment(item)
+                || self.item_participates_in_column_baseline_alignment(item)
+            {
                 // NB: Baseline-aligned items are placed once every item in their baseline-sharing group is laid out.
                 baseline_aligned_items.push((item_index, offset));
                 continue;
@@ -4114,13 +4131,50 @@ impl<'pass> GridFormattingContext<'pass> {
         })
     }
 
+    // NB: In a frame whose horizontal axis is vertical in the physical plane, the horizontal Column axis aligns items
+    //     by their baselines too: items in an orthogonal flow by their own, which lie across that axis, and other
+    //     items by synthesized ones.
+    fn item_participates_in_column_baseline_alignment(&self, item: GridItem) -> bool {
+        if !self.run.callbacks.frame.is_transposed()
+            || self.columns_are_reversed
+            || self.item_alignment(item, Axis::Column) != Alignment::Baseline
+        {
+            return false;
+        }
+        let style = self.style(item.box_);
+        if style.margin_left().is_auto() || style.margin_right().is_auto() {
+            return false;
+        }
+        !(self.item_preferred_size(item, Axis::Column).contains_percentage()
+            || style.min_width().contains_percentage()
+            || style.max_width().contains_percentage())
+    }
+
+    /// The distance from the start of the item's grid area to its alignment baseline in the Column axis, as the item is
+    /// laid out at the start of its area.
+    fn item_column_baseline(&self, item: GridItem) -> CssPixels {
+        let used = self.used(item);
+        let collapsed = used.uses_collapsing_borders_model.get();
+        let margin_box_left = used.margin_left.get() + used.border_box_left(collapsed);
+        let baseline = self
+            .sizing()
+            .establishes_orthogonal_flow(item.box_)
+            .then(|| used.orthogonal_flow_baselines().and_then(|baselines| baselines.first))
+            .flatten();
+        match baseline {
+            Some(baseline) => margin_box_left + baseline,
+            // https://drafts.csswg.org/css-align-3/#synthesize-baseline
+            None => margin_box_left + used.content_inline_size.get() + used.border_box_right(collapsed),
+        }
+    }
+
     /// The distance from the start of the item's grid area to its alignment baseline, as the item is laid out at the
     /// start of its area.
     fn item_row_baseline(&self, item: GridItem) -> CssPixels {
         let used = self.used(item);
         let collapsed = used.uses_collapsing_borders_model.get();
         let distance_from_margin_box_top =
-            if self.style(item.box_).writing_mode() == writing_mode::HORIZONTAL_TB && used.has_first_baseline.get() {
+            if !self.sizing().establishes_orthogonal_flow(item.box_) && used.has_first_baseline.get() {
                 formatting_context::box_baseline(
                     &self.run.callbacks,
                     item.box_,
@@ -4152,17 +4206,32 @@ impl<'pass> GridFormattingContext<'pass> {
         // [...] a table cell spanning three rows participates in first-baseline alignment with the table cells in the
         // first row that it spans [...]
         let mut shared_baselines = HashMap::<i32, CssPixels>::default();
+        let mut shared_column_baselines = HashMap::<i32, CssPixels>::default();
         for &(item_index, _) in items {
             let item = self.items[item_index];
-            let baseline = self.item_row_baseline(item);
-            shared_baselines
-                .entry(item.row)
-                .and_modify(|shared| *shared = (*shared).max(baseline))
-                .or_insert(baseline);
+            if self.item_participates_in_row_baseline_alignment(item) {
+                let baseline = self.item_row_baseline(item);
+                shared_baselines
+                    .entry(item.row)
+                    .and_modify(|shared| *shared = (*shared).max(baseline))
+                    .or_insert(baseline);
+            }
+            if self.item_participates_in_column_baseline_alignment(item) {
+                let baseline = self.item_column_baseline(item);
+                shared_column_baselines
+                    .entry(item.column)
+                    .and_modify(|shared| *shared = (*shared).max(baseline))
+                    .or_insert(baseline);
+            }
         }
         for &(item_index, mut offset) in items {
             let item = self.items[item_index];
-            offset.y += shared_baselines[&item.row] - self.item_row_baseline(item);
+            if self.item_participates_in_row_baseline_alignment(item) {
+                offset.y += shared_baselines[&item.row] - self.item_row_baseline(item);
+            }
+            if self.item_participates_in_column_baseline_alignment(item) {
+                offset.x += shared_column_baselines[&item.column] - self.item_column_baseline(item);
+            }
             formatting_context::place_child(&self.run, item.box_, offset, None);
         }
     }

@@ -691,12 +691,28 @@ pub struct PropertyCacheEntrySnapshot {
     /// it is a function JIT code may inline: code that calls the property's
     /// value as a constant can inline the call without feedback for it.
     pub prototype_property_inline_executable: Option<u32>,
+    /// `prototype_property`, if it is a function JIT code can call directly
+    /// whose calls need no function environment: code that calls the
+    /// property's value as a constant can call it directly without feedback
+    /// for it.
+    pub prototype_property_direct_call: Option<DirectCallTarget>,
+    /// The `WatchpointSet` cell that stays valid while `prototype` keeps
+    /// `prototype_property` in the property and its shape (see
+    /// `Shape::watch_slot_for_replacements()` in the runtime), if there is
+    /// one: code that depends on it takes the property as a constant
+    /// without checking it.
+    pub prototype_property_watchpoint: Option<CellId>,
     /// The function of the accessor the access calls: for `GetPropertyInPrototypeChain` entries, the getter of the
     /// accessor `prototype` held in the property when the snapshot was
     /// taken, for `ChangePropertyInPrototypeChain` entries its setter, and
     /// for `GetOwnProperty` entries the getter of the accessor the property
     /// held when the interpreter last called it.
     pub accessor_function: Option<AccessorFunctionSnapshot>,
+    /// Whether the receiver's own property is writable in its shape: only
+    /// data properties are, so loads and stores of it need not check for an
+    /// accessor while the object keeps the shape. Always false for
+    /// properties of prototypes.
+    pub property_holds_data: bool,
     /// Whether the property held an accessor: for `GetOwnProperty` entries
     /// when the interpreter last called its getter, and for entries of a
     /// prototype when the snapshot was taken. Loads of the property as data
@@ -1094,6 +1110,8 @@ pub struct RuntimeInfo {
     /// `CompiledCode::embedded_cells`.
     pub array_prototype: CellId,
     pub object_prototype: CellId,
+    /// `%Array%` of the realm of the compiled code.
+    pub array_constructor: CellId,
     /// `ExecutionContext::no_yield_continuation`.
     pub no_yield_continuation: u32,
     /// `js_heap_region_base`: cell pointers are this plus the offset bits of a cell value.

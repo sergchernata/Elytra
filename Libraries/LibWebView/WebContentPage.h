@@ -21,6 +21,7 @@
 #include <LibWebCommon/HTML/CrossProcessId.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/Page/PageId.h>
+#include <LibWebCommon/PermissionsPolicy/PermissionsPolicy.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 #include <LibWebView/Export.h>
 #include <LibWebView/Forward.h>
@@ -93,6 +94,15 @@ public:
     Optional<bool> hosted_environment_has_cross_site_ancestor(Web::HTML::EnvironmentId const& environment_id) const;
     bool hosts_an_environment_with_storage_key(Web::StorageAPI::StorageKey const&) const;
     void spoof_document_origin_for_testing(Web::HTML::EnvironmentId const& environment_id, URL::Origin);
+    // An extension's file the page's renderer asks for, naming the requester it loads the file for.
+    ErrorOr<IPC::File> extension_file_for_renderer(StringView extension_id, ByteString const& path, Optional<URL::Origin> requester) const;
+    // Fork hook (extensions): what the requests a page's renderer reports to webRequest are checked against
+    // (ExtensionAPI/WebRequest.cpp): the origins of the documents it hosts, and the navigations it populates.
+    bool hosts_a_document_with_origin(URL::Origin const&) const;
+    bool hosts_a_document_same_site_with(URL::Origin const&) const;
+    Optional<URL::URL> url_of_navigation_populated_in(Web::HTML::CrossProcessId navigable_id) const;
+    // Clears the bottle an environment of this page names, the way the browser's own clearing does: through the jar.
+    void clear_storage_for_testing(Web::StorageAPI::StorageEndpointType, Web::HTML::EnvironmentId const&);
     // The process and page hosting the document of a navigable that a page represents. A page represents every
     // navigable of its tab whose document it does not host, so those are the ones it can ask to navigate or post to.
     RefPtr<WebContentPage> endpoint_hosting_navigable_represented_by(Web::HTML::CrossProcessId navigable_id) const;
@@ -102,6 +112,9 @@ public:
     // False once the page can no longer host work: the page is unregistered or the process is gone. A page
     // awaiting a detached close remains open; it still coordinates its own close.
     bool is_open() const { return m_is_open; }
+
+    // Whether a document this page hosts may use the feature. The process hosting the page can act for any of them.
+    bool hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature) const;
     void close();
 
     void owe_reply(OwedReply);
@@ -161,6 +174,10 @@ private:
     bool continue_navigation_population_in_selected_process(Web::HTML::CrossProcessId navigable_id, Utf16String navigation_id);
     void for_each_hosted_document(Function<IterationDecision(CanonicalDocument&)> const&) const;
     bool populates_a_navigation_to_local_file(ByteString const& path) const;
+    // The requester a navigation the page populates reads an extension's file for, if it populates one to the file.
+    Optional<Optional<URL::Origin>> requester_of_navigation_to_extension_file(StringView extension_id, ByteString const& path) const;
+    // The requester a renderer claims, if a document the page hosts has its origin; otherwise a new opaque origin.
+    URL::Origin hosted_requester(Optional<URL::Origin> const& claimed_requester) const;
     Optional<CanonicalDocument&> document_with_hosted_environment(Web::HTML::EnvironmentId const& environment_id) const;
     StorageJar* storage_jar(Web::StorageAPI::StorageEndpointType) const;
     Optional<String> canonical_storage_key(Web::HTML::EnvironmentId const&) const;
@@ -232,11 +249,7 @@ private:
     virtual void did_request_document_cookie_version_index(Web::HTML::EnvironmentId environment_id, i64 document_id, String domain) override;
     virtual void did_set_cookie(Optional<Web::HTML::EnvironmentId>, URL::URL, HTTP::Cookie::ParsedCookie, HTTP::Cookie::Source) override;
     virtual void did_remove_blob_url_entries(Web::HTML::EnvironmentId environment_id, Vector<Utf16String> urls) override;
-    Messages::WebContentClient::DidRequestStorageItemResponse did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key);
-    Messages::WebContentClient::DidSetStorageItemResponse did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key, Utf16String value);
-    virtual void did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key) override;
-    Messages::WebContentClient::DidRequestStorageKeysResponse did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id);
-    virtual void did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id) override;
+    Messages::WebContentClient::ConnectToStorageAreaResponse connect_to_storage_area(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id);
     virtual void did_change_needs_beforeunload_check(bool needs_beforeunload_check) override;
     virtual void did_consume_user_activation(Web::HTML::UserActivationConsumption consumption) override;
     virtual void webdriver_user_prompt_handling_complete(u64 request_id, Web::WebDriver::Response response) override;
@@ -254,6 +267,10 @@ private:
     virtual void did_change_picture_in_picture_video_size(Gfx::IntSize video_size) override;
     virtual void did_change_picture_in_picture_player_controls_visibility(bool shown) override;
     virtual void did_request_file(ByteString path, i32 request_id) override;
+    virtual void did_create_extension_context(u64 context_id, String extension_id, String context_type, URL::URL url, bool is_top_level) override;
+    virtual void did_destroy_extension_context(u64 context_id) override;
+    virtual void did_post_extension_message(u64 context_id, String message) override;
+    virtual void did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id) override;
     virtual void did_request_color_picker(Color current_color) override;
     virtual void did_request_geolocation_position(u64 request_id) override;
     virtual void did_cancel_geolocation_position_request(u64 request_id) override;
@@ -297,7 +314,6 @@ private:
     virtual void did_get_dom_node_html(String html) override;
     virtual void did_resolve_dom_node_url(u64 request_id, String resolved_url) override;
     virtual void did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String> reason_phrase, Vector<HTTP::Header> response_headers, Requests::CacheState cache_state) override;
-    virtual void did_change_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String url, Optional<Utf16String> key, Optional<Utf16String> old_value, Optional<Utf16String> new_value) override;
     virtual void did_update_indexed_database(String update) override;
     virtual void did_request_clipboard_entries(u64 request_id) override;
     virtual void did_request_spell_check(u64 request_id, Utf16String text) override;
@@ -364,7 +380,7 @@ private:
     Messages::WebContentTestClient::DidRequestSiteIsolationProcessTreeForTestingResponse did_request_site_isolation_process_tree_for_testing();
     virtual void did_request_crash_of_remote_frame_processes_for_testing() override;
     virtual void did_request_stop_loading_for_testing() override;
-    virtual void did_request_reload_for_testing() override;
+    virtual void did_request_reload_for_testing(bool bypass_cache) override;
     virtual void did_request_traverse_history_by_delta_for_testing(i32 delta) override;
     virtual void did_reset_session_history_for_testing(Web::HTML::SessionHistoryEntryDescriptor) override;
     Messages::WebContentTestClient::DidRequestHasPopulatedDocumentForTestingResponse did_request_has_populated_document_for_testing(Web::HTML::CrossProcessId navigable_id) const;

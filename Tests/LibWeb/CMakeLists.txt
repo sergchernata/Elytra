@@ -28,6 +28,7 @@ set(TEST_SOURCES
     TestSharedCompiledStyleSheet.cpp
     TestSimpleRealm.cpp
     TestSourceHighlighter.cpp
+    TestStorageAreaMirror.cpp
     TestStructuredSerializeCorpus.cpp
     TestStructuredSerializeDurability.cpp
     TestStructuredSerializeFormat.cpp
@@ -37,6 +38,7 @@ set(TEST_SOURCES
     TestWebIDLBuffers.cpp
     TestWindowProxyWorld.cpp
     TestWorldCallback.cpp
+    TestWorldIsolation.cpp
     TestWrapperWorld.cpp
 )
 
@@ -63,6 +65,7 @@ endforeach()
 target_link_libraries(BenchmarkDisplayListRecording PRIVATE LibGC LibGfx LibIPC LibJS LibURL LibWebView)
 target_link_libraries(TestAudioWorkletPipe PRIVATE LibCore LibThreading)
 target_link_libraries(TestContentBlocker PRIVATE LibURL)
+target_link_libraries(TestStorageAreaMirror PRIVATE LibURL LibWebCommon)
 target_link_libraries(TestFetchEngineMessages PRIVATE LibCore LibIPC LibRequests)
 target_link_libraries(TestFetchExecutor PRIVATE LibCore LibIPC LibThreading)
 if (NOT WIN32)
@@ -94,6 +97,12 @@ target_sources(TestWindowProxyWorld PRIVATE
     ${ladybird_SOURCE_DIR}/Libraries/LibWeb/WebIDL/CallbackType.cpp
 )
 target_link_libraries(TestWindowProxyWorld PRIVATE LibGC LibJS LibWeb)
+# Elytra: what scripts store on DOM objects doesn't cross between worlds.
+target_sources(TestWorldIsolation PRIVATE
+    ${ladybird_SOURCE_DIR}/Libraries/LibWeb/DOM/IDLEventListener.cpp
+    ${ladybird_SOURCE_DIR}/Libraries/LibWeb/WebIDL/CallbackType.cpp
+)
+target_link_libraries(TestWorldIsolation PRIVATE LibCore LibGC LibGfx LibJS LibWeb)
 
 add_subdirectory("test-web")
 

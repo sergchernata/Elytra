@@ -22,6 +22,7 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibTextCodec/Encoder.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/Extensions/WebRequests.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
@@ -69,6 +70,7 @@
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/Streams/ReadableStreamDefaultReader.h>
 #include <LibWeb/Streams/TransformStream.h>
+#include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOrUtils.h>
 #include <LibWebCommon/Fetch/Infrastructure/DataURL.h>
@@ -446,7 +448,8 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
     // 4. Run report Content Security Policy violations for request.
     ContentSecurityPolicy::report_content_security_policy_violations_for_request(realm, request);
 
-    // FIXME: 5. Upgrade request to a potentially trustworthy URL, if appropriate.
+    // 5. Upgrade request to a potentially trustworthy URL, if appropriate.
+    UpgradeInsecureRequests::upgrade_request_to_a_potentially_trustworthy_url_if_appropriate(request);
 
     // 6. Upgrade a mixed content request to a potentially trustworthy URL, if appropriate.
     MixedContent::upgrade_a_mixed_content_request_to_a_potentially_trustworthy_url_if_appropriate(request);
@@ -573,8 +576,10 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
 
         // -> request’s current URL’s scheme is not an HTTP(S) scheme
         // AD-HOC: We allow CORS requests for resource:// URLs from opaque origins to enable requesting JS modules from internal pages.
+        // AD-HOC: And for an extension's files: the browser answers only for those the extension makes web accessible.
         if (!Infrastructure::is_http_or_https_scheme(request->current_url().scheme())
-            && !(origin && origin->is_opaque() && request->current_url().scheme() == "resource"sv)) {
+            && !(origin && origin->is_opaque() && request->current_url().scheme() == "resource"sv)
+            && request->current_url().scheme() != "chrome-extension"sv) {
             // NOTE: At this point all other request modes have been handled. Ensure we're not lying in the error message :^)
             VERIFY(request->mode() == Infrastructure::Request::Mode::CORS);
 
@@ -1349,6 +1354,11 @@ GC::Ref<PendingResponse> scheme_fetch(JS::Realm& realm, Infrastructure::FetchPar
 
         return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
     }
+    // AD-HOC: -> "chrome-extension"
+    // An extension's files. The browser decides which of them the requesting origin may have.
+    else if (request->current_url().scheme() == "chrome-extension"sv) {
+        return nonstandard_resource_loader_file_or_http_network_fetch(realm, fetch_params);
+    }
     // -> HTTP(S) scheme
     else if (Infrastructure::is_http_or_https_scheme(request->current_url().scheme())) {
         // Return the result of running HTTP fetch given fetchParams.
@@ -1753,6 +1763,9 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
     // 1. Let request be fetchParams’s request.
     auto request = fetch_params.request();
 
+    // Fork hook (extensions): webRequest knows the request by one ID, across redirects and authentication.
+    Extensions::ensure_request_id(*request);
+
     // 2. Let httpFetchParams be null.
     GC::Ptr<Infrastructure::FetchParams const> http_fetch_params;
 
@@ -1919,6 +1932,13 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             http_request->set_cache_mode(HTTP::CacheMode::NoStore);
         }
 
+        // AD-HOC: While a document loads bypassing the HTTP cache, so do the requests it makes without a cache mode of
+        //         their own, as do its child navigables' navigations (see create navigation params by fetching).
+        if (http_request->cache_mode() == HTTP::CacheMode::Default && http_request->mode() != Infrastructure::Request::Mode::Navigate && http_request->client()) {
+            if (auto* window = HTML::window_from_global_object(http_request->client()->global_object()); window && window->associated_document().is_loading_bypassing_cache())
+                http_request->set_cache_mode(HTTP::CacheMode::Reload);
+        }
+
         // 17. If httpRequest’s cache mode is "no-cache", httpRequest’s prevent no-cache cache-control header
         //     modification flag is unset, and httpRequest’s header list does not contain `Cache-Control`, then append
         //     (`Cache-Control`, `max-age=0`) to httpRequest’s header list.
@@ -1981,9 +2001,11 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
                 // 2. If there’s an authentication entry for httpRequest and either httpRequest’s use-URL-credentials
                 //    flag is unset or httpRequest’s current URL does not include credentials, then set
                 //    authorizationValue to authentication entry.
-                if (false // FIXME: "If there’s an authentication entry for httpRequest"
+                // Fork hook (extensions): the entries are the credentials extensions gave (webRequest.onAuthRequired).
+                if (auto authentication_entry = Extensions::authentication_entry_for(*http_request);
+                    authentication_entry.has_value()
                     && (!http_request->use_url_credentials() || !http_request->current_url().includes_credentials())) {
-                    // FIXME: "set authorizationValue to authentication entry."
+                    authorization_value = MUST(String::from_byte_string(*authentication_entry));
                 }
                 // 3. Otherwise, if httpRequest’s current URL does include credentials and isAuthenticationFetch is
                 //    true, set authorizationValue to httpRequest’s current URL, converted to an `Authorization` value.
@@ -2141,7 +2163,42 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             return false;
         };
 
+        // Fork hook (extensions): before anyone prompts, extensions may answer the challenge (webRequest.onAuthRequired),
+        //     once per request, for any request with credentials. Their credentials become the authentication entry;
+        //     cancelling, or no answer, leaves the 401 as the response.
+        auto& page = Bindings::principal_host_defined_page(realm);
         if (response->status() == 401
+            && is_authentication_fetch == IsAuthenticationFetch::Yes)
+            Extensions::forget_authentication_entry(*http_request);
+        if (response->status() == 401
+            && include_credentials == HTTP::Cookie::IncludeCredentials::Yes
+            && is_authentication_fetch == IsAuthenticationFetch::No
+            && www_authenticate_has_credential_based_scheme()
+            && (request->body().has<Empty>() || !request->body().get<GC::Ref<Infrastructure::Body>>()->source().has<Empty>())
+            && Extensions::may_answer_authentication(page, *request, *response)) {
+            auto answered = PendingResponse::create(request);
+            inner_pending_response = answered;
+            Extensions::request_authentication(page, *request, *response, GC::create_function(realm.heap(), [&realm, &fetch_params, request, response, answered](Extensions::AuthenticationAnswer answer) {
+                if (!answer.username.has_value() || fetch_params.is_canceled()) {
+                    answered->resolve(*response);
+                    return;
+                }
+                Extensions::set_authentication_entry(*request, answer.realm, *answer.username, answer.password.value_or({}));
+                if (auto const* body = request->body().get_pointer<GC::Ref<Infrastructure::Body>>()) {
+                    auto const& source = (*body)->source();
+                    auto converted_source = source.visit(
+                        [](ByteBuffer const& byte_buffer) -> BodyInitOrReadableBytes { return byte_buffer.bytes(); },
+                        [](Core::ImmutableBytes const& bytes) -> BodyInitOrReadableBytes { return bytes; },
+                        [](GC::Ref<FileAPI::Blob> blob) -> BodyInitOrReadableBytes { return blob; },
+                        [](Empty) -> BodyInitOrReadableBytes { VERIFY_NOT_REACHED(); });
+                    auto [new_body, _] = safely_extract_body(realm, converted_source);
+                    request->set_body(new_body);
+                }
+                http_network_or_cache_fetch(realm, fetch_params, IsAuthenticationFetch::Yes)->when_loaded([answered](GC::Ref<Infrastructure::Response> retried) {
+                    answered->resolve(retried);
+                });
+            }));
+        } else if (response->status() == 401
             && http_request->response_tainting() != Infrastructure::Request::ResponseTainting::CORS
             && include_credentials == HTTP::Cookie::IncludeCredentials::Yes
             && request->traversable_for_user_prompts().has<GC::Ptr<HTML::Navigable>>()
@@ -2317,6 +2374,30 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
         load_request_headers->set({ HTTP::TEST_CACHE_ENABLED_HEADER, "1"sv });
     }
 
+    // Fork hook (extensions): declarativeNetRequest may block, redirect or change the request, and webRequest hears
+    // of it. A redirect is a 307 of the browser's own, as in Chrome.
+    auto extension_verdict = Extensions::will_send_request(page, *request, load_request_headers);
+    if (extension_verdict.kind == Extensions::RequestVerdict::Kind::Block) {
+        auto blocked_response = PendingResponse::create(request);
+        blocked_response->resolve(Infrastructure::Response::network_error("Blocked by an extension"_string));
+        return blocked_response;
+    }
+    if (extension_verdict.kind == Extensions::RequestVerdict::Kind::Redirect) {
+        auto redirect = Infrastructure::Response::create();
+        redirect->set_status(307);
+        redirect->set_status_message("Internal Redirect"sv);
+        redirect->header_list()->append(HTTP::Header::isomorphic_encode("Location"sv, extension_verdict.redirect_url->serialize()));
+        auto const* origin = request->origin().get_pointer<URL::Origin>();
+        bool has_origin = origin && !origin->is_opaque();
+        redirect->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Origin"sv, has_origin ? origin->serialize() : "*"_string));
+        if (has_origin)
+            redirect->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Credentials"sv, "true"sv));
+        auto redirect_response = PendingResponse::create(request);
+        redirect_response->resolve(redirect);
+        return redirect_response;
+    }
+    auto extension_attempt = extension_verdict.attempt;
+
     LoadRequest load_request { move(load_request_headers) };
     load_request.set_url(request->current_url());
     load_request.set_page(page);
@@ -2328,6 +2409,10 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     load_request.set_request_mode(request->mode());
     load_request.set_referrer_policy(request->referrer_policy());
     load_request.set_is_navigation_request(request->is_navigation_request());
+    // A navigation the browser starts has no requester of its own.
+    bool browser_initiated_navigation = request->client() == nullptr && request->mode() == Infrastructure::Request::Mode::Navigate;
+    if (auto const* origin = request->origin().get_pointer<URL::Origin>(); origin && !browser_initiated_navigation)
+        load_request.set_origin(*origin);
     load_request.set_priority(request->priority());
     load_request.set_source_url(content_blocker_source_url_for_request(*request));
     load_request.set_network_isolation_key(Infrastructure::determine_the_network_partition_key(*request));
@@ -2391,7 +2476,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
     stream->set_up_with_byte_reading_support(realm, pull_algorithm, cancel_algorithm);
 
-    auto on_headers_received = GC::create_function(GC::Heap::the(), [&fetch_params, pending_response, stream, request, fetched_data_receiver](Requests::Request* request_server_request, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CacheState cache_state) {
+    auto on_headers_received = GC::create_function(GC::Heap::the(), [&fetch_params, pending_response, stream, request, fetched_data_receiver, page_ref = GC::Ref { page }, extension_attempt](Requests::Request* request_server_request, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, Requests::CacheState cache_state) {
         if (pending_response->is_resolved()) {
             // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
             // fetch algorithm is not interested in trailers, so just drop them here.
@@ -2442,7 +2527,10 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
             log_response(status_code, response_headers, ReadonlyBytes {});
         }
 
-        for (auto const& [name, value] : response_headers.headers())
+        // Fork hook (extensions): declarativeNetRequest's changes to the response's headers, before any CORS check; and
+        // webRequest hears of them.
+        auto extension_headers = Extensions::did_receive_response_headers(page_ref, extension_attempt, status_code.value_or(200), reason_phrase, response_headers, cache_state != Requests::CacheState::NotCached);
+        for (auto const& [name, value] : (extension_headers.has_value() ? static_cast<HTTP::HeaderList const&>(**extension_headers) : response_headers).headers())
             response->header_list()->append({ name, value });
 
         fetched_data_receiver->set_response(response);
@@ -2467,8 +2555,11 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
         fetched_data_receiver->set_cached_response_body(move(data));
     });
 
-    auto on_complete = GC::create_function(GC::Heap::the(), [&realm, pending_response, stream, fetched_data_receiver, fetch_timing_info, cross_origin_isolated_capability](bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message) {
+    auto on_complete = GC::create_function(GC::Heap::the(), [&realm, pending_response, stream, fetched_data_receiver, fetch_timing_info, cross_origin_isolated_capability, page_ref = GC::Ref { page }, extension_attempt](bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message) {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+
+        // Fork hook (extensions): webRequest's onCompleted or onErrorOccurred.
+        Extensions::did_finish_request(page_ref, extension_attempt, success ? Optional<StringView> {} : Optional<StringView> { error_message.value_or("Unknown error"sv) });
 
         if (success) {
             fetch_timing_info->update_final_timings(timing_info, cross_origin_isolated_capability);
@@ -2493,6 +2584,65 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     if (network_request && fetch_params.has_response_body_transfer_lease())
         network_request->set_body_delivery_paused(true);
     fetch_params.controller()->set_pending_request(network_request);
+
+    // To transmit request’s body body, run these steps:
+    // 1. If body is null and fetchParams’s process request end-of-body is non-null, then queue a fetch task given
+    //    fetchParams’s process request end-of-body and fetchParams’s task destination.
+    if (request->body().has<Empty>()) {
+        if (fetch_params.algorithms()->process_request_end_of_body()) {
+            Infrastructure::queue_fetch_task(fetch_params.controller(), fetch_params.task_destination(), GC::create_function(GC::Heap::the(), [&fetch_params]() {
+                fetch_params.algorithms()->process_request_end_of_body()();
+            }));
+        }
+    }
+    // 2. Otherwise, if body is non-null:
+    else if (auto const* body = request->body().get_pointer<GC::Ref<Infrastructure::Body>>()) {
+        // 1. Let processBodyChunk given bytes be these steps:
+        auto process_body_chunk = GC::create_function(GC::Heap::the(), [&fetch_params](ByteBuffer bytes) {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. Run this step in parallel: transmit bytes.
+            // NB: The whole body was handed to RequestServer above, from body's source.
+
+            // 3. If fetchParams’s process request body chunk length is non-null, then run fetchParams’s process
+            //    request body chunk length given bytes’s length.
+            if (fetch_params.algorithms()->process_request_body_chunk_length())
+                fetch_params.algorithms()->process_request_body_chunk_length()(bytes.size());
+        });
+
+        // 2. Let processEndOfBody be these steps:
+        auto process_end_of_body = GC::create_function(GC::Heap::the(), [&fetch_params]() {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. If fetchParams’s process request end-of-body is non-null, then run fetchParams’s process request
+            //    end-of-body.
+            if (fetch_params.algorithms()->process_request_end_of_body())
+                fetch_params.algorithms()->process_request_end_of_body()();
+        });
+
+        // 3. Let processBodyError given e be these steps:
+        auto process_body_error = GC::create_function(GC::Heap::the(), [&realm, &fetch_params](JS::Value error) {
+            // 1. If fetchParams is canceled, then abort these steps.
+            if (fetch_params.is_canceled())
+                return;
+
+            // 2. If e is an "AbortError" DOMException, then abort fetchParams’s controller.
+            auto const* exception = error.is_object() ? Bindings::dom_exception_from_object(error.as_object()) : nullptr;
+            if (exception && exception->name() == "AbortError"_utf16_fly_string)
+                fetch_params.controller()->abort(realm, {});
+            // 3. Otherwise, terminate fetchParams’s controller.
+            else
+                fetch_params.controller()->terminate();
+        });
+
+        // 4. Incrementally read request’s body given processBodyChunk, processEndOfBody, processBodyError, and
+        //    fetchParams’s task destination.
+        (void)(*body)->incrementally_read(realm, process_body_chunk, process_end_of_body, process_body_error, fetch_params.task_destination());
+    }
 
     return pending_response;
 }

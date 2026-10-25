@@ -301,6 +301,7 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
         .top_level_origin = top_level_origin,
         .shared_worker_key = {},
         .owners = move(owners),
+        .outside_settings_owner = owner,
         .inside_settings = move(inside_settings),
         .may_read_local_files = may_read_local_files,
         .script_blob_url = {},
@@ -382,6 +383,7 @@ void WorkerProcessManager::remove_web_content_owner(WebContentClient& client)
             auto const* web_content_owner = owner.client.get_pointer<WebContentOwner>();
             return web_content_owner && web_content_owner->client.ptr() == &client;
         });
+        forget_removed_outside_settings_owner(agent);
         if (agent.owners.is_empty())
             agents_to_close.append(agent.id);
     }
@@ -399,6 +401,7 @@ void WorkerProcessManager::remove_web_worker_owner(WebWorkerClient& client)
             auto const* web_worker_owner = owner.client.get_pointer<WebWorkerOwner>();
             return web_worker_owner && web_worker_owner->client.ptr() == &client;
         });
+        forget_removed_outside_settings_owner(agent);
         if (agent.owners.is_empty())
             agents_to_close.append(agent.id);
     }
@@ -529,6 +532,18 @@ void WorkerProcessManager::notify_worker_exception(Owner const& owner, Utf16Stri
         });
 }
 
+void WorkerProcessManager::notify_worker_content_security_policy_violation(Owner const& owner, u64 policy_index, String const& effective_directive, URL::URL const& resource)
+{
+    owner.client.visit(
+        [&](WebContentOwner const& web_content_owner) {
+            if (web_content_owner.client)
+                web_content_owner.client->async_did_worker_agent_report_content_security_policy_violation(owner.token, policy_index, effective_directive, resource);
+        },
+        [&](WebWorkerOwner const& web_worker_owner) {
+            web_worker_owner.client->async_did_worker_agent_report_content_security_policy_violation(owner.token, policy_index, effective_directive, resource);
+        });
+}
+
 void WorkerProcessManager::notify_worker_close(Owner const& owner)
 {
     owner.client.visit(
@@ -562,6 +577,7 @@ void WorkerProcessManager::worker_did_finish_loading_script(Web::HTML::WorkerAge
     auto& agent = maybe_agent->value;
     agent.worker_is_secure_context = worker_is_secure_context;
     agent.script_blob_url = {};
+    agent.outside_settings_owner = {};
 }
 
 void WorkerProcessManager::worker_did_fail_loading_script(Web::HTML::WorkerAgentId agent_id)
@@ -575,6 +591,7 @@ void WorkerProcessManager::worker_did_fail_loading_script(Web::HTML::WorkerAgent
         return;
 
     agent.closing = true;
+    agent.outside_settings_owner = {};
     auto owners = agent.owners;
     for (auto const& owner : owners)
         notify_worker_script_load_failure(owner);
@@ -592,6 +609,20 @@ void WorkerProcessManager::worker_did_report_exception(Web::HTML::WorkerAgentId 
 
     for (auto const& owner : maybe_agent->value.owners)
         notify_worker_exception(owner, message, filename, lineno, colno);
+}
+
+void WorkerProcessManager::worker_did_report_outside_settings_content_security_policy_violation(Web::HTML::WorkerAgentId agent_id, u64 policy_index, String effective_directive, URL::URL resource)
+{
+    auto maybe_agent = m_agents.find(agent_id);
+    if (maybe_agent == m_agents.end())
+        return;
+
+    // NB: Only the worker's script fetch uses outside settings as its client, so its violations are only reported
+    //     until that fetch completes, and only to the owner that started the worker, while it still owns it.
+    auto const& agent = maybe_agent->value;
+    if (agent.closing || !agent.outside_settings_owner.has_value())
+        return;
+    notify_worker_content_security_policy_violation(*agent.outside_settings_owner, policy_index, effective_directive, resource);
 }
 
 void WorkerProcessManager::worker_did_close(Web::HTML::WorkerAgentId agent_id)
@@ -657,6 +688,25 @@ void WorkerProcessManager::worker_did_request_file(Web::HTML::WorkerAgentId agen
         client->async_handle_file_return(0, file.release_value(), request_id);
 }
 
+void WorkerProcessManager::worker_did_request_extension_file(Web::HTML::WorkerAgentId agent_id, String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    auto maybe_agent = m_agents.find(agent_id);
+    if (maybe_agent == m_agents.end())
+        return;
+
+    // NB: A worker speaks for an extension only when it's one of the extension's own: its origin is the extension's.
+    //     Any other may have what the extension makes web accessible to the worker's origin.
+    auto const& worker_origin = maybe_agent->value.inside_settings->origin();
+    requester = worker_origin;
+
+    auto file = Application::extension_registry().open_file(extension_id, path, requester);
+    auto& client = maybe_agent->value.client;
+    if (file.is_error())
+        client->async_handle_file_return(file.error().code(), {}, request_id);
+    else
+        client->async_handle_file_return(0, file.release_value(), request_id);
+}
+
 void WorkerProcessManager::remove_agent(Web::HTML::WorkerAgentId agent_id, AgentRemovalCause cause)
 {
     auto maybe_agent = m_agents.find(agent_id);
@@ -700,6 +750,30 @@ void WorkerProcessManager::worker_process_did_exit(WebWorkerClient& client)
     Core::deferred_invoke([exited_workers = move(exited_workers)] { });
 }
 
+bool WorkerProcessManager::is_same_owner(Owner const& owner, Owner const& identity)
+{
+    if (owner.token != identity.token)
+        return false;
+
+    if (auto const* incoming = identity.client.get_pointer<WebContentOwner>()) {
+        auto const* candidate = owner.client.get_pointer<WebContentOwner>();
+        return candidate && candidate->client.ptr() == incoming->client.ptr();
+    }
+    if (auto const* incoming = identity.client.get_pointer<WebWorkerOwner>()) {
+        auto const* candidate = owner.client.get_pointer<WebWorkerOwner>();
+        return candidate && candidate->client.ptr() == incoming->client.ptr();
+    }
+    return false;
+}
+
+void WorkerProcessManager::forget_removed_outside_settings_owner(WorkerAgent& agent)
+{
+    if (!agent.outside_settings_owner.has_value())
+        return;
+    if (!any_of(agent.owners, [&](Owner const& owner) { return is_same_owner(owner, *agent.outside_settings_owner); }))
+        agent.outside_settings_owner = {};
+}
+
 void WorkerProcessManager::remove_owner(Web::HTML::WorkerAgentId agent_id, Owner const& identity)
 {
     auto maybe_agent = m_agents.find(agent_id);
@@ -708,19 +782,9 @@ void WorkerProcessManager::remove_owner(Web::HTML::WorkerAgentId agent_id, Owner
 
     auto& agent = maybe_agent->value;
     auto agent_owned_by_specified_owner = agent.owners.remove_all_matching([&](Owner const& owner) {
-        if (owner.token != identity.token)
-            return false;
-
-        if (auto const* incoming = identity.client.get_pointer<WebContentOwner>()) {
-            auto const* candidate = owner.client.get_pointer<WebContentOwner>();
-            return candidate && candidate->client.ptr() == incoming->client.ptr();
-        }
-        if (auto const* incoming = identity.client.get_pointer<WebWorkerOwner>()) {
-            auto const* candidate = owner.client.get_pointer<WebWorkerOwner>();
-            return candidate && candidate->client.ptr() == incoming->client.ptr();
-        }
-        return false;
+        return is_same_owner(owner, identity);
     });
+    forget_removed_outside_settings_owner(agent);
 
     if (!agent_owned_by_specified_owner)
         return;

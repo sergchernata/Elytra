@@ -269,8 +269,16 @@ public:
     [[nodiscard]] bool user_agent_initiated() const { return m_user_agent_initiated; }
     void set_user_agent_initiated(bool user_agent_initiated) { m_user_agent_initiated = user_agent_initiated; }
 
+    [[nodiscard]] bool is_form_submission() const { return m_form_submission; }
+    void set_form_submission(bool form_submission) { m_form_submission = form_submission; }
+
     [[nodiscard]] bool render_blocking() const { return m_render_blocking; }
     void set_render_blocking(bool render_blocking) { m_render_blocking = render_blocking; }
+
+    // Fork hook (extensions): the webRequest requestId, the same across redirects and authentication
+    // (LibWeb/Extensions/WebRequests).
+    Optional<u64> extension_request_id() const { return m_extension_request_id; }
+    void set_extension_request_id(u64 id) { m_extension_request_id = id; }
 
     [[nodiscard]] Vector<URL::URL> const& url_list() const { return m_url_list; }
     [[nodiscard]] Vector<URL::URL>& url_list() { return m_url_list; }
@@ -507,9 +515,15 @@ private:
     //     the user agent itself supplied, and populating a history entry sets this from the entry's document state.
     bool m_user_agent_initiated { false };
 
+    // NB: Not a Fetch concept. Upgrade Insecure Requests asks whether a navigation request is a form submission, and
+    //     creating navigation params by fetching sets this from the navigation's CSP navigation type.
+    bool m_form_submission { false };
+
     // https://fetch.spec.whatwg.org/#request-render-blocking
     // A request has an associated boolean render-blocking. Unless stated otherwise, it is false.
     bool m_render_blocking { false };
+
+    Optional<u64> m_extension_request_id;
 
     // https://fetch.spec.whatwg.org/#concept-request-url-list
     // A request has an associated URL list (a list of one or more URLs). Unless stated otherwise, it is a list

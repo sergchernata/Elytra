@@ -50,6 +50,7 @@
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
+#include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -142,6 +143,15 @@ JS::Realm* callback_realm(WebIDL::CallbackType* callback)
     return &callback->callback->shape().realm();
 }
 
+// Elytra: The world a callback's script belongs to.
+WrapperWorld* callback_world(WebIDL::CallbackType& callback)
+{
+    auto& realm = callback.callback->shape().realm();
+    if (!realm.host_defined())
+        return nullptr;
+    return &host_defined_wrapper_world(realm);
+}
+
 HTML::Window* window_from_callback(WebIDL::CallbackType& callback)
 {
     auto& realm = callback.callback->shape().realm();
@@ -232,6 +242,8 @@ void EventTarget::visit_edges(Cell::Visitor& visitor)
     if (auto const* data = m_data.ptr()) {
         visitor.visit(data->event_listener_list);
         visitor.visit(data->event_handler_map);
+        for (auto const& entry : data->other_world_event_handlers)
+            visitor.visit(entry.event_handler);
     }
 }
 
@@ -376,6 +388,27 @@ static void update_needs_beforeunload_check(EventTarget& event_target, DOMEventL
     navigable->page().update_needs_beforeunload_check();
 }
 
+// A storage event made in another process reaches this one only through the mirror of the map it changed, and a
+// window that has never touched its storage has no mirror. So the moment a window starts listening for storage
+// events, its Storage objects are created, which connects the mirrors and brings the events.
+static void connect_storage_for_storage_event_listener(EventTarget& event_target, DOMEventListener const& listener)
+{
+    if (listener.type != HTML::EventNames::storage)
+        return;
+
+    auto* window = as_if<HTML::Window>(event_target);
+    if (!window)
+        return;
+    auto document = window->associated_document_if_any();
+    if (!document || !document->is_fully_active())
+        return;
+
+    if (auto local_storage = window->local_storage(); !local_storage.is_error())
+        local_storage.value()->connect();
+    if (auto session_storage = window->session_storage(); !session_storage.is_error())
+        session_storage.value()->connect();
+}
+
 static void notify_page_that_window_listens_for_gamepad_events(EventTarget& event_target, DOMEventListener const& listener)
 {
     if (!first_is_one_of(listener.type, Gamepad::EventNames::gamepadconnected, Gamepad::EventNames::gamepaddisconnected))
@@ -469,6 +502,7 @@ void EventTarget::add_an_event_listener(DOMEventListener& listener)
         update_needs_beforeunload_check(*this, listener);
         event_listener_list_changed();
         notify_page_that_window_listens_for_gamepad_events(*this, listener);
+        connect_storage_for_storage_event_listener(*this, listener);
     }
 
     // 6. If listener’s signal is not null, then add the following abort steps to it:
@@ -626,6 +660,8 @@ static Optional<Utf16FlyString> event_name_from_event_handler_attribute_local_na
     return {};
 }
 
+static JS::Realm& event_handler_listener_realm(EventTarget&, HTML::EventHandler&);
+
 // https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-attributes:event-handler-idl-attributes-2
 WebIDL::CallbackType* EventTarget::event_handler_attribute(Utf16FlyString const& name)
 {
@@ -636,8 +672,83 @@ WebIDL::CallbackType* EventTarget::event_handler_attribute(Utf16FlyString const&
     if (!target)
         return nullptr;
 
+    // Elytra: Script of another world than the main one sees only its world's handler.
+    if (auto* world = Bindings::current_non_main_world()) {
+        auto* entry = target->find_other_world_event_handler(*world, name);
+        if (!entry)
+            return nullptr;
+        return entry->event_handler->value.get<GC::Ptr<WebIDL::CallbackType>>().ptr();
+    }
+
     // 3. Return the result of getting the current value of the event handler given eventTarget and name.
     return target->get_current_value_of_event_handler(name);
+}
+
+// Elytra: see the header.
+EventTarget::Data::OtherWorldEventHandler* EventTarget::find_other_world_event_handler(Bindings::WrapperWorld const& world, Utf16FlyString const& name)
+{
+    if (!m_data)
+        return nullptr;
+    for (auto& entry : m_data->other_world_event_handlers) {
+        if (entry.world.ptr().ptr() == &world && entry.name == name)
+            return &entry;
+    }
+    return nullptr;
+}
+
+// Elytra: Setting, replacing or clearing an event handler as the main world's steps below do, but in a world's own slot.
+void EventTarget::set_other_world_event_handler(Bindings::WrapperWorld& world, Utf16FlyString const& name, GC::Ptr<WebIDL::CallbackType> value)
+{
+    auto& handlers = ensure_data().other_world_event_handlers;
+    // Forget the handlers of worlds that are gone.
+    handlers.remove_all_matching([&](auto const& entry) {
+        if (entry.world)
+            return false;
+        if (entry.event_handler->listener)
+            remove_an_event_listener(*entry.event_handler->listener);
+        return true;
+    });
+
+    auto* entry = find_other_world_event_handler(world, name);
+    if (!value) {
+        if (!entry)
+            return;
+        if (entry->event_handler->listener)
+            remove_an_event_listener(*entry->event_handler->listener);
+        handlers.remove_first_matching([&](auto const& candidate) { return &candidate == entry; });
+        return;
+    }
+
+    if (entry) {
+        entry->event_handler->value = value;
+        return;
+    }
+
+    auto event_handler = GC::Heap::the().allocate<HTML::EventHandler>(*value);
+    auto& realm = event_handler_listener_realm(*this, *event_handler);
+    auto callback_function = JS::NativeFunction::create(
+        realm, [event_target = this, name, world = GC::Weak<Bindings::WrapperWorld> { world }](JS::VM& vm) mutable -> JS::ThrowCompletionOr<JS::Value> {
+            VERIFY(vm.argument_count() == 1);
+            auto* event = Bindings::event_from_callback_argument(vm);
+            VERIFY(event);
+
+            if (!world)
+                return JS::js_undefined();
+            auto* entry = event_target->find_other_world_event_handler(*world, name);
+            if (!entry)
+                return JS::js_undefined();
+            auto callback = GC::Ref { *entry->event_handler->value.get<GC::Ptr<WebIDL::CallbackType>>() };
+            TRY(event_target->process_event_handler_callback(*callback, *event));
+            return JS::js_undefined();
+        },
+        0, Utf16FlyString {}, &realm);
+    auto callback = GC::Heap::the().allocate<WebIDL::CallbackType>(*callback_function, realm);
+    auto listener = GC::Heap::the().allocate<DOMEventListener>();
+    listener->type = name;
+    listener->callback = IDLEventListener::create(*callback);
+    add_an_event_listener(*listener);
+    event_handler->listener = listener;
+    handlers.append({ world, name, event_handler });
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#getting-the-current-value-of-the-event-handler
@@ -723,9 +834,15 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(Utf16FlySt
             // 1. Set eventHandler's value to null.
             event_handler->value = GC::Ptr<WebIDL::CallbackType> {};
 
-            // FIXME: 2. Report the error for the appropriate script and with the appropriate position (line number and column number) given by location, using settings object's global object.
+            // 2. Let syntaxError be a new SyntaxError exception associated with settings object's realm which describes
+            //    the error while parsing. It should be based on location, where the script body originated.
+            // FIXME: Base the error on location.
+            auto syntax_error = JS::SyntaxError::create(settings_object.realm(), compiled_function.release_error());
 
-            // 3. Return null.
+            // 3. Report an exception with syntaxError for settings object's global object.
+            HTML::report_an_exception(settings_object.global_object(), syntax_error);
+
+            // 4. Return null.
             return nullptr;
         }
 
@@ -781,6 +898,12 @@ void EventTarget::set_event_handler_attribute(Utf16FlyString const& name, GC::Pt
     // 2. If eventTarget is null, then return.
     if (!event_target)
         return;
+
+    // Elytra: Script of another world than the main one sets only its world's handler.
+    if (auto* world = Bindings::current_non_main_world()) {
+        event_target->set_other_world_event_handler(*world, name, value);
+        return;
+    }
 
     // 3. If the given value is null, then deactivate an event handler given eventTarget and name.
     if (!value) {
@@ -937,6 +1060,8 @@ void EventTarget::erase_all_event_listeners_and_handlers()
     // NB: Deactivating an event handler removes it from the map, so collect the names up front.
     for (auto const& name : m_data->event_handler_map.keys())
         deactivate_event_handler(name);
+    // Elytra: And other worlds' handlers, whose listeners go below.
+    m_data->other_world_event_handlers.clear();
 
     // 2. Remove all event listeners given eventTarget.
     remove_all_event_listeners();
@@ -954,6 +1079,13 @@ JS::ThrowCompletionOr<void> EventTarget::process_event_handler_for_event(Utf16Fl
     // 3. If callback is null, then return.
     if (!callback)
         return {};
+
+    return process_event_handler_callback(*callback, event);
+}
+
+JS::ThrowCompletionOr<void> EventTarget::process_event_handler_callback(WebIDL::CallbackType& callback_reference, Event& event)
+{
+    auto* callback = &callback_reference;
 
     // 4. If callback's associated realm's global object is a Window object whose associated Document is not fully
     //    active, then return.

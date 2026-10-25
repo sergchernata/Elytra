@@ -1,0 +1,11 @@
+peer saw key="a" oldValue=null newValue="1" url-is-actor=true storageArea-is-localStorage=true
+peer saw key="a" oldValue="1" newValue="2" url-is-actor=true storageArea-is-localStorage=true
+peer saw key="a" oldValue="2" newValue=null url-is-actor=true storageArea-is-localStorage=true
+peer saw key="b" oldValue=null newValue="1" url-is-actor=true storageArea-is-localStorage=true
+peer saw key=null oldValue=null newValue=null url-is-actor=true storageArea-is-localStorage=true
+peer saw 5 events for 6 operations (one changed nothing)
+racing writes: at most one write was refused outright: true
+racing writes: exactly one 3 MiB key kept, and both sides agree on which: true
+racing writes: the kept write reached the other side as one storage event: true
+racing writes: a write the browser refused after its window accepted it was reverted there with a storage event, and nothing else was: true
+racing writes: no other events: true

@@ -10,8 +10,8 @@
 #include <LibCore/ElapsedTimer.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/StatsLog.h>
-#include <LibDevTools/StorageHelpers.h>
 #include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibWebCommon/Geolocation/GeolocationPositionErrorCode.h>
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/Error.h>
@@ -23,6 +23,7 @@
 #include <LibWebView/CanonicalBrowsingContextGroup.h>
 #include <LibWebView/CanonicalDocument.h>
 #include <LibWebView/CanonicalEnvironmentSettingsObject.h>
+#include <LibWebView/CanonicalNavigation.h>
 #include <LibWebView/CanonicalTraversable.h>
 #include <LibWebView/CanonicalWindow.h>
 #include <LibWebView/CookieJar.h>
@@ -30,6 +31,7 @@
 #include <LibWebView/NavigationLoader.h>
 #include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/RequestServerManager.h>
+#include <LibWebView/StorageAreaRegistry.h>
 #include <LibWebView/StorageJar.h>
 #include <LibWebView/URL.h>
 #include <LibWebView/Utilities.h>
@@ -632,6 +634,8 @@ void WebContentPage::fail_renderer_owned_downloads()
 void WebContentPage::close()
 {
     PictureInPictureManager::the().close_window(*this);
+    if (Application::is_initialized())
+        Application::extension_runtime().page_closed(*this);
     m_is_open = false;
     // NB: Nothing finishes the input this page held, including a page discarded while its process hosts other pages.
     if (m_traversable) {
@@ -802,12 +806,14 @@ void WebContentPage::did_create_child_frame(Web::HTML::CrossProcessId parent_fra
 
     hosted_state.container.document_active_sandboxing_flag_set = container_document->active_sandboxing_flag_set();
     hosted_state.container.document_embedder_policy = container_document->embedder_policy();
+    hosted_state.container.document_permissions_policy = container_document->permissions_policy();
     traversable.adopt_nested_history_for_created_child(*parent_navigable, *container_document, frame_id);
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#create-a-new-child-navigable
     // NB: The process creating the navigable reports the entry that initializing it, in step 8, created.
     auto initial_entry = CanonicalSessionHistoryEntry::create_from_descriptor(Web::HTML::create_session_history_entry_descriptor(move(initial_history_entry), 0));
-    if (initial_entry.is_error()) {
+    // NB: Its URL is about:blank. Another of an extension's file, or a local file, would be read by a history step.
+    if (initial_entry.is_error() || initial_entry.value()->url.scheme() == "chrome-extension"sv || initial_entry.value()->url.scheme() == "file"sv) {
         client().did_misbehave("did_create_child_frame"sv, "invalid initial session history entry"sv);
         return;
     }
@@ -933,6 +939,10 @@ static Optional<Web::HTML::PreparedNavigationDescriptor> navigation_from_page(We
     if (!initiator_origin.has_value())
         return {};
     if (navigation.url.scheme() == "file"sv && !may_navigate_to_a_local_file(requesting_client))
+        return {};
+    // NB: The browser reads an extension's file for the source document's origin, so a page's navigation to one names
+    //     its source document.
+    if (navigation.url.scheme() == "chrome-extension"sv && !navigation.source_snapshot_params.fetch_client.has_value())
         return {};
     navigation.initiator_origin_snapshot = initiator_origin.release_value();
     return navigation;
@@ -1239,47 +1249,34 @@ void WebContentPage::did_request_document_cookie_version_index(Web::HTML::Enviro
     }
 }
 
-Messages::WebContentClient::DidRequestStorageItemResponse WebContentPage::did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return Optional<Utf16String> {};
-    return storage_jar->get_item(storage_endpoint, *canonical_key, bottle_key);
-}
-
-Messages::WebContentClient::DidSetStorageItemResponse WebContentPage::did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key, Utf16String value)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return WebView::StorageOperationError::QuotaExceededError;
-    return storage_jar->set_item(storage_endpoint, *canonical_key, bottle_key, value);
-}
-
-void WebContentPage::did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id, Utf16String bottle_key)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (canonical_key.has_value() && storage_jar)
-        storage_jar->remove_item(storage_endpoint, *canonical_key, bottle_key);
-}
-
-Messages::WebContentClient::DidRequestStorageKeysResponse WebContentPage::did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
-{
-    auto canonical_key = canonical_storage_key(environment_id);
-    auto* storage_jar = this->storage_jar(storage_endpoint);
-    if (!canonical_key.has_value() || !storage_jar)
-        return Vector<Utf16String> {};
-    return storage_jar->get_all_keys(storage_endpoint, *canonical_key);
-}
-
-void WebContentPage::did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
+void WebContentPage::clear_storage_for_testing(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id)
 {
     auto canonical_key = canonical_storage_key(environment_id);
     auto* storage_jar = this->storage_jar(storage_endpoint);
     if (canonical_key.has_value() && storage_jar)
         storage_jar->clear_storage_key(storage_endpoint, *canonical_key);
+}
+
+Messages::WebContentClient::ConnectToStorageAreaResponse WebContentPage::connect_to_storage_area(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id)
+{
+    auto canonical_key = canonical_storage_key(environment_id);
+    auto* storage_jar = this->storage_jar(storage_endpoint);
+    if (!canonical_key.has_value() || !storage_jar)
+        return { {}, {}, {}, 0 };
+
+    auto connection = StorageAreaRegistry::the().connect(client(), *storage_jar, storage_endpoint, *canonical_key);
+    if (!connection.has_value())
+        return { {}, {}, {}, 0 };
+
+    Vector<Utf16String> keys;
+    Vector<Utf16String> values;
+    keys.ensure_capacity(connection->items.size());
+    values.ensure_capacity(connection->items.size());
+    for (auto& item : connection->items) {
+        keys.unchecked_append(move(item.key));
+        values.unchecked_append(move(item.value));
+    }
+    return { connection->id, move(keys), move(values), connection->usage };
 }
 
 void WebContentPage::did_change_needs_beforeunload_check(bool needs_beforeunload_check)
@@ -1484,6 +1481,79 @@ bool WebContentPage::populates_a_navigation_to_local_file(ByteString const& path
     return result;
 }
 
+// NB: The initiator origin is the one the UI process admitted the navigation with, or a history entry's.
+Optional<Optional<URL::Origin>> WebContentPage::requester_of_navigation_to_extension_file(StringView extension_id, ByteString const& path) const
+{
+    auto names_the_file = [&](URL::URL const& url) {
+        return url.scheme() == "chrome-extension"sv && url.serialized_host() == extension_id && url.file_path() == path;
+    };
+    Optional<Optional<URL::Origin>> requester;
+    traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        auto navigation = navigable.uncommitted_navigation();
+        if (!navigation || navigation->worker() != this || !names_the_file(navigation->url))
+            return IterationDecision::Continue;
+        auto const* creating = navigation->state.get_pointer<CanonicalNavigation::CreatingNavigationParams>();
+        if (!creating)
+            return IterationDecision::Continue;
+        requester = creating->loader->extension_file_requester();
+        return IterationDecision::Break;
+    });
+    if (requester.has_value())
+        return requester;
+    return traversable().requester_of_history_entry_for_extension_file(*this, extension_id, path);
+}
+
+URL::Origin WebContentPage::hosted_requester(Optional<URL::Origin> const& claimed_requester) const
+{
+    if (!claimed_requester.has_value())
+        return URL::Origin::create_opaque();
+    // An opaque origin has the least a requester can have.
+    if (claimed_requester->is_opaque() && !claimed_requester->is_file_origin())
+        return *claimed_requester;
+    bool is_hosted = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        auto const& origin = document.origin();
+        is_hosted = claimed_requester->is_file_origin() ? origin.is_file_origin() : origin.is_same_origin(*claimed_requester);
+        return is_hosted ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return is_hosted ? *claimed_requester : URL::Origin::create_opaque();
+}
+
+bool WebContentPage::hosts_a_document_with_origin(URL::Origin const& origin) const
+{
+    if (origin.is_opaque())
+        return false;
+    bool found = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        found = document.origin().is_same_origin(origin);
+        return found ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return found;
+}
+
+bool WebContentPage::hosts_a_document_same_site_with(URL::Origin const& origin) const
+{
+    if (origin.is_opaque())
+        return false;
+    bool found = false;
+    for_each_hosted_document([&](CanonicalDocument& document) {
+        found = !document.origin().is_opaque() && document.origin().is_same_site(origin);
+        return found ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return found;
+}
+
+Optional<URL::URL> WebContentPage::url_of_navigation_populated_in(Web::HTML::CrossProcessId navigable_id) const
+{
+    auto navigable = population_worker_navigable(navigable_id);
+    if (!navigable.has_value())
+        return {};
+    auto navigation = navigable->uncommitted_navigation();
+    if (!navigation || navigation->worker() != this)
+        return {};
+    return navigation->url;
+}
+
 void WebContentPage::did_request_file(ByteString path, i32 request_id)
 {
     // NB: The renderer's sandbox keeps it out of the local file system, so this is the only way it can read a file.
@@ -1501,13 +1571,80 @@ void WebContentPage::did_request_file(ByteString path, i32 request_id)
         async_handle_file_return(0, file.release_value(), request_id);
 }
 
+void WebContentPage::did_create_extension_context(u64 context_id, String extension_id, String context_type, URL::URL url, bool is_top_level)
+{
+    Application::extension_runtime().context_created(*this, context_id, move(extension_id), move(context_type), move(url), is_top_level);
+}
+
+void WebContentPage::did_destroy_extension_context(u64 context_id)
+{
+    Application::extension_runtime().context_destroyed(*this, context_id);
+}
+
+void WebContentPage::did_post_extension_message(u64 context_id, String message)
+{
+    Application::extension_runtime().message_received(*this, context_id, message);
+}
+
+ErrorOr<IPC::File> WebContentPage::extension_file_for_renderer(StringView extension_id, ByteString const& path, Optional<URL::Origin> requester) const
+{
+    // Fork hook (extensions): extensions don't run in private windows, nor do their files load there.
+    if (client().is_private() == IsPrivate::Yes)
+        return Error::from_errno(ENOENT);
+    auto const& registry = Application::extension_registry();
+    auto const* extension = registry.find(extension_id);
+    if (!extension)
+        return Error::from_errno(ENOENT);
+
+    // NB: A process the extension's pages run in speaks for the extension, and hosts nothing else.
+    if (client().may_speak_for_extension(extension_id))
+        return registry.open_file(extension_id, path, extension->origin());
+
+    // NB: The browser reads the file a navigation's document is made from itself (NavigationLoader), for the requester
+    //     the UI process holds. The process populating the navigation fetches an empty stand-in: it may host another
+    //     site.
+    if (auto navigation_requester = requester_of_navigation_to_extension_file(extension_id, path); navigation_requester.has_value())
+        return registry.open_stand_in_file(extension_id, path, *navigation_requester);
+
+    // NB: Anything else is for a document the page hosts. The registry gives it only the files the extension makes web
+    //     accessible to its origin, so the renderer names it, but it must be one the page hosts.
+    return registry.open_file(extension_id, path, hosted_requester(requester));
+}
+
+void WebContentPage::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    auto file = extension_file_for_renderer(extension_id, path, move(requester));
+    if (file.is_error())
+        async_handle_file_return(file.error().code(), {}, request_id);
+    else
+        async_handle_file_return(0, file.release_value(), request_id);
+}
+
 void WebContentPage::did_request_color_picker(Color current_color)
 {
     view().did_request_color_picker({}, *this, current_color);
 }
 
+bool WebContentPage::hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature feature) const
+{
+    auto is_allowed = false;
+    traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable const& navigable) {
+        auto const& document = navigable.active_document();
+        if (document.host() != this)
+            return IterationDecision::Continue;
+        auto value = Web::PermissionsPolicy::check_permissions_policy(document.permissions_policy(), feature, document.origin(), document.origin());
+        is_allowed = value == Web::PermissionsPolicy::FeatureValue::Enabled;
+        return is_allowed ? IterationDecision::Break : IterationDecision::Continue;
+    });
+    return is_allowed;
+}
+
 void WebContentPage::did_request_geolocation_position(u64 request_id)
 {
+    if (!hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature::Geolocation)) {
+        async_geolocation_position_response(request_id, {}, to_underlying(Web::Geolocation::GeolocationPositionErrorCode::PermissionDenied));
+        return;
+    }
     if (view().on_request_geolocation_position)
         view().on_request_geolocation_position(*this, request_id);
 }
@@ -1902,32 +2039,6 @@ void WebContentPage::did_receive_network_response_headers(u64 request_id, u32 st
     }
 }
 
-void WebContentPage::did_change_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, String url, Optional<Utf16String> key, Optional<Utf16String> old_value, Optional<Utf16String> new_value)
-{
-    if (displays_tab()) {
-        auto host = DevTools::storage_host_for_url(url);
-        if (!host.has_value())
-            return;
-
-        DevTools::DevToolsDelegate::StorageChange::Type type;
-        if (!key.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Cleared;
-        else if (!old_value.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Added;
-        else if (!new_value.has_value())
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Deleted;
-        else
-            type = DevTools::DevToolsDelegate::StorageChange::Type::Changed;
-
-        view().notify_storage_changed({
-            .storage_endpoint = storage_endpoint,
-            .host = host.release_value(),
-            .type = type,
-            .key = key.has_value() ? Optional<String> { key->to_utf8() } : Optional<String> {},
-        });
-    }
-}
-
 void WebContentPage::did_update_indexed_database(String update)
 {
     if (displays_tab())
@@ -2080,6 +2191,8 @@ void WebContentPage::did_complete_navigation_unload_check(Web::HTML::CrossProces
     population_request.target_snapshot_params.sandboxing_flags |= navigable->snapshot_target_snapshot_params().sandboxing_flags;
     ongoing_navigation->history_entry = MUST(CanonicalSessionHistoryEntry::create_from_descriptor(Web::HTML::create_session_history_entry_descriptor(population_request.history_entry, 0)));
     ongoing_navigation->state = CanonicalNavigation::CreatingNavigationParams { NavigationLoader::create(client().is_private(), move(population_request)) };
+    if (ongoing_navigation->is_browser_ui_navigation)
+        ongoing_navigation->loader()->set_extension_file_requester({});
     async_create_navigation_params(ongoing_navigation->loader()->request());
 
     // Requesting navigation params starts the fetch, so a view's top-level population begins its recorded
@@ -2849,10 +2962,10 @@ void WebContentPage::did_request_stop_loading_for_testing()
         view().stop_loading();
 }
 
-void WebContentPage::did_request_reload_for_testing()
+void WebContentPage::did_request_reload_for_testing(bool bypass_cache)
 {
     if (displays_tab())
-        view().reload();
+        view().reload(bypass_cache ? BypassCache::Yes : BypassCache::No);
 }
 
 // The tab's Back and Forward buttons, which traverse the history with no source document.

@@ -9,6 +9,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/ShadowRoot.h>
@@ -579,6 +580,10 @@ GC::Ref<HTML::CustomElementRegistry> construct_custom_element_registry()
 
 JS::ThrowCompletionOr<void> define(JS::Realm& realm, HTML::CustomElementRegistry& registry, Utf16String const& name, GC::Ref<WebIDL::CallbackType> constructor, ElementDefinitionOptions const& options)
 {
+    // Elytra: As in Chrome, custom elements are the main world's: a registry shared by all worlds mustn't hand one
+    //         world's constructors (and through them its globals) to another.
+    if (realm.host_defined() && !host_defined_wrapper_world(realm).is_main_world())
+        return throw_completion(realm, WebIDL::NotSupportedError::create("Custom elements can only be defined in the main world"_utf16));
     return registry.define(realm, name, constructor, options);
 }
 

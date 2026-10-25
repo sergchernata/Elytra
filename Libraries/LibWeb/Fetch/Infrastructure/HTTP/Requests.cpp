@@ -251,6 +251,7 @@ GC::Ref<Request> Request::clone(JS::Realm& realm) const
     new_request->set_text_directive_user_activation(m_text_directive_user_activation);
     new_request->set_browsing_context_group_has_multiple_contexts(m_browsing_context_group_has_multiple_contexts);
     new_request->set_user_agent_initiated(m_user_agent_initiated);
+    new_request->set_form_submission(m_form_submission);
     new_request->set_render_blocking(m_render_blocking);
     new_request->set_url_list(m_url_list);
     new_request->set_redirect_count(m_redirect_count);
@@ -259,6 +260,8 @@ GC::Ref<Request> Request::clone(JS::Realm& realm) const
     new_request->set_done(m_done);
     new_request->set_timing_allow_failed(m_timing_allow_failed);
     new_request->m_navigation_timing_allow_values_list = m_navigation_timing_allow_values_list;
+    // Fork hook (extensions): a clone is the same request to webRequest.
+    new_request->m_extension_request_id = m_extension_request_id;
 
     // 2. If request’s body is non-null, set newRequest’s body to the result of cloning request’s body.
     if (auto const* body = m_body.get_pointer<GC::Ref<Body>>())

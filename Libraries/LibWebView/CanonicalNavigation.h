@@ -76,6 +76,7 @@ public:
         State state;
         RefPtr<WebContentPage> page {};
         RefPtr<CanonicalSessionHistoryEntry> history_entry {};
+        bool is_browser_ui_navigation { false };
     };
     static NonnullRefPtr<CanonicalNavigation> create(Start start)
     {
@@ -95,6 +96,9 @@ public:
     RefPtr<CanonicalSessionHistoryEntry> history_entry {};
     // Held so that revoking the blob URL the navigation is to cannot take the entry away from it.
     BlobURLHandle blob_url;
+    // NB: One the UI process began without a source document, as the browser's UI does, not one a renderer asked for.
+    //     The browser opens any of an extension's pages for it.
+    bool is_browser_ui_navigation { false };
 
     RefPtr<WebContentPage> worker() const;
     RefPtr<WebContentPage> host() const;
@@ -112,6 +116,7 @@ private:
         , state(move(start.state))
         , page(move(start.page))
         , history_entry(move(start.history_entry))
+        , is_browser_ui_navigation(start.is_browser_ui_navigation)
     {
     }
 };

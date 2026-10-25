@@ -60,6 +60,8 @@ public:
 
     void set_parser_document(Badge<HTMLParser>, GC::Ref<DOM::Document> document) { m_parser_document = document; }
     void set_was_enabled_when_created_by_parser(Badge<HTMLParser>, bool was_enabled_when_created_by_parser) { m_was_enabled_when_created_by_parser = was_enabled_when_created_by_parser; }
+    void set_parser_document(Badge<XMLDocumentBuilder>, GC::Ref<DOM::Document> document) { m_parser_document = document; }
+    void set_was_enabled_when_created_by_parser(Badge<XMLDocumentBuilder>, bool was_enabled_when_created_by_parser) { m_was_enabled_when_created_by_parser = was_enabled_when_created_by_parser; }
 
     void set_media(Utf16View);
     Utf16String media() const;
@@ -223,6 +225,8 @@ private:
     unsigned m_relationship { 0 };
     u64 m_current_fetch_generation { 0 };
     bool m_stylesheet_processing_pending { false };
+    Optional<u64> m_fetch_generation_waiting_for_critical_subresources;
+    u64 m_loaded_style_sheet_fetch_generation { 0 };
 
     // https://html.spec.whatwg.org/multipage/semantics.html#explicitly-enabled
     bool m_explicitly_enabled { false };

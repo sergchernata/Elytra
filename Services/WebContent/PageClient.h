@@ -211,7 +211,7 @@ private:
     virtual void crash_remote_frame_processes_for_testing() override;
     virtual void page_did_spoof_document_origin_for_testing(Web::HTML::EnvironmentSettingsObject const&, URL::Origin const&) override;
     virtual void stop_loading_through_ui_process_for_testing() override;
-    virtual void reload_through_ui_process_for_testing() override;
+    virtual void reload_through_ui_process_for_testing(bool bypass_cache) override;
     virtual void traverse_history_by_delta_through_ui_process_for_testing(i32 delta) override;
     virtual void send_bad_ipc_message_for_testing(StringView kind, URL::URL const& active_document_url) override;
     virtual Gfx::Palette palette() const override;
@@ -298,14 +298,9 @@ private:
     virtual void page_did_lose_request_server_connection() override;
     virtual void page_did_simulate_worker_request_server_connection_loss() override;
     virtual void page_did_store_hsts_policy_for_testing(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) override;
+    virtual void page_did_request_clear_storage_for_testing(Web::StorageAPI::StorageEndpointType, Web::HTML::EnvironmentSettingsObject const&) override;
     virtual bool page_did_is_known_hsts_host(String const&) override;
-    virtual Optional<Utf16String> page_did_request_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id, Utf16String const& bottle_key) override;
-    virtual WebView::StorageSetResult page_did_set_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id, Utf16String const& bottle_key, Utf16String const& value) override;
-    virtual void page_did_remove_storage_item(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id, Utf16String const& bottle_key) override;
-    virtual Vector<Utf16String> page_did_request_storage_keys(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id) override;
     virtual u64 page_did_request_storage_usage(Web::HTML::EnvironmentId const& environment_id) override;
-    virtual void page_did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId const& environment_id) override;
-    virtual void page_did_broadcast_storage_change(Web::StorageAPI::StorageEndpointType storage_endpoint, String const& url, Optional<Utf16String> const& key, Optional<Utf16String> const& old_value, Optional<Utf16String> const& new_value) override;
     virtual void page_did_update_indexed_database(String const& url, Web::IndexedDB::TransactionChanges const&) override;
     virtual void page_did_update_resource_count(i32) override;
     virtual NewWebViewResult page_did_request_new_web_view(Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<Web::HTML::CrossProcessId> opener_navigable_id, Optional<URL::URL> opener_base_url, Utf16String const& target_name, Web::HTML::SandboxingFlagSet popup_sandboxing_flag_set) override;
@@ -381,6 +376,9 @@ private:
     virtual void page_did_change_accessibility_tree() override;
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot) override;
     virtual void received_message_from_web_ui(Utf16String const& name, JS::Value data) override;
+    virtual void page_did_create_extension_context(u64 context_id, String const& extension_id, String const& context_type, URL::URL const& url, bool is_top_level) override;
+    virtual void page_did_destroy_extension_context(u64 context_id) override;
+    virtual void page_did_post_extension_message(u64 context_id, String const& message) override;
     virtual void page_did_block_resource() override;
     virtual void page_did_start_network_request(u64 request_id, URL::URL const&, ByteString const&, Vector<HTTP::Header> const&, ReadonlyBytes, Optional<String>, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority) override;
     virtual void page_did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String>, Vector<HTTP::Header> const&, Requests::CacheState) override;

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/Invalidation/AdoptedStyleSheetInvalidator.h>
 #include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/CSS/StyleSheetState.h>
@@ -27,11 +28,15 @@ GC::Ref<WebIDL::ObservableArray> create_adopted_style_sheets_list(Node& document
 {
     auto& realm = document_or_shadow_root.document().relevant_settings_object().realm();
     auto adopted_style_sheets = WebIDL::ObservableArray::create(realm);
-    adopted_style_sheets->set_on_set_an_indexed_value_callback([&document_or_shadow_root, adopted_style_sheets](u32 index, JS::Value& value) -> WebIDL::ExceptionOr<void> {
+    adopted_style_sheets->set_on_set_an_indexed_value_callback([&document_or_shadow_root, adopted_style_sheets, &realm](u32 index, JS::Value& value) -> WebIDL::ExceptionOr<void> {
         auto& vm = document_or_shadow_root.vm();
         auto style_sheet = CSS::css_style_sheet_from_value(value);
         if (!style_sheet)
             return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "CSSStyleSheet");
+
+        // Elytra: The list is the main world's, which mustn't get another world's wrapper of a sheet one of its
+        //         scripts adopts.
+        value = CSS::css_style_sheet(realm, *style_sheet);
 
         // The set an indexed value algorithm for adoptedStyleSheets, given value and index, is the following:
         // 1. If value’s constructed flag is not set, or its constructor document is not equal to this

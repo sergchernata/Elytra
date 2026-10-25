@@ -29,6 +29,11 @@ set(INTERNAL_RESOURCES
 )
 list(TRANSFORM INTERNAL_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/")
 
+set(EXTENSION_RESOURCES
+    chrome-api.js
+)
+list(TRANSFORM EXTENSION_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/extensions/")
+
 set(SITE_COMPATIBILITY_RESOURCES
     aljazeera.com.json
     cnn.com.json
@@ -174,6 +179,10 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
+    copy_resource_set(ladybird/extensions RESOURCES ${EXTENSION_RESOURCES}
+        DESTINATION ${base_directory} TARGET ${bundle_target}
+    )
+
     copy_resource_set(ladybird/site-compatibility RESOURCES ${SITE_COMPATIBILITY_RESOURCES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
@@ -219,6 +228,7 @@ function(install_ladybird_resources destination component)
     install(FILES ${128x128_ICONS} DESTINATION "${destination}/icons/128x128" COMPONENT ${component})
     install(FILES ${THEMES} DESTINATION "${destination}/themes" COMPONENT ${component})
     install(FILES ${INTERNAL_RESOURCES} DESTINATION "${destination}/ladybird" COMPONENT ${component})
+    install(FILES ${EXTENSION_RESOURCES} DESTINATION "${destination}/ladybird/extensions" COMPONENT ${component})
     install(FILES ${SITE_COMPATIBILITY_RESOURCES} DESTINATION "${destination}/ladybird/site-compatibility" COMPONENT ${component})
     install(FILES ${ABOUT_PAGES} DESTINATION "${destination}/ladybird/about-pages" COMPONENT ${component})
     install(FILES ${ABOUT_SETTINGS_RESOURCES} DESTINATION "${destination}/ladybird/about-pages/settings" COMPONENT ${component})

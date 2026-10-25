@@ -95,6 +95,18 @@ sk_sp<SkImageFilter> Canvas2DCommandPlayer::image_filter_from(Canvas2DCompositin
     });
 }
 
+static Optional<Gfx::CanvasShadow> shadow_from(Canvas2DCompositing const& compositing)
+{
+    if (!compositing.has_shadow)
+        return {};
+    return Gfx::CanvasShadow {
+        .color = compositing.shadow.color,
+        .offset_x = compositing.shadow.offset_x,
+        .offset_y = compositing.shadow.offset_y,
+        .blur = compositing.shadow.blur,
+    };
+}
+
 RefPtr<Gfx::PaintStyle> Canvas2DCommandPlayer::paint_style_from(Canvas2DPaint const& paint) const
 {
     auto with_color_stops = [&](auto paint_style) -> NonnullRefPtr<Gfx::PaintStyle> {
@@ -138,31 +150,20 @@ RefPtr<Gfx::PaintStyle> Canvas2DCommandPlayer::paint_style_from(Canvas2DPaint co
 void Canvas2DCommandPlayer::play_command(Canvas2DFillPath const& command)
 {
     auto path = path_from(command.path_data);
-    // Shadows are recorded as blurred solid-color fills; everything else goes through the general paint-style overload.
-    if (command.blur_radius > 0 && command.paint.kind == Canvas2DPaintKind::Color) {
-        m_painter->fill_path(path, command.paint.color, command.winding_rule, command.blur_radius, command.compositing.compositing_and_blending_operator);
-        return;
-    }
-
     auto paint_style = paint_style_from(command.paint);
     if (!paint_style)
         return;
-    m_painter->fill_path(path, *paint_style, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, command.winding_rule);
+    m_painter->fill_path(path, *paint_style, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, command.winding_rule, shadow_from(command.compositing));
 }
 
 void Canvas2DCommandPlayer::play_command(Canvas2DStrokePath const& command)
 {
     auto path = path_from(command.path_data);
     auto dash_array = inline_objects<float>(inline_data(command.dash_array));
-    if (command.blur_radius > 0 && command.paint.kind == Canvas2DPaintKind::Color) {
-        m_painter->stroke_path(path, command.paint.color, command.thickness, command.blur_radius, command.compositing.compositing_and_blending_operator, command.cap_style, command.join_style, command.miter_limit, dash_array, command.dash_offset);
-        return;
-    }
-
     auto paint_style = paint_style_from(command.paint);
     if (!paint_style)
         return;
-    m_painter->stroke_path(path, *paint_style, image_filter_from(command.compositing), command.thickness, command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, command.cap_style, command.join_style, command.miter_limit, dash_array, command.dash_offset);
+    m_painter->stroke_path(path, *paint_style, image_filter_from(command.compositing), command.thickness, command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, command.cap_style, command.join_style, command.miter_limit, dash_array, command.dash_offset, shadow_from(command.compositing));
 }
 
 void Canvas2DCommandPlayer::play_command(Canvas2DDrawGlyphRun const& command)
@@ -183,7 +184,7 @@ void Canvas2DCommandPlayer::play_command(Canvas2DDrawGlyphRun const& command)
     glyphs.ensure_capacity(tape_glyphs.size());
     for (auto const& glyph : tape_glyphs)
         glyphs.unchecked_append({ .position = glyph.position, .glyph_id = glyph.glyph_id });
-    m_painter->draw_glyph_run(*font, sk_font.release_value(), glyphs, command.translation, *paint_style, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator);
+    m_painter->draw_glyph_run(*font, sk_font.release_value(), glyphs, command.translation, *paint_style, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, shadow_from(command.compositing));
 }
 
 void Canvas2DCommandPlayer::play_command(Canvas2DClearRect const& command)
@@ -196,7 +197,7 @@ void Canvas2DCommandPlayer::play_command(Canvas2DDrawImageFrame const& command)
     auto const* frame = m_resolvers.image_frame(command.frame_id.value());
     if (!frame)
         return;
-    m_painter->draw_bitmap(command.dst_rect, *frame, command.src_rect, command.scaling_mode, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator);
+    m_painter->draw_bitmap(command.dst_rect, *frame, command.src_rect, command.scaling_mode, image_filter_from(command.compositing), command.compositing.global_alpha, command.compositing.compositing_and_blending_operator, shadow_from(command.compositing));
 }
 
 void Canvas2DCommandPlayer::play_command(Canvas2DDrawCanvas const& command)
@@ -224,20 +225,9 @@ void Canvas2DCommandPlayer::play_command(Canvas2DDrawVideoFrame const& command)
     draw_image(*image, command.dst_rect, command.src_rect, command.scaling_mode, command.compositing);
 }
 
-void Canvas2DCommandPlayer::draw_image(SkImage const& image, Gfx::FloatRect const& dst_rect, Gfx::IntRect const& src_rect, Gfx::ScalingMode scaling_mode, Canvas2DCompositing const& compositing)
+void Canvas2DCommandPlayer::draw_image(SkImage const& image, Gfx::FloatRect const& dst_rect, Gfx::FloatRect const& src_rect, Gfx::ScalingMode scaling_mode, Canvas2DCompositing const& compositing)
 {
-    SkPaint paint;
-    paint.setImageFilter(image_filter_from(compositing));
-    paint.setAlpha(static_cast<u8>(compositing.global_alpha * 255));
-    paint.setBlender(Gfx::to_skia_blender(compositing.compositing_and_blending_operator));
-
-    m_surface->canvas().drawImageRect(
-        &image,
-        Gfx::to_skia_rect(src_rect),
-        Gfx::to_skia_rect(dst_rect),
-        Gfx::to_skia_sampling_options(scaling_mode),
-        &paint,
-        SkCanvas::kStrict_SrcRectConstraint);
+    m_painter->draw_image(image, dst_rect, src_rect, scaling_mode, image_filter_from(compositing), compositing.global_alpha, compositing.compositing_and_blending_operator, shadow_from(compositing));
 }
 
 void Canvas2DCommandPlayer::play_command(Canvas2DSetTransform const& command)
@@ -288,6 +278,17 @@ void Canvas2DCommandPlayer::play_command(Canvas2DClearCanvas const& command)
 
     for (int y = 0; y < size.height(); y += strip_height)
         m_surface->write_from_bitmap(*strip, { 0, y }, m_color_space);
+}
+
+// https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-putimagedata
+void Canvas2DCommandPlayer::play_command(Canvas2DPutImageFrame const& command)
+{
+    // NB: putImageData() sets the pixels of the output bitmap, so they are written to the surface directly, without
+    //     the current transformation matrix, the clipping region, or compositing.
+    auto const* frame = m_resolvers.image_frame(command.frame_id.value());
+    if (!frame)
+        return;
+    m_surface->write_from_bitmap(frame->bitmap(), command.position, frame->color_space());
 }
 
 }

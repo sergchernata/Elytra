@@ -27,6 +27,7 @@
 #include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/Timer.h>
+#include <LibWeb/StorageAPI/StorageAreaMirror.h>
 #include <LibWebCommon/CSS/PreferredColorScheme.h>
 #include <LibWebCommon/CSS/PreferredContrast.h>
 #include <LibWebCommon/CSS/PreferredMotion.h>
@@ -52,7 +53,8 @@
 namespace WebContent {
 
 class ConnectionFromClient final
-    : public IPC::ConnectionFromClient<WebContentClientEndpoint, WebContentServerEndpoint> {
+    : public IPC::ConnectionFromClient<WebContentClientEndpoint, WebContentServerEndpoint>
+    , public Web::StorageAPI::StorageAreaMirrorClient {
     C_OBJECT(ConnectionFromClient);
 
     friend class TestConnection;
@@ -109,6 +111,9 @@ private:
     virtual void run_webdriver_user_prompt_handling(Web::PageId page_id, u64 request_id) override;
     virtual void did_handle_webdriver_mouse_event(Web::PageId page_id, u64 request_id) override;
     virtual void connect_to_web_ui(Web::PageId page_id, IPC::TransportHandle handle) override;
+    virtual void set_installed_extensions(Web::PageId page_id, String extensions) override;
+    virtual void deliver_extension_message(Web::PageId page_id, u64 context_id, String message) override;
+    virtual void run_extension_script(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, String extension_id, bool main_world, String source, String filename) override;
     virtual void connect_to_request_server(IPC::TransportHandle handle, int client_id) override;
     virtual void connect_to_test_endpoint(IPC::TransportHandle handle) override;
     virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;
@@ -169,9 +174,17 @@ private:
     virtual void get_source(Web::PageId page_id) override;
     virtual void inspect_dom_tree(Web::PageId page_id) override;
     virtual void inspect_storage(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, u64 request_id) override;
-    virtual Messages::WebContentServer::SetSessionStorageItemResponse set_session_storage_item(Web::PageId page_id, Utf16String key, Utf16String value) override;
-    virtual Messages::WebContentServer::RemoveSessionStorageItemResponse remove_session_storage_item(Web::PageId page_id, Utf16String key) override;
-    virtual Messages::WebContentServer::ClearSessionStorageResponse clear_session_storage(Web::PageId page_id) override;
+    // Web::StorageAPI::StorageAreaMirrorClient: the mirrors' link to the browser process, which owns the storage.
+    virtual Web::StorageAPI::StorageAreaConnection connect_to_storage_area(Web::PageId, Web::StorageAPI::StorageEndpointType, Web::HTML::EnvironmentId const&) override;
+    virtual void disconnect_from_storage_area(Web::StorageAPI::StorageAreaId) override;
+    virtual void set_storage_item(Web::StorageAPI::StorageAreaId, Utf16String const& key, Utf16String const& value, String const& document_url) override;
+    virtual void remove_storage_item(Web::StorageAPI::StorageAreaId, Utf16String const& key, String const& document_url) override;
+    virtual void clear_storage_area(Web::StorageAPI::StorageAreaId, String const& document_url) override;
+
+    virtual void storage_area_changed(Web::StorageAPI::StorageAreaId area_id, Optional<Utf16String> key, Optional<Utf16String> old_value, Optional<Utf16String> new_value, String url) override;
+    virtual void storage_area_write_acknowledged(Web::StorageAPI::StorageAreaId area_id) override;
+    virtual void storage_area_write_refused(Web::StorageAPI::StorageAreaId area_id, Vector<Utf16String> keys, Vector<Utf16String> values) override;
+    virtual void storage_area_reset(Web::StorageAPI::StorageAreaId area_id, Vector<Utf16String> keys, Vector<Utf16String> values) override;
     virtual void inspect_dom_node(Web::PageId page_id, WebView::DOMNodeProperties::Type, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options) override;
     virtual void inspect_grid_layouts(Web::PageId page_id, Web::UniqueNodeID root_node_id) override;
     virtual void inspect_current_grid(Web::PageId page_id, Web::UniqueNodeID node_id) override;
@@ -332,6 +345,7 @@ private:
     virtual void broadcast_channel_message(Web::HTML::BroadcastChannelMessage message) override;
     virtual void did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token) override;
     virtual void did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno) override;
+    virtual void did_worker_agent_report_content_security_policy_violation(Web::HTML::WorkerAgentOwnerToken owner_token, u64 policy_index, String effective_directive, URL::URL resource) override;
     virtual void did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token) override;
     virtual void did_worker_agent_die(Web::HTML::WorkerAgentOwnerToken owner_token) override;
 

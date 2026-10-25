@@ -1,0 +1,7 @@
+{
+    "manifest_version": 3,
+    "name": "Notifications test extension without the permission",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo03m71YvuZ6BMmwufITchz3VrAqCEam6qIAOCU13zbfj3NAZ14nGQBtqyH2j0bn37jjaruuTTPojoCy780VtP/2cLqDZytBZfNxsRLPqoKxvSjGKLk5zg9C67+h2SkVHJ7vO48x14CTsi0TSu9MkM7PH5v66z73OfSZCh/QI4TksLy85JKyhMB9tqS6A+oH+vKn79Z1wY/DKtYRDLyOQOGHLCATJjEOr8+HhEnMvo0LmcPOM8S8RYmUuM7qoLfUrt48dWi3qwkxFT49TsIgDfC18/XhdgYbB+CzC9i0HubrjLkFbKVXCzMW8tX43xmYbyaoMVuEqQKwn42/MGrpyawIDAQAB",
+    "permissions": ["storage"]
+}

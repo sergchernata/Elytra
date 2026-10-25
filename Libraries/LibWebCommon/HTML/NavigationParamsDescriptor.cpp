@@ -68,6 +68,7 @@ ErrorOr<void> encode(Encoder& encoder, Web::HTML::NavigationRequestDescriptor co
     TRY(encoder.encode(request.redirect_count));
     TRY(encoder.encode(request.text_directive_user_activation));
     TRY(encoder.encode(request.browsing_context_group_has_multiple_contexts));
+    TRY(encoder.encode(request.cache_mode));
     return {};
 }
 
@@ -84,6 +85,7 @@ ErrorOr<Web::HTML::NavigationRequestDescriptor> decode(Decoder& decoder)
         .redirect_count = TRY(decoder.decode<u8>()),
         .text_directive_user_activation = TRY(decoder.decode<bool>()),
         .browsing_context_group_has_multiple_contexts = TRY(decoder.decode<bool>()),
+        .cache_mode = TRY(decoder.decode<HTTP::CacheMode>()),
     };
 }
 
@@ -270,6 +272,7 @@ ErrorOr<void> encode(Encoder& encoder, Web::HTML::NavigationParamsDescriptor con
     TRY(encoder.encode(params.agent_cluster_id));
     TRY(encoder.encode(params.agent_cluster_cross_origin_isolation_mode));
     TRY(encoder.encode(params.new_browsing_context_group_id));
+    TRY(encoder.encode(params.permissions_policy));
     return {};
 }
 
@@ -295,6 +298,7 @@ ErrorOr<Web::HTML::NavigationParamsDescriptor> decode(Decoder& decoder)
         .agent_cluster_id = TRY(decoder.decode<Optional<u64>>()),
         .agent_cluster_cross_origin_isolation_mode = TRY(decoder.decode<Web::HTML::CrossOriginIsolationMode>()),
         .new_browsing_context_group_id = TRY(decoder.decode<Optional<u64>>()),
+        .permissions_policy = TRY(decoder.decode<Optional<Web::PermissionsPolicy::PermissionsPolicy>>()),
     };
 }
 

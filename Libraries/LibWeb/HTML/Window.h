@@ -21,6 +21,7 @@
 #include <LibWeb/Bindings/Forward.h>
 #include <LibWeb/Bindings/IdleRequest.h>
 #include <LibWeb/DOM/EventTarget.h>
+#include <LibWeb/EventTiming/EventTiming.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/BarProp.h>
@@ -207,7 +208,8 @@ public:
     u32 length();
     GC::Ptr<WindowProxy const> top() const;
     JS::Value opener() const;
-    WebIDL::ExceptionOr<void> set_opener(JS::Value);
+    // Elytra: Takes the realm of the receiver, whose world's global the value is set on.
+    WebIDL::ExceptionOr<void> set_opener(JS::Realm&, JS::Value);
     GC::Ptr<WindowProxy const> parent() const;
     GC::Ptr<DOM::Element const> frame_element() const;
     WebIDL::ExceptionOr<GC::Ptr<WindowProxy>> open(Optional<Utf16String> const& url, Optional<Utf16String> const& target, Optional<Utf16String> const& features);
@@ -218,6 +220,7 @@ public:
     [[nodiscard]] GC::Ref<Speech::SpeechSynthesis> speech_synthesis();
 
     void alert(Utf16String const& message = {});
+    void print();
     bool confirm(Optional<Utf16String> const& message);
     Optional<Utf16String> prompt(Optional<Utf16String> const& message, Optional<Utf16String> const& default_);
 
@@ -284,6 +287,7 @@ public:
     [[nodiscard]] GC::Ref<External> external();
 
     [[nodiscard]] GC::Ref<CustomElementRegistry> custom_elements();
+    GC::Ptr<CustomElementRegistry> custom_elements_for_world(JS::Realm&);
 
     HighResolutionTime::DOMHighResTimeStamp last_activation_timestamp() const { return m_last_activation_timestamp; }
     void set_last_activation_timestamp(HighResolutionTime::DOMHighResTimeStamp timestamp) { m_last_activation_timestamp = timestamp; }
@@ -314,6 +318,12 @@ public:
     bool find(Utf16View string);
 
     static void for_each_active(Function<IterationDecision(Window&)> callback);
+
+    EventTiming::WindowEventTimingState& event_timing_state() { return m_event_timing_state; }
+
+    // https://w3c.github.io/largest-contentful-paint/#has-dispatched-scroll-event
+    bool has_dispatched_scroll_event() const { return m_has_dispatched_scroll_event; }
+    void set_has_dispatched_scroll_event() { m_has_dispatched_scroll_event = true; }
 
 private:
     Window();
@@ -401,6 +411,12 @@ private:
 
     // https://html.spec.whatwg.org/multipage/obsolete.html#dom-external
     GC::Ptr<External> m_external;
+
+    EventTiming::WindowEventTimingState m_event_timing_state;
+
+    // https://w3c.github.io/largest-contentful-paint/#has-dispatched-scroll-event
+    // Each Window has has dispatched scroll event, a boolean which is initially set to false.
+    bool m_has_dispatched_scroll_event { false };
 };
 
 void run_animation_frame_callbacks(DOM::Document&, double now);

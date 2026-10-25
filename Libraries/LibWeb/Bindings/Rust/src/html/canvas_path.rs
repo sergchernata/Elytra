@@ -282,8 +282,8 @@ pub(crate) fn arc(
     x: f32,
     y: f32,
     radius: f32,
-    start_angle: f32,
-    end_angle: f32,
+    start_angle: f64,
+    end_angle: f64,
     counterclockwise: bool,
 ) -> Result<(), CanvasPathError> {
     if radius < 0.0 && radius.is_finite() {
@@ -311,14 +311,16 @@ pub(crate) fn ellipse(
     radius_x: f32,
     radius_y: f32,
     rotation: f32,
-    mut start_angle: f32,
-    mut end_angle: f32,
-    mut counterclockwise: bool,
+    start_angle: f64,
+    end_angle: f64,
+    counterclockwise: bool,
 ) -> Result<(), CanvasPathError> {
     // 1. If any of the arguments are infinite or NaN, then return.
-    if [x, y, radius_x, radius_y, rotation, start_angle, end_angle]
+    if [x, y, radius_x, radius_y, rotation]
         .iter()
         .any(|argument| !argument.is_finite())
+        || !start_angle.is_finite()
+        || !end_angle.is_finite()
     {
         return Ok(());
     }
@@ -340,20 +342,17 @@ pub(crate) fn ellipse(
     // is true and startAngle − endAngle is greater than or equal to 2π, then the arc is the whole circumference of
     // this ellipse"
     // Also draw the full ellipse if making a non-zero whole number of turns.
+    // NB: The angles are compared in double precision, as they were given, so that an arc of exactly 2π stays whole.
+    let is_whole_circumference = (!counterclockwise && (end_angle - start_angle) >= core::f64::consts::TAU)
+        || (counterclockwise && (start_angle - end_angle) >= core::f64::consts::TAU)
+        || (start_angle != end_angle && (start_angle - end_angle) % core::f64::consts::TAU == 0.0);
+
     let tau = core::f32::consts::TAU;
-    if (!counterclockwise && (end_angle - start_angle) >= tau)
-        || (counterclockwise && (start_angle - end_angle) >= tau)
-        || (start_angle != end_angle && (start_angle - end_angle) % tau == 0.0)
-    {
-        start_angle = 0.0;
-        // FIXME: elliptical_arc_to() incorrectly handles the case where the start/end points are very close.
-        //        So we slightly fudge the numbers here to correct for that.
-        end_angle = tau * 0.9999;
-        counterclockwise = false;
-    } else {
-        start_angle %= tau;
-        end_angle %= tau;
-    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the angles of an arc of a Gfx::Path are floats"
+    )]
+    let (start_angle, end_angle) = ((start_angle as f32) % tau, (end_angle as f32) % tau);
 
     // Then, figure out where the ends of the arc are.
     // To do so, we can pretend that the center of this ellipse is at (0, 0), and the whole coordinate system is
@@ -410,13 +409,28 @@ pub(crate) fn ellipse(
     //    start point of the arc.
     add_line_to_start_point(path, start_point);
 
+    let radii = FloatSize {
+        width: radius_x,
+        height: radius_y,
+    };
+
+    // NB: The whole circumference starts and ends at the start point, so it is added as two halves.
+    if is_whole_circumference {
+        let half_turn = if counterclockwise {
+            -core::f32::consts::PI
+        } else {
+            core::f32::consts::PI
+        };
+        let opposite_point = resolve_point_with_angle(start_angle + half_turn);
+        path.elliptical_arc_to(opposite_point, radii, rotation, false, !counterclockwise);
+        path.elliptical_arc_to(start_point, radii, rotation, false, !counterclockwise);
+        return Ok(());
+    }
+
     // 4. Add the start and end points of the arc to the subpath, and connect them with an arc.
     path.elliptical_arc_to(
         end_point,
-        FloatSize {
-            width: radius_x,
-            height: radius_y,
-        },
+        radii,
         rotation,
         delta_theta > core::f32::consts::PI,
         !counterclockwise,
@@ -630,8 +644,11 @@ pub(crate) fn round_rect(
 
     // 11.5. Let scale be the minimum value of the ratios w / top, h / right, w / bottom, h / left.
     // NB: As AK::min(), which the C++ took it with, this keeps the first of two ratios unless the second is less.
+    // INTEROP: The ratios are taken with the magnitudes of w and h, so that a rectangle with a negative width or
+    //          height keeps its radii.
     let min = |a: f64, b: f64| if b < a { b } else { a };
-    let scale = min(min(w / top, h / right), min(w / bottom, h / left));
+    let (width, height) = (w.abs(), h.abs());
+    let scale = min(min(width / top, height / right), min(width / bottom, height / left));
 
     // 11.6. If scale is less than 1, then set the x and y members of upperLeft, upperRight, lowerLeft, and
     //       lowerRight to their current values multiplied by scale.
@@ -643,8 +660,13 @@ pub(crate) fn round_rect(
     }
 
     // 12. Create a new subpath:
+    // INTEROP: When w or h is negative, the rectangle extends to the left of x or above y. The corner radii are then
+    //          measured into the rectangle from its corners, and the arcs turn the other way when just one of them
+    //          is negative.
+    let x_direction = if w < 0.0 { -1.0 } else { 1.0 };
+    let y_direction = if h < 0.0 { -1.0 } else { 1.0 };
     let large_arc = false;
-    let sweep = true;
+    let sweep = x_direction * y_direction > 0.0;
     #[allow(
         clippy::cast_possible_truncation,
         reason = "the radii of an arc of a Gfx::Path are floats"
@@ -655,14 +677,14 @@ pub(crate) fn round_rect(
     };
 
     // 12.1. Move to the point (x + upperLeft["x"], y).
-    path.move_to(point_from_doubles(x + upper_left.x, y));
+    path.move_to(point_from_doubles(x + x_direction * upper_left.x, y));
 
     // 12.2. Draw a straight line to the point (x + w − upperRight["x"], y).
-    path.line_to(point_from_doubles(x + w - upper_right.x, y));
+    path.line_to(point_from_doubles(x + w - x_direction * upper_right.x, y));
 
     // 12.3. Draw an arc to the point (x + w, y + upperRight["y"]).
     path.elliptical_arc_to(
-        point_from_doubles(x + w, y + upper_right.y),
+        point_from_doubles(x + w, y + y_direction * upper_right.y),
         radii_of(upper_right),
         0.0,
         large_arc,
@@ -670,11 +692,11 @@ pub(crate) fn round_rect(
     );
 
     // 12.4. Draw a straight line to the point (x + w, y + h − lowerRight["y"]).
-    path.line_to(point_from_doubles(x + w, y + h - lower_right.y));
+    path.line_to(point_from_doubles(x + w, y + h - y_direction * lower_right.y));
 
     // 12.5. Draw an arc to the point (x + w − lowerRight["x"], y + h).
     path.elliptical_arc_to(
-        point_from_doubles(x + w - lower_right.x, y + h),
+        point_from_doubles(x + w - x_direction * lower_right.x, y + h),
         radii_of(lower_right),
         0.0,
         large_arc,
@@ -682,11 +704,11 @@ pub(crate) fn round_rect(
     );
 
     // 12.6. Draw a straight line to the point (x + lowerLeft["x"], y + h).
-    path.line_to(point_from_doubles(x + lower_left.x, y + h));
+    path.line_to(point_from_doubles(x + x_direction * lower_left.x, y + h));
 
     // 12.7. Draw an arc to the point (x, y + h − lowerLeft["y"]).
     path.elliptical_arc_to(
-        point_from_doubles(x, y + h - lower_left.y),
+        point_from_doubles(x, y + h - y_direction * lower_left.y),
         radii_of(lower_left),
         0.0,
         large_arc,
@@ -694,11 +716,11 @@ pub(crate) fn round_rect(
     );
 
     // 12.8. Draw a straight line to the point (x, y + upperLeft["y"]).
-    path.line_to(point_from_doubles(x, y + upper_left.y));
+    path.line_to(point_from_doubles(x, y + y_direction * upper_left.y));
 
     // 12.9. Draw an arc to the point (x + upperLeft["x"], y).
     path.elliptical_arc_to(
-        point_from_doubles(x + upper_left.x, y),
+        point_from_doubles(x + x_direction * upper_left.x, y),
         radii_of(upper_left),
         0.0,
         large_arc,
@@ -885,24 +907,34 @@ mod tests {
     fn a_whole_turn_is_the_whole_ellipse() {
         let mut path = RecordingPath::default();
         assert_eq!(
-            arc(&mut path, 0.0, 0.0, 10.0, 0.0, core::f32::consts::TAU, false),
+            arc(&mut path, 0.0, 0.0, 10.0, 0.0, core::f64::consts::TAU, false),
             Ok(())
         );
         let [
             Op::MoveTo(start_x, start_y),
             Op::EllipticalArcTo {
-                large_arc,
-                sweep,
+                x: opposite_x,
+                large_arc: first_large_arc,
+                sweep: first_sweep,
                 radii,
+                ..
+            },
+            Op::EllipticalArcTo {
+                x: end_x,
+                y: end_y,
+                large_arc: second_large_arc,
+                sweep: second_sweep,
                 ..
             },
         ] = path.ops.as_slice()
         else {
-            panic!("the arc is one elliptical arc from its start: {:?}", path.ops);
+            panic!("the arc is two elliptical arcs from its start: {:?}", path.ops);
         };
         assert_eq!((*start_x, *start_y), (10.0, 0.0));
+        assert_eq!(*opposite_x, -10.0);
+        assert_eq!((*end_x, *end_y), (10.0, 0.0));
         assert_eq!(*radii, (10.0, 10.0));
-        assert!(*large_arc && *sweep);
+        assert!(!*first_large_arc && *first_sweep && !*second_large_arc && *second_sweep);
     }
 
     #[test]

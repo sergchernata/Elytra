@@ -230,7 +230,8 @@ impl<Serialization: AsRef<str>> Url<Serialization> {
                 };
 
                 // 4. If pathURL’s scheme is "http", "https", or "file", then return pathURL’s origin.
-                if matches!(path_url.scheme(), "http" | "https" | "file") {
+                // AD-HOC: So is a chrome-extension: one, so that blob URLs an extension makes are its own.
+                if matches!(path_url.scheme(), "http" | "https" | "file" | "chrome-extension") {
                     return path_url.origin();
                 }
 
@@ -247,6 +248,8 @@ impl<Serialization: AsRef<str>> Url<Serialization> {
             // AD-HOC: resource:// URLs are internal browser resources; give them a shared tuple origin
             // so that same-origin checks pass between any two resource:// documents or worker scripts.
             "resource" => Origin::new_tuple("resource", empty_host(), None),
+            // AD-HOC: An extension's pages and scripts share one origin, named after the extension's ID (its host).
+            "chrome-extension" if self.port().is_none() && self.serialized_host().is_some_and(is_extension_id) => Origin::new_tuple("chrome-extension", self.host(), None),
             // -> "file"
             "file" => {
                 // Unfortunate as it is, this is left as an exercise to the reader. When in doubt, return a new opaque origin.
@@ -273,6 +276,11 @@ impl<Serialization: AsRef<str>> Url<Serialization> {
             _ => Origin::new_opaque(OpaqueOriginKind::Standard),
         }
     }
+}
+
+// An extension's ID: 32 of the letters a to p.
+fn is_extension_id(host: &str) -> bool {
+    host.len() == 32 && host.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
 }
 
 fn empty_host() -> Host {

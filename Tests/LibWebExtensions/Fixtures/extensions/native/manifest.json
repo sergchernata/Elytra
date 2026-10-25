@@ -1,0 +1,10 @@
+{
+    "manifest_version": 3,
+    "name": "Native messaging test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnFpNAdV9RdA6Lx0wSPVa1eWL6LV+IUIghrN7rBtFqxYsp4bNww9ZLtAQP43941wicESYJgt7HzKTPgQSZVVGm0/kfvQPlG7a1oufrLGQVTpsRXNizCG3hkYaznkS5aFLgQWa+qsWbWfa3iFgqoM6RxCiJuTOFwnugOiMo12gNTQEBUsqj4CMuZ2FQHx6Tad4tIizKStCT8z1qjnyteqWmxfCKFDhY41ymDfEJdL8U1NbkukCIilBOB39iKJIYHbfUSrKjpm45LmX2avqLDKk2mUEz8LSscaxZgdX0samrmj8VqVZTil31nJzrrNDA86kFAmkWS9+lLS5XKT9qINegQIDAQAB",
+    "permissions": ["nativeMessaging"],
+    "content_scripts": [
+        { "matches": ["file:///*/native-content.html"], "js": ["content.js"] }
+    ]
+}

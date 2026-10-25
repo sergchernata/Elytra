@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "Security: about:blank frames",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwyR6bOKwucWeqFa0zo4enP7KEF3RMuTwAjdxukZL7D8xL/TsYtvgWEvoYEeIQBw0lIruKCNBcwhjP6fv4qGyR4HlEyh5ViTqbYkax02GbhbOZW+HeoXzKkoso876AOu28zi2ZxjOBzt4ySNT8PBqEjvxSs28NkW4hOJPSy+XN7qVAIx/bhS/OhZtbWzXScLcszU2HhEG4v0feHwRixviUlpbbKEZz4QJhZrVyIjMwk2mOuON0IHEoAkAW4jOCGxKhX9NSNcALBZzcjmPbr+TLiySGlpDwBxLZWjEf/mXAyhZFIAUkAlSxCW63Vt+3c3hMsevRp7ulsy5HTcUVsI0yQIDAQAB",
+    "content_scripts": [
+        { "matches": ["file:///*/blank-top.html"], "js": ["content.js"], "all_frames": true, "match_about_blank": true, "run_at": "document_end" }
+    ]
+}

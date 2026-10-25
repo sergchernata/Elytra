@@ -28,6 +28,7 @@
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/PaintTiming/PaintTiming.h>
 #include <LibWeb/Painting/BoxViews.h>
 #include <LibWeb/Painting/PaintFacts.h>
 #include <LibWeb/Painting/ScrollSnap.h>
@@ -135,11 +136,6 @@ StringView Node::class_name() const
     }
 #undef LAYOUT_NODE_KIND_NAME_CASE
     VERIFY_NOT_REACHED();
-}
-
-void Node::reset_cached_intrinsic_sizes_of_self_and_ancestors()
-{
-    RustFFI::render_state_reset_cached_intrinsic_sizes_of_self_and_ancestors(document_host(), slot_id(this));
 }
 
 RustFFI::DocumentHost* Node::document_host() const
@@ -258,6 +254,29 @@ void NodeWithStyle::ImageObserver::image_style_value_did_update(CSS::ImageStyleV
 {
     VERIFY(m_owner);
     Painting::push_layer_image_paint_facts(*m_owner);
+    report_to_paint_timing_if_available();
+}
+
+void NodeWithStyle::ImageObserver::set_observes_background_image_of(DOM::Element& element, bool reported_to_paint_timing)
+{
+    m_background_image_element = element;
+    m_reported_to_paint_timing = reported_to_paint_timing;
+    report_to_paint_timing_if_available();
+}
+
+// https://w3c.github.io/paint-timing/#sec-modifications-CSS
+void NodeWithStyle::ImageObserver::report_to_paint_timing_if_available()
+{
+    // Whenever an image request in an Element element's associated background image requests becomes completely
+    // available, run the algorithm to process an image that finished loading with element and image request as
+    // inputs.
+    if (!m_background_image_element || m_reported_to_paint_timing || !m_resource)
+        return;
+    auto image_data = decoded_image_data();
+    if (!image_data)
+        return;
+    m_reported_to_paint_timing = true;
+    PaintTiming::process_an_image_that_finished_loading(*m_background_image_element, PaintTiming::image_request_info(Utf16String::from_utf8(m_resource->url().serialize()), image_data));
 }
 
 NodeWithStyle::~NodeWithStyle()
@@ -283,9 +302,29 @@ void NodeWithStyle::rebuild_image_observers(Vector<RefPtr<CSS::CursorStyleValue 
         return make<ImageObserver>(*this, *image_to_observe);
     };
 
+    // NB: A background image the old observers told paint timing of is not told of again.
+    auto background_image_was_reported_to_paint_timing = [&](CSS::ImageStyleValue const& image) {
+        auto const* old_observers = image_observers();
+        if (!old_observers)
+            return false;
+        for (auto const& old_observer : old_observers->background_layers) {
+            if (old_observer && &old_observer->image() == &image && old_observer->reported_to_paint_timing())
+                return true;
+        }
+        return false;
+    };
+
+    auto* background_image_element = as_if<DOM::Element>(dom_node());
+    if (!background_image_element && is_generated_for_pseudo_element())
+        background_image_element = pseudo_element_generator().ptr();
+
     auto new_observers = make<ImageObserverSlots>();
-    for (auto const& image : background_images())
-        new_observers->background_layers.append(observer_for(image.ptr()));
+    for (auto const& image : background_images()) {
+        auto observer = observer_for(image.ptr());
+        if (observer && background_image_element)
+            observer->set_observes_background_image_of(*background_image_element, background_image_was_reported_to_paint_timing(observer->image()));
+        new_observers->background_layers.append(move(observer));
+    }
     for (auto const& image : mask_images())
         new_observers->mask_layers.append(observer_for(image.ptr()));
     for (auto const& cursor_style_value : cursor_style_values)
@@ -504,9 +543,8 @@ static bool uses_button_layout(Node const& node)
     return html_element && html_element->uses_button_layout();
 }
 
-void NodeWithStyle::set_style_record_identity(CSS::InstalledStyle const& installed, CSS::InstalledStyle const& held_before)
+void NodeWithStyle::set_style_record_identity(CSS::StyleRecordID style_record_identity)
 {
-    auto style_record_identity = installed.record();
     // A detached or layout-derived record is independent of its DOM target's record. A
     // rendering consequence replaces and re-derives it explicitly through apply_style().
     if (m_has_layout_derived_style)
@@ -517,29 +555,6 @@ void NodeWithStyle::set_style_record_identity(CSS::InstalledStyle const& install
     }
 
     bool should_repin_style_record = m_style_record_pinned_for_cxx_consumers;
-    // Both answers come from the records themselves, so neither side needs a ComputedValues built
-    // for it. Compare the effective payloads, including animations, rather than treating every
-    // animation overlay as layout-affecting. The node's own record is the one its target held
-    // before where the node followed it, which the target still holds.
-    auto const& new_record_view = installed.view();
-    VERIFY(new_record_view.present);
-    CSS::StyleEngine::StyleRecordView old_record_view {};
-    if (!!m_style_record_identity) {
-        old_record_view = held_before.record() == m_style_record_identity
-            ? held_before.view()
-            : document().style_computer().style_engine().style_record_view(held_read(), m_style_record_identity);
-    }
-    // NB: SVG geometry can depend on currentColor strokes and animation composition. Keep its conservative reset.
-    bool svg_style_may_affect_intrinsic_sizes = is_svg_box()
-        && (old_record_view.animation_overlay_identity != 0
-            || new_record_view.animation_overlay_identity != 0
-            || (old_record_view.present
-                && static_cast<CSS::ComputedValues::InheritedTextValues const*>(old_record_view.payloads[to_underlying(CSS::StyleGroupIndex::InheritedTextValues)])->color
-                    != static_cast<CSS::ComputedValues::InheritedTextValues const*>(new_record_view.payloads[to_underlying(CSS::StyleGroupIndex::InheritedTextValues)])->color));
-    bool changes_layout_affecting_style = !old_record_view.present
-        || svg_style_may_affect_intrinsic_sizes
-        || CSS::ComputedValues::layout_affecting_group_payloads_differ(old_record_view.payloads, new_record_view.payloads);
-
     release_pinned_style_record();
     m_background_images.clear();
     m_mask_images.clear();
@@ -550,9 +565,8 @@ void NodeWithStyle::set_style_record_identity(CSS::InstalledStyle const& install
     if (should_repin_style_record)
         pin_style_record_for_cxx_consumers();
 
-    if (changes_layout_affecting_style)
-        reset_cached_intrinsic_sizes_of_self_and_ancestors();
-    if (changes_layout_affecting_style && (kind() == RustFFI::NodeKind::FieldSetBox || uses_button_layout(*this)))
+    // The anonymous content box of a button or a fieldset also takes properties of this style that it does not inherit.
+    if (kind() == RustFFI::NodeKind::FieldSetBox || uses_button_layout(*this))
         RustFFI::render_state_reinherit_anonymous_descendants(document_host(), slot_id(this), false);
 }
 
@@ -723,7 +737,7 @@ void Node::dom_node_style_node_changed(DOM::Node& dom_node, CSS::StyleNodeID old
             generated_for.append(encode_generated_for(pseudo_element));
         });
     }
-    RustFFI::render_state_style_node_changed(arena->host(), old_style_node.value(), new_style_node.value(), generated_for.data(), generated_for.size());
+    RustFFI::render_state_style_node_changed(arena->host(), old_style_node.value(), new_style_node.value(), generated_for.span());
     // The arena tells a node about a change to its layout node through its StyleNodeID, so a node whose StyleNodeID
     // changes is one it cannot name. Its box presence is committed again here instead. A node that had no StyleNodeID
     // had no layout node either, and a fresh StyleNodeID has none bound yet, so it has nothing to commit.

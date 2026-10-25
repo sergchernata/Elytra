@@ -16,6 +16,7 @@
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -67,7 +68,7 @@ void report_exception_to_console(JS::Value value, JS::Realm& realm, ErrorInPromi
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#report-an-exception
-void report_an_exception(JS::Object& global, JS::Value exception, OmitError omit_error)
+void report_an_exception(JS::Object& global, JS::Value exception, OmitError omit_error, GC::Ptr<Script> script)
 {
     auto& realm = relevant_realm(global);
     auto& vm = realm.vm();
@@ -80,22 +81,38 @@ void report_an_exception(JS::Object& global, JS::Value exception, OmitError omit
 
     // 3. Let script be a script found in an implementation-defined way, or null. This should usually be the
     //    running script (most notably during run a classic script).
-    auto script_or_module = vm.get_active_script_or_module();
+    // NB: The running script's execution context is gone by the time its error gets reported, so callers that know
+    //     the script pass it in.
+    if (!script) {
+        vm.get_active_script_or_module().visit(
+            [&](GC::Ref<JS::Script> const& js_script) {
+                script = script_from_host_defined(js_script->host_defined());
+            },
+            [&](GC::Ref<JS::Module> const& module) {
+                script = script_from_host_defined(module->host_defined());
+            },
+            [](auto const&) { });
+    }
+
+    // NB: A parse error is created before its script runs, so take its location from the script.
+    if (script && !script->parse_error().is_null() && script->parse_error() == exception) {
+        error_info.filename = Utf16String::from_utf8(script->filename());
+        if (auto const& position = script->parse_error_position(); position.has_value()) {
+            error_info.lineno = position->line;
+            error_info.colno = position->column;
+        }
+    }
 
     // 4. If script is a classic script and script's muted errors is true, then set errorInfo[error] to null,
     //    errorInfo[message] to "Script error.", errorInfo[filename] to the empty string, errorInfo[lineno] to
     //    0, and errorInfo[colno] to 0.
-    script_or_module.visit(
-        [&](GC::Ref<JS::Script> const& js_script) {
-            if (as<ClassicScript>(script_from_host_defined(js_script->host_defined()))->muted_errors() == ClassicScript::MutedErrors::Yes) {
-                error_info.error = JS::js_null();
-                error_info.message = "Script error."_utf16;
-                error_info.filename = Utf16String {};
-                error_info.lineno = 0;
-                error_info.colno = 0;
-            }
-        },
-        [](auto const&) { });
+    if (auto* classic_script = as_if<ClassicScript>(script.ptr()); classic_script && classic_script->muted_errors() == ClassicScript::MutedErrors::Yes) {
+        error_info.error = JS::js_null();
+        error_info.message = "Script error."_utf16;
+        error_info.filename = Utf16String {};
+        error_info.lineno = 0;
+        error_info.colno = 0;
+    }
 
     // 5. If omitError is true, then set errorInfo[error] to null.
     if (omit_error == OmitError::Yes)
@@ -120,7 +137,11 @@ void report_an_exception(JS::Object& global, JS::Value exception, OmitError omit
         event_init.colno = error_info.colno;
         event_init.error = error_info.error;
 
-        not_handled = window_or_worker->this_impl().dispatch_event(ErrorEvent::create(EventNames::error, event_init, HighResolutionTime::current_high_resolution_time(global)));
+        auto error_event = ErrorEvent::create(EventNames::error, event_init, HighResolutionTime::current_high_resolution_time(global));
+        // Elytra: A world's uncaught errors are for its own listeners.
+        if (auto& global_realm = global.shape().realm(); global_realm.host_defined())
+            error_event->restrict_to_world(Bindings::host_defined_wrapper_world(global_realm));
+        not_handled = window_or_worker->this_impl().dispatch_event(error_event);
 
         // 3. Set global's in error reporting mode to false.
         window_or_worker->set_in_error_reporting_mode(false);

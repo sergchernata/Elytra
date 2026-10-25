@@ -30,6 +30,18 @@ set(SOURCES
     DownloadPresentation.cpp
     DownloadSegmentation.cpp
     DownloadStore.cpp
+    ExtensionAPI/Action.cpp
+    ExtensionAPI/Alarms.cpp
+    ExtensionAPI/ContextMenus.cpp
+    ExtensionAPI/Downloads.cpp
+    ExtensionAPI/Management.cpp
+    ExtensionAPI/NativeMessaging.cpp
+    ExtensionAPI/Notifications.cpp
+    ExtensionAPI/Storage.cpp
+    ExtensionAPI/Tabs.cpp
+    ExtensionAPI/WebRequest.cpp
+    ExtensionRegistry.cpp
+    ExtensionRuntime.cpp
     ExternalURLHandler.cpp
     FaviconStore.cpp
     FileDownloader.cpp
@@ -64,6 +76,7 @@ set(SOURCES
     SessionStore.cpp
     Settings.cpp
     SiteCompatibility.cpp
+    StorageAreaRegistry.cpp
     StorageJar.cpp
     TestSpellChecker.cpp
     URL.cpp
@@ -143,7 +156,7 @@ add_custom_target(generate_build_information DEPENDS ${build_information_stamp})
 
 ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
 add_dependencies(LibWebView generate_build_information)
-target_link_libraries(LibWebView PUBLIC LibCompositing LibSandbox LibWebCommon)
+target_link_libraries(LibWebView PUBLIC LibCompositing LibSandbox LibWebCommon LibWebExtensions)
 target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading SDL3::SDL3)
 
 if (LINUX)

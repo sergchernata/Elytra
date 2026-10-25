@@ -24,7 +24,7 @@ use libjs_rust::api::{
 use crate::ak_format::ak_formatted;
 use crate::bindings::interface::{Interface, Ref, create_dictionary_object, wrap};
 use crate::bindings::promise::WebIdlPromise;
-use crate::bindings::services::web_bindings_object_implements_interface;
+use crate::bindings::services::{web_bindings_object_implements_interface, web_bindings_value_for_world};
 use crate::bindings::{CallContext, Exception, WebIdlResult};
 
 /// A USVString, a string without lone surrogates. Its UTF-16 code units are always well-formed.
@@ -971,25 +971,35 @@ impl ToJs for bool {
     }
 }
 
+/// Elytra: An object that the implementation hands script, as the world of the call's realm has it: a promise, a
+/// wrapper or another object made in (or stored by script of) another world is that world's way in.
+fn value_for_world(cx: &CallContext, value: Value) -> Value {
+    if !value.is_object() {
+        return value;
+    }
+    // SAFETY: The realm is live, and the value is live while the conversion runs.
+    Value(unsafe { web_bindings_value_for_world(cx.realm().as_ptr().cast(), value.0) })
+}
+
 /// https://webidl.spec.whatwg.org/#js-any
 impl ToJs for Value {
-    fn to_js(self, _: &CallContext) -> ThrowCompletionOr<Value> {
-        Ok(self)
+    fn to_js(self, cx: &CallContext) -> ThrowCompletionOr<Value> {
+        Ok(value_for_world(cx, self))
     }
 }
 
 /// An object converted to a JS value: https://webidl.spec.whatwg.org/#js-object, and what an implementation returns
 /// for a promise type, https://webidl.spec.whatwg.org/#js-promise, which is the promise object.
 impl ToJs for Gc<Object> {
-    fn to_js(self, _: &CallContext) -> ThrowCompletionOr<Value> {
-        Ok(Value::from_object(self))
+    fn to_js(self, cx: &CallContext) -> ThrowCompletionOr<Value> {
+        Ok(value_for_world(cx, Value::from_object(self)))
     }
 }
 
 /// https://webidl.spec.whatwg.org/#js-promise
 impl ToJs for WebIdlPromise {
-    fn to_js(self, _: &CallContext) -> ThrowCompletionOr<Value> {
-        Ok(Value::from_object(self.promise()))
+    fn to_js(self, cx: &CallContext) -> ThrowCompletionOr<Value> {
+        Ok(value_for_world(cx, Value::from_object(self.promise())))
     }
 }
 
@@ -1039,8 +1049,8 @@ impl ToJs for f64 {
 
 /// A callback function converted to a JS value, https://webidl.spec.whatwg.org/#js-callback-function
 impl ToJs for Gc<FunctionObject> {
-    fn to_js(self, _: &CallContext) -> ThrowCompletionOr<Value> {
-        Ok(Value::from_object(self))
+    fn to_js(self, cx: &CallContext) -> ThrowCompletionOr<Value> {
+        Ok(value_for_world(cx, Value::from_object(self)))
     }
 }
 
@@ -1137,8 +1147,8 @@ pub(crate) fn to_cpp_interface_in_union(
 
 /// https://webidl.spec.whatwg.org/#js-interface
 impl ToJs for CppInterface {
-    fn to_js(self, _: &CallContext) -> ThrowCompletionOr<Value> {
-        Ok(Value::from_object(self.0))
+    fn to_js(self, cx: &CallContext) -> ThrowCompletionOr<Value> {
+        Ok(value_for_world(cx, Value::from_object(self.0)))
     }
 }
 

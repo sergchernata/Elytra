@@ -38,7 +38,9 @@ WebIDL::ExceptionOr<CanvasImageSourceUsability> check_usability_of_image(CanvasI
 
             // If image is not fully decodable, then return bad.
             // If image has a natural width or natural height (or both) equal to zero, then return bad.
-            if (!image_provider_is_usable_for_canvas(*image_element))
+            // NB: An image whose current request is not completely available is not fully decodable, even while the
+            //     request still holds image data.
+            if (image_element->current_request().state() != HTML::ImageRequest::State::CompletelyAvailable || !image_provider_is_usable_for_canvas(*image_element))
                 return { CanvasImageSourceUsability::Bad };
             return Optional<CanvasImageSourceUsability> {};
         },
@@ -108,9 +110,9 @@ bool image_is_not_origin_clean(CanvasImageSource const& image)
             return image_data && image_data->is_cors_cross_origin();
         },
         // HTMLVideoElement
-        [](GC::Ref<HTMLVideoElement>) {
-            // FIXME: image's media data is CORS-cross-origin.
-            return false;
+        [](GC::Ref<HTMLVideoElement> video) {
+            // image's media data is CORS-cross-origin.
+            return video->media_data_is_cors_cross_origin();
         },
         // HTMLCanvasElement
         // OffscreenCanvas

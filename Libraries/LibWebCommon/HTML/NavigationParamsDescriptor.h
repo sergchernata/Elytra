@@ -14,6 +14,7 @@
 #include <AK/Utf16String.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
+#include <LibHTTP/Cache/CacheMode.h>
 #include <LibHTTP/Header.h>
 #include <LibIPC/Forward.h>
 #include <LibURL/Origin.h>
@@ -32,6 +33,7 @@
 #include <LibWebCommon/HTML/Scripting/EnvironmentId.h>
 #include <LibWebCommon/HTML/SerializedPolicyContainer.h>
 #include <LibWebCommon/HTML/UserNavigationInvolvement.h>
+#include <LibWebCommon/PermissionsPolicy/PermissionsPolicy.h>
 #include <LibWebCommon/ReferrerPolicy/ReferrerPolicy.h>
 
 namespace Web::HTML {
@@ -53,6 +55,9 @@ struct NavigationRequestDescriptor {
     u8 redirect_count { 0 };
     bool text_directive_user_activation { false };
     bool browsing_context_group_has_multiple_contexts { false };
+
+    // Whether the navigation bypassed the HTTP cache, which the new Document's own fetches then do while it loads.
+    HTTP::CacheMode cache_mode { HTTP::CacheMode::Default };
 };
 
 struct NavigationResponseBodyHandle {
@@ -128,6 +133,8 @@ struct NavigationParamsDescriptor {
     Optional<u64> agent_cluster_id;
     CrossOriginIsolationMode agent_cluster_cross_origin_isolation_mode { CrossOriginIsolationMode::None };
     Optional<u64> new_browsing_context_group_id;
+    // The permissions policy the UI process created for the new Document.
+    Optional<PermissionsPolicy::PermissionsPolicy> permissions_policy {};
 };
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#non-fetch-scheme-navigation-params

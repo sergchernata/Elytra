@@ -182,6 +182,10 @@ asm_dispatch_table:
     .quad asm_handler_DeleteById
     .quad asm_handler_DeleteByValue
     .quad asm_handler_DeleteVariable
+    .quad asm_handler_NewDisposableResourceStack
+    .quad asm_handler_AddDisposableResource
+    .quad asm_handler_DisposeResources
+    .quad asm_handler_AsyncDisposeResourcesStep
     .quad asm_handler_GetCompletionFields
     .quad asm_handler_SetCompletionType
     .quad asm_handler_GetTemplateObject
@@ -233,10 +237,6 @@ asm_dispatch_table:
     .quad asm_handler_JumpStrictlyInequalsLoopRhsInt32
     .quad asm_handler_JumpLooselyEqualsLoopRhsInt32
     .quad asm_handler_JumpLooselyInequalsLoopRhsInt32
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback
     .quad asm_handler_fallback
     .quad asm_handler_fallback
     .quad asm_handler_fallback
@@ -1206,6 +1206,22 @@ CSYM(js_interpreter_handler_ranges):
     .quad asm_handler_DeleteVariable_hot_end
     .quad asm_handler_DeleteVariable_cold
     .quad asm_handler_DeleteVariable_cold_end
+    .quad asm_handler_NewDisposableResourceStack
+    .quad asm_handler_NewDisposableResourceStack_hot_end
+    .quad asm_handler_NewDisposableResourceStack_cold
+    .quad asm_handler_NewDisposableResourceStack_cold_end
+    .quad asm_handler_AddDisposableResource
+    .quad asm_handler_AddDisposableResource_hot_end
+    .quad asm_handler_AddDisposableResource_cold
+    .quad asm_handler_AddDisposableResource_cold_end
+    .quad asm_handler_DisposeResources
+    .quad asm_handler_DisposeResources_hot_end
+    .quad asm_handler_DisposeResources_cold
+    .quad asm_handler_DisposeResources_cold_end
+    .quad asm_handler_AsyncDisposeResourcesStep
+    .quad asm_handler_AsyncDisposeResourcesStep_hot_end
+    .quad asm_handler_AsyncDisposeResourcesStep_cold
+    .quad asm_handler_AsyncDisposeResourcesStep_cold_end
     .quad asm_handler_GetCompletionFields
     .quad asm_handler_GetCompletionFields_hot_end
     .quad asm_handler_GetCompletionFields_cold
@@ -1410,22 +1426,6 @@ CSYM(js_interpreter_handler_ranges):
     .quad asm_handler_JumpLooselyInequalsLoopRhsInt32_hot_end
     .quad asm_handler_JumpLooselyInequalsLoopRhsInt32_cold
     .quad asm_handler_JumpLooselyInequalsLoopRhsInt32_cold_end
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback_hot_end
-    .quad asm_handler_fallback_cold
-    .quad asm_handler_fallback_cold_end
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback_hot_end
-    .quad asm_handler_fallback_cold
-    .quad asm_handler_fallback_cold_end
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback_hot_end
-    .quad asm_handler_fallback_cold
-    .quad asm_handler_fallback_cold_end
-    .quad asm_handler_fallback
-    .quad asm_handler_fallback_hot_end
-    .quad asm_handler_fallback_cold
-    .quad asm_handler_fallback_cold_end
     .quad asm_handler_fallback
     .quad asm_handler_fallback_hot_end
     .quad asm_handler_fallback_cold
@@ -16840,6 +16840,208 @@ asm_handler_DeleteVariable:
 asm_handler_DeleteVariable_hot_end:
 asm_handler_DeleteVariable_cold:
 asm_handler_DeleteVariable_cold_end:
+
+.p2align 4
+asm_handler_NewDisposableResourceStack:
+    mov DWORD PTR [rbx + -64], r13d
+    lea r11, [r14 + r13]
+    mov rdi, QWORD PTR [rbp - 48]
+    mov esi, r13d
+    lea rdx, [r14 + r13]
+    call CSYM(asm_slow_path_new_disposable_resource_stack)
+    test rax, rax
+    js .Lasm_NewDisposableResourceStack.scalar_result_done_0
+    bt rax, 32
+    jnc .Lasm_NewDisposableResourceStack.scalar_result_done_0
+    lea rcx, [r14 + r13]
+    mov r10d, DWORD PTR [rcx + 4]
+    mov QWORD PTR [rbx + r10 * 8], rdx
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_NewDisposableResourceStack.scalar_result_done_0:
+    test rax, rax
+    js .Lexit
+    bt rax, 32
+    jnc .Lasm_NewDisposableResourceStack.slow_path_transfer_1
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_NewDisposableResourceStack.slow_path_transfer_1:
+    mov rcx, QWORD PTR [rbp - 48]
+    mov rbx, QWORD PTR [rcx]
+    add rbx, 128
+    mov rcx, QWORD PTR [rbx + -40]
+    mov r14, QWORD PTR [rcx + 40]
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+asm_handler_NewDisposableResourceStack_hot_end:
+asm_handler_NewDisposableResourceStack_cold:
+asm_handler_NewDisposableResourceStack_cold_end:
+
+.p2align 4
+asm_handler_AddDisposableResource:
+    mov DWORD PTR [rbx + -64], r13d
+    lea r11, [r14 + r13]
+    mov r10d, DWORD PTR [r11 + 4]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AddDisposableResource.scalar_value_ready_0:
+    mov rcx, rax
+    mov r10d, DWORD PTR [r11 + 8]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AddDisposableResource.scalar_value_ready_1:
+    mov r8, rax
+    mov rdi, QWORD PTR [rbp - 48]
+    mov esi, r13d
+    lea rdx, [r14 + r13]
+    call CSYM(asm_slow_path_add_disposable_resource)
+    test rax, rax
+    js .Lasm_AddDisposableResource.scalar_result_done_2
+    bt rax, 32
+    jnc .Lasm_AddDisposableResource.scalar_result_done_2
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_AddDisposableResource.scalar_result_done_2:
+    test rax, rax
+    js .Lexit
+    bt rax, 32
+    jnc .Lasm_AddDisposableResource.slow_path_transfer_3
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_AddDisposableResource.slow_path_transfer_3:
+    mov rcx, QWORD PTR [rbp - 48]
+    mov rbx, QWORD PTR [rcx]
+    add rbx, 128
+    mov rcx, QWORD PTR [rbx + -40]
+    mov r14, QWORD PTR [rcx + 40]
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+asm_handler_AddDisposableResource_hot_end:
+asm_handler_AddDisposableResource_cold:
+asm_handler_AddDisposableResource_cold_end:
+
+.p2align 4
+asm_handler_DisposeResources:
+    mov DWORD PTR [rbx + -64], r13d
+    lea r11, [r14 + r13]
+    mov r10d, DWORD PTR [r11 + 4]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_DisposeResources.scalar_value_ready_0:
+    mov rcx, rax
+    mov r10d, DWORD PTR [r11 + 8]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_DisposeResources.scalar_value_ready_1:
+    mov r8, rax
+    mov r10d, DWORD PTR [r11 + 12]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_DisposeResources.scalar_value_ready_2:
+    mov r9, rax
+    mov rdi, QWORD PTR [rbp - 48]
+    mov esi, r13d
+    lea rdx, [r14 + r13]
+    call CSYM(asm_slow_path_dispose_resources)
+    test rax, rax
+    js .Lasm_DisposeResources.scalar_result_done_3
+    bt rax, 32
+    jnc .Lasm_DisposeResources.scalar_result_done_3
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_DisposeResources.scalar_result_done_3:
+    test rax, rax
+    js .Lexit
+    bt rax, 32
+    jnc .Lasm_DisposeResources.slow_path_transfer_4
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_DisposeResources.slow_path_transfer_4:
+    mov rcx, QWORD PTR [rbp - 48]
+    mov rbx, QWORD PTR [rcx]
+    add rbx, 128
+    mov rcx, QWORD PTR [rbx + -40]
+    mov r14, QWORD PTR [rcx + 40]
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+asm_handler_DisposeResources_hot_end:
+asm_handler_DisposeResources_cold:
+asm_handler_DisposeResources_cold_end:
+
+.p2align 4
+asm_handler_AsyncDisposeResourcesStep:
+    mov DWORD PTR [rbx + -64], r13d
+    lea rcx, [r14 + r13]
+    sub rsp, 96
+    mov r10d, DWORD PTR [rcx + 12]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AsyncDisposeResourcesStep.value_ready_1:
+    mov r8, rax
+    mov r10d, DWORD PTR [rcx + 16]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AsyncDisposeResourcesStep.value_ready_2:
+    mov r9, rax
+    mov r10d, DWORD PTR [rcx + 20]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AsyncDisposeResourcesStep.value_ready_3:
+    mov QWORD PTR [rsp], rax
+    mov r10d, DWORD PTR [rcx + 24]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AsyncDisposeResourcesStep.value_ready_4:
+    mov QWORD PTR [rsp + 8], rax
+    mov r10d, DWORD PTR [rcx + 28]
+    mov rax, QWORD PTR [rbx + r10 * 8]
+.Lasm_AsyncDisposeResourcesStep.value_ready_5:
+    mov QWORD PTR [rsp + 16], rax
+    mov rdi, QWORD PTR [rbp - 48]
+    mov esi, r13d
+    lea rdx, [r14 + r13]
+    lea rcx, [rsp + 32]
+    call CSYM(asm_slow_path_async_dispose_resources_step)
+    test rax, rax
+    js .Lasm_AsyncDisposeResourcesStep.values_exceptional_outputs_7
+    bt rax, 32
+    jnc .Lasm_AsyncDisposeResourcesStep.values_exceptional_outputs_7
+    lea rcx, [r14 + r13]
+    mov r10d, DWORD PTR [rcx + 4]
+    mov r11, QWORD PTR [rsp + 32]
+    mov QWORD PTR [rbx + r10 * 8], r11
+.Lasm_AsyncDisposeResourcesStep.skip_output_value_8:
+    mov r10d, DWORD PTR [rcx + 8]
+    mov r11, QWORD PTR [rsp + 40]
+    mov QWORD PTR [rbx + r10 * 8], r11
+.Lasm_AsyncDisposeResourcesStep.skip_output_value_9:
+    add rsp, 96
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_AsyncDisposeResourcesStep.values_exceptional_outputs_7:
+.Lasm_AsyncDisposeResourcesStep.values_restore_stack_6:
+    add rsp, 96
+.Lasm_AsyncDisposeResourcesStep.values_call_done_0:
+    test rax, rax
+    js .Lexit
+    bt rax, 32
+    jnc .Lasm_AsyncDisposeResourcesStep.slow_path_transfer_10
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+.Lasm_AsyncDisposeResourcesStep.slow_path_transfer_10:
+    mov rcx, QWORD PTR [rbp - 48]
+    mov rbx, QWORD PTR [rcx]
+    add rbx, 128
+    mov rcx, QWORD PTR [rbx + -40]
+    mov r14, QWORD PTR [rcx + 40]
+    mov r13d, eax
+    movzx eax, BYTE PTR [r14 + r13]
+    jmp [r12 + rax * 8]
+asm_handler_AsyncDisposeResourcesStep_hot_end:
+asm_handler_AsyncDisposeResourcesStep_cold:
+asm_handler_AsyncDisposeResourcesStep_cold_end:
 
 .p2align 4
 asm_handler_GetCompletionFields:

@@ -1,0 +1,11 @@
+{
+    "manifest_version": 3,
+    "name": "Security: content scripts and storage",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsYW/HgVF77qzavK2FCSz9U06VZ+1EEfU5K9LqRTWpddOCP+6S8vscauOM86j57isfXbzE8gR2uPA8SqOGWTE6/0X6gqxaTjdi/1ak8AxS8CVh5QsIOwgZp+/hMBUVpu665WLoPyfRpfa9e+51qjMepPsezLchac5qH0bpGfcBYd2r0Pkictg/Tf2w6L1w8kDvYaeMaWVMZueUn9jDfJN4Iv2tjbUCU/OAOeaSxCy8fYUWFARhlPySGNkYJCeN7xQ/Sa8EBufMjvS/mtiYlh2wO0wLjAz08WVarC725y1+BnTtunI2pxsN2smFt+VAXPqyvRth7Q33+DNjesFcprmGQIDAQAB",
+    "permissions": ["storage"],
+    "background": { "service_worker": "background.js" },
+    "content_scripts": [
+        { "matches": ["file:///*/storage-*.html"], "js": ["content.js"], "run_at": "document_end" }
+    ]
+}

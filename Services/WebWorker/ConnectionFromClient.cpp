@@ -122,8 +122,12 @@ void ConnectionFromClient::request_file(Web::FileRequest request)
     auto request_id = ++last_id;
 
     auto path = request.path();
+    auto extension_file = request.extension_file();
     m_requested_files.set(request_id, move(request));
-    async_did_request_file(path, request_id);
+    if (extension_file.has_value())
+        async_did_request_extension_file(extension_file->extension_id, extension_file->path, extension_file->requester, request_id);
+    else
+        async_did_request_file(path, request_id);
 }
 
 void ConnectionFromClient::blob_url_entry_removed(Utf16String url)
@@ -198,6 +202,11 @@ void ConnectionFromClient::did_worker_agent_fail_loading_script(Web::HTML::Worke
 void ConnectionFromClient::did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno)
 {
     Web::HTML::WorkerAgentParent::did_report_worker_exception(owner_token, move(message), move(filename), lineno, colno);
+}
+
+void ConnectionFromClient::did_worker_agent_report_content_security_policy_violation(Web::HTML::WorkerAgentOwnerToken owner_token, u64 policy_index, String effective_directive, URL::URL resource)
+{
+    Web::HTML::WorkerAgentParent::did_report_content_security_policy_violation(owner_token, policy_index, move(effective_directive), move(resource));
 }
 
 void ConnectionFromClient::did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token)

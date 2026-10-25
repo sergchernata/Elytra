@@ -14,6 +14,7 @@ use crate::parser::ForbiddenTokens;
 use crate::parser::PRECEDENCE_COMMA;
 use crate::parser::Parser;
 use crate::parser::Position;
+use crate::parser::collect_binding_names;
 use crate::parser::is_strict_reserved_word;
 use crate::parser::is_unconditional_reserved_word;
 use crate::token::TokenType;
@@ -399,11 +400,12 @@ impl Parser<'_> {
         let init_start = self.position();
         let init_starts_with_async_keyword = self.match_token(TokenType::Async);
         let is_var_init = self.match_token(TokenType::Var);
-        let is_using = self.match_for_using_declaration();
+        let is_await_using = self.match_await_using_declaration();
+        let is_using = is_await_using || self.match_for_using_declaration();
         let is_let = self.match_token(TokenType::Let) && (self.flags.strict_mode || self.try_match_let_declaration());
         let is_declaration = is_var_init || is_using || is_let || self.match_token(TokenType::Const);
         let init = if is_using {
-            LocalForInit::Declaration(self.parse_using_declaration(true))
+            LocalForInit::Declaration(self.parse_using_declaration(true, is_await_using))
         } else if is_declaration {
             LocalForInit::Declaration(self.parse_variable_declaration(true))
         } else {
@@ -530,6 +532,12 @@ impl Parser<'_> {
                     self.syntax_error("Missing initializer in const declaration");
                 }
             }
+        }
+        if let LocalForInit::Declaration(ref declaration) = init
+            && let StatementKind::UsingDeclaration(ref using_declaration) = declaration.inner
+            && using_declaration.declarations.iter().any(|d| d.init.is_none())
+        {
+            self.syntax_error("Missing initializer in using declaration");
         }
         if is_await {
             // https://tc39.es/ecma262/#prod-ForInOfStatement
@@ -671,7 +679,18 @@ impl Parser<'_> {
             && !self.done()
         {
             if self.match_declaration() {
-                children.push(self.parse_declaration());
+                let declaration = self.parse_declaration();
+                // https://tc39.es/ecma262/#sec-switch-statement-static-semantics-early-errors
+                // CaseClause : `case` Expression `:` StatementList
+                // DefaultClause : `default` `:` StatementList
+                // - It is a Syntax Error if ContainsUsing of StatementList is true.
+                if matches!(declaration.inner, StatementKind::UsingDeclaration(_)) {
+                    self.syntax_error_at_position(
+                        "'using' declarations are not allowed directly in a case or default clause",
+                        declaration.range.start,
+                    );
+                }
+                children.push(declaration);
             } else {
                 children.push(self.parse_statement(true));
             }
@@ -732,14 +751,14 @@ impl Parser<'_> {
 
         self.scope_collector.open_catch_scope();
 
+        let mut catch_pattern_names: Vec<StringId> = Vec::new();
         let parameter = if self.match_token(TokenType::ParenOpen) {
             self.consume();
             let parameter = if self.match_token(TokenType::CurlyOpen) || self.match_token(TokenType::BracketOpen) {
-                self.pattern_bound_names.clear();
                 let pattern = self.parse_binding_pattern();
+                let pattern_bound_names = std::mem::take(&mut self.pattern_bound_names);
                 // Materialize Utf16Strings for slice-based scope-collector calls.
-                let names_to_check: Vec<Utf16String> = self
-                    .pattern_bound_names
+                let names_to_check: Vec<Utf16String> = pattern_bound_names
                     .iter()
                     .map(|(n, _)| self.arena.strings[*n].clone())
                     .collect();
@@ -762,7 +781,8 @@ impl Parser<'_> {
                 self.scope_collector.add_catch_parameter_pattern(&bound_names);
                 // Register each binding pattern identifier for scope analysis
                 // so they get is_local() annotations (matching variable declarations).
-                let pattern_bound_ids: Vec<IdentifierId> = self.pattern_bound_names.iter().map(|(_, id)| *id).collect();
+                let pattern_bound_ids: Vec<IdentifierId> = pattern_bound_names.iter().map(|(_, id)| *id).collect();
+                catch_pattern_names = pattern_bound_names.iter().map(|(n, _)| *n).collect();
                 let Self {
                     scope_collector, arena, ..
                 } = self;
@@ -811,7 +831,7 @@ impl Parser<'_> {
         // Collect catch parameter names (as StringIds) for post-body validation.
         let catch_names: Vec<StringId> = match &parameter {
             Some(CatchBinding::Identifier(id)) => vec![self.arena.identifiers[*id].name],
-            Some(CatchBinding::BindingPattern(_)) => self.pattern_bound_names.iter().map(|(n, _)| *n).collect(),
+            Some(CatchBinding::BindingPattern(_)) => catch_pattern_names,
             None => Vec::new(),
         };
 
@@ -823,45 +843,37 @@ impl Parser<'_> {
         if !catch_names.is_empty()
             && let StatementKind::Block(scope_id) = body.inner
         {
-            for child in &self.arena.scopes[scope_id].children.clone() {
+            let mut lexically_declared_names: HashSet<Utf16String> = HashSet::default();
+            for child in &self.arena.scopes[scope_id].children {
                 match &child.inner {
                     StatementKind::VariableDeclaration(vd) if vd.kind != DeclarationKind::Var => {
                         for decl in &vd.declarations {
-                            if let VariableDeclaratorTarget::Identifier(id) = decl.target {
-                                let id_name = self.arena.identifiers[id].name;
-                                for cn in &catch_names {
-                                    if *cn == id_name {
-                                        let n = String::from_utf16_lossy(self.arena.strings[*cn].as_slice());
-                                        self.syntax_error(&format!(
-                                            "Identifier '{n}' already declared as catch parameter"
-                                        ));
-                                    }
-                                }
-                            }
+                            collect_binding_names(&decl.target, &mut lexically_declared_names, &self.arena);
                         }
                     }
-                    StatementKind::FunctionDeclaration(fd) if fd.name.is_some() => {
-                        let id = fd.name.unwrap();
-                        let id_name = self.arena.identifiers[id].name;
-                        for cn in &catch_names {
-                            if *cn == id_name {
-                                let n = String::from_utf16_lossy(self.arena.strings[*cn].as_slice());
-                                self.syntax_error(&format!("Identifier '{n}' already declared as catch parameter"));
-                            }
+                    StatementKind::UsingDeclaration(data) => {
+                        for decl in &data.declarations {
+                            collect_binding_names(&decl.target, &mut lexically_declared_names, &self.arena);
+                        }
+                    }
+                    StatementKind::FunctionDeclaration(fd) => {
+                        if let Some(id) = fd.name {
+                            lexically_declared_names.insert(self.arena.name_of(id).clone());
                         }
                     }
                     StatementKind::ClassDeclaration(data) => {
                         if let Some(id) = data.name {
-                            let id_name = self.arena.identifiers[id].name;
-                            for cn in &catch_names {
-                                if *cn == id_name {
-                                    let n = String::from_utf16_lossy(self.arena.strings[*cn].as_slice());
-                                    self.syntax_error(&format!("Identifier '{n}' already declared as catch parameter"));
-                                }
-                            }
+                            lexically_declared_names.insert(self.arena.name_of(id).clone());
                         }
                     }
                     _ => {}
+                }
+            }
+            for cn in &catch_names {
+                let name = &self.arena.strings[*cn];
+                if lexically_declared_names.contains(name) {
+                    let n = String::from_utf16_lossy(name.as_slice());
+                    self.syntax_error(&format!("Identifier '{n}' already declared as catch parameter"));
                 }
             }
         }
@@ -996,14 +1008,16 @@ impl Parser<'_> {
         if self.token_value(&self.current_token) != utf16!("using") {
             return false;
         }
-        let next = self.next_token();
+        let (next, after_next) = self.next_two_tokens();
         if next.trivia_has_line_terminator {
             return false;
         }
         if next.token_type == TokenType::Identifier {
             let next_val = self.token_original_value(&next);
+            // NB: The `using of` lookahead restriction only applies to for-of and for-await-of, so `for (using of =
+            //     null;;)` declares a binding named `of`.
             if next_val == utf16!("of") {
-                return false;
+                return after_next.token_type == TokenType::Equals;
             }
         }
         // Must be an actual identifier, not just an identifier-name keyword

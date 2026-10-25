@@ -34,18 +34,39 @@ GlyphRun::GlyphRun(Vector<DrawGlyph>&& glyphs, NonnullRefPtr<Font const> font, T
 
 GlyphRun::~GlyphRun() = default;
 
-NonnullRefPtr<GlyphRun> GlyphRun::slice(size_t start, size_t length) const
+// Tight bounds of the ink of the painted glyphs, from their own extents, in the coordinates of glyph_run_bounding_box().
+// Empty if no painted glyph has ink.
+static FloatRect glyph_run_ink_bounding_box(Font const& font, ReadonlySpan<DrawGlyph> glyphs, float scale)
 {
-    Vector<DrawGlyph> sliced_glyphs;
-    sliced_glyphs.ensure_capacity(length);
+    auto font_ascent = font.pixel_metrics().ascent;
+    auto* hb_font = font.harfbuzz_font();
+    int x_scale = 0;
+    int y_scale = 0;
+    hb_font_get_scale(hb_font, &x_scale, &y_scale);
+    if (x_scale <= 0 || y_scale <= 0)
+        return {};
+    auto units_to_pixels_x = font.pixel_size() * scale / x_scale;
+    auto units_to_pixels_y = font.pixel_size() * scale / y_scale;
 
-    float width = 0;
-    for (size_t i = start; i < start + length; ++i) {
-        sliced_glyphs.unchecked_append(m_glyphs[i]);
-        width += m_glyphs[i].glyph_width;
+    FloatRect bounds;
+    for (auto const& glyph : glyphs) {
+        if (!glyph.should_paint)
+            continue;
+        hb_glyph_extents_t extents;
+        if (!hb_font_get_glyph_extents(hb_font, glyph.glyph_id, &extents))
+            continue;
+        auto origin_x = glyph.position.x() * scale;
+        auto origin_y = (glyph.position.y() + font_ascent) * scale;
+        // HarfBuzz extents have y pointing up, so `height` is negative for ink above the baseline.
+        FloatRect glyph_bounds {
+            origin_x + extents.x_bearing * units_to_pixels_x,
+            origin_y - extents.y_bearing * units_to_pixels_y,
+            extents.width * units_to_pixels_x,
+            -extents.height * units_to_pixels_y,
+        };
+        bounds.unite(glyph_bounds);
     }
-
-    return adopt_ref(*new GlyphRun(move(sliced_glyphs), m_font, m_text_type, width));
+    return bounds;
 }
 
 FloatRect glyph_run_bounding_box(Font const& font, ReadonlySpan<DrawGlyph> glyphs, float scale)
@@ -87,34 +108,7 @@ FloatRect glyph_run_bounding_box(Font const& font, ReadonlySpan<DrawGlyph> glyph
     }
 
     // The font doesn't record an overall bounding box (e.g. bitmap-only fonts), so unite the glyphs' own extents.
-    auto* hb_font = font.harfbuzz_font();
-    int x_scale = 0;
-    int y_scale = 0;
-    hb_font_get_scale(hb_font, &x_scale, &y_scale);
-    if (x_scale <= 0 || y_scale <= 0)
-        return {};
-    auto units_to_pixels_x = font.pixel_size() * scale / x_scale;
-    auto units_to_pixels_y = font.pixel_size() * scale / y_scale;
-
-    FloatRect bounds;
-    for (auto const& glyph : glyphs) {
-        if (!glyph.should_paint)
-            continue;
-        hb_glyph_extents_t extents;
-        if (!hb_font_get_glyph_extents(hb_font, glyph.glyph_id, &extents))
-            continue;
-        auto origin_x = glyph.position.x() * scale;
-        auto origin_y = (glyph.position.y() + font_ascent) * scale;
-        // HarfBuzz extents have y pointing up, so `height` is negative for ink above the baseline.
-        FloatRect glyph_bounds {
-            origin_x + extents.x_bearing * units_to_pixels_x,
-            origin_y - extents.y_bearing * units_to_pixels_y,
-            extents.width * units_to_pixels_x,
-            -extents.height * units_to_pixels_y,
-        };
-        bounds.unite(glyph_bounds);
-    }
-    return bounds;
+    return glyph_run_ink_bounding_box(font, glyphs, scale);
 }
 
 namespace {
@@ -397,45 +391,6 @@ Vector<float> glyph_run_glyph_intercepts(Font const& font, ReadonlySpan<DrawGlyp
     return intervals;
 }
 
-Vector<NonnullRefPtr<GlyphRun>> shape_text(FloatPoint baseline_start, Utf16View const& string, FontCascadeList const& font_cascade_list, float letter_spacing)
-{
-    if (string.is_empty())
-        return {};
-
-    Vector<NonnullRefPtr<GlyphRun>> runs;
-
-    auto it = string.begin();
-    auto substring_begin_offset = string.iterator_offset(it);
-    Font const* last_font = &font_cascade_list.font_for_code_point(*it);
-    FloatPoint last_position = baseline_start;
-
-    auto add_run = [&runs, &last_position, letter_spacing](Utf16View const& string, Font const& font) {
-        auto run = shape_text(last_position, letter_spacing, 0.f, string, font, GlyphRun::TextType::Common);
-        last_position.translate_by(run->width(), 0);
-        runs.append(*run);
-    };
-
-    while (it != string.end()) {
-        auto code_point = *it;
-        auto const* font = &font_cascade_list.font_for_code_point(code_point);
-        if (font != last_font) {
-            auto substring = string.substring_view(substring_begin_offset, string.iterator_offset(it) - substring_begin_offset);
-            add_run(substring, *last_font);
-            last_font = font;
-            substring_begin_offset = string.iterator_offset(it);
-        }
-        ++it;
-    }
-
-    auto end_offset = string.iterator_offset(it);
-    if (substring_begin_offset < end_offset) {
-        auto substring = string.substring_view(substring_begin_offset, end_offset - substring_begin_offset);
-        add_run(substring, *last_font);
-    }
-
-    return runs;
-}
-
 static hb_buffer_t* setup_text_shaping(Utf16View const& string, Font const& font, GlyphRun::TextType text_type)
 {
     hb_buffer_t* buffer = hb_buffer_create();
@@ -652,6 +607,7 @@ extern "C" {
 void ladybird_gfx_shape_text_uncached(void const*, u16 const*, size_t, Gfx::FFI::TextType, float, float, void*, void (*)(void*, Gfx::FFI::DrawGlyph const*, size_t, float, size_t, float));
 float ladybird_gfx_font_measure_text_width(void const*, u16 const*, size_t);
 void ladybird_gfx_glyph_run_bounding_box(void const*, Gfx::FFI::DrawGlyph const*, size_t, float, float*);
+void ladybird_gfx_glyph_run_ink_bounding_box(void const*, Gfx::FFI::DrawGlyph const*, size_t, float, float*);
 void ladybird_gfx_glyph_run_glyph_intercepts(void const*, Gfx::FFI::DrawGlyph const*, size_t, float, float, float, void*, void (*)(void*, float));
 }
 
@@ -710,6 +666,26 @@ extern "C" void ladybird_gfx_glyph_run_bounding_box(
     VERIFY(glyphs || glyph_count == 0);
     VERIFY(out_rect);
     auto bounds = Gfx::glyph_run_bounding_box(
+        *static_cast<Gfx::Font const*>(font),
+        { reinterpret_cast<Gfx::DrawGlyph const*>(glyphs), glyph_count },
+        scale);
+    out_rect[0] = bounds.x();
+    out_rect[1] = bounds.y();
+    out_rect[2] = bounds.width();
+    out_rect[3] = bounds.height();
+}
+
+extern "C" void ladybird_gfx_glyph_run_ink_bounding_box(
+    void const* font,
+    Gfx::FFI::DrawGlyph const* glyphs,
+    size_t glyph_count,
+    float scale,
+    float* out_rect)
+{
+    VERIFY(font);
+    VERIFY(glyphs || glyph_count == 0);
+    VERIFY(out_rect);
+    auto bounds = Gfx::glyph_run_ink_bounding_box(
         *static_cast<Gfx::Font const*>(font),
         { reinterpret_cast<Gfx::DrawGlyph const*>(glyphs), glyph_count },
         scale);

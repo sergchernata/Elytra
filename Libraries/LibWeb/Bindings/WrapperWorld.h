@@ -14,6 +14,7 @@
 #include <LibGC/WeakHashMap.h>
 #include <LibGC/WeakHashSet.h>
 #include <LibGC/WeakInlines.h>
+#include <LibJS/Runtime/Completion.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/RustInterface.h>
 #include <LibWeb/Bindings/Wrappable.h>
@@ -70,6 +71,25 @@ private:
 
 WEB_API WrapperWorld& host_defined_wrapper_world(JS::Realm&);
 WEB_API WrapperWorld const& host_defined_wrapper_world(JS::Realm const&);
+
+// Elytra: Script in one world mustn't get hold of another world's objects, which lead to that world's globals (and,
+// for an extension's content scripts, to its chrome.* API). A value a script stored on a platform object (an event's
+// detail, a message's data) reaches script of another world as Chrome has it: a node or other platform object as that
+// world's wrapper of it, a WindowProxy as that world's, a promise as that world's promise of its result, an array or
+// plain object as that world's copy of it, anything else as a structured clone in that world's realm, or null when it
+// can't be copied. The engine applies it to what it hands script, so that what it made in (or for) one world, such as
+// a callback's arguments or a promise an operation returns, doesn't lead script of another world to the first one.
+WEB_API JS::Value value_for_world(JS::Realm& realm, JS::Value);
+
+// Elytra: The promise as the realm's world has it: the promise itself when it's that world's, otherwise a promise of
+// the realm settled as it is with value_for_world() of its result. Then that world's then() is the one that's called.
+WEB_API GC::Ref<JS::Object> promise_for_world(JS::Realm& realm, JS::Object& promise);
+
+// Elytra: A throw completion whose value is value_for_world() of what was thrown.
+WEB_API JS::Completion completion_for_world(JS::Realm& realm, JS::Completion);
+
+// Elytra: The world script is running in, or null when that's the main world or no script runs.
+WEB_API WrapperWorld* current_non_main_world();
 
 template<typename T>
 class WrapperWorldWeakValueCache {

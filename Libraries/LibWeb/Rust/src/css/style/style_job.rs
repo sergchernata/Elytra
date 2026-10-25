@@ -222,7 +222,12 @@ pub(crate) struct ComposedPseudoStyles {
 
 /// The view of each record a transaction's rows name and the custom-property environment it was computed in, by record,
 /// which the host's drain reads without asking.
-struct NamedRecords(Box<[(u64, super::bridge::FfiStyleRecordView, Option<u64>)]>);
+struct NamedRecords {
+    records: Box<[(u64, super::bridge::FfiStyleRecordView, Option<u64>)]>,
+    /// Where the last lookup found its record. The host installs a transaction's rows in tree order, the order in
+    /// which their new records were minted, so the next lookup mostly finds the record at or just past it.
+    cursor: std::cell::Cell<usize>,
+}
 
 // SAFETY: A view points into a published record, which never changes while it is live, and the host reads one only for
 // a record it installs from the transaction, which keeps it live, or one a row replaces, which the engine reclaims no
@@ -242,8 +247,12 @@ impl StyleJobAnswer {
 
     /// The view of `record`, one the rows name, and the custom-property environment it was computed in.
     pub(crate) fn record(&self, record: u64) -> Option<(super::bridge::FfiStyleRecordView, Option<u64>)> {
-        let records = &self.records.0;
-        let index = records.binary_search_by_key(&record, |&(record, ..)| record).ok()?;
+        let NamedRecords { records, cursor } = &self.records;
+        let near = cursor.get();
+        let index = (near..records.len().min(near + 4))
+            .find(|&index| records[index].0 == record)
+            .or_else(|| records.binary_search_by_key(&record, |&(record, ..)| record).ok())?;
+        cursor.set(index);
         let (_, view, environment) = records[index];
         Some((view, environment))
     }
@@ -331,7 +340,10 @@ impl StyleJob {
         decided_transition_steps.sort_unstable_by_key(crate::css::transition::DecidedTransitionStep::node);
         StyleJobAnswer {
             output,
-            records: NamedRecords(records),
+            records: NamedRecords {
+                records,
+                cursor: std::cell::Cell::new(0),
+            },
             composed_pseudo_styles: composed_pseudo_styles.into_boxed_slice(),
             decided_transition_steps: decided_transition_steps.into_boxed_slice(),
         }
@@ -455,24 +467,19 @@ pub(crate) struct TakesFinishedStyleIn {
 
 const TAKES_FINISHED_STYLE_IN: TakesFinishedStyleIn = TakesFinishedStyleIn { _private: () };
 
-/// Ends the transaction the host took last, and has `allocator` mint the identities its end released again first.
-///
-/// # Safety
-///
-/// `host` must be a live document host, on its document's thread, and `allocator` its document's allocator.
+/// Ends the transaction the host took last, and has `allocator`, its document's allocator, mint the identities its end
+/// released again first.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn style_engine_end_style_transaction(
+pub extern "C" fn style_engine_end_style_transaction(
     host: &DocumentHost,
     read: &crate::render_state::BegunRead,
-    allocator: *mut StyleNodeIdAllocator,
+    allocator: &mut StyleNodeIdAllocator,
 ) {
-    assert!(!allocator.is_null());
     host.end_style_transaction();
     let released = with_engine(read, host, |engine| engine.discard_style_transaction_outputs());
     let memo = host.engine_memo();
     memo.held.borrow_mut().forget(&released);
     memo.described.borrow_mut().forget(&released);
     memo.baselines.borrow_mut().forget(&released);
-    // SAFETY: As above.
-    unsafe { &mut *allocator }.release(&released);
+    allocator.release(&released);
 }

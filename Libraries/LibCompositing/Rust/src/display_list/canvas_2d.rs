@@ -12,7 +12,7 @@ use super::commands::*;
 use super::ffi_bytes::FfiBytes;
 use super::validate::validate_canvas_2d_tape;
 use libgfx_rust::{
-    AffineTransform, CapStyle, Color, CompositingAndBlendingOperator, FloatPoint, FloatRect, IntRect, JoinStyle,
+    AffineTransform, CapStyle, Color, CompositingAndBlendingOperator, FloatPoint, FloatRect, IntPoint, JoinStyle,
     ScalingMode, WindingRule,
 };
 use std::ffi::c_void;
@@ -52,13 +52,14 @@ pub enum Paint<'a> {
     },
 }
 
-/// How a draw composites: the serialized filter graph of the context if it has one, the global alpha, and the
-/// compositing and blending operator.
+/// How a draw composites: the serialized filter graph of the context if it has one, the global alpha, the
+/// compositing and blending operator, and the shadow that the draw casts if it casts one.
 #[derive(Clone, Copy, Debug)]
 pub struct Compositing<'a> {
     pub filter: Option<&'a [u8]>,
     pub global_alpha: f32,
     pub compositing_and_blending_operator: CompositingAndBlendingOperator,
+    pub shadow: Option<Canvas2DShadow>,
 }
 
 impl Default for Compositing<'_> {
@@ -67,6 +68,7 @@ impl Default for Compositing<'_> {
             filter: None,
             global_alpha: 1.0,
             compositing_and_blending_operator: CompositingAndBlendingOperator::SourceOver,
+            shadow: None,
         }
     }
 }
@@ -190,6 +192,8 @@ impl InlineData {
             has_filter: compositing.filter.is_some(),
             global_alpha: compositing.global_alpha,
             compositing_and_blending_operator: compositing.compositing_and_blending_operator,
+            has_shadow: compositing.shadow.is_some(),
+            shadow: compositing.shadow.unwrap_or_default(),
         }
     }
 
@@ -222,34 +226,19 @@ impl TapeWriter {
     }
 
     /// `path` is a serialized Gfx::Path.
-    pub fn fill_path(
-        &mut self,
-        path: &[u8],
-        paint: &Paint,
-        winding_rule: WindingRule,
-        blur_radius: f32,
-        compositing: &Compositing,
-    ) {
+    pub fn fill_path(&mut self, path: &[u8], paint: &Paint, winding_rule: WindingRule, compositing: &Compositing) {
         let mut inline_data = InlineData::new::<Canvas2DFillPath>();
         let command = Canvas2DFillPath {
             path_data: inline_data.append_path(path),
             paint: inline_data.append_paint(paint),
             winding_rule,
-            blur_radius,
             compositing: inline_data.append_compositing(compositing),
         };
         self.append(&command, &inline_data);
     }
 
     /// `path` is a serialized Gfx::Path.
-    pub fn stroke_path(
-        &mut self,
-        path: &[u8],
-        paint: &Paint,
-        stroke: &Stroke,
-        blur_radius: f32,
-        compositing: &Compositing,
-    ) {
+    pub fn stroke_path(&mut self, path: &[u8], paint: &Paint, stroke: &Stroke, compositing: &Compositing) {
         let mut inline_data = InlineData::new::<Canvas2DStrokePath>();
         let command = Canvas2DStrokePath {
             path_data: inline_data.append_path(path),
@@ -260,7 +249,6 @@ impl TapeWriter {
             miter_limit: stroke.miter_limit,
             dash_array: inline_data.append_objects(stroke.dash_array),
             dash_offset: stroke.dash_offset,
-            blur_radius,
             compositing: inline_data.append_compositing(compositing),
         };
         self.append(&command, &inline_data);
@@ -293,7 +281,7 @@ impl TapeWriter {
         &mut self,
         frame_id: ImageFrameResourceId,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -312,7 +300,7 @@ impl TapeWriter {
         &mut self,
         source_canvas_id: CanvasId,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -332,7 +320,7 @@ impl TapeWriter {
         video_sink_handle: u64,
         generation: u64,
         dst_rect: FloatRect,
-        src_rect: IntRect,
+        src_rect: FloatRect,
         scaling_mode: ScalingMode,
         compositing: &Compositing,
     ) {
@@ -376,6 +364,10 @@ impl TapeWriter {
 
     pub fn clear_canvas(&mut self, color: Color) {
         self.append_plain(&Canvas2DClearCanvas { color });
+    }
+
+    pub fn put_image_frame(&mut self, frame_id: ImageFrameResourceId, position: IntPoint) {
+        self.append_plain(&Canvas2DPutImageFrame { frame_id, position });
     }
 }
 
@@ -422,6 +414,7 @@ mod tests {
     use crate::display_list::nested_records::span_bytes;
     use crate::display_list::storage::write_run;
     use crate::display_list::validate::validate_tape;
+    use libgfx_rust::IntRect;
 
     fn records(tape: &[u8]) -> Vec<(DisplayListCommandType, Vec<u8>)> {
         let mut records = Vec::new();
@@ -450,11 +443,11 @@ mod tests {
             &path,
             &linear_gradient(&colors, &positions),
             WindingRule::EvenOdd,
-            0.0,
             &Compositing {
                 filter: Some(&filter),
                 global_alpha: 0.5,
                 compositing_and_blending_operator: CompositingAndBlendingOperator::Multiply,
+                shadow: None,
             },
         );
         assert_eq!(validate_canvas_2d_tape(writer.bytes()), Ok(()));
@@ -537,7 +530,7 @@ mod tests {
         writer.draw_image_frame(
             ImageFrameResourceId(3),
             FloatRect::new(0.0, 0.0, 4.0, 4.0),
-            IntRect::new(0, 0, 2, 2),
+            FloatRect::new(0.0, 0.0, 2.0, 2.0),
             ScalingMode::NearestNeighbor,
             &Compositing::default(),
         );
@@ -572,7 +565,6 @@ mod tests {
                 dash_array: &[1.0, 2.0],
                 dash_offset: 0.5,
             },
-            3.0,
             &Compositing::default(),
         );
         assert_eq!(validate_canvas_2d_tape(writer.bytes()), Ok(()));
@@ -582,7 +574,6 @@ mod tests {
         assert_eq!(command.paint.pattern_repetition, Canvas2DPatternRepetition::RepeatY);
         assert_eq!(command.paint.pattern_transform.get().unwrap().values[4], 3.0);
         assert_eq!(command.dash_array.size, 8);
-        assert_eq!(command.blur_radius, 3.0);
     }
 
     #[test]
@@ -634,7 +625,6 @@ mod tests {
                 &[1],
                 &Paint::Color(Color(0xff00_0000)),
                 WindingRule::Nonzero,
-                0.0,
                 &Compositing {
                     global_alpha,
                     ..Compositing::default()

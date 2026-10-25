@@ -1452,21 +1452,18 @@ pub extern "C" fn rust_computed_longhand_table_create_with_inherited_values(
 /// winning declaration's cascade source slot when its value carries style
 /// sheet context, and -1 otherwise; storing without a slot clears any slot a
 /// previous store recorded for the longhand.
-///
-/// # Safety
-/// `table` must be a valid, unfrozen, uniquely owned table and `data` must
-/// point at live `StyleValueData`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_computed_longhand_table_set(
+pub extern "C" fn rust_computed_longhand_table_set(
     table: &mut ComputedLonghandTable,
     property_id: u16,
-    data: *const c_void,
+    data: crate::css::ffi_support::ArcRef<'_, StyleValueData>,
     source_slot: i64,
 ) {
-    let value = unsafe {
-        RetainedStyleValueData::from_retained_pointer(crate::css::style_value::retain_style_value(data.cast()))
-    };
-    table.set(property_id, value, source_slot);
+    table.set(
+        property_id,
+        RetainedStyleValueData::from_arc(data.to_arc()),
+        source_slot,
+    );
 }
 
 /// Replaces the table's contents with `source`'s, for the C++ builder that
@@ -1537,22 +1534,13 @@ pub extern "C" fn rust_computed_longhand_table_inheritance_bits(table: &Computed
 
 /// Replaces the whole importance and inheritance bitmaps, for the builder
 /// seeding a fresh table from an existing style's published bitmaps.
-///
-/// # Safety
-/// `table` must be a valid, unfrozen, uniquely owned table; each bitmap must
-/// have exactly `LONGHAND_BITMAP_BYTES` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_computed_longhand_table_load_flag_bitmaps(
+pub extern "C" fn rust_computed_longhand_table_load_flag_bitmaps(
     table: &mut ComputedLonghandTable,
-    importance: *const u8,
-    importance_count: usize,
-    inheritance: *const u8,
-    inheritance_count: usize,
+    importance: ak::Span<'_, u8>,
+    inheritance: ak::Span<'_, u8>,
 ) {
-    table.load_flag_bitmaps(
-        unsafe { ak::slice_from_raw_parts(importance, importance_count) },
-        unsafe { ak::slice_from_raw_parts(inheritance, inheritance_count) },
-    );
+    table.load_flag_bitmaps(importance.as_slice(), inheritance.as_slice());
 }
 
 /// Resets the state a fresh drive must not inherit from the style its table
@@ -1592,15 +1580,12 @@ pub extern "C" fn rust_computed_longhand_table_metadata(
 /// The recorded inheritance-dependent specified values as a borrowed span.
 /// The span stays valid while the caller's table reference is live and no
 /// further add or remove mutates the table.
-///
-/// # Safety
-/// `table` must be a valid table and `out_count` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_computed_longhand_table_inheritance_dependent_values(
+pub extern "C" fn rust_computed_longhand_table_inheritance_dependent_values(
     table: &ComputedLonghandTable,
-    out_count: *mut usize,
+    out_count: &mut usize,
 ) -> *const FfiTableInheritanceDependentValue {
-    unsafe { *out_count = table.inheritance_dependent_view.len() };
+    *out_count = table.inheritance_dependent_view.len();
     table.inheritance_dependent_view.as_ptr()
 }
 

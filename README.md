@@ -26,7 +26,22 @@ the few changes it needs in Ladybird itself are small, marked `Fork hook (Arc)`,
   Minimize and Close. Minimized, it plays on with a player at the bottom of the sidebar.
 - **Fill from 1Password** (⌘\), through 1Password's command-line tool.
 - **Import from Arc**: your spaces, pinned tabs, folders and favorites.
+- **Chrome extensions** (in progress): see below.
 - **Updates itself** from this repository's signed releases.
+
+## Extensions
+
+Elytra is learning to run Chrome (Manifest V3) extensions unmodified, with 1Password's as the first goal. Add one
+from **File › Extensions…** by pasting its Chrome Web Store link, or load an unpacked folder. Extensions get a button
+in the sidebar's top strip, with their badge and popup, and their keyboard commands.
+
+What works: installing, updating and removing extensions; `chrome-extension://` pages in processes of their own,
+under the extension's CSP; background service workers; content scripts in isolated worlds; and the `runtime`
+(messaging, ports, native messaging), `storage`, `tabs`, `windows`, `scripting`, `webNavigation`, `action`,
+`commands`, `alarms`, `idle`, `i18n`, `permissions`, `management`, `privacy`, `webRequest`, `declarativeNetRequest`,
+`notifications`, `contextMenus` and `downloads` APIs. Extensions stay out of private windows. The work has been
+through two adversarial security reviews. How it fits together, and what's left:
+[Documentation/Elytra/WebExtensions.md](Documentation/Elytra/WebExtensions.md).
 
 ## Install
 

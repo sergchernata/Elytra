@@ -25,7 +25,6 @@
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/OpacityValueStyleValue.h>
-#include <LibWeb/CSS/StyleValues/OpenTypeTaggedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StringStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -91,7 +90,7 @@ NonnullRefPtr<ComputedStyleWorkingSet> ComputedStyleWorkingSet::create_with_base
     ComputedValuesFFI::rust_computed_longhand_table_clear_seeded_state(working_set->m_computed_longhand_table);
     auto importance = base.property_importance_bitmap();
     auto inheritance = base.property_inheritance_bitmap();
-    ComputedValuesFFI::rust_computed_longhand_table_load_flag_bitmaps(working_set->m_computed_longhand_table, importance.data(), importance.size(), inheritance.data(), inheritance.size());
+    ComputedValuesFFI::rust_computed_longhand_table_load_flag_bitmaps(working_set->m_computed_longhand_table, importance, inheritance);
     for (auto const& entry : base.inheritance_dependent_specified_values())
         ComputedValuesFFI::rust_computed_longhand_table_add_inheritance_dependent_value(working_set->m_computed_longhand_table, entry.property, entry.value);
     working_set->set_display_before_box_type_transformation(base.display_before_box_type_transformation());

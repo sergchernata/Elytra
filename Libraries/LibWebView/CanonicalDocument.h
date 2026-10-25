@@ -16,6 +16,7 @@
 #include <LibWebCommon/HTML/CrossProcessId.h>
 #include <LibWebCommon/HTML/EmbedderPolicy.h>
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
+#include <LibWebCommon/PermissionsPolicy/PermissionsPolicy.h>
 #include <LibWebView/Export.h>
 #include <LibWebView/Forward.h>
 
@@ -65,6 +66,10 @@ public:
     Web::HTML::EmbedderPolicy const& embedder_policy() const { return m_embedder_policy; }
     void set_embedder_policy(Web::HTML::EmbedderPolicy embedder_policy) { m_embedder_policy = move(embedder_policy); }
 
+    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-permissions-policy
+    Web::PermissionsPolicy::PermissionsPolicy const& permissions_policy() const { return m_permissions_policy; }
+    void set_permissions_policy(Web::PermissionsPolicy::PermissionsPolicy permissions_policy) { m_permissions_policy = move(permissions_policy); }
+
     // https://html.spec.whatwg.org/multipage/dom.html#completely-loaded
     bool is_completely_loaded() const { return m_completely_loaded; }
     void set_completely_loaded() { m_completely_loaded = true; }
@@ -95,6 +100,8 @@ public:
     // The host of the WebUI the document displays, if it was created from the about: URL of a page with a channel to
     // the UI process.
     Optional<String> const& web_ui_host() const { return m_web_ui_host; }
+    // The extension whose document this is, by ID: one of its pages, or a document of its origin.
+    Optional<String> const& extension_host() const { return m_extension_host; }
 
     void make_active();
 
@@ -110,10 +117,12 @@ private:
     IsInitialAboutBlank m_is_initial_about_blank { IsInitialAboutBlank::No };
     Web::HTML::OpenerPolicy m_opener_policy;
     Web::HTML::EmbedderPolicy m_embedder_policy;
+    Web::PermissionsPolicy::PermissionsPolicy m_permissions_policy { Web::PermissionsPolicy::PermissionsPolicy::empty_permissions_policy() };
     bool m_completely_loaded { false };
     u32 m_unload_counter { 0 };
     bool m_is_local_file_content { false };
     Optional<String> m_web_ui_host;
+    Optional<String> m_extension_host;
     RefPtr<WebContentPage> m_host;
 };
 

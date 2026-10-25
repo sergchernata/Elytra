@@ -1,0 +1,9 @@
+{
+    "manifest_version": 3,
+    "name": "Menus test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl9p7xyZU6zWmZlNuqAIl2UvHQrJYYjVqoqvfsRgbxreIIUKMxYbQ9Tq6xc06ZuWmUG7TQfji4pfqMbI+nW4kkCFwgWuCJVtsU7ob/ulBo0Et/4As8PgJBH+H50nmKuOGTgWzIieg+1MUfJXGgYmxl5pEfDpSJ4/nBlOs9a5ZGg26qKgjZlukBtgGwmJQya6xk3m10C83AUHhsGlW76REIVyO0iR9lyh1CZydYde0d5DHZuzuWTVIwerYeyYIqRC2Wyw9LCFPAl3EH7iM/QtpjIOPZ0GxMAX+KjOUByqZePh9BTA0kQq7MzGjHAmWDAWQtNmebmSkl+3ocfuf3F9UQwIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "action": { "default_title": "Menus" },
+    "permissions": ["contextMenus", "storage"]
+}

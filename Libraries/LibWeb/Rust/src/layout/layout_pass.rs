@@ -67,6 +67,8 @@ pub(crate) struct LayoutPass<'arena> {
     pub(crate) initial_containing_block_inline_size: CssPixels,
     pub(crate) initial_containing_block_block_size: CssPixels,
     pub(crate) document_in_quirks_mode: bool,
+    /// The frame of the formatting context the pass is laying out, in which style reads see sizes and box sides.
+    pub(crate) frame: super::geometry::Frame,
 }
 
 impl<'arena> LayoutPass<'arena> {
@@ -85,9 +87,18 @@ impl<'arena> LayoutPass<'arena> {
             initial_containing_block_inline_size,
             initial_containing_block_block_size,
             document_in_quirks_mode,
+            frame: super::geometry::Frame::PHYSICAL,
         }
     }
 
+    /// This pass, laying out in the frame of `writing_mode`.
+    #[inline]
+    pub(crate) fn in_frame_of(mut self, writing_mode: u8) -> Self {
+        self.frame = super::geometry::Frame::of(writing_mode);
+        self
+    }
+
+    #[inline]
     pub(crate) fn arena(&self) -> &'arena LayoutNodeArena {
         self.arena
     }
@@ -107,6 +118,7 @@ impl<'arena> LayoutPass<'arena> {
         self.arena.intrinsic_size_cache_stamp(node)
     }
 
+    #[inline]
     pub(crate) fn node_data(&self, node: Node) -> &'arena NodeData {
         self.arena().data(node)
     }
@@ -117,6 +129,7 @@ impl<'arena> LayoutPass<'arena> {
             .expect("text node content must be synced to the arena before layout")
     }
 
+    #[inline]
     pub(crate) fn style_payloads(&self, node: Node) -> &'arena FfiStylePayloads {
         self.arena
             .style_payloads(node)

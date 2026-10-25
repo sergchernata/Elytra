@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	Content Security Policy: Expects blocked for worker-classic to same-http origin and keep-origin redirection from http context.
+Pass	Content Security Policy: Expects blocked for worker-classic to same-http origin and keep-origin redirection from http context.: securitypolicyviolation
+Pass	Content Security Policy: Expects blocked for worker-classic to same-http origin and no-redirect redirection from http context.
+Pass	Content Security Policy: Expects blocked for worker-classic to same-http origin and no-redirect redirection from http context.: securitypolicyviolation

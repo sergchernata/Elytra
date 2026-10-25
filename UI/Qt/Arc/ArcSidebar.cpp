@@ -12,6 +12,7 @@
 #include <LibURL/Parser.h>
 #include <LibWebView/SessionHistory.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
+#include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <LibWebView/BrowsingSession.h>
@@ -254,6 +255,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle->setFixedSize(28, 28);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
+    // Extensions' buttons, at the strip's right.
+    create_extension_buttons(window, m_top_strip);
     layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);

@@ -245,6 +245,9 @@ void initialize_main_thread_vm(HTML::AgentType type)
                         /* .reason = */ promise.result(),
                     };
                     auto promise_rejection_event = HTML::PromiseRejectionEvent::create(realm.global_object(), HTML::EventNames::rejectionhandled, event_init);
+                    // Elytra: A world's rejections are for its own listeners.
+                    if (auto& promise_realm = promise.shape().realm(); promise_realm.host_defined())
+                        promise_rejection_event->restrict_to_world(host_defined_wrapper_world(promise_realm));
                     global.dispatch_event(promise_rejection_event);
                 }));
                 break;
@@ -515,7 +518,8 @@ void initialize_main_thread_vm(HTML::AgentType type)
             // 3. Set fetchReferrer to referencingScript's base URL.
             fetch_referrer = referencing_script->base_url().value();
 
-            // FIXME: 4. Set originalFetchOptions to referencingScript's fetch options.
+            // 4. Set originalFetchOptions to referencingScript's fetch options.
+            original_fetch_options = referencing_script->fetch_options();
         }
 
         // 7. If referrer is a Cyclic Module Record and moduleRequest is equal to the first element of referrer.[[RequestedModules]], then:

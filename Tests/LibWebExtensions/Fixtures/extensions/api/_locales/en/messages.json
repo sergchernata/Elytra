@@ -1,0 +1,4 @@
+{
+    "name": { "message": "API test extension" },
+    "greeting": { "message": "Hello, $who$! You have $1 new $$ messages.", "placeholders": { "who": { "content": "$2" } } }
+}

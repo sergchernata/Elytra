@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	text-orientation initial value
+Pass	text-orientation: upright
+Pass	text-orientation: sideways
+Pass	text-orientation should inherit
+Pass	text-orientation: mixed
+Pass	text-orientation: initial
+Pass	text-orientation: inherit
+Pass	text-orientation: foo

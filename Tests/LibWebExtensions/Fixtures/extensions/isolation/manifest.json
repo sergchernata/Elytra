@@ -1,0 +1,11 @@
+{
+    "manifest_version": 3,
+    "name": "World isolation test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1VqpIXxPWrnt4hWKCyh2Y1RyKQWGntAUgWd5Sc1kJ6JJDXRW4eayKNi+EPpAD2ysBPz+3PxzD17JNNNUm8nxOzll1TdHDlBH+F9zh2TlYov+vrWmCPTKjMc57ySiwhuYvjmvnRpsC01QZXgZluMyBAKjsA3xJcdefNvqoMCnQ1I55rpzHA2/Z0gvzGaazhmI7eRM8tkcakNXZ7sZO5n+krJRdJVLcYjZxqHzx2vLW8Sd38QcxWRDWERFlNYN5ix1jd9jNmfBwRXtPCZ3NCkceB3agOGXW/omtwo70xWVTWyt6ngWc3TEkP5JMJ5g4WvirC6IQwYEA70Z7fx+0ZyjUQIDAQAB",
+    "background": { "service_worker": "background.js" },
+    "content_scripts": [
+        { "matches": ["file:///*/isolation.html"], "js": ["content.js"], "run_at": "document_end" },
+        { "matches": ["file:///*/isolation-engine.html"], "js": ["engine.js"], "run_at": "document_end" }
+    ]
+}

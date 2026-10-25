@@ -196,6 +196,18 @@ describe("in- and exports", () => {
         expectModulePassed("./import-with-attributes.mjs");
     });
 
+    test("import attribute keys must be unique", () => {
+        expectedModuleToThrowSyntaxError("./duplicate-import-attribute-key.mjs", "Duplicate import attribute key");
+    });
+
+    test("imported bindings cannot be redeclared", () => {
+        expectedModuleToThrowSyntaxError("./import-redeclared-by-let.mjs", "Identifier 'passed' already declared");
+        expectedModuleToThrowSyntaxError("./import-redeclared-by-var.mjs", "Identifier 'passed' already declared");
+        expectedModuleToThrowSyntaxError("./import-redeclared-by-function.mjs", "Identifier 'passed' already declared");
+        expectedModuleToThrowSyntaxError("./import-redeclaring-class.mjs", "Identifier 'passed' already declared");
+        expectedModuleToThrowSyntaxError("./duplicate-import-binding.mjs", "Identifier 'passed' already declared");
+    });
+
     test("namespace has expected ordering", () => {
         expectModulePassed("./namespace-order.mjs");
     });
@@ -224,7 +236,7 @@ describe("in- and exports", () => {
         expectModulePassed("./anon-func-decl-default-export.mjs");
     });
 
-    test.xfail("can have top level using declarations which trigger at the end of running a module", () => {
+    test("can have top level using declarations which trigger at the end of running a module", () => {
         expectModulePassed("./top-level-dispose.mjs");
     });
 

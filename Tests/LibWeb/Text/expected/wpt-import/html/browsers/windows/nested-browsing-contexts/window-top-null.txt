@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	`window.top` is null when browsing context container element removed
+Pass	`window.top`null when any ancestor browsing context container removed

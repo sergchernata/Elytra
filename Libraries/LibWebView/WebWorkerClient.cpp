@@ -77,6 +77,11 @@ void WebWorkerClient::did_report_worker_exception(Utf16String message, Utf16Stri
     WorkerProcessManager::the().worker_did_report_exception(m_agent_id, move(message), move(filename), lineno, colno);
 }
 
+void WebWorkerClient::did_report_outside_settings_content_security_policy_violation(u64 policy_index, String effective_directive, URL::URL resource)
+{
+    WorkerProcessManager::the().worker_did_report_outside_settings_content_security_policy_violation(m_agent_id, policy_index, move(effective_directive), move(resource));
+}
+
 void WebWorkerClient::remove_blob_url_entries()
 {
     if (auto session = m_session.strong_ref())
@@ -145,6 +150,11 @@ Messages::WebWorkerClient::DidRequestBlobUrlEntryResponse WebWorkerClient::did_r
 void WebWorkerClient::did_request_file(ByteString path, i32 request_id)
 {
     WorkerProcessManager::the().worker_did_request_file(m_agent_id, move(path), request_id);
+}
+
+void WebWorkerClient::did_request_extension_file(String extension_id, ByteString path, Optional<URL::Origin> requester, i32 request_id)
+{
+    WorkerProcessManager::the().worker_did_request_extension_file(m_agent_id, move(extension_id), move(path), move(requester), request_id);
 }
 
 Messages::WebWorkerClient::DidIsKnownHstsHostResponse WebWorkerClient::did_is_known_hsts_host(String domain)

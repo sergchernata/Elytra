@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "Alarms test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxf/Dap9xjap3yRqzm7ximTR5tQcst+P7qS+wXMNbcItm+wZVp8QSV+IbSq+VNP4Ou+meDh1IFRW5kVA2c7jUD5YMwx5ss+eYowD4e13LKdhnpSa6MfdzYV97uJwJcyvy8hsxj5Rr5UJNC9vEzYiPKMi04+1wzksj+nO9KDVsJm9oNCNj3Fk5aQvFJPHbl4JeAjdsim6JsWorlUYtuA5GhVq72jTnDWBhHdNb+z1/K0vO0fZEc3jR5UwxHaAKTpsG2G4psHs1VTeQQvUBI47sqSM3oJ2aTxfFSmUC9B0Uxrn+Da1+1RDftJ88M8L4HpZUrtgxttYzYI92Imbt0VWjoQIDAQAB",
+    "permissions": ["alarms", "idle", "storage"],
+    "background": { "service_worker": "background.js" }
+}

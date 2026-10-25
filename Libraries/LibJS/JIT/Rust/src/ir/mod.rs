@@ -558,11 +558,16 @@ pub enum Op {
     /// holding an arguments object the code never created), the node reads
     /// its operands from the frame and writes the result there, like a
     /// `Generic` node.
+    ///
+    /// The callee it calls is its call feedback's `DirectCallTarget`, or
+    /// with `target`, the graph's `direct_call_targets[target]`, a function
+    /// the code holds as a constant.
     CallDirect {
         executable: u32,
         pc: u32,
         inlined_frame_bytes: u32,
         stores_operands: bool,
+        target: Option<u32>,
     },
     /// The `Call` instruction at `pc` of `executable`, like `Generic`, but
     /// calling its call feedback's `NativeCallTarget` directly, in the
@@ -876,10 +881,12 @@ pub enum Op {
         part: AccessorPart,
     },
     /// Loads the named property at `offset` of the object in input 0. Exits
-    /// if the property holds an accessor. An optional input 1 is the
-    /// object's `CellAddress`.
+    /// if the property holds an accessor, unless checks before it ensure
+    /// that it `holds_data`. An optional input 1 is the object's
+    /// `CellAddress`.
     LoadNamed {
         offset: u32,
+        holds_data: bool,
     },
     /// Adds a property to the object in input 0 (whose `CellAddress` is
     /// input 2), made by an `AllocateObject` with room for it, which has the
@@ -893,10 +900,12 @@ pub enum Op {
         property_count: u32,
     },
     /// Stores input 1 into the named property at `offset` of the object in
-    /// input 0, which already exists. Exits if the property holds an accessor.
-    /// An optional input 2 is the object's `CellAddress`.
+    /// input 0, which already exists. Exits if the property holds an accessor,
+    /// unless checks before it ensure that it `holds_data`. An optional input
+    /// 2 is the object's `CellAddress`.
     StoreNamed {
         offset: u32,
+        holds_data: bool,
     },
 
     // Control nodes. Each block ends with exactly one of these.
@@ -1858,8 +1867,8 @@ impl Op {
             | Op::CheckPrototypeChainValid { .. }
             | Op::LoadGlobalBinding { .. }
             | Op::StoreGlobalBinding { .. }
-            | Op::LoadNamed { .. }
-            | Op::StoreNamed { .. }
+            | Op::LoadNamed { holds_data: false, .. }
+            | Op::StoreNamed { holds_data: false, .. }
             | Op::ShapeSwitch { .. } => Some(ExitKind::BadShape),
             _ => None,
         }
@@ -2063,6 +2072,8 @@ pub struct Graph {
     /// Immutable properties of embedded typed arrays. Their fixed lengths
     /// require a valid cached storage offset before each access.
     pub typed_array_constants: Vec<(u64, crate::snapshot::TypedArraySnapshot)>,
+    /// The targets of `Op::CallDirect` nodes that call function constants.
+    pub direct_call_targets: Vec<crate::snapshot::DirectCallTarget>,
     /// The most bytes of interpreter stack that materializing the frames of
     /// inlined calls, and the frames of direct and native calls on top of
     /// them, take at once. Compiled code checks at entry that they fit.

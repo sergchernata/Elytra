@@ -57,6 +57,7 @@
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Layout/LayoutRustFFI.h>
+#include <LibWeb/PaintTiming/DocumentPaintTimingState.h>
 #include <LibWeb/Painting/DisplayListRecording.h>
 #include <LibWeb/Painting/FlexboxInspectorOverlay.h>
 #include <LibWeb/Painting/Forward.h>
@@ -75,6 +76,7 @@
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
 #include <LibWebCommon/HTML/UserNavigationInvolvement.h>
 #include <LibWebCommon/HTML/VisibilityState.h>
+#include <LibWebCommon/PermissionsPolicy/PermissionsPolicy.h>
 
 namespace Web {
 
@@ -180,6 +182,7 @@ enum class InvalidateLayoutTreeReason {
     X(HTMLInputElementHeight, true)                 \
     X(HTMLInputElementWidth, true)                  \
     X(HTMLLabelElementActivationBehavior, false)    \
+    X(HighlightRegistryHighlightsFromPoint, false)  \
     X(InspectAccessibilityTree, false)              \
     X(InspectDOMTree, false)                        \
     X(InspectDevToolsLayoutData, false)             \
@@ -266,18 +269,7 @@ struct DocumentUnloadTimingInfo {
     HighResolutionTime::DOMHighResTimeStamp unload_event_end_time { 0 };
 };
 
-enum class PolicyControlledFeature : u8 {
-    Autoplay,
-    Camera,
-    CrossOriginIsolated,
-    EncryptedMedia,
-    FocusWithoutUserActivation,
-    Fullscreen,
-    Gamepad,
-    Microphone,
-    PictureInPicture,
-    WindowManagement,
-};
+using PolicyControlledFeature = PermissionsPolicy::PolicyControlledFeature;
 
 struct PendingFullscreenEvent {
     enum class Type {
@@ -349,7 +341,7 @@ public:
     void set_find_in_page_active_match(GC::Ptr<Range>);
     void collapse_find_in_page_active_match_if_its_text_changed();
     Vector<GC::Ref<Range>> const& find_in_page_highlighted_matches() const { return m_find_in_page_highlighted_matches; }
-    void set_find_in_page_highlighted_matches(Vector<GC::Ref<Range>>);
+    void set_find_in_page_highlighted_matches(GC::RootVector<GC::Ref<Range>>);
     void remove_find_in_page_highlighted_matches_whose_text_changed();
 
     Editing::SpellingMarkers& spelling_markers();
@@ -646,6 +638,9 @@ public:
     // Whether the last layout committed a box whose `content-visibility` is `auto`.
     bool has_boxes_with_auto_content_visibility() const;
     Compositing::AccumulatedVisualContextTree visual_context_tree() const;
+
+    PaintTiming::DocumentPaintTimingState& paint_timing_state() { return m_paint_timing_state; }
+
     Compositing::ScrollStateSnapshot const& scroll_state_snapshot() const;
 
     GC::Ref<NodeList> get_elements_by_name(Utf16View);
@@ -662,6 +657,7 @@ public:
 
     // https://drafts.csswg.org/css-font-loading/#font-source
     GC::Ref<CSS::FontFaceSet> fonts();
+    GC::Ref<CSS::HighlightRegistry> highlight_registry();
 
     void clear();
     void capture_events();
@@ -835,6 +831,12 @@ public:
     bool ready_for_post_load_tasks() const { return m_ready_for_post_load_tasks; }
     void set_ready_for_post_load_tasks(bool ready);
 
+    // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#print-when-loaded
+    bool print_when_loaded() const { return m_print_when_loaded; }
+    void set_print_when_loaded() { m_print_when_loaded = true; }
+
+    void run_the_printing_steps();
+
     void completely_finish_loading();
     bool completely_loaded_deferred() const { return m_completely_loaded_deferred; }
     void queue_navigation_timing_entry();
@@ -854,6 +856,11 @@ public:
     bool browsing_context_group_has_multiple_contexts() const;
     bool browsing_context_group_has_remote_contexts() const { return m_browsing_context_group_has_remote_contexts; }
     void set_browsing_context_group_has_remote_contexts(bool value) { m_browsing_context_group_has_remote_contexts = value; }
+
+    // AD-HOC: Whether this document is still loading after a navigation that bypassed the HTTP cache: a reload that
+    //         bypasses it, or a child navigable's navigation while its container document loaded that way. Until it
+    //         has completely loaded, the requests it makes without a cache mode of their own bypass the cache too.
+    bool is_loading_bypassing_cache() const { return m_navigation_bypassed_cache && !is_completely_loaded(); }
 
     GC::Ptr<HTML::HTMLScriptElement> current_script() const { return m_current_script.ptr(); }
     void set_current_script(Badge<HTML::HTMLScriptElement>, GC::Ptr<HTML::HTMLScriptElement> script) { m_current_script = move(script); }
@@ -1067,6 +1074,10 @@ public:
     // https://html.spec.whatwg.org/multipage/origin.html#active-sandboxing-flag-set
     HTML::SandboxingFlagSet active_sandboxing_flag_set() const;
     void set_active_sandboxing_flag_set(HTML::SandboxingFlagSet);
+
+    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-permissions-policy
+    PermissionsPolicy::PermissionsPolicy const& permissions_policy() const { return m_permissions_policy; }
+    void set_permissions_policy(PermissionsPolicy::PermissionsPolicy policy) { m_permissions_policy = move(policy); }
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-policy-container
     GC::Ref<HTML::PolicyContainer> policy_container() const;
@@ -1948,6 +1959,7 @@ private:
     Optional<Utf16String> m_encoding;
 
     bool m_ready_for_post_load_tasks { false };
+    bool m_print_when_loaded { false };
 
     GC::Ptr<DOMImplementation> m_implementation;
     GC::Ptr<FragmentDirective> m_fragment_directive;
@@ -1960,6 +1972,7 @@ private:
     // Each Document has a text directive user activation, which is a boolean, initially false.
     bool m_text_directive_user_activation { false };
     bool m_browsing_context_group_has_remote_contexts { false };
+    bool m_navigation_bypassed_cache { false };
     GC::Ptr<HTML::HTMLScriptElement> m_current_script;
 
     u32 m_ignore_destructive_writes_counter { 0 };
@@ -2091,6 +2104,9 @@ private:
     // https://drafts.csswg.org/css-font-loading/#font-source
     GC::Ref<CSS::FontFaceSet> m_fonts;
 
+    // https://drafts.csswg.org/css-highlight-api-1/#highlight-registry
+    GC::Ptr<CSS::HighlightRegistry> m_highlight_registry;
+
     // https://html.spec.whatwg.org/multipage/document-lifecycle.html#completely-loaded-time
     Optional<AK::UnixDateTime> m_completely_loaded_time;
     bool m_completely_loaded_deferred { false };
@@ -2104,6 +2120,9 @@ private:
 
     // https://html.spec.whatwg.org/multipage/origin.html#active-sandboxing-flag-set
     HTML::SandboxingFlagSet m_active_sandboxing_flag_set;
+
+    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-permissions-policy
+    PermissionsPolicy::PermissionsPolicy m_permissions_policy { PermissionsPolicy::PermissionsPolicy::empty_permissions_policy() };
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-policy-container
     mutable GC::Ptr<HTML::PolicyContainer> m_policy_container;
@@ -2163,6 +2182,8 @@ private:
     HashTable<URL::URL> m_list_of_speculative_fetch_urls;
 
     GC::Ptr<CSS::VisualViewport> m_visual_viewport;
+
+    PaintTiming::DocumentPaintTimingState m_paint_timing_state;
 
     // NOTE: Not in the spec per se, but Document must be able to access all IntersectionObservers whose root is in the document.
     GC::WeakHashSet<IntersectionObserver::IntersectionObserver> m_intersection_observers;

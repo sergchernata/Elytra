@@ -167,8 +167,8 @@ Exits: E = eager, L = lazy. Every node that can exit has a frame state. "Call" m
 | AssumeValid | Exits if the code was invalidated; a patchable no-op (section 5). | E | Any | | |
 | AssumeLegacyArgumentsUnread | After an instruction whose calls may run code reading the legacy `arguments` of inlined frames; escape analysis makes it an `AssumeValid` or removes it (section 4, "Legacy arguments"). | E | Any | | |
 | **Object memory** | | | | | |
-| LoadNamed | A named property at an offset; exits for accessors. | E | Named | | cse |
-| StoreNamed | Stores an existing named property; exits for accessors. | E | Named | Named | |
+| LoadNamed | A named property at an offset; exits for accessors, unless the shape check of its object input ensures that it `holds_data` (the own property is writable in the checked shape, and accessor properties never are). Loads from prototypes always check: no check guards their constant object as an input, so they could move above their guards. | E unless `holds_data` | Named | | cse |
+| StoreNamed | Stores an existing named property; exits for accessors, unless it `holds_data` like a `LoadNamed`. | E unless `holds_data` | Named | Named | |
 | AddNamed | Adds a property to a fresh object and gives it the new shape. | | Named | Named | |
 | LoadAccessorFunction | The getter or setter of an accessor property. | E | Named | | |
 | HasInPrototypeChain | Whether input 1 is on input 0's prototype chain (the OrdinaryHasInstance loop). | E | Named | | |
@@ -359,11 +359,12 @@ compiled again once catches keep happening there, and the recompile calls the ca
 ## 5. Dependencies and invalidation
 
 Compiled code may assume facts that hold until a rare runtime event (`code::Dependency`): a
-prototype chain stays valid, a shape stays stable, a global binding or a property of the global
-object is never assigned, the global declarative environment gets no bindings, no `[[IsHTMLDDA]]`
-object exists. Each of the first and the last kinds is a `WatchpointSet` that stays valid
-(`runtime/watchpoint_set.rs`), such as one of a realm for the iterator protocol
-(`runtime/realm_watchpoints.rs`).
+prototype chain stays valid, a shape stays stable, a prototype keeps the value of a property, a
+global binding or a property of the global object is never assigned, the global declarative
+environment gets no bindings, no `[[IsHTMLDDA]]` object exists. Each of the first, the third and
+the last kinds is a `WatchpointSet` that stays valid (`runtime/watchpoint_set.rs`), such as one of
+a realm for the iterator protocol (`runtime/realm_watchpoints.rs`) or the one of a prototype's slot
+(`Shape::watch_slot_for_replacements()`).
 
 - The builder and check elimination record the dependencies they rely on in
   `Graph::dependencies`.
@@ -441,7 +442,31 @@ before, loads of the binding stay plain loads; for a captured binding, that hold
 loads. Closures are counted where they are created (`SharedFunctionInstanceData::closure_count()`),
 so compiled code only copies closure templates of functions that have several closures already.
 
-To be written: exit reasons, recompiles, the rule that a failed speculation is never repeated.
+**Methods of prototypes.** A property lookup cache entry that found an object in a prototype (like
+a method) is a constant to the builder. Where the prototype's shape watches the property's slot
+(`PropertyCacheEntrySnapshot::prototype_property_watchpoint`), the code depends on the slot's
+watchpoint set and loads nothing; otherwise it loads the property and checks it against the
+constant. Slots that property lookup caches write to have no watchpoint set, and neither do slots
+whose value was replaced while watched (`Shape::was_slot_replaced()`): the code their replacement
+invalidated learned nothing, while a failed check is an exit that the recompile avoids.
+
+**Polymorphic calls.** A call whose callee is a phi of a few function constants, like the methods
+that a `GetById` found for the shapes it switched on, inlines each of them (or calls the slow
+path for those it cannot inline). Where the phi's block is a join of nothing but the edges that
+bring the constants, each inlined call starts on its edges, which keep what the code knew there
+(the shape of the receiver); otherwise the code branches on the callee, and calls generically
+where it could inline none of them. Callees that are small but for moves and jumps
+(`OpCode::is_free_when_inlined()`) are always inlined, whatever the budget, except as cases of
+such calls, which may each inline several and nest.
+
+**Shapes the caches learned.** A speculation that failed is never made again at the same place,
+with one exception: a `BadShape` exit at an instruction whose property lookup cache the code
+speculated on records how many entries the cache had when the code was compiled. Recompiles leave
+the exit out of the sites they avoid once the cache has more (`Executable::jit_exit_sites_for_recompile()`),
+since the interpreter added the shapes the code did not know. Each such exit needs a larger cache,
+and caches stop growing once megamorphic, so this ends.
+
+To be written: exit reasons, recompiles.
 
 ## 10. The snapshot and the caches
 

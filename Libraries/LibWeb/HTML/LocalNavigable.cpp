@@ -96,6 +96,7 @@
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/InputEvent.h>
 #include <LibWeb/UIEvents/InputTypes.h>
+#include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/WebIDL/Promise.h>
 #include <LibWeb/XHR/FormData.h>
 #include <LibWebCommon/CSS/SystemColor.h>
@@ -1589,6 +1590,29 @@ void LocalNavigable::set_active_document(GC::Ptr<DOM::Document> document)
     m_active_session_history_entry->document_state()->set_document_id(document_id);
 }
 
+// https://html.spec.whatwg.org/multipage/document-sequences.html#allowed-to-perform-a-navigation-or-history-update
+LocalNavigable::NavigationOrHistoryUpdatePermission LocalNavigable::allowed_to_perform_a_navigation_or_history_update()
+{
+    // An allowed to perform a navigation or history update algorithm, which is implementation-defined and returns
+    // either allowed or blocked.
+    // NB: We block a navigable's navigations and history updates after it has done too many of them within a short
+    //     timespan, so a page cannot flood the session history or keep the event loop busy navigating.
+    static constexpr u32 max_updates_in_rate_limit_window = 200;
+    static constexpr auto rate_limit_window_duration = AK::Duration::from_seconds(10);
+
+    auto now = MonotonicTime::now_coarse();
+    if (now - m_navigation_or_history_update_rate_limit_window_start > rate_limit_window_duration) {
+        m_navigation_or_history_update_rate_limit_window_start = now;
+        m_navigation_or_history_updates_in_rate_limit_window = 0;
+    }
+
+    if (m_navigation_or_history_updates_in_rate_limit_window >= max_updates_in_rate_limit_window)
+        return NavigationOrHistoryUpdatePermission::Blocked;
+
+    ++m_navigation_or_history_updates_in_rate_limit_window;
+    return NavigationOrHistoryUpdatePermission::Allowed;
+}
+
 Optional<u64> LocalNavigable::browsing_context_group_id() const
 {
     Navigable const* top_level_traversable = this;
@@ -2307,6 +2331,14 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
             return;
         }
 
+        // AD-HOC: Main fetch can upgrade request's current URL to a potentially trustworthy URL without a redirect.
+        //         Treat that like a redirect, so currentURL and entry's URL name the URL that was actually fetched,
+        //         which is also response's URL and the document's URL.
+        if (state_holder->request->current_url() != state_holder->current_url) {
+            state_holder->current_url = state_holder->request->current_url();
+            state_holder->redirected_url = state_holder->current_url;
+        }
+
         // 8. If request's body is null, then set entry's document state's resource to null.
         if (state_holder->request->body().has<Empty>()) {
             state_holder->resource_cleared = true;
@@ -2573,11 +2605,23 @@ static void create_navigation_params_by_fetching(
         //         Chromium (FetchCacheMode::kValidateCache) and Firefox (nsIRequest::VALIDATE_ALWAYS); WebKit goes
         //         further, and bypasses the cache entirely (ReloadIgnoringCacheData).
         request->set_cache_mode(HTTP::CacheMode::NoCache);
+
+        // AD-HOC: A reload that bypasses the HTTP cache uses the "reload" cache mode instead, with which "Fetch behaves
+        //         as if there is no HTTP cache on the way to the network. Ergo, it creates a normal request and updates
+        //         the HTTP cache with the response."
+        if (document_state.reload_bypasses_cache)
+            request->set_cache_mode(HTTP::CacheMode::Reload);
     }
 
     // 8. Otherwise, if entry's document state's ever populated is true, then set request's history-navigation flag.
     else if (document_state.ever_populated)
         request->set_history_navigation(true);
+
+    // AD-HOC: While a document loads bypassing the HTTP cache, so do the documents of its child navigables.
+    if (request->cache_mode() == HTTP::CacheMode::Default) {
+        if (auto container_document = navigable->container_document(); container_document && container_document->is_loading_bypassing_cache())
+            request->set_cache_mode(HTTP::CacheMode::Reload);
+    }
 
     // 9. If sourceSnapshotParams's has transient activation is true, then set request's user-activation to true.
     if (source_snapshot_params->has_transient_activation)
@@ -2598,6 +2642,12 @@ static void create_navigation_params_by_fetching(
     //         IsUserTriggeredForSecFetchSite() that its triggering principal is the system's.
     if (document_state.user_agent_initiated == UserAgentInitiated::Yes && navigable && navigable->is_top_level_traversable())
         request->set_user_agent_initiated(true);
+
+    // NB: What step 2.1 of Upgrade Insecure Requests' "upgrade request to a potentially trustworthy URL, if
+    //     appropriate" asks about.
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-request
+    if (csp_navigation_type == ContentSecurityPolicy::Directives::Directive::NavigationType::FormSubmission)
+        request->set_form_submission(true);
 
     // 10. If navigable's container is non-null:
     // NB: The container's local name is read through the navigable, which replicates it for a container in another
@@ -4421,8 +4471,16 @@ GC::Ref<LocalNavigable> LocalNavigable::create_stand_in(Badge<Page> badge, Remot
     //     is covered above.
     auto [browsing_context, document] = BrowsingContext::create_a_new_browsing_context_and_document(page, container ? GC::Ptr<DOM::Document> { container->document() } : nullptr, container, remote_navigable.window_proxy(), current_history_entry.document_state.origin);
 
-    if (!local_parent)
+    if (!local_parent) {
+        // NB: The browsing context of a navigable whose container is in another process inherits the insecure requests
+        //     policy that the container's process reports for its node document. So does the stand-in's document.
+        // https://w3c.github.io/webappsec-upgrade-insecure-requests/#nesting
+        auto const& container_state = remote_navigable.replicated_state().container;
+        UpgradeInsecureRequests::inherit_the_insecure_requests_policy_into_a_nested_browsing_context(browsing_context, container_state.document_insecure_requests_policy, container_state.document_upgrade_insecure_navigations_set);
+        UpgradeInsecureRequests::inherit_the_insecure_requests_policy_into_a_new_document(document->relevant_settings_object(), browsing_context);
+
         page.ensure_compositor_host();
+    }
 
     // 7. Let navigable be a new navigable.
     GC::Ref<LocalNavigable> navigable = *GC::Heap::the().allocate<LocalNavigable>(page, page.client().is_svg_page_client());

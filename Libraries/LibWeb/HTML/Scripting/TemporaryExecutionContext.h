@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/OwnPtr.h>
 #include <LibGC/Ptr.h>
+#include <LibJS/Forward.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 
@@ -29,6 +31,9 @@ public:
 private:
     GC::Ref<EnvironmentSettingsObject> m_settings;
     CallbacksEnabled m_callbacks_enabled { CallbacksEnabled::No };
+    // Elytra: The realm of another world than the main one (an extension's isolated world) shares the principal
+    //         realm's settings object; this makes it the current realm, so that what the steps create is its own.
+    OwnPtr<JS::ExecutionContext> m_world_execution_context;
 };
 
 }

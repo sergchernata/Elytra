@@ -50,6 +50,7 @@
 #include <LibWebCommon/Page/SpellingError.h>
 #include <LibWebCommon/Page/ViewportIsFullscreen.h>
 #include <LibWebCommon/ReferrerPolicy/ReferrerPolicy.h>
+#include <LibWebCommon/StorageAPI/StorageAreaId.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 #include <LibWebCommon/WebDriver/Capabilities.h>
 #include <LibWebCommon/WebDriver/Response.h>
@@ -84,6 +85,9 @@ endpoint WebContentServer routed by Web::PageId page_id
     did_handle_webdriver_mouse_event(Web::PageId page_id, u64 request_id) =|
     set_webdriver_session_config(Web::PageId page_id, Web::WebDriver::UserPromptHandler user_prompt_handler, Web::WebDriver::PageLoadStrategy page_load_strategy, bool strict_file_interactability, JsonValue timeouts) =|
     connect_to_web_ui(Web::PageId page_id, IPC::TransportHandle handle) =|
+    set_installed_extensions(Web::PageId page_id, String extensions) =|
+    deliver_extension_message(Web::PageId page_id, u64 context_id, String message) =|
+    run_extension_script(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId navigable_id, String extension_id, bool main_world, String source, String filename) =|
     connect_to_request_server(IPC::TransportHandle handle, int client_id) =|
     connect_to_test_endpoint(IPC::TransportHandle handle) =|
     connect_to_image_decoder(IPC::TransportHandle handle) =|
@@ -155,9 +159,10 @@ endpoint WebContentServer routed by Web::PageId page_id
     get_source(Web::PageId page_id) =|
     inspect_dom_tree(Web::PageId page_id) =|
     inspect_storage(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, u64 request_id) =|
-    [NotRouted] set_session_storage_item(Web::PageId page_id, Utf16String key, Utf16String value) => (Optional<WebView::StorageSetResult> result)
-    [NotRouted] remove_session_storage_item(Web::PageId page_id, Utf16String key) => (Optional<Utf16String> old_value)
-    [NotRouted] clear_session_storage(Web::PageId page_id) => (bool did_clear)
+    storage_area_changed(Web::StorageAPI::StorageAreaId area_id, Optional<Utf16String> key, Optional<Utf16String> old_value, Optional<Utf16String> new_value, String url) =|
+    storage_area_write_acknowledged(Web::StorageAPI::StorageAreaId area_id) =|
+    storage_area_write_refused(Web::StorageAPI::StorageAreaId area_id, Vector<Utf16String> keys, Vector<Utf16String> values) =|
+    storage_area_reset(Web::StorageAPI::StorageAreaId area_id, Vector<Utf16String> keys, Vector<Utf16String> values) =|
     inspect_dom_node(Web::PageId page_id, WebView::DOMNodeProperties::Type property_type, Web::UniqueNodeID node_id, Optional<Web::CSS::PseudoElement> pseudo_element, JsonValue options) =|
     inspect_grid_layouts(Web::PageId page_id, Web::UniqueNodeID root_node_id) =|
     inspect_current_grid(Web::PageId page_id, Web::UniqueNodeID node_id) =|
@@ -312,6 +317,7 @@ endpoint WebContentServer routed by Web::PageId page_id
 
     did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token) =|
     did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno) =|
+    did_worker_agent_report_content_security_policy_violation(Web::HTML::WorkerAgentOwnerToken owner_token, u64 policy_index, String effective_directive, URL::URL resource) =|
     did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token) =|
     did_worker_agent_die(Web::HTML::WorkerAgentOwnerToken owner_token) =|
 

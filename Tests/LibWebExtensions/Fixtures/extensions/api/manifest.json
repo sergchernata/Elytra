@@ -1,0 +1,8 @@
+{
+    "manifest_version": 3,
+    "name": "__MSG_name__",
+    "version": "2.5",
+    "default_locale": "en",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5qoUXWeKNp/waDH/YieLPovg/wkW/iBm9kM+Tkh6sZMA2l2/2d6EwBArg/mUq87pgzx0uvTdxAdisTN4ed4vxVfV+UL7DgxjpSJS7GsUbLN+VKcRJ8F1ihTshKlDZyXRKMHWZNT4VR9w49NGrTkyW/nKCseDmlQnOuq3X661uQ4o1fLiKAgTW8+phrOzzZPvYX1HaXlKwXKX6xKxVD9A8Faa6z3zyfLRh9KvjiBAwx3JhznmYqFMHYroTecPYKgD9o04wyaaPrHJ5b92iGpamJyNpkY9whCkO3kbIhwBhk+Nz1aCJs5+g57AAUml9ZNchKYBvVOoghbku/nV5J2r0QIDAQAB",
+    "permissions": ["storage"]
+}

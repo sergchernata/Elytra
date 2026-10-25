@@ -46,6 +46,8 @@
 #include <LibWebCommon/Page/PageId.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BookmarkStore.h>
+#include <LibWebView/ExtensionRegistry.h>
+#include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/BrowserProcess.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/DownloadStore.h>
@@ -157,6 +159,8 @@ public:
     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
 
     static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
+    static ExtensionRegistry& extension_registry() { return the().m_extension_registry; }
+    static ExtensionRuntime& extension_runtime() { return the().m_extension_runtime; }
     void update_bookmark_action_for_current_web_view();
     void update_actions_for_active_web_view();
     void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
@@ -353,6 +357,7 @@ public:
     NonnullRefPtr<Core::Promise<Empty>> clear_browsing_data(ClearBrowsingDataOptions const&);
 
     Action& reload_action() { return *m_reload_action; }
+    Action& reload_bypassing_cache_action() { return *m_reload_bypassing_cache_action; }
     Action& copy_selection_action() { return *m_copy_selection_action; }
     Action& undo_action() { return *m_undo_action; }
     Action& redo_action() { return *m_redo_action; }
@@ -587,6 +592,8 @@ private:
     OwnPtr<ApplicationSettingsObserver> m_settings_observer;
 
     OwnPtr<BookmarkStore> m_bookmark_store;
+    ExtensionRegistry m_extension_registry;
+    ExtensionRuntime m_extension_runtime { m_extension_registry };
     OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
 
     OwnPtr<AutocompleteService> m_autocomplete_service;
@@ -677,6 +684,7 @@ private:
     OwnPtr<ProcessManager> m_process_manager;
 
     RefPtr<Action> m_reload_action;
+    RefPtr<Action> m_reload_bypassing_cache_action;
     RefPtr<Action> m_copy_selection_action;
     RefPtr<Action> m_undo_action;
     RefPtr<Action> m_redo_action;

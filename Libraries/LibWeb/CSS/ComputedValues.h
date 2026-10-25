@@ -288,38 +288,31 @@ inline Gfx::InterpolationColorSpace to_interpolation_color_space(ColorInterpolat
 }
 
 // Every ComputedValues style value group, in vtable registration order:
-// G(enumerator, member path, sharing-info name, affects layout).
-// A group may be flagged as not affecting layout only when every one of its fields is
-// read exclusively at paint or display-list build time: background qualifies (paint;
-// resource-observer registration runs in apply_style regardless of layout), mask
-// qualifies (paint and hit-testing), and text_reset qualifies (text-decoration resolves
-// at display-list build; white-space-trim is unread by layout today, so implementing it
-// must revisit the flag). effects stays layout-affecting because filter/backdrop-filter
-// establish fixed-positioning containing blocks and re-parent abspos descendants.
-#define LIBWEB_ENUMERATE_COMPUTED_VALUE_STYLE_GROUPS(G)                 \
-    G(InheritedTableValues, m_inherited.table, "inheritedTable", true)  \
-    G(InheritedListValues, m_inherited.list, "inheritedList", true)     \
-    G(InheritedUIValues, m_inherited.ui, "inheritedUI", true)           \
-    G(InheritedSVGValues, m_inherited.svg, "inheritedSVG", true)        \
-    G(InheritedTextValues, m_inherited.text, "inheritedText", true)     \
-    G(InheritedBoxValues, m_inherited.box, "inheritedBox", true)        \
-    G(FontValues, m_inherited.font, "font", true)                       \
-    G(AnimationValues, m_noninherited.animation, "animation", true)     \
-    G(SVGResetValues, m_noninherited.svg_reset, "svgReset", true)       \
-    G(GridValues, m_noninherited.grid, "grid", true)                    \
-    G(AnchorValues, m_noninherited.anchor, "anchor", true)              \
-    G(EffectsValues, m_noninherited.effects, "effects", true)           \
-    G(MaskValues, m_noninherited.mask_data, "mask", false)              \
-    G(TextResetValues, m_noninherited.text_reset, "textReset", false)   \
-    G(ContentValues, m_noninherited.content_data, "content", true)      \
-    G(TransformValues, m_noninherited.transform, "transform", true)     \
-    G(BackgroundValues, m_noninherited.background, "background", false) \
-    G(BorderValues, m_noninherited.border, "border", true)              \
-    G(AlignmentValues, m_noninherited.alignment, "alignment", true)     \
-    G(MiscResetValues, m_noninherited.misc, "miscReset", true)          \
-    G(SizingValues, m_noninherited.sizing, "sizing", true)              \
-    G(SurroundValues, m_noninherited.surround, "surround", true)        \
-    G(BoxValues, m_noninherited.box, "box", true)
+// G(enumerator, member path, sharing-info name).
+#define LIBWEB_ENUMERATE_COMPUTED_VALUE_STYLE_GROUPS(G)          \
+    G(InheritedTableValues, m_inherited.table, "inheritedTable") \
+    G(InheritedListValues, m_inherited.list, "inheritedList")    \
+    G(InheritedUIValues, m_inherited.ui, "inheritedUI")          \
+    G(InheritedSVGValues, m_inherited.svg, "inheritedSVG")       \
+    G(InheritedTextValues, m_inherited.text, "inheritedText")    \
+    G(InheritedBoxValues, m_inherited.box, "inheritedBox")       \
+    G(FontValues, m_inherited.font, "font")                      \
+    G(AnimationValues, m_noninherited.animation, "animation")    \
+    G(SVGResetValues, m_noninherited.svg_reset, "svgReset")      \
+    G(GridValues, m_noninherited.grid, "grid")                   \
+    G(AnchorValues, m_noninherited.anchor, "anchor")             \
+    G(EffectsValues, m_noninherited.effects, "effects")          \
+    G(MaskValues, m_noninherited.mask_data, "mask")              \
+    G(TextResetValues, m_noninherited.text_reset, "textReset")   \
+    G(ContentValues, m_noninherited.content_data, "content")     \
+    G(TransformValues, m_noninherited.transform, "transform")    \
+    G(BackgroundValues, m_noninherited.background, "background") \
+    G(BorderValues, m_noninherited.border, "border")             \
+    G(AlignmentValues, m_noninherited.alignment, "alignment")    \
+    G(MiscResetValues, m_noninherited.misc, "miscReset")         \
+    G(SizingValues, m_noninherited.sizing, "sizing")             \
+    G(SurroundValues, m_noninherited.surround, "surround")       \
+    G(BoxValues, m_noninherited.box, "box")
 
 class StyleEngine;
 
@@ -424,7 +417,6 @@ public:
     // Callers can serialize straight from the returned handle without minting a wrapper.
     RustStyleValueHandle const* stored_style_value_handle(PropertyID) const;
 
-    RefPtr<StyleValue const> color_style_value() const;
     ComputedValues const& base_values() const { return m_borrowed_base_values ? *m_borrowed_base_values : m_base_values ? *m_base_values
                                                                                                                         : *this; }
     bool has_animated_values() const { return m_borrowed_base_values || m_base_values; }
@@ -435,10 +427,6 @@ public:
         u64 total_instances_created { 0 };
     };
     static Statistics const& statistics() { return s_statistics; }
-
-    // The same question answered straight from two style records' group payload arrays, so a caller
-    // that only wants the answer does not have to materialize a ComputedValues for either record.
-    static bool layout_affecting_group_payloads_differ(void const* const* a, void const* const* b);
 
     // Returns the Rust-owned payload for direct read-only layout access. The
     // pointer is borrowed from this immutable ComputedValues instance.
@@ -451,7 +439,7 @@ public:
     template<typename Callback>
     void for_each_style_group_sharing_state(ComputedValues const* parent, Callback callback) const
     {
-#define LIBWEB_VISIT_STYLE_GROUP(name, path, sharing_name, affects_layout) \
+#define LIBWEB_VISIT_STYLE_GROUP(name, path, sharing_name) \
     callback(sharing_name##sv, parent ? path.ptr_equals(parent->path) : false, path.is_default());
         LIBWEB_ENUMERATE_COMPUTED_VALUE_STYLE_GROUPS(LIBWEB_VISIT_STYLE_GROUP)
 #undef LIBWEB_VISIT_STYLE_GROUP
@@ -464,8 +452,6 @@ public:
     bool depends_on_viewport_metrics() const { return m_depends_on_viewport_metrics; }
     bool font_metrics_depend_on_viewport_metrics() const { return m_font_metrics_depend_on_viewport_metrics; }
     bool in_display_none_subtree() const { return m_in_display_none_subtree; }
-    bool highlight_colors_authored() const { return m_highlight_colors_authored; }
-    bool highlight_color_is_current_color() const { return m_highlight_color_is_current_color; }
     bool has_pseudo_element_style(PseudoElement pseudo_element) const { return m_pseudo_element_styles & (1ull << to_underlying(pseudo_element)); }
     u64 pseudo_element_style_mask() const { return m_pseudo_element_styles; }
     ReadonlySpan<ComputedValuesFFI::FfiTableInheritanceDependentValue const> inheritance_dependent_specified_values() const { return m_inheritance_dependent_specified_values; }
@@ -503,53 +489,20 @@ public:
     bool content_uses_list_item_counter() const { return generated_content_facts() & ComputedValuesFFI::GENERATED_CONTENT_SHOWS_LIST_ITEM_COUNTER; }
     Display display() const { return display_from_ffi_display(m_noninherited.box->display); }
     Display display_before_box_type_transformation() const { return display_from_ffi_display(m_noninherited.box->display_before_box_type_transformation); }
-    Optional<int> z_index() const
-    {
-        if (!m_noninherited.box->has_z_index)
-            return {};
-        return m_noninherited.box->z_index;
-    }
-    TextAlign text_align() const { return m_inherited.text->text_align_value(); }
-    TextDecorationStyle text_decoration_style() const { return static_cast<TextDecorationStyle>(m_noninherited.text_reset->text_decoration_style); }
     Color text_decoration_color() const { return Color::from_bgra(m_noninherited.text_reset->text_decoration_color); }
     ReadonlySpan<ShadowData> text_shadow() const { return m_inherited.text->text_shadow_span(); }
     Positioning position() const { return static_cast<Positioning>(m_noninherited.box->position); }
-    WhiteSpaceCollapse white_space_collapse() const { return m_inherited.text->white_space_collapse_value(); }
-    FlexDirection flex_direction() const { return static_cast<FlexDirection>(m_noninherited.alignment->flex_direction); }
-    AlignSelf align_self() const { return static_cast<AlignSelf>(m_noninherited.alignment->align_self); }
-    int order() const { return m_noninherited.alignment->order; }
     Appearance appearance() const { return static_cast<Appearance>(m_noninherited.misc->appearance); }
     float opacity() const { return m_noninherited.effects->opacity; }
     Visibility visibility() const { return static_cast<Visibility>(m_inherited.box->visibility); }
-    JustifyContent justify_content() const { return static_cast<JustifyContent>(m_noninherited.alignment->justify_content); }
-    JustifySelf justify_self() const { return static_cast<JustifySelf>(m_noninherited.alignment->justify_self); }
     ComputedFilterView backdrop_filter() const { return m_noninherited.effects->backdrop_filter_value(); }
     ComputedFilterView filter() const { return m_noninherited.effects->filter_value(); }
     ReadonlySpan<ShadowData> box_shadow() const { return m_noninherited.effects->box_shadow_span(); }
     ComputedValuesFFI::ComputedSize const& width() const { return m_noninherited.sizing->width; }
     ComputedValuesFFI::ComputedSize const& height() const { return m_noninherited.sizing->height; }
-    Variant<VerticalAlign, LengthPercentage> vertical_align() const
-    {
-        auto const& value = m_noninherited.box->vertical_align;
-        if (value.is_keyword)
-            return static_cast<VerticalAlign>(value.keyword);
-        return LengthPercentage::view(value.value);
-    }
     Direction direction() const { return static_cast<Direction>(m_inherited.box->direction); }
     WritingMode writing_mode() const { return static_cast<WritingMode>(m_inherited.box->writing_mode); }
 
-    Isolation isolation() const { return m_noninherited.effects->isolation_value(); }
-    Containment contain() const
-    {
-        auto const& box = *m_noninherited.box;
-        return Containment {
-            .size_containment = box.size_containment,
-            .inline_size_containment = box.inline_size_containment,
-            .layout_containment = box.layout_containment,
-            .style_containment = box.style_containment,
-            .paint_containment = box.paint_containment,
-        };
-    }
     ContainerType container_type() const
     {
         auto const& box = *m_noninherited.box;
@@ -594,28 +547,20 @@ public:
     // counter style.
     bool reads_counter_style_environment(bool is_pseudo) const { return ComputedValuesFFI::rust_style_reads_counter_style_environment(static_cast<StyleValueFFI::StyleValueData const*>(m_noninherited.content_data->content.pointer), static_cast<StyleValueFFI::StyleValueData const*>(list_style_type_data()), is_pseudo); }
 
-    Optional<URL> clip_path() const { return m_noninherited.mask_data->clip_path_value(); }
     Color flood_color() const { return Gfx::Color::from_bgra(m_noninherited.svg_reset->flood_color); }
     float flood_opacity() const { return m_noninherited.svg_reset->flood_opacity; }
 
-    LengthPercentage const& cx() const { return LengthPercentage::view(m_noninherited.svg_reset->cx); }
-    LengthPercentage const& cy() const { return LengthPercentage::view(m_noninherited.svg_reset->cy); }
     NonnullRefPtr<StyleValue const> d() const
     {
         auto const* handle = &m_noninherited.svg_reset->d;
         static_assert(sizeof(RustStyleValueHandle) == sizeof(*handle));
         return style_value_from_handle(PropertyID::D, reinterpret_cast<RustStyleValueHandle const&>(*handle)).release_nonnull();
     }
-    LengthPercentage const& r() const { return LengthPercentage::view(m_noninherited.svg_reset->r); }
-    LengthPercentageOrAuto rx() const { return m_noninherited.svg_reset->rx.is_auto ? LengthPercentageOrAuto::make_auto() : LengthPercentage::view(m_noninherited.svg_reset->rx.value); }
-    LengthPercentageOrAuto ry() const { return m_noninherited.svg_reset->ry.is_auto ? LengthPercentageOrAuto::make_auto() : LengthPercentage::view(m_noninherited.svg_reset->ry.value); }
     LengthPercentage const& x() const { return LengthPercentage::view(m_noninherited.svg_reset->x); }
     LengthPercentage const& y() const { return LengthPercentage::view(m_noninherited.svg_reset->y); }
 
     bool has_transformations() const { return m_noninherited.transform->has_transformations(); }
     TransformOrigin transform_origin() const { return m_noninherited.transform->transform_origin_value(); }
-    TransformStyle transform_style() const { return m_noninherited.transform->transform_style_value(); }
-    BackfaceVisibility backface_visibility() const { return m_noninherited.transform->backface_visibility_value(); }
     RefPtr<TransformationStyleValue const> rotate() const { return m_noninherited.transform->rotate_value(); }
     RefPtr<TransformationStyleValue const> translate() const { return m_noninherited.transform->translate_value(); }
     RefPtr<TransformationStyleValue const> scale() const { return m_noninherited.transform->scale_value(); }
@@ -632,9 +577,7 @@ public:
     Color outline_color() const { return Color::from_bgra(m_noninherited.misc->outline_color); }
     Color column_rule_color() const { return Color::from_bgra(m_noninherited.misc->column_rule_color); }
     OutlineStyle outline_style() const { return static_cast<OutlineStyle>(m_noninherited.misc->outline_style); }
-    CSSPixels outline_width() const { return m_noninherited.misc->outline_width; }
 
-    MathStyle math_style() const { return static_cast<MathStyle>(m_inherited.font->math_style); }
     int math_depth() const { return m_inherited.font->math_depth; }
 
 private:
@@ -710,11 +653,6 @@ public:
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::InheritedListValues);
 
         RefPtr<AbstractImageStyleValue const> list_style_image_value() const;
-
-        bool operator==(InheritedListValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct InheritedUIValues : ComputedValuesFFI::InheritedUIValues {
@@ -737,11 +675,6 @@ public:
             static_assert(sizeof(Utf16FlyString) == sizeof(size_t));
             static_assert(alignof(Utf16FlyString) == alignof(size_t));
             return { reinterpret_cast<Utf16FlyString const*>(color_schemes.pointer), color_schemes.length };
-        }
-
-        bool operator==(InheritedUIValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
         }
     };
 
@@ -774,11 +707,6 @@ public:
                 static_cast<PaintOrder>(paint_order[2]),
             };
         }
-
-        bool operator==(InheritedSVGValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct InheritedTextValues : ComputedValuesFFI::InheritedTextValues {
@@ -795,11 +723,6 @@ public:
             return { reinterpret_cast<ShadowData const*>(text_shadow.pointer), text_shadow.length };
         }
         TextTransform text_transform_value() const { return static_cast<TextTransform>(text_transform); }
-
-        bool operator==(InheritedTextValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     // The layout and lifecycle of this group are defined in Rust (computed_values.rs). The
@@ -819,7 +742,8 @@ public:
                 && direction == other.direction
                 && writing_mode == other.writing_mode
                 && content_visibility == other.content_visibility
-                && image_rendering == other.image_rendering;
+                && image_rendering == other.image_rendering
+                && text_orientation == other.text_orientation;
         }
     };
 
@@ -830,11 +754,6 @@ public:
 
         WEB_API Gfx::FontCascadeList const& font_list_value() const;
         FontStyleKeyword font_style_keyword() const;
-
-        bool operator==(FontValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
 private:
@@ -868,41 +787,21 @@ public:
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::AnimationValues);
 
         Vector<Utf16FlyString> animation_names_value() const;
-
-        bool operator==(AnimationValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     // The layout and lifecycle of this group are defined in Rust (computed_values.rs).
     struct SVGResetValues : ComputedValuesFFI::SVGResetValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::SVGResetValues);
-
-        bool operator==(SVGResetValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct GridValues : ComputedValuesFFI::GridValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::GridValues);
-
-        bool operator==(GridValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct AnchorValues : ComputedValuesFFI::AnchorValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::AnchorValues);
 
         ReadonlySpan<Utf16FlyString> anchor_names_span() const { return fly_strings(anchor_names); }
-
-        bool operator==(AnchorValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
 
     private:
         static ReadonlySpan<Utf16FlyString> fly_strings(ComputedValuesFFI::RetainedUtf16FlyStringList const& values)
@@ -926,11 +825,6 @@ public:
             static_assert(alignof(ShadowData) == alignof(ComputedValuesFFI::ComputedShadow));
             return { reinterpret_cast<ShadowData const*>(box_shadows.pointer), box_shadows.length };
         }
-
-        bool operator==(EffectsValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct MaskValues : ComputedValuesFFI::MaskValues {
@@ -943,11 +837,6 @@ public:
         // https://drafts.fxtf.org/css-masking/#the-clip-path
         // TODO: Support basic shapes and geometry boxes.
         Optional<URL> clip_path_value() const;
-
-        bool operator==(MaskValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct TextResetValues : ComputedValuesFFI::TextResetValues {
@@ -958,11 +847,6 @@ public:
             static_assert(sizeof(TextDecorationLine) == sizeof(u8));
             return { reinterpret_cast<TextDecorationLine const*>(text_decoration_lines.pointer), text_decoration_lines.length };
         }
-
-        bool operator==(TextResetValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct ContentValues : ComputedValuesFFI::ContentValues {
@@ -970,11 +854,6 @@ public:
 
         NonnullRefPtr<StyleValue const> computed_content_value() const;
         bool content_is_normal() const;
-
-        bool operator==(ContentValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct TransformValues : public ComputedValuesFFI::TransformValues {
@@ -1045,10 +924,6 @@ public:
                 return {};
             return CSSPixels::from_raw(perspective_px);
         }
-        bool operator==(TransformValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
 
     private:
         static RefPtr<TransformationStyleValue const> transformation_value(ComputedValuesFFI::ComputedStyleValueHandle const& handle)
@@ -1065,11 +940,6 @@ public:
 
         Color background_color_value() const { return Color::from_bgra(background_color); }
         Vector<RefPtr<AbstractImageStyleValue const>> background_images_value() const;
-
-        bool operator==(BackgroundValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct BorderValues : ComputedValuesFFI::BorderValues {
@@ -1080,20 +950,10 @@ public:
         BorderData const& border_right_value() const { return reinterpret_cast<BorderData const&>(border_right); }
         BorderData const& border_bottom_value() const { return reinterpret_cast<BorderData const&>(border_bottom); }
         RefPtr<AbstractImageStyleValue const> border_image_source_value() const;
-
-        bool operator==(BorderValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct AlignmentValues : ComputedValuesFFI::AlignmentValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::AlignmentValues);
-
-        bool operator==(AlignmentValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct MiscResetValues : ComputedValuesFFI::MiscResetValues {
@@ -1101,29 +961,14 @@ public:
 
         Optional<Utf16FlyString> view_transition_name_value() const;
         ScrollSnapStrictness scroll_snap_strictness_value() const { return static_cast<ScrollSnapStrictness>(scroll_snap_strictness); }
-
-        bool operator==(MiscResetValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct SizingValues : ComputedValuesFFI::SizingValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::SizingValues);
-
-        bool operator==(SizingValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct SurroundValues : ComputedValuesFFI::SurroundValues {
         static constexpr size_t style_group_index = to_underlying(StyleGroupIndex::SurroundValues);
-
-        bool operator==(SurroundValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
     struct BoxValues : ComputedValuesFFI::BoxValues {
@@ -1133,11 +978,6 @@ public:
         Float float_value() const { return static_cast<Float>(float_); }
         Clear clear_value() const { return static_cast<Clear>(clear); }
         Positioning position_value() const { return static_cast<Positioning>(position); }
-
-        bool operator==(BoxValues const& other) const
-        {
-            return ComputedValuesFFI::rust_style_group_payloads_equal(style_group_index, this, &other);
-        }
     };
 
 private:
@@ -1210,8 +1050,6 @@ private:
     bool m_depends_on_viewport_metrics { false };
     bool m_font_metrics_depend_on_viewport_metrics { false };
     bool m_in_display_none_subtree { false };
-    bool m_highlight_colors_authored { false };
-    bool m_highlight_color_is_current_color { false };
     bool m_is_style_record_view { false };
 };
 
@@ -1268,61 +1106,6 @@ private:
 public:
     void set_animated_properties(AnimatedProperties const*);
 
-    void set_color(Color color)
-    {
-        if (m_values.m_inherited.text->color_value() == color)
-            return;
-        m_values.m_inherited.text.access().color = color.value();
-    }
-    void set_color_scheme(PreferredColorScheme color_scheme)
-    {
-        if (m_values.m_inherited.ui->color_scheme_value() == color_scheme)
-            return;
-        m_values.m_inherited.ui.access().color_scheme = to_underlying(color_scheme);
-    }
-    void set_text_align(TextAlign text_align)
-    {
-        if (m_values.m_inherited.text->text_align_value() == text_align)
-            return;
-        m_values.m_inherited.text.access().text_align = to_underlying(text_align);
-    }
-    void set_letter_spacing(CSSPixels value)
-    {
-        if (m_values.m_inherited.text->letter_spacing_value() == value)
-            return;
-        m_values.m_inherited.text.access().letter_spacing = value;
-    }
-    void set_display(Display value)
-    {
-        if (m_values.display() == value)
-            return;
-        m_values.m_noninherited.box.access().display = to_ffi_display(value);
-    }
-    void set_display_before_box_type_transformation(Display value)
-    {
-        if (m_values.display_before_box_type_transformation() == value)
-            return;
-        m_values.m_noninherited.box.access().display_before_box_type_transformation = to_ffi_display(value);
-    }
-    void set_rotate(RefPtr<TransformationStyleValue const> value)
-    {
-        if (m_values.rotate() == value)
-            return;
-        TransformValues::set_transformation(m_values.m_noninherited.transform.access().rotate, value.ptr());
-    }
-    void set_scale(RefPtr<TransformationStyleValue const> value)
-    {
-        if (m_values.scale() == value)
-            return;
-        TransformValues::set_transformation(m_values.m_noninherited.transform.access().scale, value.ptr());
-    }
-    void set_translate(RefPtr<TransformationStyleValue const> value)
-    {
-        if (m_values.translate() == value)
-            return;
-        TransformValues::set_transformation(m_values.m_noninherited.transform.access().translate, value.ptr());
-    }
-
     ComputedValues& m_values;
 };
 
@@ -1351,12 +1134,7 @@ public:
         m_values->m_depends_on_viewport_metrics = values.m_depends_on_viewport_metrics;
         m_values->m_font_metrics_depend_on_viewport_metrics = values.m_font_metrics_depend_on_viewport_metrics;
         m_values->m_in_display_none_subtree = values.m_in_display_none_subtree;
-        m_values->m_highlight_colors_authored = values.m_highlight_colors_authored;
-        m_values->m_highlight_color_is_current_color = values.m_highlight_color_is_current_color;
     }
-
-    Mutator* operator->() { return &m_mutator; }
-    Mutator const* operator->() const { return &m_mutator; }
 
     NonnullRefPtr<ComputedValues const> build() && { return move(m_values); }
 
