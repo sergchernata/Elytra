@@ -17,6 +17,7 @@
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/Bindings/MessagePort.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/HTML/PromiseRejectionEvent.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
@@ -184,6 +185,9 @@ void UniversalGlobalScopeMixin::notify_about_rejected_promises(Badge<EventLoop>)
             };
 
             auto promise_rejection_event = PromiseRejectionEvent::create(realm.global_object(), HTML::EventNames::unhandledrejection, event_init);
+            // Elytra: A world's unhandled rejections are for its own listeners.
+            if (auto& promise_realm = promise->shape().realm(); promise_realm.host_defined())
+                promise_rejection_event->restrict_to_world(Bindings::host_defined_wrapper_world(promise_realm));
 
             bool not_handled = global.dispatch_event(*promise_rejection_event);
 

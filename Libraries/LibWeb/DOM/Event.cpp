@@ -365,3 +365,19 @@ JS::Value current_target_value(JS::Realm& realm, DOM::Event const& event)
 }
 
 }
+
+namespace Web::DOM {
+
+// Elytra: see the header.
+void Event::restrict_to_world(Bindings::WrapperWorld& world)
+{
+    m_world = world;
+    m_is_restricted_to_world = true;
+}
+
+bool Event::can_be_dispatched_in_world(Bindings::WrapperWorld const* world) const
+{
+    return !m_is_restricted_to_world || (world && m_world.ptr().ptr() == world);
+}
+
+}

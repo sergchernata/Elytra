@@ -207,7 +207,8 @@ public:
     u32 length();
     GC::Ptr<WindowProxy const> top() const;
     JS::Value opener() const;
-    WebIDL::ExceptionOr<void> set_opener(JS::Value);
+    // Elytra: Takes the realm of the receiver, whose world's global the value is set on.
+    WebIDL::ExceptionOr<void> set_opener(JS::Realm&, JS::Value);
     GC::Ptr<WindowProxy const> parent() const;
     GC::Ptr<DOM::Element const> frame_element() const;
     WebIDL::ExceptionOr<GC::Ptr<WindowProxy>> open(Optional<Utf16String> const& url, Optional<Utf16String> const& target, Optional<Utf16String> const& features);
@@ -284,6 +285,7 @@ public:
     [[nodiscard]] GC::Ref<External> external();
 
     [[nodiscard]] GC::Ref<CustomElementRegistry> custom_elements();
+    GC::Ptr<CustomElementRegistry> custom_elements_for_world(JS::Realm&);
 
     HighResolutionTime::DOMHighResTimeStamp last_activation_timestamp() const { return m_last_activation_timestamp; }
     void set_last_activation_timestamp(HighResolutionTime::DOMHighResTimeStamp timestamp) { m_last_activation_timestamp = timestamp; }

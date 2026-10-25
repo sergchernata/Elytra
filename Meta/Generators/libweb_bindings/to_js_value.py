@@ -613,6 +613,13 @@ def frozen_array_to_javascript_value(
     return sequence_to_javascript_value(frozen_array_type, value, includes, context, realm, wrapper_world, freeze=True)
 
 
+# Elytra: What script of another world stored (an any or object value, a callback) mustn't lead this world's script to
+# that world; see Bindings::value_for_world().
+def value_for_world(expression: str, includes: GeneratedIncludes, realm: str) -> str:
+    includes.add("LibWeb/Bindings/WrapperWorld.h")
+    return f"Bindings::value_for_world({realm}, JS::Value({expression}))"
+
+
 def to_javascript_value(
     idl_type: IDLType,
     value: str,
@@ -633,9 +640,9 @@ def to_javascript_value(
     if type_name == "undefined":
         return undefined_to_javascript_value()
     if type_name == "any":
-        return any_to_javascript_value(value)
+        return value_for_world(any_to_javascript_value(value), includes, realm)
     if type_name == "object":
-        return object_to_javascript_value(value)
+        return value_for_world(object_to_javascript_value(value), includes, realm)
     if is_buffer_source_type(idl_type):
         return buffer_source_to_javascript_value(idl_type, value, includes)
     if type_name == "boolean":
@@ -679,7 +686,9 @@ def to_javascript_value(
         return dictionary_to_javascript_value(idl_type, value, includes, context, realm)
 
     if type_name == "Promise":
-        return promise_to_javascript_value(value, includes)
+        # Elytra: A promise another world's realm made is handed to this one as this world's promise of its result.
+        includes.add("LibWeb/Bindings/WrapperWorld.h")
+        return f"Bindings::promise_for_world({realm}, *{promise_to_javascript_value(value, includes)})"
 
     interface_like_type = interface_like_type_for_idl_type(idl_type, context)
     if interface_like_type is not None:
@@ -687,10 +696,10 @@ def to_javascript_value(
 
     interface = context.interface(idl_type)
     if interface is not None and interface.is_callback_interface:
-        return callback_interface_to_javascript_value(value, includes, interface)
+        return value_for_world(callback_interface_to_javascript_value(value, includes, interface), includes, realm)
 
     if context.callback_function(idl_type) is not None:
-        return callback_function_to_javascript_value(value, includes)
+        return value_for_world(callback_function_to_javascript_value(value, includes), includes, realm)
 
     if isinstance(idl_type, IDLParameterizedType) and type_name == "sequence":
         return sequence_to_javascript_value(idl_type, value, includes, context, realm, wrapper_world)

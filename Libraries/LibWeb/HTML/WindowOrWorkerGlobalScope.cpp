@@ -24,6 +24,7 @@
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/PrimitiveString.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibJS/Script.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/MessagePort.h>
 #include <LibWeb/Bindings/Wrappable.h>
@@ -847,10 +848,16 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
     // 7. Let initiating script be the active script.
     auto const* initiating_script = Web::Bindings::active_script();
 
+    // Elytra: A string an isolated world's script (an extension's content script) passes is compiled in that world,
+    //         as Chrome does, not in the main one.
+    GC::Ptr<JS::Realm> isolated_world_realm;
+    if (function_or_string.has<Utf16String>() && Bindings::current_non_main_world())
+        isolated_world_realm = this_impl().vm().current_realm();
+
     // FIXME: 8. Let uniqueHandle be null.
 
     // 9. Let task be a task that runs the following substeps:
-    auto task = GC::create_function(GC::Heap::the(), Function<void()>([this, handler = move(function_or_string), timeout, arguments = move(arguments), repeat, id, initiating_script]() {
+    auto task = GC::create_function(GC::Heap::the(), Function<void()>([this, handler = move(function_or_string), timeout, arguments = move(arguments), repeat, id, initiating_script, isolated_world_realm]() {
         // FIXME: 1. Assert: uniqueHandle is a unique internal value, not null.
 
         // 2. If id does not exist in global's map of setTimeout and setInterval IDs, then abort these steps.
@@ -874,6 +881,23 @@ WebIDL::ExceptionOr<i32> WindowOrWorkerGlobalScopeMixin::run_timer_initializatio
             // 6. Otherwise:
             [&](Utf16String const& source) {
                 // 1. Assert: handler is a string.
+
+                // Elytra: See isolated_world_realm.
+                if (isolated_world_realm) {
+                    auto& realm = *isolated_world_realm;
+                    if (Bindings::host_defined_wrapper_world(realm).is_detached())
+                        return;
+                    TemporaryExecutionContext execution_context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
+                    auto script = JS::Script::parse(source, realm);
+                    if (script.is_error()) {
+                        dbgln("setTimeout: the handler doesn't parse: {}", script.error().first().to_utf16_string());
+                        return;
+                    }
+                    auto result = realm.vm().run(script.value());
+                    if (result.is_throw_completion())
+                        report_an_exception(realm.global_object(), result.error_value());
+                    return;
+                }
 
                 // 2. Let settings object be global's relevant settings object.
                 auto& settings_object = relevant_settings_object(*this);
@@ -1652,6 +1676,9 @@ void WindowOrWorkerGlobalScopeMixin::notify_about_rejected_promises(Badge<EventL
             };
 
             auto promise_rejection_event = PromiseRejectionEvent::create(realm.global_object(), HTML::EventNames::unhandledrejection, event_init);
+            // Elytra: A world's unhandled rejections are for its own listeners.
+            if (auto& promise_realm = promise->shape().realm(); promise_realm.host_defined())
+                promise_rejection_event->restrict_to_world(Bindings::host_defined_wrapper_world(promise_realm));
 
             bool not_handled = global.dispatch_event(*promise_rejection_event);
 

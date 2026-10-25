@@ -259,7 +259,8 @@ JS::Value window_named_item_value(WrapperWorld& wrapper_world, JS::Realm& realm,
 {
     return window.named_item(name).visit(
         [](Empty) -> JS::Value { return JS::js_undefined(); },
-        [](GC::Ref<HTML::WindowProxy> const& value) -> JS::Value { return &value->object(); },
+        // Elytra: A named frame's WindowProxy for the world that asks.
+        [&realm](GC::Ref<HTML::WindowProxy> const& value) -> JS::Value { return Bindings::value_for_world(realm, &value->object()); },
         [&wrapper_world, &realm](GC::Ref<DOM::Element> const& value) -> JS::Value { return wrap(wrapper_world, realm, value); },
         [&wrapper_world, &realm](GC::Ref<DOM::HTMLCollection> const& value) -> JS::Value { return wrap(wrapper_world, realm, value); });
 }
@@ -1433,7 +1434,7 @@ JS::Value Window::opener() const
     return &opener_window_proxy->object();
 }
 
-WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
+WebIDL::ExceptionOr<void> Window::set_opener(JS::Realm& realm, JS::Value value)
 {
     // 1. If the given value is null and this's browsing context is non-null, then set this's browsing context's opener browsing context to null.
     auto browsing_context = this->browsing_context();
@@ -1446,7 +1447,8 @@ WebIDL::ExceptionOr<void> Window::set_opener(JS::Value value)
     // 2. If the given value is non-null, then perform ? DefinePropertyOrThrow(this, "opener", { [[Value]]: the given value, [[Writable]]: true, [[Enumerable]]: true, [[Configurable]]: true }).
     if (!value.is_null()) {
         JS::PropertyDescriptor descriptor { .value = value, .writable = true, .enumerable = true, .configurable = true };
-        TRY(relevant_global_object(*this).define_property_or_throw(vm().names.opener, descriptor));
+        // Elytra: On the global of the world that set it (as for a [Replaceable] attribute), not the main world's.
+        TRY(Bindings::platform_object_for_window(*this, realm).define_property_or_throw(vm().names.opener, descriptor));
     }
 
     return {};
@@ -2280,6 +2282,14 @@ GC::Ref<CustomElementRegistry> Window::custom_elements()
 
     // 2. Return this's associated Document's custom element registry.
     return *registry;
+}
+
+// Elytra: As in Chrome, other worlds than the main one (an extension's content scripts) have no custom elements.
+GC::Ptr<CustomElementRegistry> Window::custom_elements_for_world(JS::Realm& realm)
+{
+    if (realm.host_defined() && !Bindings::host_defined_wrapper_world(realm).is_main_world())
+        return nullptr;
+    return custom_elements();
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#document-tree-child-navigable-target-name-property-set

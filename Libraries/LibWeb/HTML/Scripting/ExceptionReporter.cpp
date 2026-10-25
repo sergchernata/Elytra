@@ -16,6 +16,7 @@
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
@@ -120,7 +121,11 @@ void report_an_exception(JS::Object& global, JS::Value exception, OmitError omit
         event_init.colno = error_info.colno;
         event_init.error = error_info.error;
 
-        not_handled = window_or_worker->this_impl().dispatch_event(ErrorEvent::create(EventNames::error, event_init, HighResolutionTime::current_high_resolution_time(global)));
+        auto error_event = ErrorEvent::create(EventNames::error, event_init, HighResolutionTime::current_high_resolution_time(global));
+        // Elytra: A world's uncaught errors are for its own listeners.
+        if (auto& global_realm = global.shape().realm(); global_realm.host_defined())
+            error_event->restrict_to_world(Bindings::host_defined_wrapper_world(global_realm));
+        not_handled = window_or_worker->this_impl().dispatch_event(error_event);
 
         // 3. Set global's in error reporting mode to false.
         window_or_worker->set_in_error_reporting_mode(false);

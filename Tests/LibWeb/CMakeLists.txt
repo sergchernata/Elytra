@@ -37,6 +37,7 @@ set(TEST_SOURCES
     TestWebIDLBuffers.cpp
     TestWindowProxyWorld.cpp
     TestWorldCallback.cpp
+    TestWorldIsolation.cpp
     TestWrapperWorld.cpp
 )
 
@@ -94,6 +95,12 @@ target_sources(TestWindowProxyWorld PRIVATE
     ${ladybird_SOURCE_DIR}/Libraries/LibWeb/WebIDL/CallbackType.cpp
 )
 target_link_libraries(TestWindowProxyWorld PRIVATE LibGC LibJS LibWeb)
+# Elytra: what scripts store on DOM objects doesn't cross between worlds.
+target_sources(TestWorldIsolation PRIVATE
+    ${ladybird_SOURCE_DIR}/Libraries/LibWeb/DOM/IDLEventListener.cpp
+    ${ladybird_SOURCE_DIR}/Libraries/LibWeb/WebIDL/CallbackType.cpp
+)
+target_link_libraries(TestWorldIsolation PRIVATE LibCore LibGC LibGfx LibJS LibWeb)
 
 add_subdirectory("test-web")
 

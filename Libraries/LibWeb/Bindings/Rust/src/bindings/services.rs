@@ -67,6 +67,10 @@ unsafe extern "C" {
 
     /// A promise rejected with the reason, in the realm of the this value of an operation that ran in the current
     /// realm: the realm of the object, or the current realm for a value that is not an object.
+    /// Elytra: The value as the world of the realm has it, as Web::Bindings::value_for_world() makes it: what script of
+    /// another world stored, or what the engine made in another world's realm, mustn't lead to that world.
+    pub(crate) fn web_bindings_value_for_world(realm: *mut c_void, value: u64) -> u64;
+
     pub(crate) fn web_bindings_rejected_promise(
         current_realm: *mut c_void,
         this_value: u64,

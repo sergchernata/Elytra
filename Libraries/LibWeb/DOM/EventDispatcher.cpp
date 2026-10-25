@@ -75,11 +75,15 @@ bool EventDispatcher::inner_invoke(Event& event, EventTarget::ClonedEventListene
         if (phase == Event::Phase::BubblingPhase && listener->capture)
             continue;
 
+        auto& callback = listener->callback->callback();
+
+        // Elytra: An event about one world's script doesn't go to other worlds' listeners.
+        if (!event.can_be_dispatched_in_world(Bindings::callback_world(callback)))
+            continue;
+
         // 5. If listener’s once is true, then remove an event listener given event’s currentTarget attribute value and listener.
         if (listener->once)
             event.current_target()->remove_an_event_listener(*listener);
-
-        auto& callback = listener->callback->callback();
 
         // 6. Let targetGlobal be event's currentTarget's node document's relevant global object if event's currentTarget
         //    is a node; otherwise event's currentTarget's relevant global object.

@@ -114,12 +114,14 @@ JS::Realm& WindowProxy::realm() const
     return m_object->shape().realm();
 }
 
-static JS::Value active_window_proxy_value(Navigable& navigable)
+// Elytra: The WindowProxy of a child navigable for the world of this one (frames[0] from a content script is that
+//         world's), which the realm of this one stands for.
+static JS::Value active_window_proxy_value(Navigable& navigable, JS::Realm& realm)
 {
     auto window_proxy = navigable.active_window_proxy();
     if (!window_proxy)
         return JS::js_null();
-    return &window_proxy->object();
+    return Bindings::value_for_world(realm, &window_proxy->object());
 }
 
 // 7.2.3.1 [[GetPrototypeOf]] ( ), https://html.spec.whatwg.org/multipage/nav-history-apis.html#windowproxy-getprototypeof
@@ -180,7 +182,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
             // NOTE: children are coming sorted in required order from document_tree_child_navigables()
 
             // 2. Set value to children[index]'s active WindowProxy.
-            value = active_window_proxy_value(*children[index]);
+            value = active_window_proxy_value(*children[index], realm());
         }
 
         // 5. If value is undefined, then:
@@ -217,7 +219,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> WindowProxy::internal_ge
             return TRY(cross_origin_property_fallback(vm, property_key));
 
         // 1. Let value be the active WindowProxy of the named object of W with the name P.
-        auto value = active_window_proxy_value(*navigable.value());
+        auto value = active_window_proxy_value(*navigable.value(), realm());
 
         // 2. Return PropertyDescriptor { [[Value]]: value, [[Enumerable]]: false, [[Writable]]: false, [[Configurable]]: true }.
         // NOTE: The reason the property descriptors are non-enumerable, despite this mismatching the same-origin behavior, is for compatibility with existing web content. See issue #3183 for details.

@@ -580,11 +580,12 @@ def write_attribute_getter(
             {cache_setter}
         return js_value;
     }}()"""
-    return_value = (
-        "R"
-        if "ReturnsJSValue" in attribute.extended_attributes
-        else to_javascript_value(attribute.type, "R", includes, context, getter_realm_argument)
-    )
+    if "ReturnsJSValue" in attribute.extended_attributes:
+        # Elytra: The value may be what script of another world stored; see Bindings::value_for_world().
+        includes.add("LibWeb/Bindings/WrapperWorld.h")
+        return_value = f"Bindings::value_for_world({getter_realm_argument}, R)"
+    else:
+        return_value = to_javascript_value(attribute.type, "R", includes, context, getter_realm_argument)
 
     if attribute_type_is_promise:
         if getter_prelude or getter_cache_check:
@@ -665,6 +666,7 @@ def write_attribute_getter(
     if window_member_is_cross_origin_accessible(interface, attribute.name, "getter"):
         out.write(f"    {the_remote_window(includes, 'js_value')}\n")
         impl_from_js_value = f"remote_window ? nullptr : {impl_from_js_value}"
+    final_return_value = cached_return_value or return_value
     out.write(
         f"""    idl_object = {impl_from_js_value};
     [[maybe_unused]] auto& this_object_realm = this_value_realm(realm, js_value);
@@ -672,7 +674,7 @@ def write_attribute_getter(
 {getter_prelude}
     {getter_steps}
 {getter_cache_check}
-    return {cached_return_value or return_value};
+    return {final_return_value};
 }}
 
 """

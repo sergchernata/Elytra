@@ -8,7 +8,15 @@
 
 #include <AK/Optional.h>
 #include <LibJS/Runtime/VM.h>
+#include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
+
+namespace Web::Bindings {
+
+// Elytra: see WrapperWorld.h.
+WEB_API JS::Completion completion_for_world(JS::Realm&, JS::Completion);
+
+}
 
 namespace Web::WebIDL {
 
@@ -79,7 +87,8 @@ ALWAYS_INLINE JS::Completion exception_to_throw_completion(JS::VM& vm, JS::Realm
             return throw_completion(realm, exception);
         },
         [&](JS::Completion const& completion) {
-            return completion;
+            // Elytra: What the steps threw may be another world's (an abort reason, say): it's thrown as this one's.
+            return Bindings::completion_for_world(realm, completion);
         });
 }
 
@@ -106,6 +115,12 @@ JS::ThrowCompletionOr<Ret> throw_dom_exception_if_needed(JS::VM& vm, JS::Realm& 
     } else if constexpr (IsVoid<T>) {
         fn();
         return JS::js_undefined();
+    } else if constexpr (IsThrowCompletionOr<T>) {
+        // Elytra: As exception_to_throw_completion() does.
+        auto result = fn();
+        if (result.is_error())
+            return Bindings::completion_for_world(realm, result.release_error());
+        return result;
     } else {
         return fn();
     }

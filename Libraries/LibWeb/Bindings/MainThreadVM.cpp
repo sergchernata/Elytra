@@ -245,6 +245,9 @@ void initialize_main_thread_vm(HTML::AgentType type)
                         /* .reason = */ promise.result(),
                     };
                     auto promise_rejection_event = HTML::PromiseRejectionEvent::create(realm.global_object(), HTML::EventNames::rejectionhandled, event_init);
+                    // Elytra: A world's rejections are for its own listeners.
+                    if (auto& promise_realm = promise.shape().realm(); promise_realm.host_defined())
+                        promise_rejection_event->restrict_to_world(host_defined_wrapper_world(promise_realm));
                     global.dispatch_event(promise_rejection_event);
                 }));
                 break;

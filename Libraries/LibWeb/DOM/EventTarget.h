@@ -10,6 +10,7 @@
 #include <AK/Utf16FlyString.h>
 #include <AK/Vector.h>
 #include <LibGC/RootVector.h>
+#include <LibGC/Weak.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/DOM/DOMEventListener.h>
@@ -98,6 +99,15 @@ private:
         // https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-map
         // Spec Note: The order of the entries of event handler map could be arbitrary. It is not observable through any algorithms that operate on the map.
         HashMap<Utf16FlyString, GC::Ref<HTML::EventHandler>> event_handler_map;
+
+        // Elytra: As in Chrome, each world has event handlers of its own; the map above is the main world's. Another
+        //         world's handler is never seen by, nor replaced from, a world other than the one that set it.
+        struct OtherWorldEventHandler {
+            GC::Weak<Bindings::WrapperWorld> world;
+            Utf16FlyString name;
+            GC::Ref<HTML::EventHandler> event_handler;
+        };
+        Vector<OtherWorldEventHandler> other_world_event_handlers;
     };
 
     Data& ensure_data();
@@ -107,6 +117,11 @@ private:
     void activate_event_handler(Utf16FlyString const& name, HTML::EventHandler& event_handler);
     void deactivate_event_handler(Utf16FlyString const& name);
     JS::ThrowCompletionOr<void> process_event_handler_for_event(Utf16FlyString const& name, Event& event);
+    JS::ThrowCompletionOr<void> process_event_handler_callback(WebIDL::CallbackType&, Event&);
+
+    // Elytra: Event handlers of worlds other than the main one.
+    Data::OtherWorldEventHandler* find_other_world_event_handler(Bindings::WrapperWorld const&, Utf16FlyString const& name);
+    void set_other_world_event_handler(Bindings::WrapperWorld&, Utf16FlyString const& name, GC::Ptr<WebIDL::CallbackType>);
 };
 
 bool is_window_reflecting_body_element_event_handler(Utf16FlyString const& name);

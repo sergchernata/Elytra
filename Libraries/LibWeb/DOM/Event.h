@@ -196,6 +196,11 @@ public:
     virtual bool is_mouse_event() const { return false; }
     virtual bool is_pointer_event() const { return false; }
 
+    // Elytra: As in Chrome, an event about one world's script (its uncaught error, its unhandled rejection) only goes
+    //         to that world's listeners.
+    void restrict_to_world(Bindings::WrapperWorld&);
+    bool can_be_dispatched_in_world(Bindings::WrapperWorld const*) const;
+
 protected:
     void initialize_event(Utf16FlyString const&, bool, bool);
 
@@ -221,6 +226,8 @@ private:
     bool m_dispatch { false };
 
     bool m_is_trusted { false };
+    bool m_is_restricted_to_world { false };
+    GC::Weak<Bindings::WrapperWorld> m_world;
 
     Path m_path;
     TouchTargetList m_touch_target_list;

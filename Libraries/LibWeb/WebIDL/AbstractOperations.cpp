@@ -17,6 +17,7 @@
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
@@ -182,6 +183,32 @@ static JS::Completion refuse_callback_from_inactive_window(JS::Realm& realm)
     return throw_completion(realm, NotSupportedError::create(realm, "Cannot run a callback from a window whose document is not fully active"_utf16));
 }
 
+// Elytra: A callback's arguments, and its this value, are its own world's: what the engine made for them (records, a
+//         promise, wrappers) may be the main world's, which a page that replaced its builtins could use to get hold of
+//         the callback (and through it, of the callback's world). See Bindings::value_for_world().
+static bool arguments_need_world_conversion(JS::Realm& realm, Optional<JS::Value> const& this_argument, ReadonlySpan<JS::Value> args)
+{
+    auto is_of_another_realm = [&](JS::Value value) { return value.is_object() && &value.as_object().shape().realm() != &realm; };
+    if (this_argument.has_value() && is_of_another_realm(*this_argument))
+        return true;
+    for (auto value : args) {
+        if (is_of_another_realm(value))
+            return true;
+    }
+    return false;
+}
+
+static GC::RootVector<JS::Value> arguments_for_world(JS::Realm& realm, Optional<JS::Value>& this_argument, ReadonlySpan<JS::Value> args)
+{
+    if (this_argument.has_value())
+        this_argument = Bindings::value_for_world(realm, *this_argument);
+    GC::RootVector<JS::Value> converted;
+    converted.ensure_capacity(args.size());
+    for (auto value : args)
+        converted.unchecked_append(Bindings::value_for_world(realm, value));
+    return converted;
+}
+
 // https://webidl.spec.whatwg.org/#call-a-user-objects-operation
 JS::Completion call_user_object_operation(CallbackType& callback, Utf16FlyString const& operation_name, Optional<JS::Value> this_argument, ReadonlySpan<JS::Value> args, RefuseCallbackFromInactiveWindow refuse_from_inactive_window)
 {
@@ -251,6 +278,13 @@ JS::Completion call_user_object_operation(CallbackType& callback, Utf16FlyString
 
     // FIXME: 11. Let esArgs be the result of converting args to an ECMAScript arguments list. If this throws an exception, set completion to the completion value representing the thrown exception and jump to the step labeled return.
     //        For simplicity, we currently make the caller do this. However, this means we can't throw exceptions at this point like the spec wants us to.
+
+    // Elytra: See arguments_for_world().
+    Optional<GC::RootVector<JS::Value>> converted_args;
+    if (arguments_need_world_conversion(realm, this_argument, args)) {
+        converted_args = arguments_for_world(realm, this_argument, args);
+        args = converted_args->span();
+    }
 
     // 12. Let callResult be Call(X, thisArg, esArgs).
     auto call_result = JS::call(object->vm(), as<JS::FunctionObject>(*actual_function_object), this_argument.value(), args);
@@ -339,6 +373,13 @@ static auto invoke_callback_impl(CallbackType& callback, Optional<JS::Value> thi
 
     // FIXME: 10. Let jsArgs be the result of converting args to a JavaScript arguments list.
     //            If this throws an exception, set completion to the completion value representing the thrown exception and jump to the step labeled return.
+
+    // Elytra: See arguments_for_world().
+    Optional<GC::RootVector<JS::Value>> converted_args;
+    if (arguments_need_world_conversion(realm, this_argument, args)) {
+        converted_args = arguments_for_world(realm, this_argument, args);
+        args = converted_args->span();
+    }
 
     // 11. Let callResult be Call(F, thisArg, jsArgs).
     auto call_result = JS::call(function_object->vm(), as<JS::FunctionObject>(*function_object), this_argument.value(), args);
@@ -465,6 +506,14 @@ JS::Completion construct(CallbackType& callable, ReadonlySpan<JS::Value> args)
 
     // FIXME: 9. Let jsArgs be the result of converting args to a JavaScript arguments list. If this throws an exception, set completion to the completion value representing the thrown exception and jump to the step labeled return.
     //        For simplicity, we currently make the caller do this. However, this means we can't throw exceptions at this point like the spec wants us to.
+
+    // Elytra: See arguments_for_world().
+    Optional<GC::RootVector<JS::Value>> converted_args;
+    Optional<JS::Value> no_this_argument;
+    if (arguments_need_world_conversion(realm, no_this_argument, args)) {
+        converted_args = arguments_for_world(realm, no_this_argument, args);
+        args = converted_args->span();
+    }
 
     // 10. Let callResult be Completion(Construct(F, jsArgs)).
     auto call_result = JS::construct(function_object->vm(), as<JS::FunctionObject>(*function_object), args);

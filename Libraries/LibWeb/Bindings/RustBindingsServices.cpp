@@ -90,6 +90,7 @@ void* web_bindings_wrapper_world(void* realm, bool* is_main_world);
 JSObject* web_bindings_rust_wrapper_for(void* realm, void* cell);
 void web_bindings_set_rust_wrapper(void* realm, void* cell, JSObject* wrapper);
 JSObject* web_bindings_rejected_promise(void* current_realm, JSValue this_value, JSValue reason);
+JSValue web_bindings_value_for_world(void* realm, JSValue value);
 void web_bindings_queue_a_microtask(void* realm, JSObject* function);
 void* web_bindings_create_callback_function(JSObject* callable, bool returns_promise);
 JSCompletion web_bindings_invoke_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments);
@@ -293,6 +294,12 @@ JSObject* web_bindings_rejected_promise(void* current_realm, JSValue this_value,
     auto& promise_realm = this_value_realm(realm, promise_realm_this_value);
     auto promise = WebIDL::create_rejected_promise(promise_realm, JS::HostABI::value_from_abi(reason));
     return JS::HostABI::object_to_abi(promise->promise().ptr());
+}
+
+// Elytra: See Bindings::value_for_world().
+JSValue web_bindings_value_for_world(void* realm, JSValue value)
+{
+    return JS::HostABI::value_to_abi(value_for_world(*static_cast<JS::Realm*>(realm), JS::HostABI::value_from_abi(value)));
 }
 
 void web_bindings_queue_a_microtask(void* realm, JSObject* function)
