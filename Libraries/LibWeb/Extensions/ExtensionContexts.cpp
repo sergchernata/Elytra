@@ -187,6 +187,24 @@ static InstalledExtension const* find_extension(StringView id)
     return nullptr;
 }
 
+Vector<String> content_security_policies_for(StringView extension_id)
+{
+    auto const* extension = find_extension(extension_id);
+    if (!extension)
+        return {};
+
+    // Chrome's (csp_info.cc).
+    auto declared = "script-src 'self';"_string;
+    if (extension->manifest.is_object()) {
+        auto const& manifest = extension->manifest.as_object();
+        if (auto policy = manifest.get_object("content_security_policy"sv); policy.has_value()) {
+            if (auto pages = policy->get_string("extension_pages"sv); pages.has_value())
+                declared = *pages;
+        }
+    }
+    return { move(declared), "script-src 'self' 'wasm-unsafe-eval' 'inline-speculation-rules'; object-src 'self';"_string };
+}
+
 static String const& api_source()
 {
     static String& source = *new String([] {

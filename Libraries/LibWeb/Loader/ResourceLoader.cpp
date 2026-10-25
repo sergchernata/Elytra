@@ -23,6 +23,7 @@
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Loader/LoadRequest.h>
+#include <LibWeb/Extensions/ExtensionContexts.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
@@ -184,12 +185,16 @@ static NonnullRefPtr<HTTP::HeaderList> response_headers_for_file(StringView path
 
 // An extension's file. Its pages and scripts load one another, and web pages load what it makes web accessible (the
 // browser refuses the rest), so CORS requests may read it.
-static NonnullRefPtr<HTTP::HeaderList> response_headers_for_extension_file(StringView path)
+static NonnullRefPtr<HTTP::HeaderList> response_headers_for_extension_file(StringView extension_id, StringView path)
 {
-    return HTTP::HeaderList::create({
+    auto headers = HTTP::HeaderList::create({
         { "Access-Control-Allow-Origin"sv, "*"sv },
         { "Content-Type"sv, Core::guess_mime_type_based_on_filename(path) },
     });
+    // The extension's pages and workers run under its policies.
+    for (auto const& policy : Extensions::content_security_policies_for(extension_id))
+        headers->append({ "Content-Security-Policy"sv, policy.to_byte_string() });
+    return headers;
 }
 
 static void log_request_start(LoadRequest const& request)
@@ -319,7 +324,7 @@ void ResourceLoader::handle_file_load_request(LoadRequest& request, FileHandler 
         FileLoadResult load_result {
             .data = maybe_data.value().bytes(),
             .response_headers = is_extension_file
-                ? response_headers_for_extension_file(request.url()->file_path())
+                ? response_headers_for_extension_file(request.url()->serialized_host(), request.url()->file_path())
                 : response_headers_for_file(request.url()->file_path(), st_or_error.value().st_mtime),
         };
         on_file(load_result);

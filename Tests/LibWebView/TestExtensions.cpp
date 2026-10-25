@@ -169,6 +169,17 @@ void content_scripts_stay_out_of_local_files_unless_allowed(WebView::HeadlessWeb
     CHECK(report.get_bool("untouched"sv).value_or(false));
 }
 
+// Extension pages run under the extension's CSP, and under Chrome's minimum whatever the manifest says.
+void extension_pages_have_their_content_security_policy(WebView::HeadlessWebView& view, WebView::ExtensionRegistry& registry)
+{
+    MUST(registry.load_unpacked(fixture("csp"sv)));
+    auto report = report_of(view, url("chrome-extension://kbhmgdahlmkgoidkomhgedeonohlkhmn/page.html"sv));
+    CHECK(!report.get_bool("inline"sv).value_or(true));
+    CHECK_EQ(string_in(report, "eval"sv), "blocked"sv);
+    CHECK_EQ(string_in(report, "wasm"sv), "compiled"sv);
+    CHECK_EQ(string_in(report, "image"sv), "blocked"sv);
+}
+
 }
 
 }
@@ -184,5 +195,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         extension_contexts_message_each_other(harness.view, harness.registry);
         content_scripts_run_in_their_own_world(harness.view, harness.registry, harness.directory);
         content_scripts_stay_out_of_local_files_unless_allowed(harness.view, harness.registry, harness.directory);
+        extension_pages_have_their_content_security_policy(harness.view, harness.registry);
     });
 }

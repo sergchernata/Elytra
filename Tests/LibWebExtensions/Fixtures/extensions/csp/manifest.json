@@ -1,0 +1,7 @@
+{
+    "manifest_version": 3,
+    "name": "CSP test extension",
+    "version": "1.0",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAneJiSFo7gBMKJZDgFfMmBGeT0E93+WjOlkODPAo6ZrjaRULbPhdk9Ck24Qh4WAnz3Q8zjk+xX0VY6GlHLWeC1Ctb/rWQL3F/GHycC2NxJPR9fhafKvpRWBIW7tzKw2Rc6fzxQIYZfMyyP6cnw1ZxEpTrrHVcifKmTfTT8WvYiIvRxDNeVzrNb/TYkmPfC6fSWk6pNTSPzoYwYvLRMygGrlsrMw+8fUNHljZc89F2jXCnLIt2qeBeAZCEZMUxwkA8Lc3MoAOOSWZ4tbF+j7kxnZwJX1GPiWW4HF+qsLZ0x/O46T2p5tnBYQSqu3E1Lttz+vHXMZbylIG/EkRdsMk8rwIDAQAB",
+    "content_security_policy": { "extension_pages": "script-src 'self' 'unsafe-eval'; object-src 'self'; img-src 'none'" }
+}

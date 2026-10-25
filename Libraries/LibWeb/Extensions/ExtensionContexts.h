@@ -8,6 +8,7 @@
 
 #include <AK/String.h>
 #include <AK/StringView.h>
+#include <AK/Vector.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/DocumentReadyState.h>
@@ -18,6 +19,10 @@ namespace Web::Extensions {
 
 // The installed extensions, as the browser describes them (WebView::ExtensionRegistry::serialize_for_renderers()).
 WEB_API void set_installed_extensions(StringView json);
+
+// The content security policies an installed extension's pages and workers run under: the manifest's (or Chrome's
+// default), and Chrome's minimum, which applies whatever the manifest says. Nothing for an extension that isn't installed.
+WEB_API Vector<String> content_security_policies_for(StringView extension_id);
 
 // A message from the browser to a context.
 WEB_API void deliver_message(u64 context_id, String const& message);
