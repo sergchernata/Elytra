@@ -321,6 +321,14 @@ QString describe(ImportSummary const& summary)
     return lines.join("\n");
 }
 
+// Space names and notes come from Arc's data (and spaces can be shared by others): never let Qt read them as rich text.
+static QMessageBox::StandardButton show_plain_message(QWidget* parent, QMessageBox::Icon icon, QString const& text, QMessageBox::StandardButtons buttons = QMessageBox::Ok)
+{
+    QMessageBox box(icon, "Import from Arc", text, buttons, parent);
+    box.setTextFormat(Qt::PlainText);
+    return static_cast<QMessageBox::StandardButton>(box.exec());
+}
+
 void run_import_dialog(QWidget* parent)
 {
     auto directory = default_arc_data_directory();
@@ -338,10 +346,10 @@ void run_import_dialog(QWidget* parent)
 
     auto result = import_from_arc(directory);
     if (result.is_error()) {
-        QMessageBox::warning(parent, "Import from Arc", QString("Import failed: %1").arg(qstring_from_ak_string(result.error().string_literal())));
+        show_plain_message(parent, QMessageBox::Warning, QString("Import failed: %1").arg(qstring_from_ak_string(result.error().string_literal())));
         return;
     }
-    QMessageBox::information(parent, "Import from Arc", describe(result.value()));
+    show_plain_message(parent, QMessageBox::Information, describe(result.value()));
 }
 
 }

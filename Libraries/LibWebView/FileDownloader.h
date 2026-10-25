@@ -173,6 +173,7 @@ private:
     u64 m_next_download_id { 0 };
 
     // Fork hook (Arc profiles): the session whose cookies each download uses, when not private-or-not's.
+    bool belongs_to_a_profile_session(u64 download_id) const; // Fork hook (Arc profiles)
     HashMap<u64, WeakPtr<BrowsingSession>> m_download_sessions;
     ErrorOr<NonnullRefPtr<Requests::RequestClient>> request_server_client_for(Download const&) const;
 };

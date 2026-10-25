@@ -28,7 +28,9 @@ DisplayUrl display_url_parts(QUrl const& url)
 {
     if (!url.isValid() || url.isEmpty())
         return {};
-    auto host = url.host(QUrl::PrettyDecoded);
+    // The host as the network sees it (punycode for international names): shown decoded, a name in lookalike letters
+    // ("аррӏе.com" in Cyrillic) would pass for the site it imitates.
+    auto host = url.host(QUrl::FullyEncoded);
     if (host.isEmpty())
         return { url.toDisplayString(), {} };
     if (host.startsWith("www."))

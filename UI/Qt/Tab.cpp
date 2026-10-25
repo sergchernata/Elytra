@@ -1470,7 +1470,11 @@ void Tab::ensure_loaded()
     auto deferred_url = m_deferred_tab->url;
     // initialize() hides the toolbar's window controls, which overwrites the visibility TabWidget last asked for.
     auto toolbar_window_controls_visible = m_toolbar_window_controls_visible;
-    initialize({});
+    // Fork hook (Arc profiles): in the tab's own profile.
+    if (create_returning_view)
+        create_returning_view(this, deferred_url, [&] { initialize({}); });
+    else
+        initialize({});
     m_deferred_tab.clear();
 
     // TabWidget pushed these while the tab had no toolbar to apply them to.

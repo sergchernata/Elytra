@@ -39,7 +39,7 @@ ladybird_test("Arc/TestArcImportParser.cpp" UI/Qt
     CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
     LIBS Qt::Core Qt::Gui Qt::Widgets
 )
-target_sources(TestArcImportParser PRIVATE "${ARC_SOURCE_DIR}/ArcImportParser.cpp" "${ARC_SOURCE_DIR}/CustomGlyphs.cpp" "${ARC_SOURCE_DIR}/SpaceStore.cpp")
+target_sources(TestArcImportParser PRIVATE "${ARC_SOURCE_DIR}/ArcIcons.cpp" "${ARC_SOURCE_DIR}/ArcImportParser.cpp" "${ARC_SOURCE_DIR}/CustomGlyphs.cpp" "${ARC_SOURCE_DIR}/SpaceStore.cpp")
 if (APPLE)
     target_sources(TestArcImportParser PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm")
     target_link_libraries(TestArcImportParser PRIVATE "-framework AppKit")

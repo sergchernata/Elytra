@@ -40,6 +40,9 @@ class TabBarButton;
 class WebContentView;
 class BrowserWindow;
 class DevToolsBanner;
+namespace Arc {
+class SelfTest;
+}
 
 class ExitFullscreenButton : public QPushButton {
     Q_OBJECT
@@ -246,6 +249,7 @@ private:
 
     Tab& create_new_tab(Web::HTML::ActivateTab, Optional<WebView::CanonicalTraversable&>);
     Tab& create_restored_tab(WebView::RestoredSessionTab const&, int index, bool defer);
+    friend class Arc::SelfTest; // Fork hook (Arc): the self-test restores tabs as a launch does.
     void initialize_tab(Tab*);
     void initialize_tab_view(Tab*);
     void uninitialize_tab(Tab*);

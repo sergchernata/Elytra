@@ -10,7 +10,9 @@
 #include <QDir>
 #include <QFile>
 #include <QSet>
+#include <QBuffer>
 #include <QHash>
+#include <QImage>
 #include <QPixmap>
 #include <QUrl>
 
@@ -33,6 +35,9 @@ void set_directory(QString const& path)
     directory() = path;
     QDir().mkpath(path);
 }
+
+static constexpr qsizetype MAX_ICON_BYTES = 1024 * 1024;
+static constexpr int MAX_ICON_SIDE = 512;
 
 static QString site_of(QString const& url)
 {
@@ -71,10 +76,21 @@ bool store_png(QString const& url, QByteArray const& png)
     auto site = site_of(url);
     if (site.isEmpty() || directory().isEmpty() || QFile::exists(file_for_site(site)))
         return false;
+    // The bytes come from another app's database: decode them once here, at a sane size, and keep only a PNG made
+    // from the pixels, so what is read back at every launch is a small image of our own making.
+    if (png.size() > MAX_ICON_BYTES)
+        return false;
+    QImage image;
+    if (!image.loadFromData(png) || image.isNull() || image.width() > MAX_ICON_SIDE || image.height() > MAX_ICON_SIDE)
+        return false;
+    QByteArray clean;
+    QBuffer buffer(&clean);
+    if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG"))
+        return false;
     QFile file(file_for_site(site));
     if (!file.open(QIODevice::WriteOnly))
         return false;
-    file.write(png);
+    file.write(clean);
     memory().remove(site);
     return true;
 }

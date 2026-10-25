@@ -195,6 +195,7 @@ private:
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
+    void tabs_come_back_in_their_own_profile();
     void list_ends_with_room_to_double_click();
     void update_pill_hidden_without_a_release();
     void background_tabs_show_while_loading_and_stay_open();
@@ -1437,6 +1438,118 @@ void SelfTest::profiles_get_their_own_session()
     settle(300);
 }
 
+// A tab's cookies come from the session its view is made in. Tabs coming back (restored at launch, reopened after
+// closing) and tabs a page opens are made in their own profile's session, never in the profile shown at the time:
+// else the page loads with the other profile's cookies (and leaves its own there) before the sidebar reopens it.
+void SelfTest::tabs_come_back_in_their_own_profile()
+{
+    auto beta_session = session_for_profile("SelfTest");
+    auto& default_session = WebView::Application::default_session();
+    auto session_name = [&](Tab& tab) {
+        if (!tab.is_loaded())
+            return QString("not loaded");
+        return QString(&tab.view().session() == beta_session.ptr() ? "Beta's" : &tab.view().session() == &default_session ? "the default" : "another");
+    };
+    auto ak_url = [](QString const& text) { return URL::Parser::basic_parse(ak_string_from_qstring(text)).value(); };
+    auto find_tab = [&](QString const& url) -> Tab* {
+        for (auto* tab : s().tabs()) {
+            if (at(*tab, url))
+                return tab;
+        }
+        return nullptr;
+    };
+    // Alpha shown, so new views open in its (default) profile, as when the window is the active one.
+    auto show_alpha = [&] {
+        s().switch_to_space(m_alpha);
+        settle(200);
+        set_profile_for_new_views(ArcSidebar::profile_of_space(m_alpha));
+    };
+    show_alpha();
+    check(!session_for_new_views(), "(new views open in the default profile while Alpha shows)");
+
+    // Restored, loading only once something needs it (selecting it, moving it, opening it from the command bar)
+    // while another profile's space shows.
+    {
+        auto url = page("Restored in Beta");
+        auto& tab = window().create_restored_tab({ .tab_id = 0, .url = ak_url(url), .pinned = false }, window().tab_count(), true);
+        ArcSidebar::set_tab_space(tab, m_beta); // As restoring the session's spaces does.
+        check(!tab.is_loaded(), "a restored tab waits to be selected");
+        tab.ensure_loaded();
+        check(tab.is_loaded() && &tab.view().session() == beta_session.ptr(), "selected from another profile's space, it loads in its own profile's session", session_name(tab));
+        s().close_tab(tab);
+        show_alpha();
+    }
+
+    // A window's active tab, restored at launch with its view, before any sidebar has placed it.
+    {
+        auto url = page("Restored eagerly");
+        auto entries = SpaceStore::the().session();
+        entries.append({ qstring_from_ak_string(ak_url(url).serialize()), m_beta, {}, {} });
+        SpaceStore::the().set_session(entries);
+        auto& tab = window().create_restored_tab({ .tab_id = 0, .url = ak_url(url), .pinned = false }, window().tab_count(), false);
+        check(&tab.view().session() == beta_session.ptr(), "a tab restored with its view is made in the profile its space has", session_name(tab));
+        QPointer<Tab> guarded = &tab;
+        s().schedule_rebuild();
+        settle(400);
+        check(guarded && ArcSidebar::space_of(*guarded) == m_beta, "and joins a space of that profile, not the one shown",
+            guarded ? QString("in %1").arg(ArcSidebar::space_of(*guarded) == m_alpha ? "Alpha" : ArcSidebar::space_of(*guarded)) : QString("replaced"));
+        if (guarded)
+            s().close_tab(*guarded);
+        show_alpha();
+    }
+
+    // Reopened after closing, from another profile's space.
+    {
+        s().switch_to_space(m_beta);
+        settle(200);
+        auto url = page("Closed in Beta");
+        auto& tab = *s().open_tab(url);
+        wait_until([&] { return loaded(tab); });
+        s().close_tab(tab);
+        settle(300);
+        show_alpha();
+        Application::the().reopen_recently_closed_tab(&window());
+        Tab* reopened = nullptr;
+        wait_until([&] { return (reopened = find_tab(url)) != nullptr; });
+        check(reopened, "a closed tab reopens");
+        if (reopened) {
+            check(&reopened->view().session() == beta_session.ptr(), "in the profile it was closed in", session_name(*reopened));
+            s().close_tab(*reopened);
+        }
+        show_alpha();
+    }
+
+    // A tab a page opens shares its opener's session. Put in the space shown (of another profile) it would be reopened
+    // there, carrying the address the page chose into the other profile.
+    {
+        s().switch_to_space(m_beta);
+        settle(200);
+        auto& opener = *s().open_tab(page("Opener in Beta"));
+        wait_until([&] { return loaded(opener); });
+        show_alpha();
+        auto opened_url = page("Opened by Beta");
+        opener.view().run_javascript(ak_string_from_qstring(QString("window.open('%1', '_blank');").arg(opened_url)));
+        Tab* opened = nullptr;
+        wait_until([&] { return (opened = find_tab(opened_url)) != nullptr; });
+        check(opened, "a page opens a tab");
+        if (opened) {
+            QPointer<Tab> guarded = opened;
+            settle(600);
+            check(guarded && &guarded->view().session() == beta_session.ptr() && ArcSidebar::space_of(*guarded) == m_beta,
+                "it stays in its opener's profile and a space of it, never reopened in the profile shown",
+                guarded ? QString("%1 session, %2 space").arg(session_name(*guarded), ArcSidebar::space_of(*guarded) == m_beta ? "Beta's" : "another") : QString("replaced"));
+            for (auto* tab : s().tabs()) {
+                if (at(*tab, opened_url) || at(*tab, page("Opened by Beta")))
+                    s().close_tab(*tab);
+            }
+        }
+        s().close_tab(opener);
+        s().switch_to_space(m_alpha);
+        settle(300);
+    }
+    check(&default_session != beta_session.ptr(), "(the two profiles have separate sessions)");
+}
+
 void SelfTest::list_ends_with_room_to_double_click()
 {
     rebuild_now();
@@ -2341,6 +2454,7 @@ int SelfTest::run()
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
+    tabs_come_back_in_their_own_profile();
     list_ends_with_room_to_double_click();
     update_pill_hidden_without_a_release();
     background_tabs_show_while_loading_and_stay_open();

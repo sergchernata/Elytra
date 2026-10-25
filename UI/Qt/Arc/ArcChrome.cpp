@@ -389,6 +389,7 @@ void install()
         return ArcSidebar::TOOLBAR_LEFT_MARGIN;
     };
     WebView::PictureInPictureManager::on_windows_changed = &ArcSidebar::picture_in_picture_windows_changed;
+    Tab::create_returning_view = &ArcSidebar::create_returning_view;
     // Not for the self-test, which runs beside the real browser.
     if (!qEnvironmentVariableIsSet("ARC_SELF_TEST"))
         register_little_arc_hot_key();

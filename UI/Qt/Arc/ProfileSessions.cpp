@@ -94,6 +94,18 @@ void open_all_profile_sessions()
         (void)session_for_profile(space.profile);
 }
 
+Optional<QString> profile_of_session(WebView::BrowsingSession const& session)
+{
+    if (&session == &WebView::Application::default_session())
+        return QString();
+    auto const& sessions = sessions_by_profile();
+    for (auto it = sessions.begin(); it != sessions.end(); ++it) {
+        if (it.value().ptr() == &session)
+            return it.key();
+    }
+    return {};
+}
+
 void set_profile_for_new_views(QString const& profile)
 {
     s_session_for_new_views = session_for_profile(profile);

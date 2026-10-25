@@ -587,7 +587,12 @@ Tab& BrowserWindow::create_restored_tab(WebView::RestoredSessionTab const& resto
         return *tab;
     }
 
-    auto* tab = new Tab(this);
+    Tab* tab = nullptr;
+    // Fork hook (Arc profiles): in the tab's own profile.
+    if (Tab::create_returning_view)
+        Tab::create_returning_view(nullptr, restored.url, [&] { tab = new Tab(this); });
+    else
+        tab = new Tab(this);
     // The tab already has a row, so initialize_tab() doesn't register a new one.
     tab->set_session_tab_id(restored.tab_id);
     tab->set_pinned(restored.pinned);

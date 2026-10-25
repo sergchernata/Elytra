@@ -70,6 +70,9 @@ public:
     // The toolbar's left margin in a window with a sidebar: its buttons line up with the page.
     static constexpr int TOOLBAR_LEFT_MARGIN = 2;
     static ArcSidebar* for_window(BrowserWindow&);
+
+    // Tab::create_returning_view: a restored or reopened tab's view is made in the profile the tab belongs to.
+    static void create_returning_view(Tab const*, URL::URL const&, Function<void()> const& create_view);
     // Picture-in-Picture windows opened or closed: each window's player shows only while its tab has none.
     static void picture_in_picture_windows_changed();
 
@@ -149,6 +152,7 @@ private:
     void update_auto_picture_in_picture(Tab* previous, Tab& current);
     // Arc's media player at the bottom of the sidebar, for a tab playing out of sight.
     QString recent_space_of_profile(QString const& profile, Tab const* except) const;
+    QString space_for_new_tab(Tab const&) const;
     void update_mini_player();
     void schedule_mini_player_update();
     void place_mini_player();
@@ -237,6 +241,7 @@ private:
     QColor space_color() const;
     QString current_profile() const;
     static QString profile_of_tab(Tab const&);
+    static QString profile_of_entry(QString const& space_id, QString const& node_id);
     void apply_profile_for_new_views();
     void style_update_button();
     void place_tabs_in_their_profiles();

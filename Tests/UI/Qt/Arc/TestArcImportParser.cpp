@@ -6,12 +6,19 @@
  */
 
 #include <AK/Platform.h>
+#include <algorithm>
 #include <LibTest/TestCase.h>
+#include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcImportParser.h>
 
+#include <QBuffer>
+#include <QDir>
+#include <QFile>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTemporaryDir>
 
 using namespace Ladybird::Arc;
 
@@ -135,4 +142,123 @@ TEST_CASE(malformed_input_yields_nothing_rather_than_crashing)
     auto data = parse_arc_sidebar("not json");
     EXPECT(data.spaces.isEmpty());
     EXPECT(!data.notes.isEmpty());
+}
+
+// Builds a sidebar with one space whose pinned, Today and favorite containers hold the given items.
+static QByteArray sidebar_with(QJsonArray pinned_children, QJsonArray today_children, QJsonArray favorite_children, QList<QJsonObject> const& extra_items)
+{
+    QJsonArray items;
+    auto add = [&](QJsonObject const& item) {
+        items.append(item["id"]);
+        items.append(item);
+    };
+    add(container_item("pinned", pinned_children));
+    add(container_item("today", today_children));
+    add(container_item("favorites", favorite_children));
+    for (auto const& item : extra_items)
+        add(item);
+    QJsonObject space {
+        { "id", "space" }, { "title", "Space" }, { "profile", QJsonObject { { "default", true } } },
+        { "containerIDs", QJsonArray { "unpinned", "today", "pinned", "pinned" } },
+    };
+    QJsonObject container {
+        { "spaces", QJsonArray { "space", space } },
+        { "items", items },
+        { "topAppsContainerIDs", QJsonArray { QJsonObject { { "default", true } }, "favorites" } },
+    };
+    QJsonObject root { { "sidebar", QJsonObject { { "containers", QJsonArray { container } } } } };
+    return QJsonDocument(root).toJson();
+}
+
+// Arc data can hold links others shared, and Today tabs open as soon as the import ends: only web pages come across.
+TEST_CASE(links_that_are_not_web_pages_are_left_out)
+{
+    QList<QJsonObject> items {
+        tab_item("web", "https://example.com/", "Web"),
+        tab_item("upper", "HTTP://example.org/", "Upper case"),
+        tab_item("script", "javascript:alert(document.cookie)", "Script"),
+        tab_item("file", "file:///etc/passwd", "File"),
+        tab_item("data", "data:text/html,<script>alert(1)</script>", "Data"),
+        tab_item("today-web", "https://news.example/", "News"),
+        tab_item("today-script", "JavaScript:alert(1)", "Script"),
+        tab_item("fav-web", "https://mail.example/", "Mail"),
+        tab_item("fav-file", "file:///Users/someone/secret.html", "Secret"),
+    };
+    auto data = parse_arc_sidebar(sidebar_with({ "web", "upper", "script", "file", "data" }, { "today-web", "today-script" }, { "fav-web", "fav-file" }, items));
+
+    VERIFY(data.spaces.size() == 1);
+    VERIFY(data.spaces[0].pinned.size() == 2);
+    EXPECT(data.spaces[0].pinned[0].url == "https://example.com/");
+    EXPECT(data.spaces[0].pinned[1].url == "HTTP://example.org/");
+    VERIFY(data.today_tabs.size() == 1);
+    EXPECT(data.today_tabs[0].url == "https://news.example/");
+    VERIFY(data.favorites.size() == 1);
+    EXPECT(data.favorites[0].url == "https://mail.example/");
+    EXPECT_EQ(data.skipped_links, 5);
+    EXPECT(std::any_of(data.notes.begin(), data.notes.end(), [](QString const& note) { return note.contains("Skipped 5 links"); }));
+
+    EXPECT(is_importable_url("https://example.com/"));
+    EXPECT(!is_importable_url(" javascript:alert(1)"));
+    EXPECT(!is_importable_url("about:blank"));
+}
+
+// Folders refer to their children by id, so nesting isn't bounded by the JSON parser. A long chain must not run the
+// stack out.
+TEST_CASE(deeply_nested_folders_are_cut_off_rather_than_crashing)
+{
+    QList<QJsonObject> items;
+    constexpr int depth = 100000;
+    for (int i = 0; i < depth; ++i)
+        items.append(container_item(QString("folder-%1").arg(i), { QString("folder-%1").arg(i + 1) }, { { "list", QJsonObject {} } }, "Folder"));
+    items.append(tab_item(QString("folder-%1").arg(depth), "https://deep.example/", "Deep"));
+
+    auto data = parse_arc_sidebar(sidebar_with({ "folder-0" }, {}, {}, items));
+    VERIFY(data.spaces.size() == 1);
+    VERIFY(data.spaces[0].pinned.size() == 1);
+    int levels = 0;
+    for (auto const* node = &data.spaces[0].pinned[0]; node->is_folder() && !node->children.isEmpty(); node = &node->children[0])
+        ++levels;
+    EXPECT(levels <= 64);
+    EXPECT(data.skipped_items >= 1);
+}
+
+static QByteArray png_of(QSize size)
+{
+    QImage image(size, QImage::Format_ARGB32);
+    image.fill(Qt::red);
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+    return bytes;
+}
+
+// Icons come out of another app's database: only real, reasonably sized images are kept, re-encoded as our own PNG.
+TEST_CASE(imported_icons_must_be_real_images)
+{
+    QTemporaryDir directory;
+    ArcIcons::set_directory(directory.path());
+
+    EXPECT(ArcIcons::store_png("https://good.example/", png_of({ 32, 32 })));
+    EXPECT(ArcIcons::has_icon("https://good.example/page"));
+    EXPECT(!ArcIcons::icon_for_url("https://good.example/").isNull());
+
+    QByteArray not_an_image = "<html><script>alert(1)</script></html>";
+    EXPECT(!ArcIcons::store_png("https://junk.example/", not_an_image));
+    EXPECT(!ArcIcons::has_icon("https://junk.example/"));
+
+    EXPECT(!ArcIcons::store_png("https://huge.example/", png_of({ 4000, 4000 })));
+    EXPECT(!ArcIcons::has_icon("https://huge.example/"));
+
+    // What is kept is a PNG made from the pixels, not the bytes handed over (here, with trailing data appended).
+    auto padded = png_of({ 16, 16 }) + QByteArray(1000, 'x');
+    EXPECT(ArcIcons::store_png("https://padded.example/", padded));
+    QDir dir(directory.path());
+    auto files = dir.entryList({ "*.png" }, QDir::Files);
+    EXPECT_EQ(files.size(), 2);
+    for (auto const& name : files) {
+        QFile file(dir.filePath(name));
+        VERIFY(file.open(QIODevice::ReadOnly));
+        EXPECT(!file.readAll().endsWith("xxxx"));
+    }
 }

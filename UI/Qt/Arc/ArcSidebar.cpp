@@ -76,6 +76,33 @@ namespace Ladybird::Arc {
 
 
 static constexpr char const* SPACE_PROPERTY = "arc_space";
+
+// Tabs closed lately, newest first, with where they were: a reopened one comes back in its own profile.
+struct ClosedTabRecord {
+    QString url;
+    QString space_id;
+    QString node_id;
+};
+
+static QList<ClosedTabRecord>& recently_closed_tabs()
+{
+    static QList<ClosedTabRecord> records;
+    return records;
+}
+
+// Tooltips and message boxes read text that looks like HTML as rich text. Page titles (a favorite's) and names from
+// imported data must show as written, not render markup.
+static QString plain_tooltip(QString const& text)
+{
+    return "<qt>" + text.toHtmlEscaped() + "</qt>";
+}
+
+static QMessageBox::StandardButton ask_plain(QWidget* parent, QString const& title, QString const& text)
+{
+    QMessageBox box(QMessageBox::Question, title, text, QMessageBox::Yes | QMessageBox::No, parent);
+    box.setTextFormat(Qt::PlainText);
+    return static_cast<QMessageBox::StandardButton>(box.exec());
+}
 static constexpr char const* BLANK_PROPERTY = "arc_blank";
 static constexpr int UPDATE_BUTTON_HEIGHT = 40;
 static constexpr int SPARE_TAB_DELAY_MS = 1200;
@@ -249,6 +276,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_space_icon = new SymbolButton(m_header);
     m_space_icon->setFixedSize(28, 28);
     m_space_title = new QLabel(m_header);
+    m_space_title->setTextFormat(Qt::PlainText);
     m_space_menu_button = new SymbolButton(m_header);
     m_space_menu_button->set_symbol("ellipsis");
     m_space_menu_button->setFixedSize(26, 26);
@@ -1129,9 +1157,25 @@ void ArcSidebar::track_tabs()
 {
     for (auto* tab : tabs()) {
         if (!tab->property(SPACE_PROPERTY).isValid())
-            set_tab_space(*tab, m_space_id);
+            set_tab_space(*tab, space_for_new_tab(*tab));
         watch_tab(*tab);
     }
+}
+
+// A new tab goes in the space shown, unless its page already lives in another profile's session: a tab a page opened
+// (window.open, a link to a new tab) shares its opener's session. Put in a space of another profile, it would be
+// reopened there with the address the page chose, linking one profile's identity to the other's. It joins a space of
+// its own profile instead.
+QString ArcSidebar::space_for_new_tab(Tab const& tab) const
+{
+    if (!tab.is_loaded() || tab.view().is_private() == WebView::IsPrivate::Yes)
+        return m_space_id;
+    auto profile = profile_of_session(tab.view().session());
+    if (!profile.has_value() || *profile == current_profile())
+        return m_space_id;
+    if (auto space = recent_space_of_profile(*profile, &tab); !space.isEmpty())
+        return space;
+    return m_space_id;
 }
 
 void ArcSidebar::watch_tab(Tab& tab)
@@ -1180,14 +1224,10 @@ void ArcSidebar::watch_tab(Tab& tab)
 // Puts restored tabs back in their spaces and pinned slots, matching by URL in order.
 void ArcSidebar::restore_session_assignments()
 {
-    static bool restored = false;
-    if (restored)
-        return;
-    restored = true;
-
+    // Read once; each window that opens takes the entries for its tabs, so every restored window gets its own.
     auto& store = SpaceStore::the();
-    auto entries = store.session();
-    QList<bool> used(entries.size(), false);
+    static auto const entries = store.session();
+    static QList<bool> used(entries.size(), false);
 
     for (auto* tab : tabs()) {
         auto url = url_of(*tab);
@@ -1248,7 +1288,12 @@ void ArcSidebar::save_session()
 // A stored URL (pinned, favorite, imported) as a URL to load; nothing if it isn't one, rather than aborting.
 static Optional<URL::URL> parse_stored_url(QString const& text)
 {
-    auto encoded = QUrl(text).toEncoded();
+    QUrl parsed(text);
+    // Pinned tabs, favorites and dropped links are opened, never run: a javascript: one would run script in a fresh
+    // tab of this profile.
+    if (parsed.scheme().compare("javascript", Qt::CaseInsensitive) == 0)
+        return {};
+    auto encoded = parsed.toEncoded();
     if (encoded.isEmpty())
         return {};
     return URL::Parser::basic_parse(StringView(encoded.constData(), static_cast<size_t>(encoded.size())));
@@ -1577,6 +1622,12 @@ void ArcSidebar::dismiss_mini_player()
 void ArcSidebar::before_tab_closes(Tab& tab)
 {
     tab.setProperty(CLOSING_PROPERTY, true);
+    if (!is_private() && !is_blank(tab)) {
+        auto& closed = recently_closed_tabs();
+        closed.prepend({ url_of(tab), space_of(tab), node_of(tab) });
+        if (closed.size() > 50)
+            closed.removeLast();
+    }
     if (&tab == m_player_tab)
         schedule_mini_player_update();
     if (m_window->current_tab() != &tab)
@@ -1791,7 +1842,7 @@ void ArcSidebar::delete_folder(QString const& node_id)
 
     auto tab_count = count_tabs(node->children);
     if (tab_count > 0) {
-        auto answer = QMessageBox::question(m_window, "Delete Folder",
+        auto answer = ask_plain(m_window, "Delete Folder",
             QString("Delete \"%1\" and the %2 pinned tab(s) inside it?\n\nOpen tabs from this folder move to Today.").arg(node->title).arg(tab_count));
         if (answer != QMessageBox::Yes)
             return;
@@ -1936,7 +1987,7 @@ void ArcSidebar::delete_space(QString const& space_id)
     if (!space || store.spaces().size() <= 1)
         return;
 
-    auto answer = QMessageBox::question(m_window, "Delete Space",
+    auto answer = ask_plain(m_window, "Delete Space",
         QString("Delete the space \"%1\" and its pinned tabs and folders?\n\nIts open tabs move to another space.").arg(space->title));
     // The dialog runs its own event loop, in which the store can change.
     if (answer != QMessageBox::Yes || !store.space(space_id) || store.spaces().size() <= 1)
@@ -2294,12 +2345,53 @@ QString ArcSidebar::profile_of_space(QString const& space_id)
 // A tab's profile: its favorite's (favorites belong to a profile), else its space's.
 QString ArcSidebar::profile_of_tab(Tab const& tab)
 {
-    auto node = node_of(tab);
-    if (is_favorite_node(node)) {
-        if (auto const* favorite = SpaceStore::the().favorite(node.mid(4)))
+    return profile_of_entry(space_of(tab), node_of(tab));
+}
+
+QString ArcSidebar::profile_of_entry(QString const& space_id, QString const& node_id)
+{
+    if (is_favorite_node(node_id)) {
+        if (auto const* favorite = SpaceStore::the().favorite(node_id.mid(4)))
             return favorite->profile;
     }
-    return profile_of_space(space_of(tab));
+    return profile_of_space(space_id);
+}
+
+// A tab's cookies and site data come from the session its view is created in, which can't change afterwards. One
+// coming back (restored at launch, or reopened) is created in its own profile, never in whichever is shown: else its
+// page loads with another profile's cookies (and leaves its own there) before the sidebar could reopen it.
+void ArcSidebar::create_returning_view(Tab const* tab, URL::URL const& url, Function<void()> const& create_view)
+{
+    Optional<QString> profile;
+    if (tab && (tab->property(SPACE_PROPERTY).isValid() || !node_of(*tab).isEmpty()))
+        profile = profile_of_tab(*tab);
+
+    auto text = qstring_from_ak_string(url.serialize());
+    if (!profile.has_value()) {
+        auto& closed = recently_closed_tabs();
+        for (int i = 0; i < closed.size(); ++i) {
+            if (closed[i].url == text) {
+                profile = profile_of_entry(closed[i].space_id, closed[i].node_id);
+                closed.removeAt(i);
+                break;
+            }
+        }
+    }
+    if (!profile.has_value()) {
+        for (auto const& entry : SpaceStore::the().session()) {
+            if (entry.url == text) {
+                profile = profile_of_entry(entry.space_id, entry.node_id);
+                break;
+            }
+        }
+    }
+
+    if (!profile.has_value()) {
+        create_view();
+        return;
+    }
+    ScopedProfileForNewViews scope(*profile);
+    create_view();
 }
 
 // New tabs (links, the command bar, Cmd+T) open in the profile of the space shown in the active window.
@@ -2340,8 +2432,10 @@ void ArcSidebar::place_tabs_in_their_profiles()
         set_tab_space(*reopened, space);
         set_tab_node(*reopened, node);
         reopened->setProperty(PINNED_HOME_PROPERTY, home);
+        // Closed outright: asked first ("leave page?"), staying would keep it listed in this space with the other
+        // profile's cookies, and never reconsidered. Its page lives on in the reopened tab.
         if (auto old_index = m_tabs.index_of(tab); old_index >= 0)
-            m_window->request_to_close_tab(old_index);
+            m_window->definitely_close_tab(old_index);
     }
 }
 
@@ -2570,7 +2664,7 @@ void ArcSidebar::rebuild_favorites()
         auto icon = icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr);
         if (button->icon().cacheKey() != icon.cacheKey())
             button->setIcon(icon);
-        auto tooltip = favorite.title.isEmpty() ? favorite.url : favorite.title;
+        auto tooltip = plain_tooltip(favorite.title.isEmpty() ? favorite.url : favorite.title);
         if (button->toolTip() != tooltip)
             button->setToolTip(tooltip);
         auto checked = tab && tab == current;
@@ -2760,7 +2854,7 @@ void ArcSidebar::rebuild_switcher()
         button->setObjectName("ArcSpaceButton");
         button->set_icon_text(space.icon.isEmpty() ? space.title.left(1).toUpper() : space.icon);
         button->set_dimmed(!active);
-        button->setToolTip(i < 9 ? QString("%1  (%2%3)").arg(space.title, SPACE_SHORTCUT_MODIFIER == Qt::META ? "\u2303" : "Alt+").arg(i + 1) : space.title);
+        button->setToolTip(plain_tooltip(i < 9 ? QString("%1  (%2%3)").arg(space.title, SPACE_SHORTCUT_MODIFIER == Qt::META ? "\u2303" : "Alt+").arg(i + 1) : space.title));
         button->setContextMenuPolicy(Qt::CustomContextMenu);
 
         auto id = space.id;
@@ -3602,6 +3696,8 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
 {
     auto destination = resolve_drop(target, place);
     for (auto const& url : urls) {
+        if (!parse_stored_url(url.toString()).has_value())
+            continue; // Not something to open (javascript:).
         if (destination.pinned) {
             SpaceStore::the().add_pinned_tab(m_space_id, destination.parent_id, destination.index, url.toString(), url.host());
             if (destination.index >= 0)

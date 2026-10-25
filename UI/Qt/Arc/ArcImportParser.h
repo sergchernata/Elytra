@@ -29,11 +29,15 @@ struct ArcSidebarData {
     int folders { 0 };
     int tabs { 0 };
     int skipped_items { 0 }; // Arc-only item kinds (notes, easels) with no Ladybird equivalent.
+    int skipped_links { 0 }; // Links that aren't web pages (javascript:, file:, data: ...), left out.
     QStringList notes;       // Things worth telling the user (e.g. an icon that had to fall back).
 };
 
 // Parses StorableSidebar.json's contents. Returns nullopt-like empty data with a note on malformed input.
 ArcSidebarData parse_arc_sidebar(QByteArray const& json);
+
+// Whether a link from Arc's data may be imported: web pages (http and https) only.
+bool is_importable_url(QString const& url);
 
 // Maps an Arc space icon name to an SF Symbol name, or returns an empty string when there is none.
 QString sf_symbol_for_arc_icon(QString const& arc_icon);

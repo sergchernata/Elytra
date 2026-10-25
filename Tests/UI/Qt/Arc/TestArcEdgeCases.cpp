@@ -317,6 +317,13 @@ TEST_CASE(address_bar_shows_the_host_and_the_rest_of_the_url)
     parts = display_url_parts(QUrl("https://wwwexample.com/"));
     EXPECT(parts.host == "wwwexample.com"); // Only a "www." label is dropped.
 
+    // An international name shows as it is sent (punycode): lookalike letters from another script can't pass for
+    // the site they imitate.
+    parts = display_url_parts(QUrl(QString::fromUtf8("https://\xD0\xB0\xD1\x80\xD1\x80\xD3\x8F\xD0\xB5.com/")));
+    EXPECT(parts.host == "xn--80ak6aa92e.com");
+    parts = display_url_parts(QUrl("https://xn--80ak6aa92e.com/"));
+    EXPECT(parts.host == "xn--80ak6aa92e.com");
+
     parts = display_url_parts(QUrl("https://example.com/caf%C3%A9?q=a%20b"));
     EXPECT(parts.rest == QString::fromUtf8("/café?q=a b")); // Readable, not percent-encoded.
 

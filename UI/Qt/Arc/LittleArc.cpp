@@ -229,7 +229,7 @@ BrowserWindow& open_little_arc(Optional<URL::URL> const& url)
     configuration.y = available.top() + qMax(0, (available.height() - HEIGHT) / 3);
 
     // In the most recent space's profile, as Arc does.
-    set_profile_for_new_views(ArcSidebar::profile_of_space(most_recent_space()));
+    ScopedProfileForNewViews profile(ArcSidebar::profile_of_space(most_recent_space()));
     auto& window = application.new_window({ url.value_or(URL::about_blank()) }, configuration, BrowserWindow::IsPopupWindow::Yes,
         WebView::IsPrivate::No, nullptr, {}, ShowWindow::No);
     window.setProperty(LITTLE_ARC_PROPERTY, true);

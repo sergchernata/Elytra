@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/RefPtr.h>
 #include <LibWebView/Forward.h>
 #include <QString>
@@ -35,6 +36,9 @@ private:
 // Opens the session of every profile a space uses, so browser-wide actions (clearing site data) reach all of them,
 // not only those visited this run.
 void open_all_profile_sessions();
+
+// The profile a session belongs to: empty for the default session, nothing for one that isn't a profile's (private).
+Optional<QString> profile_of_session(WebView::BrowsingSession const&);
 
 // The profile new views use outside a ScopedProfileForNewViews: the current space's, in the active window.
 void set_profile_for_new_views(QString const& profile);

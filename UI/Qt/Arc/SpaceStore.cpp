@@ -211,6 +211,8 @@ void SpaceStore::write_now()
     if (!file.open(QIODevice::WriteOnly))
         return;
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    // It lists every open tab's address (which can carry tokens): readable by the user only.
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     file.commit();
 }
 

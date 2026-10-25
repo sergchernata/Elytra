@@ -15,6 +15,7 @@ All Arc code lives in `UI/Qt/Arc/`. Upstream files carry only small hooks, each 
 | `UI/Qt/TabBar.h/.cpp` (Little Arc) | `set_minimal_chrome_bar()` and `m_minimal_chrome_bar`: the branch at the top of `rebuild_layout()` (only that bar above the page), and checks in `update_web_view_frame()`, `update_vertical_tabs_overlay_geometry()`, `update_vertical_tabs_resize_handle()` and the content separator's visibility |
 | `Tests/UI/Qt/CMakeLists.txt` | `include(Arc/ArcTests.cmake)` just before the `if (NOT LINUX) return()` near the end |
 | `UI/Qt/ChromeStyle.h/.cpp` | `set_chrome_background_tint()`, and `chrome_background()` applying it (the space color across the window frame) |
+| `UI/Qt/Tab.h/.cpp`, `BrowserWindow.cpp`, `Application.cpp` (returning tabs) | `Tab::create_returning_view`, wrapped around making the view of a tab that comes back: `Tab::ensure_loaded()` (a deferred restored tab), `BrowserWindow::create_restored_tab()` (one restored with its view) and `Application::reopen_recently_closed_tab()`. The sidebar makes it in the tab's own profile, so its page never loads with another profile's cookies |
 | `UI/Qt/Tab.h/.cpp` (toolbar margin) | `Tab::toolbar_left_margin`, used where the toolbar's margins are set (constructor, `set_toolbar_window_controls_visible()`): the Arc toolbar's left margin from the start, so its buttons never jump |
 | `UI/Qt/Tab.h/.cpp` (sidebar button) | `Tab::hides_sidebar_toggle_while_expanded`, checked in `update_vertical_tabs_toolbar_button_placement()`: the docked Arc sidebar has its own toggle beside the window buttons |
 | `UI/Qt/Tab.h/.cpp` (spinner) | `Tab::animates_loading_spinner`, checked in `set_loading()`: the Arc sidebar shows no spinner, so the 80 ms timer stays off |
@@ -36,7 +37,7 @@ private-or-not; these hooks carry the session itself instead. All are marked `Fo
 | `WebContentClient.h/.cpp` | constructed with a session (the private-or-not constructor stays, forwarding) |
 | `HelperProcess.h/.cpp` | `launch_web_content_process()` and `launch_web_worker_process()` take a session |
 | `WebWorkerClient.h/.cpp`, `WorkerProcessManager.h/.cpp` | workers take their owner's session; shared-worker keys, per-site worker counts and BroadcastChannel delivery are partitioned by session |
-| `FileDownloader.h/.cpp` | downloads remember the session they started in (`m_download_sessions`) for their requests |
+| `FileDownloader.h/.cpp` | downloads remember the session they started in (`m_download_sessions`, kept while the download is listed) for their requests, and fail rather than fall back to the default session once it's gone; a profile's downloads aren't persisted for resuming after a restart (`belongs_to_a_profile_session()`), since the record can't say whose cookies to use |
 | `CanonicalNavigable.cpp`, `CanonicalTraversable.cpp` | child-frame processes get the page's session |
 | `WebContentPage.cpp`, `ProcessSnapshot.cpp`, `WebUI/HistoryUI.cpp` | history and favicons through `records()`; downloads and BroadcastChannel by session |
 | `CookieJar.h/.cpp` | `TransientStorage::owner`: cookie-change notifications go only to views using that jar |
@@ -84,6 +85,7 @@ The window looks like Arc's, and its Minimize leaves the video playing with a pl
 | File | Hook |
 | --- | --- |
 | `README.md` | Elytra's introduction above upstream's README |
+| `UI/Qt/BrowserWindow.h` | `friend class Arc::SelfTest` (the self-test restores tabs as a launch does) |
 | `UI/Qt/BrowserWindow.cpp` | `tab_audio_play_state_changed()` returns for a tab that's gone (closed while playing), which crashed |
 | `UI/Qt/WebContentView.h/.cpp` | `set_paints_chrome_behind_corners()` (off in the Picture-in-Picture window, which is itself round), and `friend class Arc::SelfTest` |
 

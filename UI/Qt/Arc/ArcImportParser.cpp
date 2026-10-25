@@ -20,6 +20,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
+#include <QUrl>
 
 namespace Ladybird::Arc {
 
@@ -58,6 +59,18 @@ static QColor theme_color(QJsonObject const& space)
     return QColor::fromRgbF(channel("red"), channel("green"), channel("blue"));
 }
 
+// Only web pages come across. Arc data can hold links shared by others (shared spaces and folders), and Today tabs
+// open as soon as the import ends: a javascript:, file: or data: link must not run or open local files that way.
+bool is_importable_url(QString const& url)
+{
+    auto scheme = QUrl(url).scheme().toLower();
+    return scheme == "http" || scheme == "https";
+}
+
+// Folders refer to their children by id, so nesting isn't bounded by the JSON parser: deeper than this is skipped,
+// rather than recursing until the stack runs out.
+static constexpr int MAX_FOLDER_DEPTH = 64;
+
 namespace {
 
 class Reader {
@@ -71,15 +84,19 @@ public:
         }
     }
 
-    QList<PinnedNode> children_of(QString const& container_id)
+    QList<PinnedNode> children_of(QString const& container_id, int depth = 0)
     {
         QList<PinnedNode> result;
+        if (depth > MAX_FOLDER_DEPTH) {
+            ++m_data.skipped_items;
+            return result;
+        }
         for (auto const& child : m_items.value(container_id)["childrenIds"].toArray()) {
             auto id = child.toString();
             if (m_visited.contains(id))
                 continue; // Malformed data: don't loop.
             m_visited.insert(id);
-            if (auto node = convert(m_items.value(id)); !node.id.isEmpty())
+            if (auto node = convert(m_items.value(id), depth); !node.id.isEmpty())
                 result.append(std::move(node));
         }
         return result;
@@ -93,6 +110,10 @@ public:
             auto url = tab["savedURL"].toString();
             if (url.isEmpty())
                 continue;
+            if (!is_importable_url(url)) {
+                ++m_data.skipped_links;
+                continue;
+            }
             auto title = m_items.value(child.toString())["title"].toString();
             result.append({ {}, url, title.isEmpty() ? tab["savedTitle"].toString() : title, {} });
         }
@@ -100,7 +121,7 @@ public:
     }
 
 private:
-    PinnedNode convert(QJsonObject const& item)
+    PinnedNode convert(QJsonObject const& item, int depth)
     {
         PinnedNode node;
         auto data = item["data"].toObject();
@@ -111,6 +132,10 @@ private:
             node.url = tab["savedURL"].toString();
             if (node.url.isEmpty())
                 return {};
+            if (!is_importable_url(node.url)) {
+                ++m_data.skipped_links;
+                return {};
+            }
             node.id = SpaceStore::new_id();
             node.kind = PinnedNode::Kind::Tab;
             node.saved_title = tab["savedTitle"].toString();
@@ -125,7 +150,7 @@ private:
             node.kind = PinnedNode::Kind::Folder;
             node.title = custom_title.isEmpty() ? QString("Untitled") : custom_title;
             node.expanded = false; // Arc doesn't record it; collapsed keeps large imports tidy.
-            node.children = children_of(item["id"].toString());
+            node.children = children_of(item["id"].toString(), depth + 1);
             ++m_data.folders;
             return node;
         }
@@ -227,6 +252,9 @@ ArcSidebarData parse_arc_sidebar(QByteArray const& json)
             data.favorites.append(favorite);
         }
     }
+
+    if (data.skipped_links > 0)
+        data.notes.append(QString("Skipped %1 links that aren't web pages (such as file: or javascript: links).").arg(data.skipped_links));
 
     return data;
 }

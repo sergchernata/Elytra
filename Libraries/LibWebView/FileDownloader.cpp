@@ -884,12 +884,24 @@ void FileDownloader::restart_download_from_zero(u64 download_id, String reason_i
     start_download_request(download_id, active->effective_url);
 }
 
+// Fork hook (Arc profiles): whether a download was started in a session other than the default one.
+bool FileDownloader::belongs_to_a_profile_session(u64 download_id) const
+{
+    auto it = m_download_sessions.find(download_id);
+    if (it == m_download_sessions.end())
+        return false;
+    auto session = it->value.strong_ref();
+    return !session || session.ptr() != &Application::default_session();
+}
+
 // Fork hook (Arc profiles): a download's requests use the cookies of the session it was started in.
 ErrorOr<NonnullRefPtr<Requests::RequestClient>> FileDownloader::request_server_client_for(Download const& download) const
 {
     if (auto it = m_download_sessions.find(download.id); it != m_download_sessions.end()) {
         if (auto session = it->value.strong_ref())
             return Application::request_server_client(*session);
+        // Its session is gone: never carry on with another profile's cookies.
+        return Error::from_string_literal("The download's browsing session has closed");
     }
     return Application::request_server_client(download.is_private);
 }
@@ -898,7 +910,9 @@ u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, Le
 {
     auto download_id = m_next_download_id++;
     if (session) { // Fork hook (Arc profiles)
-        m_download_sessions.remove_all_matching([](auto, auto const& weak) { return !weak.strong_ref(); });
+        // Kept for as long as the download is listed, even once its session has gone (it then fails, never borrows the
+        // default cookies).
+        m_download_sessions.remove_all_matching([this](auto id, auto const&) { return !mutable_download_or_null(id); });
         m_download_sessions.set(download_id, session->make_weak_ptr());
     }
 
@@ -1299,6 +1313,11 @@ void FileDownloader::persist_download_snapshot(u64 id, PersistUrgency urgency)
         return;
 
     if (download->is_private == IsPrivate::Yes)
+        return;
+
+    // Fork hook (Arc profiles): the record can't say which profile's session a download belongs to, and a download
+    // resumed after a restart would use the default one's cookies. Like a private download, a profile's isn't kept.
+    if (belongs_to_a_profile_session(download->id))
         return;
 
     if (!download->can_resume || !download->total_size.has_value() || !status_is_active(download->status))

@@ -963,7 +963,13 @@ void Application::reopen_recently_closed_tab(BrowserWindow* target_window)
     i64 restored_tab_index = 0;
     for (auto& closed_tab : unit.tabs) {
         auto location = next_insertion_index.has_value() ? BrowserWindow::TabLocation::at_index(*next_insertion_index) : BrowserWindow::TabLocation::end();
-        auto& tab = window->create_new_tab(Web::HTML::ActivateTab::No, location);
+        // Fork hook (Arc profiles): in the profile the tab was closed in.
+        Tab* created = nullptr;
+        if (Tab::create_returning_view)
+            Tab::create_returning_view(nullptr, closed_tab.active_url, [&] { created = &window->create_new_tab(Web::HTML::ActivateTab::No, location); });
+        else
+            created = &window->create_new_tab(Web::HTML::ActivateTab::No, location);
+        auto& tab = *created;
         if (next_insertion_index.has_value())
             ++*next_insertion_index;
 
