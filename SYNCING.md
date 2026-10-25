@@ -50,6 +50,26 @@ upstream's `Tests/LibWebView` tests, after a merge that touches these files. `Br
 takes `Persist::No` for SQL-disabled runs (and as the fallback when a profile's database can't be opened).
 
 
+### Extensions
+
+Chrome extensions (Documentation/Elytra/WebExtensions.md) live in `Libraries/LibWebExtensions`, `LibWeb/Extensions`,
+`LibWebView/Extension*` and `UI/Qt/Arc/Extensions*`. Upstream files carry these hooks, each commented where it is.
+
+| File | Hook |
+| --- | --- |
+| `LibURL/Rust/src/origin.rs` | `chrome-extension://<id>` URLs have a tuple origin (only for extension IDs), and so do blob URLs they make |
+| `LibWebCommon/Fetch/Infrastructure/URL.h`, `SecureContexts/AbstractOperations.cpp` | `chrome-extension` is a fetch scheme, and potentially trustworthy |
+| `LibWeb/Fetch/Fetching/Fetching.cpp` | CORS requests to `chrome-extension` go on to scheme fetch, which hands them to `ResourceLoader`; `LoadRequest` gets the requester's origin |
+| `LibWeb/Loader/{FileRequest.h,LoadRequest.h,ResourceLoader.cpp}` | `chrome-extension` loads are file requests naming an `ExtensionFile`; responses carry the extension's CSP |
+| `LibWeb/DOM/Document.cpp` | `Extensions::document_is_ready_to_run_scripts()` in `set_ready_to_run_scripts()`, `document_readiness_changed()` in `update_readiness()`, `document_is_going_away()` in `destroy()` and `did_stop_being_active_document_in_navigable()` |
+| `LibWeb/Page/Page.h`, `Services/WebContent/{PageClient,ConnectionFromClient}`, `WebContentClient.ipc`, `WebContentServer.ipc` | extension contexts' messages and files; installed extensions; scripts the browser runs |
+| `Services/WebWorker/{ConnectionFromClient.cpp,WebWorkerClient.ipc}`, `LibWebView/{WebWorkerClient,WorkerProcessManager}` | workers' extension file requests, answered for the worker's own origin |
+| `LibWebView/{CanonicalDocument,CanonicalNavigable,WebContentClient}` | extension documents get processes of their own (`extension_host()`, `hosted_extension()`, `may_speak_for_extension()`), as WebUI pages do |
+| `LibWebView/WebContentPage.{h,cpp}` | the extension handlers, and `populates_a_navigation_to_extension_file()` |
+| `LibWebView/{Application,ViewImplementation}` | the registry and runtime; installed extensions are loaded at startup and sent to every page |
+| `UI/cmake/ResourceFiles.cmake` | `Base/res/ladybird/extensions` (the `chrome.*` script) |
+| `UI/Qt/Arc/ArcSidebar.cpp`, `ArcChrome.cpp` | the extension buttons; `install_extensions_ui()`; the menu item and keyboard commands |
+
 ### Picture-in-Picture as a tab is left
 
 Arc shows a playing video in upstream's floating Picture-in-Picture window when its tab is left, and puts it back on

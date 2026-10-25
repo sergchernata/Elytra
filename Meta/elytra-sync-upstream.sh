@@ -93,6 +93,7 @@ for test in TestArcSpaceStore TestArcWidgets TestArcEdgeCases TestArcImportParse
     "$BUILD_DIR/bin/$test"
 done
 LADYBIRD_SOURCE_DIR="$PWD" "$BUILD_DIR/bin/TestArcProfileSessions"
+(cd "$BUILD_DIR" && ctest -R "^Test(Manifest|Messages|ExtensionId|MatchPattern|Zip|Crx|NativeMessaging|StorageArea|Extension.*)$" --output-on-failure)
 (cd "$BUILD_DIR" && ctest -R "PictureInPicture|UIOverlays" --output-on-failure)
 unset QT_QPA_PLATFORM
 
