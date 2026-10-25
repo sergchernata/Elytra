@@ -43,6 +43,11 @@ public:
     // Empty for none (the new tab page): nothing shows.
     void set_url(QUrl const&);
     QUrl url() const { return m_url; }
+
+    // Little Arc shows the link icon as a button of its own (see copy_url()); the URL is then alone, centered.
+    void set_link_icon_shown(bool);
+    // Copies the URL, with the same "copied" check the link icon shows.
+    void copy_url();
     DisplayUrl parts() const { return m_parts; }
 
     // Layout, in this widget's coordinates; shared with the tests. Empty when there's no URL.
@@ -101,6 +106,7 @@ private:
     Hover m_hover { Hover::None };
     Hover m_pressed { Hover::None };
     bool m_copied { false };
+    bool m_link_icon_shown { true };
     QTimer* m_copied_timer { nullptr };
 };
 

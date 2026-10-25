@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <UI/Qt/Arc/ArcShortcuts.h>
+#include <UI/Qt/Arc/LittleArcWidgets.h>
 #include <UI/Qt/Arc/ReleaseInfo.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <UI/Qt/Arc/SymbolButton.h>
@@ -463,6 +464,79 @@ TEST_CASE(address_bar_clicks_edit_or_copy)
     send_mouse(bar, QEvent::MouseButtonPress, bar.icon_rect().center());
     send_mouse(bar, QEvent::MouseButtonRelease, QPointF(5, 5));
     EXPECT(edits == 1 && copies == 1);
+}
+
+// Little Arc's bar: the URL alone, centered; its link button is on the right, beside "Open in".
+TEST_CASE(address_bar_can_leave_its_link_icon_to_another_button)
+{
+    AddressBar bar;
+    bar.resize(800, AddressBar::HEIGHT);
+    bar.set_link_icon_shown(false);
+    bar.set_url(QUrl("https://github.com/"));
+    EXPECT(bar.icon_rect().isEmpty() && bar.icon_pill_rect().isEmpty());
+    EXPECT(!bar.text_rect().isEmpty());
+    EXPECT(qAbs(bar.pill_rect().center().x() - 400) < 2);
+
+    // Where the icon would be does nothing; the URL still edits.
+    int edits = 0;
+    int copies = 0;
+    QObject::connect(&bar, &AddressBar::edit_requested, [&] { ++edits; });
+    QObject::connect(&bar, &AddressBar::url_copied, [&] { ++copies; });
+    click(bar, QPointF(bar.pill_rect().left() - 15, AddressBar::HEIGHT / 2.0));
+    EXPECT(edits == 0 && copies == 0);
+    click(bar, bar.text_rect().center());
+    EXPECT(edits == 1);
+
+    // Another button copies it.
+    bar.copy_url();
+    EXPECT(copies == 1 && bar.shows_copied());
+    if (QGuiApplication::platformName() == "offscreen")
+        EXPECT(QApplication::clipboard()->text() == "https://github.com/");
+}
+
+TEST_CASE(little_arc_names_the_default_profile)
+{
+    EXPECT(profile_label(QString()) == "Default");
+    EXPECT(profile_label("Work") == "Work");
+}
+
+// "Open in Hustle ⌘O ⌄": one outlined button; the chevron, past a divider, chooses another space.
+TEST_CASE(open_in_button_opens_or_offers_the_spaces)
+{
+    OpenInButton button;
+    button.set_space_title("Hustle");
+    button.resize(button.sizeHint());
+    EXPECT(button.space_title() == "Hustle");
+
+    auto main = button.main_rect();
+    auto chevron = button.chevron_rect();
+    EXPECT(!main.isEmpty() && !chevron.isEmpty());
+    EXPECT(main.right() <= chevron.left());
+    EXPECT(chevron.right() <= button.width());
+    // All of "Open in Hustle" and the shortcut fit.
+    QFont bold = button.font();
+    bold.setWeight(QFont::DemiBold);
+    EXPECT(main.width() > QFontMetricsF(button.font()).horizontalAdvance("Open in ⌘O") + QFontMetricsF(bold).horizontalAdvance("Hustle"));
+
+    // A longer name: a wider button.
+    auto narrow = button.sizeHint().width();
+    button.set_space_title("A much longer space name");
+    EXPECT(button.sizeHint().width() > narrow);
+    button.resize(button.sizeHint());
+
+    int opens = 0;
+    int menus = 0;
+    QObject::connect(&button, &OpenInButton::open_requested, [&] { ++opens; });
+    QObject::connect(&button, &OpenInButton::spaces_requested, [&] { ++menus; });
+    click(button, button.main_rect().center());
+    EXPECT(opens == 1 && menus == 0);
+    click(button, button.chevron_rect().center());
+    EXPECT(opens == 1 && menus == 1);
+
+    // Pressing on one half and releasing on the other does neither.
+    send_mouse(button, QEvent::MouseButtonPress, button.main_rect().center());
+    send_mouse(button, QEvent::MouseButtonRelease, button.chevron_rect().center());
+    EXPECT(opens == 1 && menus == 1);
 }
 
 // --- Arc's keyboard shortcuts --------------------------------------------------------------------

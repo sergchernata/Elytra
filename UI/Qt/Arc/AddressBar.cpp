@@ -140,7 +140,8 @@ void AddressBar::relayout()
     QFontMetricsF rest_metrics(rest_font());
     // The icon's hover pill is wider than the icon: leave room for it at either edge.
     auto edge = (height() - 4.0 - ICON_SIZE) / 2;
-    auto available = width() - edge * 2 - ICON_SIZE - ICON_GAP - PILL_PADDING * 2.0;
+    auto icon_width = m_link_icon_shown ? ICON_SIZE + ICON_GAP : 0;
+    auto available = width() - edge * 2 - icon_width - PILL_PADDING * 2.0;
     if (available <= 0)
         return;
 
@@ -159,12 +160,12 @@ void AddressBar::relayout()
         }
     }
     auto text_width = host_width + rest_metrics.horizontalAdvance(m_shown_rest);
-    auto content_width = ICON_SIZE + ICON_GAP + PILL_PADDING + text_width + PILL_PADDING;
+    auto content_width = icon_width + PILL_PADDING + text_width + PILL_PADDING;
 
     // Centered on the toolbar (as in Arc), as far as the room here allows.
     qreal center = width() / 2.0;
     for (auto* ancestor = parentWidget(); ancestor; ancestor = ancestor->parentWidget()) {
-        if (ancestor->objectName() == "LadybirdNavigationToolbar") {
+        if (ancestor->objectName() == "LadybirdNavigationToolbar" || ancestor->objectName() == "ArcLittleArcBar") {
             center = mapFrom(ancestor, QPointF(ancestor->width() / 2.0, 0)).x();
             break;
         }
@@ -172,9 +173,10 @@ void AddressBar::relayout()
     auto left = qBound(edge, center - content_width / 2.0, qMax(edge, width() - content_width));
 
     auto middle = height() / 2.0;
-    m_icon_rect = QRectF(left, middle - ICON_SIZE / 2.0, ICON_SIZE, ICON_SIZE);
+    if (m_link_icon_shown)
+        m_icon_rect = QRectF(left, middle - ICON_SIZE / 2.0, ICON_SIZE, ICON_SIZE);
     auto text_height = qMax(host_metrics.height(), rest_metrics.height());
-    m_text_rect = QRectF(m_icon_rect.right() + ICON_GAP + PILL_PADDING, middle - text_height / 2.0, text_width, text_height);
+    m_text_rect = QRectF(left + icon_width + PILL_PADDING, middle - text_height / 2.0, text_width, text_height);
 }
 
 QRectF AddressBar::icon_rect() const
@@ -274,13 +276,7 @@ void AddressBar::mouseReleaseEvent(QMouseEvent* event)
     }
     event->accept();
     if (pressed == Hover::Icon) {
-        if (m_url.isEmpty())
-            return;
-        QApplication::clipboard()->setText(m_url.toString(QUrl::FullyEncoded));
-        m_copied = true;
-        m_copied_timer->start();
-        update();
-        emit url_copied();
+        copy_url();
         return;
     }
     emit edit_requested();
@@ -327,7 +323,7 @@ void AddressBar::paintEvent(QPaintEvent*)
         painter.drawRoundedRect(m_hover == Hover::Text ? pill_rect() : icon_pill_rect(), PILL_RADIUS, PILL_RADIUS);
     }
 
-    auto icon = fitted_symbol_pixmap(m_copied ? "checkmark" : "link", ICON_SIZE, icon_color, devicePixelRatioF());
+    auto icon = m_icon_rect.isEmpty() ? QPixmap() : fitted_symbol_pixmap(m_copied ? "checkmark" : "link", ICON_SIZE, icon_color, devicePixelRatioF());
     if (!icon.isNull()) {
         auto size = icon.deviceIndependentSize();
         painter.drawPixmap(QPointF(m_icon_rect.center().x() - size.width() / 2, m_icon_rect.center().y() - size.height() / 2), icon);
@@ -343,6 +339,26 @@ void AddressBar::paintEvent(QPaintEvent*)
         auto rest_rect = m_text_rect.adjusted(host_metrics.horizontalAdvance(m_shown_host), 0, 0, 0);
         painter.drawText(rest_rect, Qt::AlignLeft | Qt::AlignVCenter, m_shown_rest);
     }
+}
+
+void AddressBar::set_link_icon_shown(bool shown)
+{
+    if (m_link_icon_shown == shown)
+        return;
+    m_link_icon_shown = shown;
+    relayout();
+    update();
+}
+
+void AddressBar::copy_url()
+{
+    if (m_url.isEmpty())
+        return;
+    QApplication::clipboard()->setText(m_url.toString(QUrl::FullyEncoded));
+    m_copied = true;
+    m_copied_timer->start();
+    update();
+    emit url_copied();
 }
 
 }

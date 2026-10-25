@@ -92,6 +92,7 @@ target_sources(TestArcEdgeCases PRIVATE
     "${ARC_SOURCE_DIR}/ArcIcons.cpp"
     "${ARC_SOURCE_DIR}/ArcShortcuts.cpp"
     "${ARC_SOURCE_DIR}/CustomGlyphs.cpp"
+    "${ARC_SOURCE_DIR}/LittleArcWidgets.cpp"
     "${ARC_SOURCE_DIR}/ReleaseInfo.cpp"
     "${ARC_SOURCE_DIR}/SidebarTree.cpp"
     "${ARC_SOURCE_DIR}/SpaceSlide.cpp"
