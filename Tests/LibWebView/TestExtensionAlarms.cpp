@@ -201,6 +201,19 @@ void i18n_knows_the_browsers_languages(WebView::HeadlessWebView& view)
 
 }
 
+// An optional permission the user grants counts as much as one the manifest asks for.
+static void granted_optional_permissions_count(WebView::HeadlessWebView& view, WebView::ExtensionRegistry& registry)
+{
+    MUST(registry.load_unpacked(fixture("alarms_optional"sv)));
+    auto& runtime = WebView::Application::extension_runtime();
+    runtime.request_permissions_prompt = [](auto const&, auto, auto, Function<void(bool)> on_answer) { on_answer(true); };
+    auto report = report_of(view, url("chrome-extension://iocffhmcedpajhakfjjdkjoieimjgmhf/page.html"sv));
+    runtime.request_permissions_prompt = nullptr;
+    CHECK(is_error(report, "before"sv));
+    CHECK(report.get_bool("granted"sv).value_or(false));
+    CHECK_EQ(string_in(report, "after"sv), "a"sv);
+}
+
 }
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
@@ -228,5 +241,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         idle_state_changes_reach_listeners(harness.view, idle);
 
         i18n_knows_the_browsers_languages(harness.view);
+        granted_optional_permissions_count(harness.view, harness.registry);
     });
 }

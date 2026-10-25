@@ -20,6 +20,7 @@
 #include <LibCore/Timer.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/ExtensionAPI/ExtensionAPI.h>
+#include <LibWebView/ExtensionAPI/Management.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 #include <LibWebView/Settings.h>
@@ -162,7 +163,7 @@ Optional<String> AlarmsAPI::refusal(Context const& context, StringView permissio
     if (context.type == "content_script"sv)
         return MUST(String::formatted("chrome.{} isn't available to content scripts", permission));
     auto const* extension = runtime().registry().find(context.extension_id);
-    if (!extension || !extension->manifest().has_permission(permission))
+    if (!extension || !runtime().management().has_permission(extension->id(), permission))
         return MUST(String::formatted("chrome.{} needs the \"{}\" permission", permission, permission));
     return {};
 }
@@ -303,7 +304,7 @@ void AlarmsAPI::extensions_changed()
     Vector<String> gone;
     for (auto const& [extension_id, alarms] : m_alarms) {
         auto const* extension = runtime().registry().find(extension_id);
-        if (!extension || !extension->manifest().has_permission("alarms"sv))
+        if (!extension || !runtime().management().has_permission(extension_id, "alarms"sv))
             gone.append(extension_id);
     }
     for (auto const& extension_id : gone)
@@ -311,7 +312,7 @@ void AlarmsAPI::extensions_changed()
 
     // Alarms kept from before run again, and those missed meanwhile fire now.
     runtime().registry().for_each_extension([&](Extension const& extension) {
-        if (extension.manifest().has_permission("alarms"sv))
+        if (runtime().management().has_permission(extension.id(), "alarms"sv))
             (void)alarms_of(extension.id());
     });
     fire_due_alarms();

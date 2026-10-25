@@ -8,6 +8,7 @@
 #include <LibWebExtensions/Manifest.h>
 #include <LibWebExtensions/NativeMessaging.h>
 #include <LibWebView/ExtensionAPI/ExtensionAPI.h>
+#include <LibWebView/ExtensionAPI/Management.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
 
@@ -109,7 +110,7 @@ private:
         if (caller.type == "content_script"sv)
             return forbidden_error;
         auto const* extension = runtime().registry().find(caller.extension_id);
-        if (!extension || !extension->manifest().has_permission("nativeMessaging"sv))
+        if (!extension || !runtime().management().has_permission(extension->id(), "nativeMessaging"sv))
             return forbidden_error;
 
         if (!application.is_string() || !WebExtensions::NativeHostManifest::is_valid_name(application.as_string()))
