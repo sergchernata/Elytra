@@ -45,8 +45,9 @@ through two adversarial security reviews. How it fits together, and what's left:
 
 ## Install
 
-Download the latest build for Apple Silicon Macs from [Releases](../../releases). It's signed ad hoc, not notarized,
-so the first time, right-click the app and choose Open (or run `xattr -dr com.apple.quarantine` on it).
+Download the latest build for Apple Silicon Macs from [Releases](../../releases). It's signed with Elytra's own
+certificate, so macOS keeps the permissions you give it across updates, but it isn't notarized: the first time,
+right-click the app and choose Open (or run `xattr -dr com.apple.quarantine` on it).
 
 ## Build
 

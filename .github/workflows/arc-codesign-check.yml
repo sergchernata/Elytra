@@ -1,0 +1,41 @@
+# Arc fork: tries Elytra's app signing (Meta/elytra-codesign-release.sh) on the latest release's app, without
+# publishing anything. Run it by hand from the Actions tab after changing the signing or its secrets.
+
+name: Arc codesign check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codesign:
+    name: Sign the latest release's app
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            Meta/elytra-codesign-app.sh
+            Meta/elytra-codesign-release.sh
+            Meta/elytra-codesign.pem
+          sparse-checkout-cone-mode: false
+
+      - name: Download the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download --repo "$GITHUB_REPOSITORY" --pattern '*.zip' --dir "$RUNNER_TEMP/release"
+
+      - name: Sign it
+        env:
+          ARC_CODESIGN_P12: ${{ secrets.ARC_CODESIGN_P12 }}
+          ARC_CODESIGN_PASSWORD: ${{ secrets.ARC_CODESIGN_PASSWORD }}
+        run: |
+          ZIP="$(ls "$RUNNER_TEMP"/release/*.zip | head -1)"
+          Meta/elytra-codesign-release.sh "$ZIP"
+          ditto -x -k "$ZIP" "$RUNNER_TEMP/check"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/check/Ladybird.app"
+          codesign -dv "$RUNNER_TEMP/check/Ladybird.app"

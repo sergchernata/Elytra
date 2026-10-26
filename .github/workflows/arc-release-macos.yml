@@ -131,18 +131,59 @@ jobs:
             ${{ steps.package.outputs.zip }}.sha256
           compression-level: 0
 
-  # The only job with write access or the signing key: it signs and publishes what the build made, and runs nothing
+  # Signs the app with Elytra's certificate, so macOS knows it as the same app from one release to the next (and keeps
+  # the permissions given to it). A job of its own: the certificate's key never meets the build, and this runs
+  # nothing from it (codesign only reads the binaries).
+  codesign:
+    name: Sign the app
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-package
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+          sparse-checkout: |
+            Meta/elytra-codesign-app.sh
+            Meta/elytra-codesign-release.sh
+            Meta/elytra-codesign.pem
+          sparse-checkout-cone-mode: false
+
+      - name: Sign Ladybird.app
+        env:
+          ARC_CODESIGN_P12: ${{ secrets.ARC_CODESIGN_P12 }}
+          ARC_CODESIGN_PASSWORD: ${{ secrets.ARC_CODESIGN_PASSWORD }}
+          ZIP: ${{ needs.build.outputs.zip }}
+        run: source/Meta/elytra-codesign-release.sh "$ZIP"
+
+      - name: Keep the signed package for publishing
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package-signed
+          path: |
+            ${{ needs.build.outputs.zip }}
+            ${{ needs.build.outputs.zip }}.sha256
+          compression-level: 0
+
+  # The only job with write access or the release key: it signs and publishes what the build made, and runs nothing
   # from the build.
   publish:
     name: Publish
-    needs: build
+    needs: [build, codesign]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: release-package
+          name: release-package-signed
 
       # Only for the public key the app trusts, to check the signature against it.
       - uses: actions/checkout@v7.0.1
@@ -189,7 +230,7 @@ jobs:
           cat > notes.md <<'EOF'
           Elytra: Ladybird with an Arc-style interface, built for Apple Silicon Macs (arm64, macOS 14.4 or later).
 
-          The app is signed ad hoc, not notarized, so macOS blocks it the first time. After unzipping, either
+          The app is signed with Elytra's own certificate, not notarized, so macOS blocks it the first time. After unzipping, either
           right-click Ladybird.app and choose Open, or run:
 
               xattr -dr com.apple.quarantine /path/to/Ladybird.app
