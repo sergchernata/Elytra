@@ -33,16 +33,22 @@ rm -f "$WORK/identity.p12"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
 
-# codesign uses only certificates trusted for code signing. Setting trust needs an authorization no one is there to
-# give on a runner, so allow it first.
-sudo security authorizationdb write com.apple.trust-settings.admin allow >/dev/null
-sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERTIFICATE"
+# codesign uses only certificates trusted for code signing. Setting trust wants an authorization no one is there to
+# give on a runner; try the ways that don't ask, and say which worked.
+if sudo security authorizationdb write com.apple.trust-settings.admin allow >/dev/null 2>&1; then
+    echo "Trust settings: authorized"
+fi
+if sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERTIFICATE" 2>&1; then
+    echo "Trust settings: the certificate is trusted for code signing"
+else
+    echo "Trust settings: couldn't trust the certificate; trying without"
+fi
+security find-identity -p codesigning "$KEYCHAIN"
 
 # The identity is the committed certificate's, or nothing is signed.
 FINGERPRINT="$(openssl x509 -in "$CERTIFICATE" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
-if ! security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "$FINGERPRINT"; then
+if ! security find-identity -p codesigning "$KEYCHAIN" | grep -q "$FINGERPRINT"; then
     echo "::error::The ARC_CODESIGN_P12 secret isn't the key of Meta/elytra-codesign.pem."
-    security find-identity -p codesigning "$KEYCHAIN"
     exit 1
 fi
 
