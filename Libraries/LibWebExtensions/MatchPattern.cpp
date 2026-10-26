@@ -94,7 +94,7 @@ static ErrorOr<Optional<u16>> parse_port(StringView port)
     return Optional<u16> { static_cast<u16>(value) };
 }
 
-ErrorOr<MatchPattern> MatchPattern::parse(StringView input)
+ErrorOr<MatchPattern> MatchPattern::parse(StringView input, Schemes schemes)
 {
     MatchPattern pattern;
     pattern.m_source = TRY(String::from_utf8(input));
@@ -111,7 +111,7 @@ ErrorOr<MatchPattern> MatchPattern::parse(StringView input)
         return Error::from_string_literal("Match pattern is missing '://'");
 
     auto scheme = input.substring_view(0, *separator).to_ascii_lowercase_string();
-    if (!is_valid_pattern_scheme(scheme))
+    if (!is_valid_pattern_scheme(scheme) && !(schemes == Schemes::IncludingExtensions && scheme == "chrome-extension"sv))
         return Error::from_string_literal("Invalid scheme in match pattern");
     pattern.m_scheme = scheme;
 

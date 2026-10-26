@@ -370,6 +370,7 @@ void tabs_and_windows_are_described(WebView::HeadlessWebView& view)
     CHECK_EQ(report.get_integer<i64>("tabs_in_current_window"sv).value_or(0), 2);
     CHECK_EQ(json_of(report, "url_pattern"sv), R"(["Bee"])"sv);
     CHECK_EQ(json_of(report, "url_patterns"sv), R"(["Sea"])"sv);
+    CHECK(report.get_bool("own_page"sv).value_or(false));
     CHECK_EQ(json_of(report, "title_glob"sv), R"(["Bee"])"sv);
     CHECK_EQ(json_of(report, "pinned"sv), R"(["Bee"])"sv);
     CHECK_EQ(json_of(report, "popup"sv), R"(["Sea"])"sv);

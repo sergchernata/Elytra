@@ -20,7 +20,13 @@ namespace WebExtensions {
 // https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns
 class MatchPattern {
 public:
-    static ErrorOr<MatchPattern> parse(StringView);
+    // Which schemes a pattern may name: the web's and file:, as host permissions and content scripts take; or those
+    // and the extension scheme, as tabs.query's url takes (Chrome parses it with every scheme a tab can show).
+    enum class Schemes : u8 {
+        Web,
+        IncludingExtensions,
+    };
+    static ErrorOr<MatchPattern> parse(StringView, Schemes = Schemes::Web);
 
     // Matches scheme, host, port and path. The path glob is tested against the
     // URL's path plus "?query" when the URL has a query. The fragment is ignored.

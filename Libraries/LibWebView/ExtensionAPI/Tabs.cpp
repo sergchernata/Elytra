@@ -622,7 +622,7 @@ void TabsAPI::register_tabs_functions()
         Vector<WebExtensions::MatchPattern> patterns;
         auto urls = TRY_OR_REPLY(strings(query, "url"sv));
         for (auto const& string : urls) {
-            auto pattern = WebExtensions::MatchPattern::parse(string);
+            auto pattern = WebExtensions::MatchPattern::parse(string, WebExtensions::MatchPattern::Schemes::IncludingExtensions);
             if (pattern.is_error())
                 return reply(MUST(String::formatted("Invalid url pattern '{}'", string)));
             patterns.append(pattern.release_value());

@@ -451,3 +451,20 @@ TEST_CASE(restricted_urls)
     EXPECT(!is_restricted_url(url("https://chrome.google.com/other"sv), true));
     EXPECT(!is_restricted_url(url("https://chrome.google.com/webstorefront"sv), true));
 }
+
+// tabs.query takes patterns for any scheme Chrome shows in tabs, the extension's own pages among them; elsewhere
+// (host permissions, content scripts) only web and file schemes.
+TEST_CASE(extension_page_patterns_only_where_asked_for)
+{
+    EXPECT(MatchPattern::parse("chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/app.html"sv).is_error());
+    auto pattern = MatchPattern::parse("chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/*"sv, MatchPattern::Schemes::IncludingExtensions);
+    EXPECT(!pattern.is_error());
+    if (pattern.is_error())
+        return;
+    EXPECT(pattern.value().matches(url("chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/app.html"sv)));
+    EXPECT(!pattern.value().matches(url("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/app/app.html"sv)));
+    EXPECT(!pattern.value().matches(url("https://abcdefghijklmnopabcdefghijklmnop/app/app.html"sv)));
+    // A scheme wildcard still means http and https only.
+    auto any = MatchPattern::parse("*://*/*"sv, MatchPattern::Schemes::IncludingExtensions);
+    EXPECT(!any.is_error() && !any.value().matches(url("chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/app.html"sv)));
+}

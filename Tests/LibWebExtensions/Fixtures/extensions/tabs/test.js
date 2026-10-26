@@ -43,6 +43,8 @@ const cases = {
             tabs_in_current_window: (await chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT })).length,
             url_pattern: titles(await chrome.tabs.query({ url: "file:///*/bee.html" })),
             url_patterns: titles(await chrome.tabs.query({ url: ["*://nowhere.example/*", "file:///*/sea.html"] })),
+            // The extension's own pages, by URL (1Password looks for its app tab so).
+            own_page: JSON.stringify(ids(await chrome.tabs.query({ url: chrome.runtime.getURL("test.html*") }))) === JSON.stringify([self.id]),
             title_glob: titles(await chrome.tabs.query({ title: "B*" })),
             pinned: titles(await chrome.tabs.query({ pinned: true })),
             popup: titles(await chrome.tabs.query({ windowType: "popup" })),
