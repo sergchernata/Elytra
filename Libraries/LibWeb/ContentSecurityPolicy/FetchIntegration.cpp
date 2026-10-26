@@ -91,8 +91,19 @@ void report_content_security_policy_violations_for_request(Fetch::Infrastructure
 }
 
 // https://w3c.github.io/webappsec-csp/#should-block-request
+// Fork hook (extensions): as in Chrome, which registers its extension scheme as bypassing CSP, an extension's files
+// aren't held to a document's policy (1Password's pages allow connect-src to its servers only, yet fetch their own
+// files). The browser decides which of them a document may have (web_accessible_resources).
+static bool bypasses_content_security_policy(Fetch::Infrastructure::Request const& request)
+{
+    return request.current_url().scheme() == "chrome-extension"sv;
+}
+
 Directives::Directive::Result should_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (bypasses_content_security_policy(request))
+        return Directives::Directive::Result::Allowed;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 
@@ -126,6 +137,9 @@ Directives::Directive::Result should_request_be_blocked_by_content_security_poli
 // https://w3c.github.io/webappsec-csp/#should-block-response
 Directives::Directive::Result should_response_to_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Response const& response, Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (bypasses_content_security_policy(request))
+        return Directives::Directive::Result::Allowed;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 

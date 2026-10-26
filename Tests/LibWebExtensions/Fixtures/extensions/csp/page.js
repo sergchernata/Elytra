@@ -16,5 +16,19 @@
     const image = document.getElementById("image");
     await new Promise(resolve => image.complete ? resolve() : (image.onload = image.onerror = resolve));
     report.image = image.naturalWidth > 0 ? "loaded" : "blocked";
+    // As in Chrome, the extension's own files aren't held to its CSP (1Password's connect-src lists only its servers,
+    // and its background fetches its own files); anything else still is.
+    try {
+        const response = await fetch("manifest.json");
+        report.own_file = (await response.json()).name ? "fetched" : "empty";
+    } catch (e) {
+        report.own_file = `blocked: ${e.message}`;
+    }
+    try {
+        await fetch("data:text/plain,elsewhere");
+        report.elsewhere = "fetched";
+    } catch (e) {
+        report.elsewhere = "blocked";
+    }
     document.title = JSON.stringify(report);
 })();

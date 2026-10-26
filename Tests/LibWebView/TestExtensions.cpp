@@ -411,6 +411,8 @@ void extension_pages_have_their_content_security_policy(WebView::HeadlessWebView
     CHECK_EQ(string_in(report, "eval"sv), "blocked"sv);
     CHECK_EQ(string_in(report, "wasm"sv), "compiled"sv);
     CHECK_EQ(string_in(report, "image"sv), "blocked"sv);
+    CHECK_EQ(string_in(report, "own_file"sv), "fetched"sv);
+    CHECK_EQ(string_in(report, "elsewhere"sv), "blocked"sv);
 }
 
 // An extension's pages get processes of their own, which host nothing else: a process that may speak for an extension
@@ -858,6 +860,7 @@ void manifest_v2_policies_apply(WebView::HeadlessWebView& view)
     auto report = report_of(view, url("chrome-extension://imcggofbbffpikbjijfkocdomhplgdmk/page.html"sv));
     CHECK_EQ(string_in(report, "origin"sv), "chrome-extension://imcggofbbffpikbjijfkocdomhplgdmk"sv);
     CHECK_EQ(string_in(report, "page_fetch"sv), "blocked"sv);
+    CHECK_EQ(string_in(report, "own_fetch"sv), "loaded"sv);
 }
 
 // Back and forward come to an extension's page again.
