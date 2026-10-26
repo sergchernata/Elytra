@@ -115,7 +115,7 @@ QList<QRectF> native_window_control_rects(QWidget& window)
     return rects;
 }
 
-void keep_native_widget_above_page(QWidget& native_widget)
+void keep_native_widget_above_page(QWidget& native_widget, int level)
 {
     auto* view = reinterpret_cast<NSView*>(native_widget.winId());
     if (!view)
@@ -123,7 +123,7 @@ void keep_native_widget_above_page(QWidget& native_widget)
     view.wantsLayer = YES;
     // Sibling layers are ordered by zPosition before insertion order, so later re-attachments of the page's
     // layer can't land on top of this one.
-    view.layer.zPosition = 1000;
+    view.layer.zPosition = 1000 + level;
 }
 
 bool set_native_widget_opacity(QWidget& native_widget, qreal opacity)

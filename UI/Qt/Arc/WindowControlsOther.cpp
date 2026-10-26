@@ -17,7 +17,7 @@ QList<QRectF> native_window_control_rects(QWidget&)
     return {};
 }
 
-void keep_native_widget_above_page(QWidget&)
+void keep_native_widget_above_page(QWidget&, int)
 {
 }
 

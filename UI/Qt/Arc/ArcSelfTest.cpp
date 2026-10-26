@@ -1304,15 +1304,62 @@ void SelfTest::the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the
     check(!toggle_icon.isEmpty() && !back_icon.isEmpty() && qAbs(toggle_icon.height() - back_icon.height()) <= 1.5,
         "the sidebar toggle's icon is as big as the toolbar's", QString("toggle %1x%2, back %3x%4").arg(toggle_icon.width()).arg(toggle_icon.height()).arg(back_icon.width()).arg(back_icon.height()));
     check(appkit_window_button_dots_visible(window()), "docked, the window buttons show (as faint dots)");
+    // Upstream's own sidebar toggle (in its sidebar column since the October 2026 merge) never shows: the Arc sidebar
+    // has its own.
+    auto upstream_toggle_shown = [&] {
+        for (auto* button : window().findChildren<QToolButton*>("LadybirdVerticalTabsToggleButton")) {
+            if (button->isVisible())
+                return true;
+        }
+        return false;
+    };
+    check(!upstream_toggle_shown(), "docked, upstream's sidebar toggle doesn't show beside Arc's");
     auto docked_toggle = QRect(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)), s().m_sidebar_toggle->size());
 
-    // Hidden: the toggle stays exactly where it was, the window buttons go, and the toolbar's buttons start past it.
-    set_expanded(false);
+    // Hiding: the toggle glides from its place to the window's left edge with the sidebar, never jumping, and the
+    // sliding sidebar's copy of it stays on top of the window's (they once went separate ways, which stuttered).
+    {
+        auto& settings = WebView::Application::settings();
+        auto tab_settings = settings.tab_settings();
+        tab_settings.vertical_tabs_expanded = false;
+        settings.set_tab_settings(tab_settings);
+    }
+    QList<int> positions;
+    bool copies_agree = true;
+    QString disagreement;
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 600) {
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        auto* moving = s().m_window_toggle;
+        if (!moving || !moving->isVisible() || s().m_active_transition == ArcSidebar::Transition::None)
+            continue;
+        auto window_rect = QRect(moving->mapTo(&window(), QPoint(0, 0)), moving->size());
+        positions.append(window_rect.x());
+        if (s().m_panel->parentWidget() != &s() && s().m_sidebar_toggle->isVisible() && copies_agree) {
+            copies_agree = false;
+            disagreement = QString("the sliding sidebar's toggle shows too, at %1").arg(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)).x());
+        }
+    }
+    auto steady = positions.size() >= 3;
+    for (int i = 1; i < positions.size(); ++i)
+        steady &= positions[i] <= positions[i - 1] && positions[i] >= 0 && positions[i] <= docked_toggle.x();
+    QStringList seen;
+    for (auto position : positions)
+        seen << QString::number(position);
+    seen.removeDuplicates();
+    check(steady, "hiding, the toggle glides to the left edge without jumping back", seen.join(" "));
+    check(copies_agree, "and it's the only toggle on screen on the way (the sliding sidebar's hides)", disagreement);
+    settle(600);
+
+    // Hidden: the toggle at the left edge, the window buttons gone, and the toolbar's buttons past it.
     auto* hidden_toggle = s().m_window_toggle;
     auto hidden_rect = hidden_toggle ? QRect(hidden_toggle->mapTo(&window(), QPoint(0, 0)), hidden_toggle->size()) : QRect();
-    check(hidden_toggle && hidden_toggle->isVisible() && hidden_rect == docked_toggle, "hidden, the sidebar toggle stays where it was",
+    check(hidden_toggle && hidden_toggle->isVisible() && hidden_rect.y() == docked_toggle.y() && hidden_rect.x() <= 12 && hidden_rect.size() == docked_toggle.size(),
+        "hidden, the sidebar toggle sits at the window's left edge, level with where it was",
         QString("%1,%2 vs %3,%4").arg(hidden_rect.x()).arg(hidden_rect.y()).arg(docked_toggle.x()).arg(docked_toggle.y()));
     check(!appkit_window_button_dots_visible(window()), "and the window buttons hide with the sidebar, dots and all");
+    check(!upstream_toggle_shown(), "hidden, upstream's sidebar toggle doesn't show either");
     auto* first_button = leftmost_toolbar_button();
     auto first_left = first_button ? first_button->mapTo(&window(), QPoint(0, 0)).x() : -1;
     check(first_button && first_left > hidden_rect.right(), "the toolbar's buttons start past the toggle",
@@ -1326,12 +1373,41 @@ void SelfTest::the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the
         tab_settings.vertical_tabs_expanded = true;
         settings.set_tab_settings(tab_settings);
     }
-    settle(140);
+    // On the way, the toggle glides back from the left edge, the sliding sidebar's copy on top of it from the start.
+    QList<int> opening_positions;
+    bool opening_copies_agree = true;
+    QString opening_disagreement;
+    QElapsedTimer opening_clock;
+    opening_clock.start();
+    auto opening_column_width = -1;
+    while (opening_clock.elapsed() < 600) {
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+        if (opening_column_width < 0 && opening_clock.elapsed() >= 140)
+            opening_column_width = s().parentWidget()->width();
+        auto* moving = s().m_window_toggle;
+        if (!moving || !moving->isVisible() || s().m_active_transition != ArcSidebar::Transition::Show)
+            continue;
+        auto window_rect = QRect(moving->mapTo(&window(), QPoint(0, 0)), moving->size());
+        opening_positions.append(window_rect.x());
+        if (s().m_panel->parentWidget() != &s() && s().m_sidebar_toggle->isVisible() && opening_copies_agree) {
+            opening_copies_agree = false;
+            opening_disagreement = QString("the sliding sidebar's toggle shows too, at %1").arg(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)).x());
+        }
+    }
+    auto opening_steady = opening_positions.size() >= 3;
+    for (int i = 1; i < opening_positions.size(); ++i)
+        opening_steady &= opening_positions[i] >= opening_positions[i - 1] && opening_positions[i] <= docked_toggle.x();
+    QStringList opening_seen;
+    for (auto position : opening_positions)
+        opening_seen << QString::number(position);
+    opening_seen.removeDuplicates();
+    check(opening_steady, "opening, the toggle glides back without jumping", opening_seen.join(" "));
+    check(opening_copies_agree, "and it's the only toggle on screen on the way", opening_disagreement);
     auto* column = s().parentWidget();
     auto full_width = s().m_tabs.vertical_sidebar_expanded_width();
-    check(column && column->width() < full_width - 20, "opening, the sidebar's column widens with the page rather than at once",
-        QString("%1 of %2").arg(column ? column->width() : -1).arg(full_width));
-    settle(900);
+    check(column && opening_column_width >= 0 && opening_column_width < full_width - 20, "opening, the sidebar's column widens with the page rather than at once",
+        QString("%1 of %2").arg(opening_column_width).arg(full_width));
+    settle(600);
     check(appkit_window_button_dots_visible(window()), "docked again, the window buttons are back");
     check(!s().m_window_toggle || !s().m_window_toggle->isVisible(), "and the sidebar's own toggle is the one showing");
     auto again = QRect(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)), s().m_sidebar_toggle->size());

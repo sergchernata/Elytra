@@ -22,7 +22,8 @@ QList<QRectF> native_window_control_rects(QWidget& window);
 
 // Keeps a native child widget (the floating sidebar) above the page, whose layer the web view re-attaches
 // to the window as it resizes, which would otherwise cover it mid-animation.
-void keep_native_widget_above_page(QWidget& native_widget);
+// `level` orders such widgets among themselves (higher is in front).
+void keep_native_widget_above_page(QWidget& native_widget, int level = 0);
 
 // Sets a native child widget's layer opacity, which the system compositor applies on the GPU (no repaint).
 // Returns false where that isn't available.

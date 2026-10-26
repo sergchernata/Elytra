@@ -220,7 +220,9 @@ private:
     void dock_panel();
     void place_edge_lines();
     void inset_toolbar(QWidget& toolbar);
-    QRect window_toggle_rect() const;
+    QRect docked_toggle_rect() const;
+    QRect collapsed_toggle_rect() const;
+    QRect current_toggle_rect() const;
     bool window_toggle_shown() const;
     void update_window_toggle();
     void apply_toolbar_inset(bool new_tabs_only = false);
@@ -327,7 +329,8 @@ private:
     int m_transition_width_from { 0 };
     int m_transition_width_to { 0 };
     class SymbolButton* m_sidebar_toggle { nullptr };
-    class SymbolButton* m_window_toggle { nullptr }; // The toggle while the sidebar is hidden: see window_toggle_rect().
+    qreal m_transition_progress { 0 };
+    class SymbolButton* m_window_toggle { nullptr }; // The toggle while the sidebar is hidden: see current_toggle_rect().
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };
     QPointer<QWidget> m_watched_column;
