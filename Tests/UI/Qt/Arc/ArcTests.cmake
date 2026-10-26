@@ -23,6 +23,7 @@ target_sources(TestArcWidgets PRIVATE
     "${ARC_SOURCE_DIR}/SidebarTree.cpp"
     "${ARC_SOURCE_DIR}/SpaceSlide.cpp"
     "${ARC_SOURCE_DIR}/SymbolButton.cpp"
+    "${ARC_SOURCE_DIR}/UpdatePill.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
 )

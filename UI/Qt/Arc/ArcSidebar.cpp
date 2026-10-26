@@ -15,6 +15,7 @@
 #include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/Arc/ProfileSessions.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
+#include <UI/Qt/Arc/UpdatePill.h>
 #include <LibWebView/BrowsingSession.h>
 #include <UI/Qt/Arc/CommandBar.h>
 #include <UI/Qt/Arc/FloatingPanel.h>
@@ -105,7 +106,6 @@ static QMessageBox::StandardButton ask_plain(QWidget* parent, QString const& tit
     return static_cast<QMessageBox::StandardButton>(box.exec());
 }
 static constexpr char const* BLANK_PROPERTY = "arc_blank";
-static constexpr int UPDATE_BUTTON_HEIGHT = 40;
 static constexpr int SPARE_TAB_DELAY_MS = 1200;
 static constexpr char const* NODE_PROPERTY = "arc_node";
 static constexpr char const* LAST_TITLE_PROPERTY = "arc_last_title"; // See live_title().
@@ -308,6 +308,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_model = new SidebarModel(this);
     m_tree = new SidebarTree(this);
     m_tree->setModel(m_model);
+    // Its edge hairlines run across the whole sidebar, window edge to page, as in Arc: drawn here, not in the list.
+    m_tree->set_paints_edges(false);
+    m_tree->installEventFilter(this);
+    connect(m_tree, &SidebarTree::edges_changed, this, [this] { place_edge_lines(); });
     layout->addWidget(m_tree, 1);
 
     // The media player's slot, at the bottom with the space buttons: it grows as the player slides open (see
@@ -353,14 +357,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     });
 
     // Arc's update notice: a pill above the bottom bar once a newer release is ready (see UpdateChecker).
-    m_update_button = new QPushButton(this);
+    m_update_button = new UpdatePill(this);
     m_update_button->setObjectName("ArcUpdateButton");
-    m_update_button->setCursor(Qt::PointingHandCursor);
-    m_update_button->setFocusPolicy(Qt::NoFocus);
-    m_update_button->setFixedHeight(UPDATE_BUTTON_HEIGHT);
-    m_update_button->hide();
     layout->addWidget(m_update_button);
-    connect(m_update_button, &QPushButton::clicked, this, [this] {
+    connect(m_update_button, &QAbstractButton::clicked, this, [this] {
         auto& updates = UpdateChecker::the();
         if (updates.state() == UpdateChecker::State::Ready)
             updates.restart_into_update();
@@ -370,9 +370,9 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     auto show_update = [this] {
         auto state = UpdateChecker::the().state();
         // Downloading happens quietly; the pill shows once there's something to click.
-        m_update_button->setText(state == UpdateChecker::State::Ready ? "Restart to Update" : "New Version Available");
-        style_update_button();
-        m_update_button->setVisible(state == UpdateChecker::State::Ready || state == UpdateChecker::State::PageOnly);
+        m_update_button->set_text(state == UpdateChecker::State::Ready ? "Restart to Update" : "New Version Available");
+        // It slides up into view as it fades in (at once if the window isn't up yet).
+        m_update_button->set_shown(state == UpdateChecker::State::Ready || state == UpdateChecker::State::PageOnly);
     };
     connect(&UpdateChecker::the(), &UpdateChecker::state_changed, this, show_update);
     show_update();
@@ -2303,20 +2303,6 @@ void ArcSidebar::on_current_tab_changed(int index)
 
 // --- Views --------------------------------------------------------------------------------------
 
-void ArcSidebar::style_update_button()
-{
-    auto dark = ChromeStyle::is_dark(palette());
-    m_update_button->setStyleSheet(QString(
-        "QPushButton#ArcUpdateButton { background: %1; border: 1px solid %2; border-radius: %3px; color: %4;"
-        " font-size: 13px; font-weight: 500; margin: 0 2px 6px 2px; }"
-        "QPushButton#ArcUpdateButton:hover { background: %5; }")
-            .arg(dark ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.55)",
-                dark ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.10)",
-                QString::number((UPDATE_BUTTON_HEIGHT - 6) / 2),
-                dark ? "rgba(255,255,255,0.92)" : "rgba(0,0,0,0.80)",
-                dark ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.80)"));
-}
-
 // The space of `profile` used last: that of its most recently shown tab, else its first.
 QString ArcSidebar::recent_space_of_profile(QString const& profile, Tab const* except) const
 {
@@ -3108,6 +3094,7 @@ void ArcSidebar::place_window_controls(QPoint panel_origin, bool match_native)
 
 void ArcSidebar::set_panel_card(bool card)
 {
+    QTimer::singleShot(0, this, [this] { place_edge_lines(); });
     // Card: inner padding, rounded and shadowed (hover slide-out). Flat: identical to the docked sidebar.
     m_panel->layout()->setContentsMargins(card ? FLOATING_PADDING : 0, 0, card ? FLOATING_PADDING : 0, card ? FLOATING_PADDING : 0);
     if (m_host)
@@ -3131,6 +3118,7 @@ void ArcSidebar::dock_panel()
     m_panel->layout()->setContentsMargins(0, 0, 0, 0);
     m_panel->setGeometry(rect());
     m_panel->show();
+    place_edge_lines();
     m_traffic_lights->set_drawn(false);
     // Beside the real window controls.
     place_window_controls(mapTo(window(), QPoint(0, 0)), true);
@@ -3718,8 +3706,92 @@ void ArcSidebar::on_urls_dropped(QList<QUrl> const& urls, QModelIndex const& tar
     }
 }
 
+namespace {
+
+// One of the list's edge hairlines, at its fade's opacity. Clicks pass through it.
+class EdgeLine final : public QWidget {
+public:
+    explicit EdgeLine(QWidget* parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    void set_line(QColor color, qreal opacity)
+    {
+        color.setAlphaF(color.alphaF() * opacity);
+        if (color == m_color)
+            return;
+        m_color = color;
+        update();
+    }
+
+protected:
+    virtual void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), m_color);
+    }
+
+private:
+    QColor m_color;
+};
+
+}
+
+// The list's edge hairlines span the whole sidebar: docked, from the window's edge to the page's (over the sidebar's
+// own padding); in the sliding-out card, its width.
+void ArcSidebar::place_edge_lines()
+{
+    if (!m_tree || !m_window)
+        return;
+    auto docked = m_panel->parentWidget() == this;
+    QWidget* parent = docked ? static_cast<QWidget*>(m_window) : m_panel;
+    auto ensure = [&](QWidget*& line) {
+        if (!line)
+            line = new EdgeLine(parent);
+        else if (line->parentWidget() != parent)
+            line->setParent(parent);
+        return static_cast<EdgeLine*>(line);
+    };
+    auto* top = ensure(m_top_edge_line);
+    auto* bottom = ensure(m_bottom_edge_line);
+
+    auto visible = m_tree->isVisible() && m_panel->isVisible() && isVisible();
+    auto tree = QRect(m_tree->mapTo(parent, QPoint(0, 0)), m_tree->size());
+    int left = 0;
+    int right = parent->width();
+    if (docked) {
+        // To the page's edge, where it starts right of the sidebar.
+        right = mapTo(parent, QPoint(width(), 0)).x();
+        if (auto* tab = m_window->current_tab(); tab && tab->view().isVisible()) {
+            auto page_left = tab->view().mapTo(parent, QPoint(0, 0)).x();
+            if (page_left >= right)
+                right = page_left;
+        }
+    }
+    auto color = sidebar_hairline_color(palette());
+    auto place = [&](EdgeLine* line, int y, qreal opacity) {
+        if (!visible || opacity <= 0) {
+            line->hide();
+            return;
+        }
+        line->setGeometry(left, y, right - left, 1);
+        line->set_line(color, opacity);
+        line->show();
+        line->raise();
+    };
+    place(top, tree.top(), m_tree->top_edge_opacity());
+    place(bottom, tree.bottom(), m_tree->bottom_edge_opacity());
+}
+
 bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_tree && (event->type() == QEvent::Move || event->type() == QEvent::Resize || event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+        place_edge_lines();
+        return false;
+    }
     if (watched == m_mini_player_slot && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
         place_mini_player();
         return false;

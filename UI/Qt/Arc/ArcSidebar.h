@@ -43,6 +43,7 @@ namespace Arc {
 
 class MiniPlayer;
 class SymbolButton;
+class UpdatePill;
 namespace OnePassword {
 class Runner;
 struct Login;
@@ -217,6 +218,7 @@ private:
     virtual void tab_settings_changed() override;
     void update_mode();
     void dock_panel();
+    void place_edge_lines();
     void apply_toolbar_inset(bool new_tabs_only = false);
     void install_address_bar(QWidget& toolbar);
     void prepare_card_panel();
@@ -247,7 +249,6 @@ private:
     QColor space_color() const;
     QString current_profile() const;
     void apply_profile_for_new_views();
-    void style_update_button();
     void place_tabs_in_their_profiles();
     void apply_space_tint();
     void apply_tint(QColor const&, double amount, bool visible_only = false);
@@ -274,7 +275,10 @@ private:
     int m_serial { 0 }; // Unique per sidebar, for marking tabs it watches.
     QPointer<BrowserWindow> m_window;
     QPointer<Tab> m_spare_tab; // See prepare_spare_tab().
-    QPushButton* m_update_button { nullptr };
+    UpdatePill* m_update_button { nullptr };
+    // The list's edge hairlines, drawn edge to edge across the sidebar (see place_edge_lines()).
+    QWidget* m_top_edge_line { nullptr };
+    QWidget* m_bottom_edge_line { nullptr };
     QString m_tree_space_id;                // The space the list shows.
     QHash<QString, int> m_scroll_positions; // Each space's list scroll position.
     QStringList m_favorite_ids;                       // What the favorite tiles show, in order.

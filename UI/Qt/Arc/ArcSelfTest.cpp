@@ -31,6 +31,7 @@
 #include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/Toast.h>
 #include <UI/Qt/Arc/UpdateChecker.h>
+#include <UI/Qt/Arc/UpdatePill.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
@@ -203,6 +204,7 @@ private:
     void picture_in_picture_is_round_and_its_buttons_hold_steady();
     void window_buttons_look_inactive_everywhere();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
+    void the_lists_edge_lines_run_from_the_window_edge_to_the_page();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
     void tabs_come_back_in_their_own_profile();
@@ -1225,6 +1227,38 @@ void SelfTest::window_buttons_look_inactive_everywhere()
         guarded->close();
     settle(300);
 #endif
+}
+
+// As in Arc: once the list is longer than the sidebar, a hairline fades in where rows go out of sight, and it runs the
+// sidebar's whole width, from the window's edge to the page's.
+void SelfTest::the_lists_edge_lines_run_from_the_window_edge_to_the_page()
+{
+    QList<QPointer<Tab>> opened;
+    for (int i = 0; i < 40; ++i)
+        opened.append(s().open_tab(page(QString("Edge %1").arg(i))));
+    settle(400);
+    auto* tree = s().m_tree;
+    tree->verticalScrollBar()->setValue(0);
+    settle(400);
+    auto* line = s().m_bottom_edge_line;
+    check(line && line->isVisible(), "a long list shows a line where rows go out of sight below");
+    if (line && line->isVisible()) {
+        auto* page_view = window().current_tab() ? &window().current_tab()->view() : nullptr;
+        auto left = line->mapTo(&window(), QPoint(0, 0)).x();
+        auto right = left + line->width();
+        auto page_left = page_view ? page_view->mapTo(&window(), QPoint(0, 0)).x() : -1;
+        check(left == 0 && right == page_left, "from the window's edge to the page's", QString("%1 to %2, page at %3").arg(left).arg(right).arg(page_left));
+    }
+    auto* top = s().m_top_edge_line;
+    check(!top || !top->isVisible(), "and none above, at the top");
+    tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum());
+    settle(400);
+    check(top && top->isVisible() && (!line || !line->isVisible()), "scrolled to the end, one above and none below");
+    for (auto& tab : opened) {
+        if (tab)
+            s().close_tab(*tab);
+    }
+    settle(300);
 }
 
 // As in Arc: the docked sidebar has its own toggle beside the window buttons, in place of the toolbar's.
@@ -2677,6 +2711,7 @@ int SelfTest::run()
     picture_in_picture_is_round_and_its_buttons_hold_steady();
     window_buttons_look_inactive_everywhere();
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
+    the_lists_edge_lines_run_from_the_window_edge_to_the_page();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
     tabs_come_back_in_their_own_profile();

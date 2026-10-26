@@ -29,6 +29,7 @@ target_sources(ladybird PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/SymbolButton.cpp
     ${CMAKE_CURRENT_LIST_DIR}/Toast.cpp
     ${CMAKE_CURRENT_LIST_DIR}/UpdateChecker.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/UpdatePill.cpp
 )
 
 # The update notice asks GitHub for the latest release through Ladybird's own network stack, and checks its signature.

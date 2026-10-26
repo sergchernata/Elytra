@@ -317,8 +317,8 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
             painter->drawLine(QPointF(arrow_x - 3.5, bottom - 3.5), QPointF(arrow_x, bottom));
             painter->drawLine(QPointF(arrow_x + 3.5, bottom - 3.5), QPointF(arrow_x, bottom));
         }
-        // A light rule, as in Arc: brighter than the background in dark mode, darker in light mode.
-        painter->setPen(QPen(ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 46) : QColor(0, 0, 0, 30), 1));
+        // A light rule, as in Arc, the same as the list's edges.
+        painter->setPen(QPen(sidebar_hairline_color(palette), 1));
         painter->drawLine(QPointF(row.left() + 6, rule_y), QPointF(rule_right, rule_y));
 
         auto button = row.adjusted(0, DIVIDER_STRIP_HEIGHT, 0, 0);
@@ -486,6 +486,8 @@ SidebarTree::SidebarTree(QWidget* parent)
     setRootIsDecorated(false);
     setIndentation(16);
     setVerticalScrollBar(new SidebarScrollBar(this));
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { update_edges(); });
+    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this] { update_edges(); });
     setFrameShape(QFrame::NoFrame);
     setFocusPolicy(Qt::NoFocus);
     setMouseTracking(true);
@@ -949,6 +951,80 @@ void SidebarTree::dropEvent(QDropEvent* event)
     }
 
     event->ignore();
+}
+
+}
+
+namespace Ladybird::Arc {
+
+QColor sidebar_hairline_color(QPalette const& palette)
+{
+    return ChromeStyle::is_dark(palette) ? QColor(255, 255, 255, 30) : QColor(0, 0, 0, 22);
+}
+
+// Whether rows hide past each edge: above once scrolled down, below while there's more to scroll to.
+void SidebarTree::update_edges()
+{
+    auto* bar = verticalScrollBar();
+    fade_edge(m_top_edge, bar->value() > bar->minimum());
+    fade_edge(m_bottom_edge, bar->value() < bar->maximum());
+}
+
+void SidebarTree::fade_edge(Edge& edge, bool shown)
+{
+    if (edge.shown == shown)
+        return;
+    edge.shown = shown;
+    if (!edge.fade) {
+        edge.fade = new QVariantAnimation(this);
+        edge.fade->setEasingCurve(QEasingCurve::OutQuad);
+        connect(edge.fade, &QVariantAnimation::valueChanged, this, [this, &edge](QVariant const& value) {
+            edge.opacity = value.toReal();
+            if (m_paints_edges)
+                viewport()->update();
+            emit edges_changed();
+        });
+    }
+    edge.fade->stop();
+    auto target = shown ? 1.0 : 0.0;
+    if (!isVisible()) {
+        edge.opacity = target;
+        emit edges_changed();
+        return;
+    }
+    edge.fade->setDuration(qMax(1, qRound(EDGE_FADE_MS * qAbs(target - edge.opacity))));
+    edge.fade->setStartValue(edge.opacity);
+    edge.fade->setEndValue(target);
+    edge.fade->start();
+    // The first frame goes out with this change, not a frame later.
+    edge.opacity = target > edge.opacity ? qMax(edge.opacity, 0.01) : edge.opacity;
+}
+
+void SidebarTree::paintEvent(QPaintEvent* event)
+{
+    QTreeView::paintEvent(event);
+    if (!m_paints_edges || (m_top_edge.opacity <= 0 && m_bottom_edge.opacity <= 0))
+        return;
+    QPainter painter(viewport());
+    auto line = sidebar_hairline_color(palette());
+    auto draw = [&](qreal opacity, int y) {
+        if (opacity <= 0)
+            return;
+        auto color = line;
+        color.setAlphaF(color.alphaF() * opacity);
+        painter.fillRect(QRect(0, y, viewport()->width(), 1), color);
+    };
+    draw(m_top_edge.opacity, 0);
+    draw(m_bottom_edge.opacity, viewport()->height() - 1);
+}
+
+// The lines stay at the edges while the rows move under them: Qt shifts what's drawn when it scrolls, lines and all,
+// so draw it all again.
+void SidebarTree::scrollContentsBy(int dx, int dy)
+{
+    QTreeView::scrollContentsBy(dx, dy);
+    if (m_paints_edges && (m_top_edge.opacity > 0 || m_bottom_edge.opacity > 0))
+        viewport()->update();
 }
 
 }

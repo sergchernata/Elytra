@@ -14,6 +14,7 @@
 #include <UI/Qt/Arc/SpaceSlide.h>
 #include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
+#include <UI/Qt/Arc/UpdatePill.h>
 
 #include <AK/Vector.h>
 #include <QApplication>
@@ -583,6 +584,125 @@ TEST_CASE(downloads_shelf_rows_rise_in_one_after_another)
     // And it's quick: the whole shelf is in place well within half a second.
     EXPECT(shelf_rows_duration_ms(6) <= 450);
     EXPECT(shelf_rows_duration_ms(1) < shelf_rows_duration_ms(6));
+}
+
+// --- The update pill ------------------------------------------------------------------------------------------------
+
+static void run_events_for(int ms)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < ms)
+        QApplication::processEvents(QEventLoop::AllEvents, 5);
+}
+
+TEST_CASE(the_update_pill_slides_up_and_fades_in)
+{
+    // It starts below its place, unseen and taking no room; it ends in place, solid, at its full height.
+    auto start = update_pill_motion(0);
+    EXPECT(start.offset > 0);
+    EXPECT_EQ(start.opacity, 0.0);
+    EXPECT_EQ(start.height, 0.0);
+    auto end = update_pill_motion(1);
+    EXPECT_EQ(end.offset, 0.0);
+    EXPECT_EQ(end.opacity, 1.0);
+    EXPECT_EQ(end.height, 1.0);
+    // On the way, it only ever rises, grows clearer and makes more room.
+    auto previous = start;
+    for (int step = 1; step <= 20; ++step) {
+        auto now = update_pill_motion(step / 20.0);
+        EXPECT(now.offset <= previous.offset);
+        EXPECT(now.opacity >= previous.opacity);
+        EXPECT(now.height >= previous.height);
+        previous = now;
+    }
+}
+
+TEST_CASE(the_update_pill_animates_in_and_out)
+{
+    QWidget parent;
+    auto* pill = new UpdatePill(&parent);
+    parent.resize(260, 200);
+    parent.show();
+    pill->set_text("Restart to Update");
+    EXPECT(!pill->is_shown() && pill->isHidden());
+
+    // Shown: it starts with no room, and grows to its full height.
+    pill->set_shown(true);
+    EXPECT(pill->is_shown() && pill->isVisible());
+    EXPECT(pill->height() < UpdatePill::HEIGHT);
+    run_events_for(UpdatePill::SHOW_MS + 150);
+    EXPECT_EQ(pill->height(), UpdatePill::HEIGHT);
+    EXPECT_EQ(pill->reveal(), 1.0);
+
+    // Asked again, it stays put (an update that changes state doesn't replay it).
+    pill->set_shown(true);
+    EXPECT_EQ(pill->reveal(), 1.0);
+
+    // Hidden: it goes, then takes no room.
+    pill->set_shown(false);
+    run_events_for(UpdatePill::HIDE_MS + 150);
+    EXPECT(pill->isHidden());
+    EXPECT_EQ(pill->reveal(), 0.0);
+
+    // Without animating (as the sidebar starts with an update already waiting), it's simply there.
+    pill->set_shown(true, UpdatePill::Animate::No);
+    EXPECT_EQ(pill->reveal(), 1.0);
+    EXPECT_EQ(pill->height(), UpdatePill::HEIGHT);
+
+    int clicks = 0;
+    QObject::connect(pill, &UpdatePill::clicked, [&] { ++clicks; });
+    auto center = pill->rect().center();
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(center), QPointF(pill->mapToGlobal(center)), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, QPointF(center), QPointF(pill->mapToGlobal(center)), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(pill, &press);
+    QApplication::sendEvent(pill, &release);
+    EXPECT_EQ(clicks, 1);
+}
+
+// --- The list's edges -----------------------------------------------------------------------------------------------
+
+TEST_CASE(the_list_shows_a_hairline_where_rows_are_scrolled_out_of_sight)
+{
+    QStandardItemModel model;
+    auto fill = [&](int rows) {
+        model.clear();
+        for (int i = 0; i < rows; ++i) {
+            auto* item = new QStandardItem(QString("Tab %1").arg(i));
+            item->setData(static_cast<int>(RowKind::TodayTab), KindRole);
+            model.appendRow(item);
+        }
+    };
+    fill(3);
+    SidebarTree tree(nullptr);
+    tree.setModel(&model);
+    tree.resize(260, 300);
+    tree.show();
+    QApplication::processEvents();
+
+    // Everything fits: no edges.
+    EXPECT(!tree.top_edge_shown() && !tree.bottom_edge_shown());
+
+    // More than fits, at the top: rows hide below only.
+    fill(100);
+    QApplication::processEvents();
+    EXPECT(!tree.top_edge_shown() && tree.bottom_edge_shown());
+
+    // In the middle: both.
+    tree.verticalScrollBar()->setValue(tree.verticalScrollBar()->maximum() / 2);
+    EXPECT(tree.top_edge_shown() && tree.bottom_edge_shown());
+
+    // At the end: above only.
+    tree.verticalScrollBar()->setValue(tree.verticalScrollBar()->maximum());
+    EXPECT(tree.top_edge_shown() && !tree.bottom_edge_shown());
+
+    // They fade rather than pop: just after a change, the line is on its way.
+    tree.verticalScrollBar()->setValue(0);
+    EXPECT(!tree.top_edge_shown());
+    EXPECT(tree.top_edge_opacity() > 0);
+    run_events_for(SidebarTree::EDGE_FADE_MS + 150);
+    EXPECT_EQ(tree.top_edge_opacity(), 0.0);
+    EXPECT_EQ(tree.bottom_edge_opacity(), 1.0);
 }
 
 // --- The slide between spaces ---------------------------------------------------------------------------------------

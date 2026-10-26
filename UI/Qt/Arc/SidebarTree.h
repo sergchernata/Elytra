@@ -105,6 +105,10 @@ public:
 
 // The list's scroll bar: a thin rounded handle, as in Arc, that fades in and out. It paints the handle itself at its
 // opacity, so each step of a fade is just a repaint (a style sheet per step re-polished the bar every frame).
+// The sidebar's hairlines (the Today divider's rule, the list's edges): brighter than the background in dark mode,
+// darker in light mode.
+QColor sidebar_hairline_color(QPalette const&);
+
 class SidebarScrollBar final : public QScrollBar {
     Q_OBJECT
 
@@ -144,6 +148,16 @@ public:
     // Replaces the rows (via `rebuild`) without moving the list: same scroll position, no expand animations, no
     // repaint midway.
     void rebuild_keeping_scroll_position(Function<void()> const& rebuild);
+
+    // A hairline at the list's top and bottom edges, faded in while rows are scrolled out of sight past them, as in
+    // Arc. Shown: where it's headed; opacity: where its fade is now.
+    static constexpr int EDGE_FADE_MS = 180;
+    bool top_edge_shown() const { return m_top_edge.shown; }
+    bool bottom_edge_shown() const { return m_bottom_edge.shown; }
+    qreal top_edge_opacity() const { return m_top_edge.opacity; }
+    qreal bottom_edge_opacity() const { return m_bottom_edge.opacity; }
+    // Off, the list leaves drawing them to its owner (the sidebar draws them edge to edge), told by edges_changed().
+    void set_paints_edges(bool paints) { m_paints_edges = paints; }
     bool is_rebuilding() const { return m_rebuilding; } // Its scroll position moves then, not by the user's hand.
 
     enum class DropPlace {
@@ -154,6 +168,7 @@ public:
     };
 
 signals:
+    void edges_changed();
     void row_clicked(QModelIndex const&);
     void close_clicked(QModelIndex const&);
     void clear_clicked();
@@ -175,8 +190,21 @@ protected:
     virtual void dragMoveEvent(QDragMoveEvent*) override;
     virtual void dropEvent(QDropEvent*) override;
     virtual void drawBranches(QPainter*, QRect const&, QModelIndex const&) const override { }
+    virtual void paintEvent(QPaintEvent*) override;
+    virtual void scrollContentsBy(int dx, int dy) override;
 
 private:
+    struct Edge {
+        bool shown { false };
+        qreal opacity { 0 };
+        QVariantAnimation* fade { nullptr };
+    };
+    void update_edges();
+    void fade_edge(Edge&, bool shown);
+
+    bool m_paints_edges { true };
+    Edge m_top_edge;
+    Edge m_bottom_edge;
     bool m_rebuilding { false };
     int height_of_contents(QModelIndex const& folder) const;
     DropPlace drop_place_for(QModelIndex const& target) const;
