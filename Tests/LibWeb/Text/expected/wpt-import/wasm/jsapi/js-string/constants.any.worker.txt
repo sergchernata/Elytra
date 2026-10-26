@@ -1,0 +1,45 @@
+Harness status: OK
+
+Found 40 tests
+
+40 Pass
+Pass	constants
+Pass	constants 1
+Pass	constants 2
+Pass	constants 3
+Pass	constants 4
+Pass	constants 5
+Pass	constants 6
+Pass	constants 7
+Pass	constants 8
+Pass	constants 9
+Pass	constants 10
+Pass	constants 11
+Pass	constants 12
+Pass	constants 13
+Pass	constants 14
+Pass	constants 15
+Pass	constants 16
+Pass	constants 17
+Pass	constants 18
+Pass	constants 19
+Pass	constants 20
+Pass	constants 21
+Pass	constants 22
+Pass	constants 23
+Pass	constants 24
+Pass	constants 25
+Pass	constants 26
+Pass	constants 27
+Pass	constants 28
+Pass	constants 29
+Pass	constants 30
+Pass	constants 31
+Pass	constants 32
+Pass	constants 33
+Pass	constants 34
+Pass	constants 35
+Pass	constants 36
+Pass	constants 37
+Pass	constants 38
+Pass	constants 39

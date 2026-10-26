@@ -12,7 +12,6 @@
 #include <LibGC/WeakHashSet.h>
 #include <LibIPC/File.h>
 #include <LibJS/Runtime/AbstractOperations.h>
-#include <LibJS/Runtime/Accessor.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/FunctionObject.h>
@@ -1673,6 +1672,7 @@ WebIDL::ExceptionOr<Window::PreparedPostMessage> Window::prepare_post_message(JS
     return PreparedPostMessage {
         .serialize_with_transfer_result = move(serialize_with_transfer_result),
         .target_origin = move(target_origin),
+        .incumbent_settings_id = incumbent_settings.id,
         .source_origin = move(source_origin),
         .source = source,
     };

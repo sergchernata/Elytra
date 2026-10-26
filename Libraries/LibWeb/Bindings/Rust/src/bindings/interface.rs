@@ -22,10 +22,10 @@ use core::ptr::NonNull;
 
 use ak::Utf16FlyString;
 use libjs_rust::api::{
-    Attribute, EmbedderCell, EmbedderClass, EmbedderValue, ErrorKind, ErrorType, ExternalMemorySize, FunctionObject,
-    Gc, HostObject, JSHostClass, Object, PrimitiveString, PropertyAttributes, PropertyKey, RawNativeFunction,
-    RawNativeFunctionPointer, Realm, Throw, ThrowCompletionOr, Trace, Value, Vm, get_function_realm, host_data_of,
-    is_host_instance_of,
+    Attribute, DeferGc, EmbedderCell, EmbedderClass, EmbedderValue, ErrorKind, ErrorType, ExternalMemorySize,
+    FunctionObject, Gc, HostObject, JSHostClass, Object, PrimitiveString, PropertyAttributes, PropertyKey,
+    RawNativeFunction, RawNativeFunctionPointer, Realm, Throw, ThrowCompletionOr, Trace, Value, Vm, get_function_realm,
+    host_data_of, is_host_instance_of,
 };
 
 use crate::bindings::CallContext;
@@ -162,15 +162,12 @@ impl<T: Wrappable + Trace + Sized + 'static> Interface for T {
     }
 }
 
-/// A new object of the interface, which has no wrapper until something asks for one.
-pub(crate) fn allocate<T: Interface>(vm: &Vm, implementation: T) -> Ref<T> {
-    T::CELL_CLASS.allocate(
-        vm,
-        Wrapped {
-            main_world_wrapper: Cell::new(None),
-            implementation,
-        },
-    )
+/// A new object of the interface, built as Heap::allocate() builds a cell.
+pub(crate) fn allocate<T: Interface>(vm: &Vm, build: impl FnOnce(&DeferGc<'_>) -> T) -> Ref<T> {
+    T::CELL_CLASS.allocate(vm, |defer_gc| Wrapped {
+        main_world_wrapper: Cell::new(None),
+        implementation: build(defer_gc),
+    })
 }
 
 /// What the constructor steps or the transfer-receiving steps of an interface create: the implementation of the new
@@ -182,7 +179,7 @@ pub(crate) trait ConstructedObject<T: Interface> {
 
 impl<T: Interface> ConstructedObject<T> for T {
     fn into_object(self, vm: &Vm) -> Ref<T> {
-        allocate(vm, self)
+        allocate(vm, |_| self)
     }
 }
 
@@ -406,8 +403,13 @@ fn run_with_temporary_execution_context<F: FnOnce() -> R, R>(realm: Gc<Realm>, c
 pub(crate) fn rejected_promise(vm: &Vm, throw: Throw) -> Value {
     let current_realm = vm.current_realm().expect("a native function runs in a realm");
     // SAFETY: The realm is live, and the values are live while the native function runs.
-    let promise =
-        unsafe { web_bindings_rejected_promise(current_realm.as_ptr().cast(), vm.this_value().0, throw.value().0) };
+    let promise = unsafe {
+        web_bindings_rejected_promise(
+            current_realm.as_ptr().cast(),
+            vm.this_value().to_raw(),
+            throw.value().to_raw(),
+        )
+    };
     let promise = NonNull::new(promise.cast::<Object>()).expect("LibWeb returns the promise");
     // SAFETY: LibWeb returns a live promise.
     Value::from_object(unsafe { Gc::from_non_null(promise) })

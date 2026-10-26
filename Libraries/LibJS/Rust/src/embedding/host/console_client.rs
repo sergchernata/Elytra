@@ -154,8 +154,6 @@ impl HostConsoleClient {
             return Ok(Value::UNDEFINED);
         };
 
-        // The views point into `arguments` and these copies, which all live until the printer returns. The values
-        // stay alive in the MarkedVec of `arguments`.
         let trace_frames;
         let values;
         let printer_arguments = match &arguments {
@@ -179,7 +177,7 @@ impl HostConsoleClient {
                 }
             }
             PrinterArguments::Values(marked_values) => {
-                values = marked_values.to_vec();
+                values = marked_values.values();
                 JSConsolePrinterArguments {
                     kind: JS_CONSOLE_PRINTER_ARGUMENTS_VALUES,
                     label: JSUtf16View::of(Utf16View::EMPTY),
@@ -286,7 +284,7 @@ pub unsafe extern "C" fn js_console_client_create(
     let console = unsafe { Gc::from_non_null(console) };
     // SAFETY: The caller guarantees that the table outlives every client created with it.
     let host_methods = unsafe { methods.as_ref() }.expect("a console client has methods");
-    let client = vm.heap().allocate(HostConsoleClient {
+    let client = vm.heap().allocate(|_| HostConsoleClient {
         base: ConsoleClient::new(HostConsoleClient::CLASS, &HOST_CONSOLE_CLIENT_METHODS, console),
         host_methods,
         context: ForeignCellSlot::empty(),
@@ -320,7 +318,7 @@ pub unsafe extern "C" fn js_console_client_generically_format_values(
     if value_count > 0 {
         // SAFETY: The caller guarantees that `values` points to `value_count` values.
         for &value in unsafe { ak::slice_from_raw_parts(values, value_count) } {
-            marked_values.push(Value(value));
+            marked_values.push(Value::from_bits(value));
         }
     }
     let formatted = client

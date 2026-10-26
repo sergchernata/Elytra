@@ -32,6 +32,49 @@ fn vm_from_helper_argument<'vm>(argument: u64) -> &'vm Vm {
     unsafe { &*core::ptr::with_exposed_provenance::<Vm>(argument as usize) }
 }
 
+/// The slow path of Call, for JIT code too, whose arguments are not in an operand record.
+pub fn call_slow_path(
+    vm: &Vm,
+    pc: u32,
+    instruction: &op::Call,
+    values: &mut op::CallValues,
+    arguments: &[Value],
+) -> SlowPathControl {
+    let control = calls::call(vm, pc, instruction, values, arguments);
+    feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+}
+
+/// The slow path of CallDirectEval, for JIT code too, whose arguments are not in an operand record.
+pub fn call_direct_eval_slow_path(
+    vm: &Vm,
+    pc: u32,
+    instruction: &op::CallDirectEval,
+    values: &mut op::CallDirectEvalValues,
+    arguments: &[Value],
+) -> SlowPathControl {
+    feedback::record_call(vm, instruction.call_feedback, values.callee, call_feedback_flags::NONE);
+    let control = calls::call_direct_eval(vm, pc, instruction, values, arguments);
+    feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+}
+
+/// The slow path of CallConstruct, for JIT code too, whose arguments are not in an operand record.
+pub fn call_construct_slow_path(
+    vm: &Vm,
+    pc: u32,
+    instruction: &op::CallConstruct,
+    values: &mut op::CallConstructValues,
+    arguments: &[Value],
+) -> SlowPathControl {
+    feedback::record_call(
+        vm,
+        instruction.call_feedback,
+        values.callee,
+        call_feedback_flags::SAW_CONSTRUCT,
+    );
+    let control = calls::call_construct(vm, pc, instruction, values, arguments);
+    feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+}
+
 impl RuntimeFunctions for Runtime {
     // Arithmetic, comparisons, conversions and the jumps on comparisons: operators.rs.
 
@@ -672,7 +715,7 @@ impl RuntimeFunctions for Runtime {
     fn try_get_by_id_cache(encoded_base: u64, cache_address: u64) -> u64 {
         // SAFETY: The interpreter passes the address of one of the running executable's property lookup caches.
         let cache = unsafe { &*core::ptr::with_exposed_provenance::<PropertyLookupCache>(cache_address as usize) };
-        property_access::try_get_by_id_cache(Value(encoded_base), cache).0
+        property_access::try_get_by_id_cache(Value::from_bits(encoded_base), cache).0
     }
 
     fn try_get_by_value_typed_array(
@@ -1120,8 +1163,7 @@ impl RuntimeFunctions for Runtime {
         values: &mut op::CallValues,
         arguments: &mut [Value],
     ) -> SlowPathControl {
-        let control = calls::call(vm, pc, instruction, values, arguments);
-        feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+        call_slow_path(vm, pc, instruction, values, arguments)
     }
 
     fn call_direct_eval(
@@ -1131,9 +1173,7 @@ impl RuntimeFunctions for Runtime {
         values: &mut op::CallDirectEvalValues,
         arguments: &mut [Value],
     ) -> SlowPathControl {
-        feedback::record_call(vm, instruction.call_feedback, values.callee, call_feedback_flags::NONE);
-        let control = calls::call_direct_eval(vm, pc, instruction, values, arguments);
-        feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+        call_direct_eval_slow_path(vm, pc, instruction, values, arguments)
     }
 
     fn call_with_argument_array(
@@ -1165,14 +1205,7 @@ impl RuntimeFunctions for Runtime {
         values: &mut op::CallConstructValues,
         arguments: &mut [Value],
     ) -> SlowPathControl {
-        feedback::record_call(
-            vm,
-            instruction.call_feedback,
-            values.callee,
-            call_feedback_flags::SAW_CONSTRUCT,
-        );
-        let control = calls::call_construct(vm, pc, instruction, values, arguments);
-        feedback::record_value_after(vm, control, instruction.value_feedback, || values.dst)
+        call_construct_slow_path(vm, pc, instruction, values, arguments)
     }
 
     fn call_construct_with_argument_array(
@@ -1227,7 +1260,7 @@ impl RuntimeFunctions for Runtime {
 
     fn helper_handle_raw_native_exception(vm: u64, encoded_exception: u64) -> u64 {
         let vm = vm_from_helper_argument(vm);
-        calls::handle_raw_native_exception(vm, Value(encoded_exception)).0 as u64
+        calls::handle_raw_native_exception(vm, Value::from_bits(encoded_exception)).0 as u64
     }
 
     // Literals, iterators, generators and control flow: control.rs.

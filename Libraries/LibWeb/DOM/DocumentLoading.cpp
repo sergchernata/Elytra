@@ -84,18 +84,29 @@ static void convert_to_xml_error_document(DOM::Document& document, Utf16String e
     document.set_ready_for_post_load_tasks(true);
 }
 
-bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optional<StringView> content_encoding)
+// https://www.rfc-editor.org/rfc/rfc7303#section-3.2
+static StringView determine_xml_encoding(ReadonlyBytes data, Optional<StringView> content_encoding)
 {
-    Optional<TextCodec::Decoder> decoder;
-    // The actual HTTP headers and other metadata, not the headers as mutated or implied by the algorithms given in this specification,
-    // are the ones that must be used when determining the character encoding according to the rules given in the above specifications.
-    if (content_encoding.has_value())
-        decoder = TextCodec::decoder_for(*content_encoding);
+    // NB: A BOM takes precedence over the transport charset, followed by the XML declaration. Return canonical
+    //     encoding labels so that these views do not refer to the temporary sniffing results.
+    if (auto bom_encoding = HTML::run_bom_sniff(data); bom_encoding.has_value())
+        return TextCodec::get_standardized_encoding(*bom_encoding).value();
+    if (content_encoding.has_value()) {
+        if (auto encoding = TextCodec::get_standardized_encoding(*content_encoding); encoding.has_value())
+            return *encoding;
+    }
+    if (auto xml_encoding = HTML::get_an_xml_encoding(data); xml_encoding.has_value())
+        return TextCodec::get_standardized_encoding(*xml_encoding).value();
+
     // https://www.w3.org/TR/xml/#charencoding
     // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
     // declaration to use an encoding other than UTF-8.
-    if (!decoder.has_value())
-        decoder = TextCodec::decoder_for("UTF-8"sv);
+    return "UTF-8"sv;
+}
+
+bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optional<StringView> content_encoding)
+{
+    auto decoder = TextCodec::decoder_for(determine_xml_encoding(data, content_encoding));
     VERIFY(decoder.has_value());
     // Well-formed XML documents contain only properly encoded characters
     auto source_or_error = TextCodec::decode_to_utf8(data, *decoder, TextCodec::ErrorMode::Fatal);
@@ -132,11 +143,11 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     // AD-HOC: For about:srcdoc, the body bytes are always immediately available in the response source (the srcdoc
     //         string was inlined when the navigation params were created). Bypass the async body-reading pipeline
     //         and set up a deferred parser directly, so the document is parsed as soon as scripts may run for it.
-    else if (auto const* data = navigation_params.response->body()->source().get_pointer<ByteBuffer>();
-        data && document->url() == URL::about_srcdoc()) {
+    else if (auto const& source = navigation_params.response->body()->source();
+        source.has_value() && document->url() == URL::about_srcdoc()) {
         auto mime_type = Fetch::Infrastructure::extract_mime_type(navigation_params.response->header_list());
         auto url = navigation_params.response->url().value();
-        auto parser = HTML::HTMLParser::create_with_uncertain_encoding(document, *data, mime_type);
+        auto parser = HTML::HTMLParser::create_with_uncertain_encoding(document, source->bytes(), mime_type);
         document->set_deferred_parser_start(GC::create_function(GC::Heap::the(), [parser, url] {
             parser->run(url);
         }));
@@ -203,24 +214,13 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_xml_document(HTML::Navig
         content_encoding = *maybe_encoding;
 
     auto process_body = GC::create_function(GC::Heap::the(), [document, url = navigation_params.response->url().value(), response_header_list = navigation_params.response->header_list(), content_encoding = move(content_encoding), mime = type](ByteBuffer data) {
-        Optional<StringView> encoding;
-        // The actual HTTP headers and other metadata, not the headers as mutated or implied by the algorithms given in this specification,
-        // are the ones that must be used when determining the character encoding according to the rules given in the above specifications.
-        if (content_encoding.has_value())
-            encoding = TextCodec::get_standardized_encoding(content_encoding->bytes_as_string_view());
-        // https://www.w3.org/TR/xml/#charencoding
-        // [...] it is a fatal error [...] for an entity which begins with neither a Byte Order Mark nor an encoding
-        // declaration to use an encoding other than UTF-8.
-        if (!encoding.has_value())
-            encoding = "UTF-8"sv;
+        auto encoding = determine_xml_encoding(data, content_encoding.has_value() ? Optional<StringView> { content_encoding->bytes_as_string_view() } : OptionalNone {});
 
         // Once the character encoding is established, the document's character encoding must be set to that character encoding.
-        // NB: Decoding lets a BOM override the encoding.
-        auto bom_encoding = HTML::run_bom_sniff(data);
-        document->set_encoding(Utf16String::from_utf8(bom_encoding.has_value() ? bom_encoding->view() : *encoding));
+        document->set_encoding(Utf16String::from_utf8(encoding));
 
         // Well-formed XML documents contain only properly encoded characters
-        auto source = TextCodec::decode_to_utf8(data, *TextCodec::decoder_for(*encoding), TextCodec::ErrorMode::Fatal);
+        auto source = TextCodec::decode_to_utf8(data, *TextCodec::decoder_for(encoding), TextCodec::ErrorMode::Fatal);
         if (source.is_error()) {
             // FIXME: Insert error message into the document.
             dbgln("Failed to decode XML document: {}", source.error());

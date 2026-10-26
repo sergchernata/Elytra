@@ -149,13 +149,13 @@ public:
     QWidget* toolbar_container() const { return m_toolbar_container; }
 
     void set_vertical_tabs_enabled(bool);
-    void set_vertical_tabs_position(WebView::VerticalTabsPosition);
 #ifdef AK_OS_MACOS
     void update_web_view_frame(bool chrome_visible, Optional<WebView::VerticalTabsPosition> sidebar_position);
 #endif
     void set_window(BrowserWindow&);
     void set_toolbar_container_in_tab_layout(bool);
     void set_toolbar_window_controls_visible(bool);
+    static int toolbar_height(bool window_controls_visible);
     void update_window_control_icons();
     void update_hover_label();
 
@@ -172,8 +172,6 @@ public:
     static inline Function<bool(Tab&)> on_focus_location_editor;
     // Fork hook (Arc): the sidebar shows no loading spinner, so the tab doesn't animate one (it ticked every 80 ms).
     static inline bool animates_loading_spinner = true;
-    // Fork hook (Arc): no toolbar sidebar button while the sidebar shows, as the sidebar has its own.
-    static inline bool hides_sidebar_toggle_while_expanded = false;
     // Fork hook (Arc): the toolbar's left margin, if not upstream's (the Arc sidebar lines its buttons up with the page).
     static inline Function<Optional<int>(BrowserWindow&)> toolbar_left_margin;
     // Fork hook (Arc profiles): creates the view of a tab coming back (restored from the last session, or a closed tab
@@ -216,7 +214,6 @@ private:
     virtual void content_blocker_count_visibility_changed() override;
 
     void recreate_toolbar_icons();
-    void update_vertical_tabs_toolbar_button_placement();
     void connect_hamburger_menu();
     QToolButton* create_navigation_history_toolbar_button(QWidget& parent, QAction&, int direction);
     void update_chrome_style();
@@ -251,9 +248,6 @@ private:
     QWidget* m_performance_monitor { nullptr };
     QWidget* m_toolbar_window_controls_separator { nullptr };
     QWidget* m_toolbar_window_controls { nullptr };
-    QSpacerItem* m_sidebar_toggle_navigation_spacer { nullptr };
-    QToolButton* m_left_toggle_vertical_tabs_expanded_button { nullptr };
-    QToolButton* m_right_toggle_vertical_tabs_expanded_button { nullptr };
     WindowControlButton* m_minimize_window_button { nullptr };
     WindowControlButton* m_maximize_window_button { nullptr };
     WindowControlButton* m_close_window_button { nullptr };
@@ -291,7 +285,6 @@ private:
     bool m_has_had_real_size { false };
     bool m_is_updating_chrome_style { false };
     bool m_vertical_tabs_enabled { false };
-    WebView::VerticalTabsPosition m_vertical_tabs_position { WebView::VerticalTabsPosition::Left };
 #ifdef AK_OS_MACOS
     QHBoxLayout* m_view_layout { nullptr };
     // The web view's frame as TabWidget last asked for it, which a tab that hasn't loaded gets once it loads.
@@ -308,7 +301,6 @@ private:
     QMenu* m_media_context_menu { nullptr };
     QMenu* m_select_dropdown { nullptr };
 
-    QAction* m_toggle_vertical_tabs_expanded_action { nullptr };
     QAction* m_navigate_back_action { nullptr };
     QAction* m_navigate_forward_action { nullptr };
     QAction* m_reload_action { nullptr };

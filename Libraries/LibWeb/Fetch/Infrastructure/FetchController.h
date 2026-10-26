@@ -16,6 +16,7 @@
 #include <LibJS/Runtime/VM.h>
 #include <LibRequests/Forward.h>
 #include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Engine/FetchBodyDeliveryGate.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
@@ -71,12 +72,15 @@ public:
     void set_pending_preloaded_response(GC::Ptr<Fetching::PendingResponse> pending_preloaded_response) { m_pending_preloaded_response = pending_preloaded_response; }
 
     void set_pending_request(RefPtr<Requests::Request> const&);
+    void set_body_transport(Engine::FetchBodyDeliveryGate::Transport&);
     bool requires_network() const { return m_requires_network; }
     bool has_started_request() const { return m_has_started_request; }
     void set_inner_fetch_controller(GC::Ref<FetchController>);
 
     void stop_fetch();
     void stop_request();
+    // Stops the delivery of the current response's body without ending the fetch.
+    void stop_body_transport();
     void set_stop_steps(GC::Ref<GC::Function<void()>> stop_steps) { m_stop_steps = stop_steps; }
 
     u64 next_fetch_task_id() { return m_next_fetch_task_id++; }
@@ -121,6 +125,7 @@ private:
     GC::Ptr<Fetching::PendingResponse> m_pending_preloaded_response;
 
     WeakPtr<Requests::Request> m_pending_request;
+    WeakPtr<Engine::FetchBodyDeliveryGate::Transport> m_body_transport;
     bool m_requires_network { false };
     bool m_has_started_request { false };
 

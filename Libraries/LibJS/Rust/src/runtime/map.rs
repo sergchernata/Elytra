@@ -11,6 +11,7 @@ use hashbrown::HashMap;
 use libjs_runtime_macros::Trace;
 
 use crate::gc::class::{ExternalMemorySize, Finalize, GcCell, define_cell};
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::vm::Vm;
@@ -137,7 +138,7 @@ impl Finalize for Map {
 }
 
 impl Map {
-    pub fn new(vm: &Vm, prototype: Gc<Object>) -> Map {
+    pub fn new(_: &DeferGc<'_>, vm: &Vm, prototype: Gc<Object>) -> Map {
         Map {
             base: Object::new_with_prototype(vm, Self::CLASS, prototype, MayInterfereWithIndexedPropertyAccess::No),
             storage: GcRefCell::new(MapStorage::default()),
@@ -145,12 +146,14 @@ impl Map {
     }
 
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<Map> {
-        realm.create_object(vm, Map::new(vm, realm.intrinsics().map_prototype(vm)))
+        realm.create_object(vm, |defer_gc| {
+            Map::new(defer_gc, vm, realm.intrinsics().map_prototype(vm))
+        })
     }
 
     // 24.1.3.1 Map.prototype.clear ( ), https://tc39.es/ecma262/#sec-map.prototype.clear
     pub fn map_clear(&self, vm: &Vm) {
-        let mut storage = self.storage.borrow_mut();
+        let mut storage = self.storage.borrow_mut(vm);
         storage.entries = Vec::new();
         storage.indices = HashMap::default();
         storage.removed_entry_count = 0;
@@ -162,7 +165,7 @@ impl Map {
 
     // 24.1.3.3 Map.prototype.delete ( key ), https://tc39.es/ecma262/#sec-map.prototype.delete
     pub fn map_remove(&self, vm: &Vm, key: Value) -> bool {
-        let mut storage = self.storage.borrow_mut();
+        let mut storage = self.storage.borrow_mut(vm);
         let Some(index) = storage.indices.remove(&ValueTraitsKey(key)) else {
             return false;
         };
@@ -200,7 +203,7 @@ impl Map {
 
     // 24.1.3.9 Map.prototype.set ( key, value ), https://tc39.es/ecma262/#sec-map.prototype.set
     pub fn map_set(&self, vm: &Vm, key: Value, value: Value) {
-        let mut storage = self.storage.borrow_mut();
+        let mut storage = self.storage.borrow_mut(vm);
         let new_index = storage.entries.len();
         let index = *storage.indices.entry(ValueTraitsKey(key)).or_insert(new_index);
         if index != new_index {

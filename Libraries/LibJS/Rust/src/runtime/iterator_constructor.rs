@@ -57,17 +57,14 @@ fn current_realm(vm: &Vm) -> Gc<Realm> {
 impl IteratorConstructor {
     // 27.1.3.1 The Iterator Constructor, https://tc39.es/ecma262/#sec-iterator-constructor
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<IteratorConstructor> {
-        realm.create_object(
-            vm,
-            IteratorConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.Iterator.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| IteratorConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.Iterator.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -146,7 +143,7 @@ impl IteratorConstructor {
             };
 
             // d. Append the Record { [[OpenMethod]]: method, [[Iterable]]: item } to iterables.
-            iterables.append_iterable(method, item.as_object());
+            iterables.append_iterable(vm, method, item.as_object());
         }
 
         // 3. Let closure be a new Abstract Closure with no parameters that captures iterables and performs the following steps when called:
@@ -259,7 +256,7 @@ impl IteratorConstructor {
             };
 
             // iii. Append iter to iters.
-            zip_iterator.append_iterator(iterator);
+            zip_iterator.append_iterator(vm, iterator);
         }
 
         // 13. Let iterCount be the number of elements in iters.
@@ -273,7 +270,7 @@ impl IteratorConstructor {
                     // i. Perform the following steps iterCount times:
                     for _ in 0..iterator_count {
                         // 1. Append undefined to padding.
-                        zip_iterator.append_padding(Value::UNDEFINED);
+                        zip_iterator.append_padding(vm, Value::UNDEFINED);
                     }
                 }
                 // b. Else,
@@ -307,13 +304,13 @@ impl IteratorConstructor {
                                 None => using_iterator = false,
                                 // d. Else,
                                 // i. Append next to padding.
-                                Some(next) => zip_iterator.append_padding(next),
+                                Some(next) => zip_iterator.append_padding(vm, next),
                             }
                         }
 
                         // 2. If usingIterator is false, append undefined to padding.
                         if !using_iterator {
-                            zip_iterator.append_padding(Value::UNDEFINED);
+                            zip_iterator.append_padding(vm, Value::UNDEFINED);
                         }
                     }
 
@@ -398,7 +395,7 @@ impl IteratorConstructor {
                 // iii. If value is not undefined, then
                 if !value.is_undefined() {
                     // 1. Append key to keys.
-                    zip_iterator.append_key(key);
+                    zip_iterator.append_key(vm, key);
 
                     // 2. Let iter be Completion(GetIteratorFlattenable(value, REJECT-PRIMITIVES)).
                     // 3. IfAbruptCloseIterators(iter, iters).
@@ -409,7 +406,7 @@ impl IteratorConstructor {
                     );
 
                     // 4. Append iter to iters.
-                    zip_iterator.append_iterator(iterator);
+                    zip_iterator.append_iterator(vm, iterator);
                 }
             }
         }
@@ -425,7 +422,7 @@ impl IteratorConstructor {
                     // i. Perform the following steps iterCount times:
                     for _ in 0..iterator_count {
                         // 1. Append undefined to padding.
-                        zip_iterator.append_padding(Value::UNDEFINED);
+                        zip_iterator.append_padding(vm, Value::UNDEFINED);
                     }
                 }
                 // b. Else,
@@ -440,7 +437,7 @@ impl IteratorConstructor {
                             try_or_close_iterators!(vm, &zip_iterator.open_iterators(vm), padding_option.get(vm, &key));
 
                         // 3. Append value to padding.
-                        zip_iterator.append_padding(value);
+                        zip_iterator.append_padding(vm, value);
                     }
                 }
             }
@@ -483,7 +480,7 @@ impl Finalize for ConcatIterator {
 
 impl ConcatIterator {
     fn create(vm: &Vm) -> Gc<ConcatIterator> {
-        vm.heap().allocate(ConcatIterator {
+        vm.heap().allocate(|_| ConcatIterator {
             header: CellHeader::for_class(Self::CLASS),
             iterables: GcRefCell::new(Vec::new()),
             index: Cell::new(0),
@@ -491,9 +488,9 @@ impl ConcatIterator {
         })
     }
 
-    fn append_iterable(&self, open_method: Gc<FunctionObject>, iterable: Gc<Object>) {
+    fn append_iterable(&self, vm: &Vm, open_method: Gc<FunctionObject>, iterable: Gc<Object>) {
         self.iterables
-            .borrow_mut()
+            .borrow_mut(vm)
             .push(ConcatIterable { open_method, iterable });
     }
 
@@ -611,7 +608,7 @@ impl Finalize for ZipIterator {
 
 impl ZipIterator {
     fn create(vm: &Vm, realm: Gc<Realm>, mode: ZipMode) -> Gc<ZipIterator> {
-        vm.heap().allocate(ZipIterator {
+        vm.heap().allocate(|_| ZipIterator {
             header: CellHeader::for_class(Self::CLASS),
             realm,
             mode,
@@ -665,7 +662,7 @@ impl ZipIterator {
                     let step_value = match step_value_result {
                         Err(throw) => {
                             // i. Remove iter from openIters.
-                            self.remove_iterator_from_open_iterators(iterator);
+                            self.remove_iterator_from_open_iterators(vm, iterator);
 
                             // ii. Return ? IteratorCloseAll(openIters, result).
                             return self.close_all_open_iterators(vm, throw.into());
@@ -678,7 +675,7 @@ impl ZipIterator {
                         Some(step_value) => result = step_value,
                         None => {
                             // i. Remove iter from openIters.
-                            self.remove_iterator_from_open_iterators(iterator);
+                            self.remove_iterator_from_open_iterators(vm, iterator);
 
                             match self.mode {
                                 // ii. If mode is "shortest", then
@@ -714,7 +711,7 @@ impl ZipIterator {
                                         let open = match step_result {
                                             Err(throw) => {
                                                 // i. Remove iters[k] from openIters.
-                                                self.remove_iterator_from_open_iterators(iterator_k);
+                                                self.remove_iterator_from_open_iterators(vm, iterator_k);
 
                                                 // ii. Return ? IteratorCloseAll(openIters, open).
                                                 return self.close_all_open_iterators(vm, throw.into());
@@ -725,7 +722,7 @@ impl ZipIterator {
                                         // v. If open is DONE, then
                                         if matches!(open, IterationResult::Done) {
                                             // i. Remove iters[k] from openIters.
-                                            self.remove_iterator_from_open_iterators(iterator_k);
+                                            self.remove_iterator_from_open_iterators(vm, iterator_k);
                                         }
                                         // vi. Else,
                                         else {
@@ -752,7 +749,7 @@ impl ZipIterator {
                                     }
 
                                     // iii. Set iters[i] to null.
-                                    self.iterators.borrow_mut()[i] = None;
+                                    self.iterators.borrow_mut(vm)[i] = None;
 
                                     // iv. Set result to padding[i].
                                     result = self.padding.borrow()[i];
@@ -805,21 +802,21 @@ impl ZipIterator {
         self.finish_results.set(Some(finish_results));
     }
 
-    fn append_iterator(&self, iterator: Gc<IteratorRecord>) {
-        self.iterators.borrow_mut().push(Some(iterator));
-        self.open_iterators.borrow_mut().push(iterator);
+    fn append_iterator(&self, vm: &Vm, iterator: Gc<IteratorRecord>) {
+        self.iterators.borrow_mut(vm).push(Some(iterator));
+        self.open_iterators.borrow_mut(vm).push(iterator);
     }
 
-    fn append_key(&self, key: PropertyKey) {
-        self.keys.borrow_mut().push(key);
+    fn append_key(&self, vm: &Vm, key: PropertyKey) {
+        self.keys.borrow_mut(vm).push(key);
     }
 
-    fn append_padding(&self, padding: Value) {
-        self.padding.borrow_mut().push(padding);
+    fn append_padding(&self, vm: &Vm, padding: Value) {
+        self.padding.borrow_mut(vm).push(padding);
     }
 
-    fn remove_iterator_from_open_iterators(&self, iterator: Gc<IteratorRecord>) {
-        let mut open_iterators = self.open_iterators.borrow_mut();
+    fn remove_iterator_from_open_iterators(&self, vm: &Vm, iterator: Gc<IteratorRecord>) {
+        let mut open_iterators = self.open_iterators.borrow_mut(vm);
         if let Some(index) = open_iterators.iter().position(|candidate| *candidate == iterator) {
             open_iterators.remove(index);
         }

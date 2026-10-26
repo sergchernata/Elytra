@@ -9,7 +9,7 @@
 #include <LibGC/Heap.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/FontFaceSet.h>
-#include <LibWeb/ContentSecurityPolicy/Directives/Directive.h>
+#include <LibWeb/ContentSecurityPolicy/Directives/HTMLIntegration.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
 #include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>
@@ -63,7 +63,6 @@ void WorkerGlobalScope::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_page);
     visitor.visit(m_fonts);
     visitor.visit(m_font_computer);
-    visitor.visit(m_policy_container);
 }
 
 void WorkerGlobalScope::finalize()
@@ -82,13 +81,13 @@ void WorkerGlobalScope::set_internal_port(GC::Ref<MessagePort> port)
 void WorkerGlobalScope::close_a_worker()
 {
     // 1. Discard any tasks that have been added to workerGlobal's relevant agent's event loop's task queues.
-    relevant_settings_object(*this).responsible_event_loop().task_queue().remove_tasks_matching([](HTML::Task const& task) {
-        // NOTE: We don't discard tasks with the PostedMessage source, as the spec expects PostMessage() to act as if it is invoked immediately
-        return task.source() != HTML::Task::Source::PostedMessage;
+    relevant_settings_object(*this).responsible_event_loop().task_queue().remove_tasks_matching([](HTML::Task const&) {
+        return true;
     });
 
     // 2. Set workerGlobal's closing flag to true. (This prevents any further tasks from being queued.)
     m_closing = true;
+    relevant_settings_object(*this).responsible_event_loop().task_queue().discard_further_tasks();
 }
 
 // https://html.spec.whatwg.org/multipage/workers.html#importing-scripts-and-libraries
@@ -186,10 +185,10 @@ CSS::FontComputer& WorkerGlobalScope::font_computer()
     return *m_font_computer;
 }
 
-GC::Ref<PolicyContainer> WorkerGlobalScope::policy_container() const
+NonnullRefPtr<PolicyContainer> WorkerGlobalScope::policy_container() const
 {
     if (!m_policy_container) {
-        m_policy_container = GC::Heap::the().allocate<PolicyContainer>(GC::Heap::the());
+        m_policy_container = PolicyContainer::create();
     }
     return *m_policy_container;
 }
@@ -255,12 +254,12 @@ ContentSecurityPolicy::Directives::Directive::Result WorkerGlobalScope::run_csp_
     auto result = ContentSecurityPolicy::Directives::Directive::Result::Allowed;
 
     // 2. For each policy of global’s CSP list:
-    for (auto policy : policy_container()->csp_list->policies()) {
+    for (auto const& policy : policy_container()->csp_list.policies()) {
         // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. Execute directive’s initialization algorithm on global. If its returned value is "Blocked", then set
             //    result to "Blocked".
-            auto directive_result = directive->initialization(GC::Ref { *this }, policy);
+            auto directive_result = ContentSecurityPolicy::Directives::initialization(directive, GC::Ref { *this }, policy);
             if (directive_result == ContentSecurityPolicy::Directives::Directive::Result::Blocked) {
                 result = ContentSecurityPolicy::Directives::Directive::Result::Blocked;
             }

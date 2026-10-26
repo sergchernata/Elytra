@@ -35,17 +35,14 @@ define_native_function_class!(
 
 impl AsyncFunctionConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<AsyncFunctionConstructor> {
-        realm.create_object(
-            vm,
-            AsyncFunctionConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.AsyncFunction.as_string().clone(),
-                    realm.intrinsics().function_constructor(vm).upcast(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| AsyncFunctionConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.AsyncFunction.as_string().clone(),
+                realm.intrinsics().function_constructor(vm).upcast(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -80,7 +77,7 @@ impl AsyncFunctionConstructor {
         for index in 0..vm.argument_count() {
             marked_arguments.push(vm.argument(index));
         }
-        let arguments = marked_arguments.to_vec();
+        let arguments = marked_arguments.values();
 
         let parameter_args = &arguments[..arguments.len().saturating_sub(1)];
 

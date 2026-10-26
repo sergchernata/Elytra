@@ -19,8 +19,8 @@
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Heap/EngineCell.h>
 #include <LibJS/Runtime/Completion.h>
-#include <LibJS/Runtime/IndexedProperties.h>
 #include <LibJS/Runtime/PrimitiveString.h>
+#include <LibJS/Runtime/PropertyAttributes.h>
 #include <LibJS/Runtime/PropertyDescriptor.h>
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibJS/Runtime/Shape.h>
@@ -155,6 +155,11 @@ public:
 
     [[nodiscard]] bool is_function() const { return has_engine_object_flag(JS_LAYOUT_OBJECT_FLAG_IS_FUNCTION); }
     bool is_date() const;
+    bool is_weak_map() const;
+    bool is_weak_set() const;
+    bool is_generator() const;
+    bool is_proxy() const;
+    bool is_array_buffer() const;
     [[nodiscard]] bool is_raw_native_function() const { return has_engine_object_flag(JS_LAYOUT_OBJECT_FLAG_IS_RAW_NATIVE_FUNCTION); }
     [[nodiscard]] bool is_direct_getter_function() const { return has_engine_object_flag(JS_LAYOUT_OBJECT_FLAG_IS_DIRECT_GETTER_FUNCTION); }
     [[nodiscard]] bool has_global_object_flag() const { return has_engine_object_flag(JS_LAYOUT_OBJECT_FLAG_IS_GLOBAL_OBJECT); }
@@ -176,8 +181,8 @@ public:
     u32 indexed_array_like_size() const;
     // The runtime appends elements with the default attributes, the only ones LibJS's users append with.
     void indexed_append(Value value, PropertyAttributes attributes = default_attributes);
-    // The element taken has the default attributes, whatever the ones it was stored with.
-    ValueAndAttributes indexed_take_first();
+    // Removes the first element, which must exist, and shifts the others down.
+    void indexed_take_first();
 
     Shape& shape() { return *engine_field<Shape*>(JS_LAYOUT_OBJECT_SHAPE_OFFSET); }
     Shape const& shape() const { return *engine_field<Shape*>(JS_LAYOUT_OBJECT_SHAPE_OFFSET); }

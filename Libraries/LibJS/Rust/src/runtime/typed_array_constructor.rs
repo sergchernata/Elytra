@@ -42,17 +42,14 @@ define_native_function_class!(
 
 impl TypedArrayConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<TypedArrayConstructor> {
-        realm.create_object(
-            vm,
-            TypedArrayConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.TypedArray.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| TypedArrayConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.TypedArray.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -160,9 +157,7 @@ impl TypedArrayConstructor {
             // c. Let targetObj be ? TypedArrayCreate(C, « 𝔽(len) »).
             let target_object = typed_array_create(vm, constructor.as_function(), &[Value::from_f64(length as f64)])?;
 
-            if map_fn.is_none()
-                && values.with_values(|values| set_elements_to_numbers_if_unobservable(&target_object, values))
-            {
+            if map_fn.is_none() && set_elements_to_numbers_if_unobservable(&target_object, &values.values()) {
                 return Ok(Value::from_object(target_object));
             }
 

@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 use core::cell::Cell;
 
 use libjs_rust::api::{
-    EmbedderCell, EmbedderClass, EmbedderValue, Gc, GcRefCell, MarkedVec, Realm, Trace, TypedArrayBase, TypedArrayKind,
-    Value, Vm,
+    DeferGc, EmbedderCell, EmbedderClass, EmbedderValue, Gc, GcRefCell, MarkedVec, Realm, Trace, TypedArrayBase,
+    TypedArrayKind, Value, Vm,
 };
 
 use crate::bindings::conversions::BufferSource;
@@ -56,7 +56,7 @@ pub(crate) struct ReadableStreamDefaultReader {
 impl Wrappable for ReadableStreamDefaultReader {}
 
 impl ReadableStreamDefaultReader {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(_: &DeferGc<'_>) -> Self {
         Self {
             generic: ReadableStreamGenericReader::default(),
             read_requests: GcRefCell::new(VecDeque::new()),
@@ -72,8 +72,8 @@ impl ReadableStreamDefaultReader {
         &self.generic
     }
 
-    pub(crate) fn append_read_request(&self, read_request: ReadRequest) {
-        self.read_requests.borrow_mut().push_back(read_request);
+    pub(crate) fn append_read_request(&self, vm: &Vm, read_request: ReadRequest) {
+        self.read_requests.borrow_mut(vm).push_back(read_request);
     }
 
     /// Takes the reader's [[readRequests]], leaving an empty list.
@@ -82,14 +82,14 @@ impl ReadableStreamDefaultReader {
         for read_request in self.read_requests.borrow().iter() {
             read_requests.push(read_request.clone());
         }
-        self.read_requests.borrow_mut().clear();
+        self.read_requests.borrow_mut(vm).clear();
         read_requests
     }
 
     /// Removes the first of the reader's [[readRequests]], which are not empty.
-    pub(crate) fn take_first_read_request(&self) -> ReadRequest {
+    pub(crate) fn take_first_read_request(&self, vm: &Vm) -> ReadRequest {
         self.read_requests
-            .borrow_mut()
+            .borrow_mut(vm)
             .pop_front()
             .expect("the reader has a read request")
     }
@@ -104,7 +104,7 @@ impl ReadableStreamDefaultReader {
 
     // https://streams.spec.whatwg.org/#default-reader-constructor
     pub(crate) fn construct(cx: &mut CallContext, stream: Ref<ReadableStream>) -> WebIdlResult<Ref<Self>> {
-        let reader = allocate(cx.vm(), Self::new());
+        let reader = allocate(cx.vm(), Self::new);
 
         // 1. Perform ? SetUpReadableStreamDefaultReader(this, stream).
         set_up_readable_stream_default_reader(cx, reader, stream)?;
@@ -187,16 +187,13 @@ impl ReadableStreamDefaultReader {
         // https://streams.spec.whatwg.org/#read-loop
         // 1. Let readRequest be a new read request with the following items:
         //    NOTE: The items are the steps of ReadLoop.
-        let read_request = READ_LOOP_CLASS.allocate(
-            vm,
-            ReadLoop {
-                realm,
-                reader,
-                bytes: core::cell::RefCell::new(Vec::new()),
-                success_steps,
-                failure_steps,
-            },
-        );
+        let read_request = READ_LOOP_CLASS.allocate(vm, |_| ReadLoop {
+            realm,
+            reader,
+            bytes: core::cell::RefCell::new(Vec::new()),
+            success_steps,
+            failure_steps,
+        });
 
         // 2. Perform ! ReadableStreamDefaultReaderRead(reader, readRequest).
         readable_stream_default_reader_read(vm, reader, ReadRequest::ReadLoop(read_request));
@@ -350,6 +347,6 @@ pub(crate) fn set_up_readable_stream_default_reader(
     readable_stream_reader_generic_initialize(cx, ReadableStreamReader::ReadableStreamDefaultReader(reader), stream);
 
     // 3. Set reader.[[readRequests]] to a new empty list.
-    reader.read_requests.borrow_mut().clear();
+    reader.read_requests.borrow_mut(cx.vm()).clear();
     Ok(())
 }

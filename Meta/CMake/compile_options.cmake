@@ -66,8 +66,9 @@ if (ENABLE_CI_BASELINE_CPU)
         add_cxx_compile_options(-march=armv8.2-a)
         set(RUSTC_TARGET_CPU_FLAGS -Ctarget-feature=+v8.2a)
     elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
-        add_cxx_compile_options(-march=x86-64-v3)
-        set(RUSTC_TARGET_CPU_FLAGS -Ctarget-cpu=x86-64-v3)
+        # Keep distributed binaries usable on SSE4.2/POPCNT machines without AVX or BMI.
+        add_cxx_compile_options(-march=x86-64-v2)
+        set(RUSTC_TARGET_CPU_FLAGS -Ctarget-cpu=x86-64-v2)
     endif()
 elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
     # On RISC-V the generic -march=native is not yet supported and both gcc and clang require an explicit
@@ -233,6 +234,13 @@ endif()
 if (APPLE)
     list(APPEND CMAKE_PREFIX_PATH /opt/homebrew)
     add_cxx_link_options(LINKER:-dead_strip)
+
+    # The debug info of LTO code lives in the objects the linker generates, which it deletes after linking unless told
+    # where to keep them; dsymutil reads it from there.
+    if (LADYBIRD_GENERATE_SYMBOL_FILES)
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/lto")
+        add_cxx_link_options("LINKER:-object_path_lto,${CMAKE_BINARY_DIR}/lto/$<TARGET_PROPERTY:NAME>")
+    endif()
 endif()
 
 if (HAIKU)
@@ -244,6 +252,7 @@ endif()
 
 if (NOT WIN32)
     add_cxx_link_option_if_supported(LINKER:--gdb-index)
+    add_cxx_link_option_if_supported(LINKER:--build-id)
 
     if (NOT ENABLE_FUZZERS)
         add_cxx_link_option_if_supported(LINKER:-Bsymbolic-non-weak-functions)
@@ -287,6 +296,11 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
     if (NOT MSVC)
         add_cxx_compile_options(-O3)
+
+        # Line tables, inlined frames included, are what symbolicating a crash report needs.
+        if (LADYBIRD_GENERATE_SYMBOL_FILES)
+            add_cxx_compile_options(-g1)
+        endif()
     else()
         add_cxx_compile_options(/O2)
     endif()

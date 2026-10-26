@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	large gzip data should be decompressed successfully
+Pass	large gzip data should be decompressed successfully with byte stream

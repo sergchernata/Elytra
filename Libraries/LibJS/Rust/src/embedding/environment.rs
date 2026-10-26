@@ -158,7 +158,7 @@ pub unsafe extern "C" fn js_environment_initialize_binding(
     completion_into_abi(environment.initialize_binding(
         vm,
         &binding_name_from_abi(name),
-        Value(value),
+        Value::from_bits(value),
         initialize_binding_hint_from_abi(hint),
     ))
 }
@@ -180,7 +180,12 @@ pub unsafe extern "C" fn js_environment_set_mutable_binding(
             name.as_view(),
         )
     };
-    completion_into_abi(environment.set_mutable_binding(vm, &binding_name_from_abi(name), Value(value), strict))
+    completion_into_abi(environment.set_mutable_binding(
+        vm,
+        &binding_name_from_abi(name),
+        Value::from_bits(value),
+        strict,
+    ))
 }
 
 /// GetBindingValue(N, S), which throws a ReferenceError for a binding that is not initialized yet. Borrows the name.
@@ -227,10 +232,10 @@ pub unsafe extern "C" fn js_environment_delete_binding(
 /// reference is unresolvable. HasBinding runs on the way, which for the object environment of a with statement can
 /// run JavaScript and throw.
 ///
-/// The C++ Reference Record this resolves to has the environment as its base. GetValue, PutValue and delete of it are
-/// js_environment_get_binding_value(), js_environment_set_mutable_binding() and js_environment_delete_binding() with
-/// the same name and strictness, and for an unresolvable reference GetValue throws a ReferenceError, PutValue sets the
-/// property of the global object unless it is strict, and delete returns true. Borrows the name. Main thread only.
+/// GetValue, PutValue and delete of the Reference Record are js_environment_get_binding_value(),
+/// js_environment_set_mutable_binding() and js_environment_delete_binding() on the environment with the same name and
+/// strictness. For an unresolvable reference, GetValue throws a ReferenceError, PutValue sets the property of the global
+/// object unless it is strict, and delete returns true. Borrows the name. Main thread only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn js_environment_resolve_binding(
     vm: *mut JSVM,

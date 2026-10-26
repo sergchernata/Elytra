@@ -37,6 +37,9 @@ public:
     // https://streams.spec.whatwg.org/#readablestream-set-up-with-byte-reading-support
     void set_up_with_byte_reading_support(JS::Realm&, GC::Ptr<PullAlgorithm> = {}, GC::Ptr<CancelAlgorithm> = {}, double high_water_mark = 0);
 
+    // Whether the stream's controller is a ReadableByteStreamController.
+    bool is_readable_byte_stream() const;
+
     // https://streams.spec.whatwg.org/#readablestream-readable
     bool is_readable() const;
 
@@ -61,6 +64,15 @@ public:
     // ReadableByteStreamControllerEnqueue on the stream's controller, a ReadableByteStreamController, with a chunk of
     // the bytes.
     WebIDL::ExceptionOr<void> enqueue_bytes(ReadonlyBytes);
+
+    // The byte length of https://streams.spec.whatwg.org/#readablestream-current-byob-request-view, if the stream,
+    // which is set up with byte reading support, has one.
+    Optional<u64> current_byob_request_view_byte_length();
+
+    // https://streams.spec.whatwg.org/#readablestream-pull-from-bytes
+    // NB: The stream is set up with byte reading support, and the caller removes the pulled bytes from its own buffer,
+    //     having sized them by the current BYOB request view.
+    WebIDL::ExceptionOr<void> pull_from_bytes(ReadonlyBytes);
 
     // https://streams.spec.whatwg.org/#readablestream-close
     void close();

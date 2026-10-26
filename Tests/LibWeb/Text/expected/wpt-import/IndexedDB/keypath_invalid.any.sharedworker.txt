@@ -1,0 +1,29 @@
+Harness status: OK
+
+Found 24 tests
+
+24 Pass
+Pass	Invalid keyPath - "j a"
+Pass	Invalid keyPath - ".yo"
+Pass	Invalid keyPath - "yo,lo"
+Pass	Invalid keyPath - []
+Pass	Invalid keyPath - ["array with space"]
+Pass	Invalid keyPath - multidimensional array (invalid toString)
+Pass	Invalid keyPath - "3m"
+Pass	Invalid keyPath - {toString->3m}
+Pass	Invalid keyPath - "my.1337"
+Pass	Invalid keyPath - "..yo"
+Pass	Invalid keyPath - "y..o"
+Pass	Invalid keyPath - "y.o."
+Pass	Invalid keyPath - "y.o.."
+Pass	Invalid keyPath - "m.*"
+Pass	Invalid keyPath - "\"m\""
+Pass	Invalid keyPath - "m%"
+Pass	Invalid keyPath - "m/"
+Pass	Invalid keyPath - "m/a"
+Pass	Invalid keyPath - "m&"
+Pass	Invalid keyPath - "m!"
+Pass	Invalid keyPath - "*"
+Pass	Invalid keyPath - "*.*"
+Pass	Invalid keyPath - "^m"
+Pass	Invalid keyPath - "/m/"

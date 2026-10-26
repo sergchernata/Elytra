@@ -74,17 +74,14 @@ fn async_generator_validate(
 impl AsyncGeneratorPrototype {
     // 27.6.1 Properties of the AsyncGenerator Prototype Object, https://tc39.es/ecma262/#sec-properties-of-asyncgenerator-prototype
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<AsyncGeneratorPrototype> {
-        realm.create_object(
-            vm,
-            AsyncGeneratorPrototype {
-                base: Object::new_with_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm.intrinsics().async_iterator_prototype(),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            },
-        )
+        realm.create_object(vm, |_| AsyncGeneratorPrototype {
+            base: Object::new_with_prototype(
+                vm,
+                Self::CLASS,
+                realm.intrinsics().async_iterator_prototype(),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -173,7 +170,7 @@ impl AsyncGeneratorPrototype {
         let completion = Completion::normal(vm.argument(0));
 
         // 8. Perform AsyncGeneratorEnqueue(generator, completion, promiseCapability).
-        generator.async_generator_enqueue(completion, promise_capability);
+        generator.async_generator_enqueue(vm, completion, promise_capability);
 
         // 9. If state is either suspendedStart or suspendedYield, then
         if state == AsyncGeneratorState::SuspendedStart || state == AsyncGeneratorState::SuspendedYield {
@@ -213,7 +210,7 @@ impl AsyncGeneratorPrototype {
         let completion = Completion::new(CompletionType::Return, vm.argument(0));
 
         // 6. Perform AsyncGeneratorEnqueue(gen, completion, promiseCapability).
-        generator.async_generator_enqueue(completion, promise_capability);
+        generator.async_generator_enqueue(vm, completion, promise_capability);
 
         // 7. Let state be gen.[[AsyncGeneratorState]].
         let state = generator.async_generator_state();
@@ -288,7 +285,7 @@ impl AsyncGeneratorPrototype {
         let completion = Completion::new(CompletionType::Throw, exception);
 
         // 9. Perform AsyncGeneratorEnqueue(generator, completion, promiseCapability).
-        generator.async_generator_enqueue(completion, promise_capability);
+        generator.async_generator_enqueue(vm, completion, promise_capability);
 
         // 10. If state is suspendedYield, then
         if state == AsyncGeneratorState::SuspendedYield {

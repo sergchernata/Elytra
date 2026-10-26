@@ -12,8 +12,9 @@ use std::collections::VecDeque;
 use core::cell::Cell;
 
 use libjs_rust::api::{
-    ArrayBuffer, ArrayBufferShared, EmbedderCell, EmbedderClass, EmbedderValue, ErrorKind, ErrorType, FunctionObject,
-    Gc, GcRefCell, MarkedVec, Must, Throw, Trace, TypedArrayBase, Value, Vm, clone_array_buffer, construct,
+    ArrayBuffer, ArrayBufferShared, DeferGc, EmbedderCell, EmbedderClass, EmbedderValue, ErrorKind, ErrorType,
+    FunctionObject, Gc, GcRefCell, MarkedVec, Must, Throw, Trace, TypedArrayBase, Value, Vm, clone_array_buffer,
+    construct,
 };
 
 use crate::bindings::conversions::{ArrayBufferView, BufferSource};
@@ -135,7 +136,7 @@ pub(crate) struct ReadableByteStreamController {
 impl Wrappable for ReadableByteStreamController {}
 
 impl ReadableByteStreamController {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(_: &DeferGc<'_>) -> Self {
         Self {
             auto_allocate_chunk_size: Cell::new(None),
             byob_request: Cell::new(None),
@@ -172,11 +173,11 @@ impl ReadableByteStreamController {
     }
 
     // https://streams.spec.whatwg.org/#reset-queue
-    fn reset_queue(&self) {
+    fn reset_queue(&self, vm: &Vm) {
         // 1. Assert: container has [[queue]] and [[queueTotalSize]] internal slots.
 
         // 2. Set container.[[queue]] to a new empty list.
-        self.queue.borrow_mut().clear();
+        self.queue.borrow_mut(vm).clear();
 
         // 3. Set container.[[queueTotalSize]] to 0.
         self.queue_total_size.set(0.0);
@@ -253,10 +254,10 @@ impl ReadableByteStreamController {
     // https://streams.spec.whatwg.org/#rbs-controller-private-cancel
     pub(crate) fn cancel_steps(this: Ref<Self>, cx: &CallContext, reason: Value) -> WebIdlPromise {
         // 1. Perform ! ReadableByteStreamControllerClearPendingPullIntos(this).
-        readable_byte_stream_controller_clear_pending_pull_intos(this);
+        readable_byte_stream_controller_clear_pending_pull_intos(cx.vm(), this);
 
         // 2. Perform ! ResetQueue(this).
-        this.reset_queue();
+        this.reset_queue(cx.vm());
 
         // 3. Let result be the result of performing this.[[cancelAlgorithm]], passing in reason.
         let cancel_algorithm = this
@@ -326,34 +327,31 @@ impl ReadableByteStreamController {
             //    element size             1
             //    view constructor         %Uint8Array%
             //    reader type              "default"
-            let pull_into_descriptor = PULL_INTO_DESCRIPTOR_CLASS.allocate(
-                vm,
-                PullIntoDescriptor {
-                    buffer: Cell::new(buffer),
-                    buffer_byte_length: Cell::new(auto_allocate_chunk_size),
-                    byte_offset: Cell::new(0),
-                    byte_length: Cell::new(auto_allocate_chunk_size),
-                    bytes_filled: Cell::new(0),
-                    minimum_fill: Cell::new(1),
-                    element_size: Cell::new(1),
-                    view_constructor: cx.realm().intrinsics().uint8_array_constructor(vm),
-                    reader_type: Cell::new(ReaderType::Default),
-                },
-            );
+            let pull_into_descriptor = PULL_INTO_DESCRIPTOR_CLASS.allocate(vm, |_| PullIntoDescriptor {
+                buffer: Cell::new(buffer),
+                buffer_byte_length: Cell::new(auto_allocate_chunk_size),
+                byte_offset: Cell::new(0),
+                byte_length: Cell::new(auto_allocate_chunk_size),
+                bytes_filled: Cell::new(0),
+                minimum_fill: Cell::new(1),
+                element_size: Cell::new(1),
+                view_constructor: cx.realm().intrinsics().uint8_array_constructor(vm),
+                reader_type: Cell::new(ReaderType::Default),
+            });
 
             // 4. Append pullIntoDescriptor to this.[[pendingPullIntos]].
-            this.pending_pull_intos.borrow_mut().push_back(pull_into_descriptor);
+            this.pending_pull_intos.borrow_mut(vm).push_back(pull_into_descriptor);
         }
 
         // 6. Perform ! ReadableStreamAddReadRequest(stream, readRequest).
-        readable_stream_add_read_request(stream, read_request);
+        readable_stream_add_read_request(vm, stream, read_request);
 
         // 7. Perform ! ReadableByteStreamControllerCallPullIfNeeded(this).
         readable_byte_stream_controller_call_pull_if_needed(cx, this);
     }
 
     // https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamcontroller-releasesteps
-    pub(crate) fn release_steps(this: Ref<Self>) {
+    pub(crate) fn release_steps(vm: &Vm, this: Ref<Self>) {
         // 1. If this.[[pendingPullIntos]] is not empty,
         if let Some(first_pending_pull_into) = this.first_pending_pull_into() {
             // 1. Let firstPendingPullInto be this.[[pendingPullIntos]][0].
@@ -362,7 +360,7 @@ impl ReadableByteStreamController {
             first_pending_pull_into.reader_type.set(ReaderType::None);
 
             // 3. Set this.[[pendingPullIntos]] to the list « firstPendingPullInto ».
-            let mut pending_pull_intos = this.pending_pull_intos.borrow_mut();
+            let mut pending_pull_intos = this.pending_pull_intos.borrow_mut(vm);
             pending_pull_intos.clear();
             pending_pull_intos.push_back(first_pending_pull_into);
         }
@@ -438,19 +436,22 @@ pub(crate) fn readable_byte_stream_controller_call_pull_if_needed(
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-clear-algorithms
 pub(crate) fn readable_byte_stream_controller_clear_algorithms(controller: Ref<ReadableByteStreamController>) {
     // 1. Set controller.[[pullAlgorithm]] to undefined.
-    *controller.pull_algorithm.borrow_mut() = None;
+    controller.pull_algorithm.replace(None);
 
     // 2. Set controller.[[cancelAlgorithm]] to undefined.
-    *controller.cancel_algorithm.borrow_mut() = None;
+    controller.cancel_algorithm.replace(None);
 }
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-clear-pending-pull-intos
-pub(crate) fn readable_byte_stream_controller_clear_pending_pull_intos(controller: Ref<ReadableByteStreamController>) {
+pub(crate) fn readable_byte_stream_controller_clear_pending_pull_intos(
+    vm: &Vm,
+    controller: Ref<ReadableByteStreamController>,
+) {
     // 1. Perform ! ReadableByteStreamControllerInvalidateBYOBRequest(controller).
     readable_byte_stream_controller_invalidate_byob_request(controller);
 
     // 2. Set controller.[[pendingPullIntos]] to a new empty list.
-    controller.pending_pull_intos.borrow_mut().clear();
+    controller.pending_pull_intos.borrow_mut(vm).clear();
 }
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-close
@@ -644,6 +645,7 @@ fn readable_byte_stream_controller_enqueue_transferred_buffer(
             // 2. Perform ! ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset,
             //    byteLength).
             readable_byte_stream_controller_enqueue_chunk_to_queue(
+                vm,
                 controller,
                 transferred_buffer,
                 byte_offset,
@@ -661,7 +663,7 @@ fn readable_byte_stream_controller_enqueue_transferred_buffer(
                 assert!(first_pending_pull_into.reader_type.get() == ReaderType::Default);
 
                 // 2. Perform ! ReadableByteStreamControllerShiftPendingPullInto(controller).
-                readable_byte_stream_controller_shift_pending_pull_into(controller);
+                readable_byte_stream_controller_shift_pending_pull_into(vm, controller);
             }
 
             // 3. Let transferredView be ! Construct(%Uint8Array%, « transferredBuffer, byteOffset, byteLength »).
@@ -686,6 +688,7 @@ fn readable_byte_stream_controller_enqueue_transferred_buffer(
         // 1. Perform ! ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset,
         //    byteLength).
         readable_byte_stream_controller_enqueue_chunk_to_queue(
+            vm,
             controller,
             transferred_buffer,
             byte_offset,
@@ -712,6 +715,7 @@ fn readable_byte_stream_controller_enqueue_transferred_buffer(
         // 2. Perform ! ReadableByteStreamControllerEnqueueChunkToQueue(controller, transferredBuffer, byteOffset,
         //    byteLength).
         readable_byte_stream_controller_enqueue_chunk_to_queue(
+            vm,
             controller,
             transferred_buffer,
             byte_offset,
@@ -795,6 +799,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue_native_bytes(
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-enqueue-chunk-to-queue
 pub(crate) fn readable_byte_stream_controller_enqueue_chunk_to_queue(
+    vm: &Vm,
     controller: Ref<ReadableByteStreamController>,
     buffer: Gc<ArrayBuffer>,
     byte_offset: u64,
@@ -802,7 +807,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue_chunk_to_queue(
 ) {
     // 1. Append a new readable byte stream queue entry with buffer buffer, byte offset byteOffset, and byte length
     //    byteLength to controller.[[queue]].
-    controller.queue.borrow_mut().push_back(ReadableByteStreamQueueEntry {
+    controller.queue.borrow_mut(vm).push_back(ReadableByteStreamQueueEntry {
         buffer,
         byte_offset,
         byte_length,
@@ -838,7 +843,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
     };
 
     // 3. Perform ! ReadableByteStreamControllerEnqueueChunkToQueue(controller, cloneResult.[[Value]], 0, byteLength).
-    readable_byte_stream_controller_enqueue_chunk_to_queue(controller, clone_result, 0, byte_length);
+    readable_byte_stream_controller_enqueue_chunk_to_queue(cx.vm(), controller, clone_result, 0, byte_length);
     Ok(())
 }
 
@@ -865,7 +870,7 @@ pub(crate) fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queu
     }
 
     // 3. Perform ! ReadableByteStreamControllerShiftPendingPullInto(controller).
-    readable_byte_stream_controller_shift_pending_pull_into(controller);
+    readable_byte_stream_controller_shift_pending_pull_into(cx.vm(), controller);
     Ok(())
 }
 
@@ -884,10 +889,10 @@ pub(crate) fn readable_byte_stream_controller_error(
     }
 
     // 3. Perform ! ReadableByteStreamControllerClearPendingPullIntos(controller).
-    readable_byte_stream_controller_clear_pending_pull_intos(controller);
+    readable_byte_stream_controller_clear_pending_pull_intos(cx.vm(), controller);
 
     // 4. Perform ! ResetQueue(controller).
-    controller.reset_queue();
+    controller.reset_queue(cx.vm());
 
     // 5. Perform ! ReadableByteStreamControllerClearAlgorithms(controller).
     readable_byte_stream_controller_clear_algorithms(controller);
@@ -921,6 +926,7 @@ pub(crate) fn readable_byte_stream_controller_fill_head_pull_into_descriptor(
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-fill-pull-into-descriptor-from-queue
 pub(crate) fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
+    vm: &Vm,
     controller: Ref<ReadableByteStreamController>,
     pull_into_descriptor: PullIntoDescriptorRef,
 ) -> bool {
@@ -1009,7 +1015,7 @@ pub(crate) fn readable_byte_stream_controller_fill_pull_into_descriptor_from_que
         );
 
         {
-            let mut queue = queue.borrow_mut();
+            let mut queue = queue.borrow_mut(vm);
 
             // 9. If headOfQueue’s byte length is bytesToCopy,
             if head_of_queue.byte_length == bytes_to_copy {
@@ -1072,7 +1078,7 @@ pub(crate) fn readable_byte_stream_controller_fill_read_request_from_queue(
     // 3. Remove entry from controller.[[queue]].
     let entry = controller
         .queue
-        .borrow_mut()
+        .borrow_mut(vm)
         .pop_front()
         .expect("a controller with bytes in its queue has a queue entry");
 
@@ -1132,7 +1138,7 @@ pub(crate) fn readable_byte_stream_controller_get_byob_request(
             .expect("a Uint8Array is a typed array");
 
         // 3. Let byobRequest be a new ReadableStreamBYOBRequest.
-        let byob_request = allocate(vm, ReadableStreamBYOBRequest::new());
+        let byob_request = allocate(vm, |_| ReadableStreamBYOBRequest::new());
 
         // 4. Set byobRequest.[[controller]] to controller.
         byob_request.set_controller(Some(controller));
@@ -1232,9 +1238,9 @@ pub(crate) fn readable_byte_stream_controller_process_pull_into_descriptors_usin
         // 2. Let pullIntoDescriptor be controller.[[pendingPullIntos]][0].
 
         // 3. If ! ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor) is true,
-        if readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(controller, pull_into_descriptor) {
+        if readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(vm, controller, pull_into_descriptor) {
             // 1. Perform ! ReadableByteStreamControllerShiftPendingPullInto(controller).
-            readable_byte_stream_controller_shift_pending_pull_into(controller);
+            readable_byte_stream_controller_shift_pending_pull_into(vm, controller);
 
             // 2. Append pullIntoDescriptor to filledPullIntos.
             filled_pull_intos.push(pull_into_descriptor);
@@ -1265,7 +1271,7 @@ pub(crate) fn readable_byte_stream_controller_process_read_requests_using_queue(
 
         // 2. Let readRequest be reader.[[readRequests]][0].
         // 3. Remove readRequest from reader.[[readRequests]].
-        let read_request = reader.take_first_read_request();
+        let read_request = reader.take_first_read_request(cx.vm());
 
         // 4. Perform ! ReadableByteStreamControllerFillReadRequestFromQueue(controller, readRequest).
         readable_byte_stream_controller_fill_read_request_from_queue(cx, controller, read_request);
@@ -1345,31 +1351,28 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     //     element size             elementSize
     //     view constructor         ctor
     //     reader type              "byob"
-    let pull_into_descriptor = PULL_INTO_DESCRIPTOR_CLASS.allocate(
-        vm,
-        PullIntoDescriptor {
-            buffer: Cell::new(buffer),
-            buffer_byte_length: Cell::new(buffer.byte_length() as u64),
-            byte_offset: Cell::new(byte_offset),
-            byte_length: Cell::new(byte_length),
-            bytes_filled: Cell::new(0),
-            minimum_fill: Cell::new(minimum_fill),
-            element_size: Cell::new(element_size),
-            view_constructor: ctor,
-            reader_type: Cell::new(ReaderType::Byob),
-        },
-    );
+    let pull_into_descriptor = PULL_INTO_DESCRIPTOR_CLASS.allocate(vm, |_| PullIntoDescriptor {
+        buffer: Cell::new(buffer),
+        buffer_byte_length: Cell::new(buffer.byte_length() as u64),
+        byte_offset: Cell::new(byte_offset),
+        byte_length: Cell::new(byte_length),
+        bytes_filled: Cell::new(0),
+        minimum_fill: Cell::new(minimum_fill),
+        element_size: Cell::new(element_size),
+        view_constructor: ctor,
+        reader_type: Cell::new(ReaderType::Byob),
+    });
 
     // 14. If controller.[[pendingPullIntos]] is not empty,
     if !controller.pending_pull_intos_is_empty() {
         // 1. Append pullIntoDescriptor to controller.[[pendingPullIntos]].
         controller
             .pending_pull_intos
-            .borrow_mut()
+            .borrow_mut(vm)
             .push_back(pull_into_descriptor);
 
         // 2. Perform ! ReadableStreamAddReadIntoRequest(stream, readIntoRequest).
-        readable_stream_add_read_into_request(stream, read_into_request);
+        readable_stream_add_read_into_request(vm, stream, read_into_request);
 
         // 3. Return.
         return;
@@ -1400,7 +1403,7 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     // 16. If controller.[[queueTotalSize]] > 0,
     if controller.queue_total_size.get() > 0.0 {
         // 1. If ! ReadableByteStreamControllerFillPullIntoDescriptorFromQueue(controller, pullIntoDescriptor) is true,
-        if readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(controller, pull_into_descriptor) {
+        if readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(vm, controller, pull_into_descriptor) {
             // 1. Let filledView be ! ReadableByteStreamControllerConvertPullIntoDescriptor(pullIntoDescriptor).
             let filled_view = readable_byte_stream_controller_convert_pull_into_descriptor(cx, pull_into_descriptor);
 
@@ -1433,11 +1436,11 @@ pub(crate) fn readable_byte_stream_controller_pull_into(
     // 17. Append pullIntoDescriptor to controller.[[pendingPullIntos]].
     controller
         .pending_pull_intos
-        .borrow_mut()
+        .borrow_mut(vm)
         .push_back(pull_into_descriptor);
 
     // 18. Perform ! ReadableStreamAddReadIntoRequest(stream, readIntoRequest).
-    readable_stream_add_read_into_request(stream, read_into_request);
+    readable_stream_add_read_into_request(vm, stream, read_into_request);
 
     // 19. Perform ! ReadableByteStreamControllerCallPullIfNeeded(controller).
     readable_byte_stream_controller_call_pull_if_needed(cx, controller);
@@ -1512,7 +1515,7 @@ pub(crate) fn readable_byte_stream_controller_respond_in_closed_state(
     // 2. If firstDescriptor’s reader type is "none", perform
     //    ! ReadableByteStreamControllerShiftPendingPullInto(controller).
     if first_descriptor.reader_type.get() == ReaderType::None {
-        readable_byte_stream_controller_shift_pending_pull_into(controller);
+        readable_byte_stream_controller_shift_pending_pull_into(cx.vm(), controller);
     }
 
     // 3. Let stream be controller.[[stream]].
@@ -1526,7 +1529,7 @@ pub(crate) fn readable_byte_stream_controller_respond_in_closed_state(
         // 2. While filledPullIntos’s size < ! ReadableStreamGetNumReadIntoRequests(stream),
         while filled_pull_intos.len() < readable_stream_get_num_read_into_requests(stream) {
             // 1. Let pullIntoDescriptor be ! ReadableByteStreamControllerShiftPendingPullInto(controller).
-            let pull_into_descriptor = readable_byte_stream_controller_shift_pending_pull_into(controller);
+            let pull_into_descriptor = readable_byte_stream_controller_shift_pending_pull_into(cx.vm(), controller);
 
             // 2. Append pullIntoDescriptor to filledPullIntos.
             filled_pull_intos.push(pull_into_descriptor);
@@ -1585,7 +1588,7 @@ pub(crate) fn readable_byte_stream_controller_respond_in_readable_state(
     //       the queue, so the underlying source can keep filling it.
 
     // 5. Perform ! ReadableByteStreamControllerShiftPendingPullInto(controller).
-    readable_byte_stream_controller_shift_pending_pull_into(controller);
+    readable_byte_stream_controller_shift_pending_pull_into(cx.vm(), controller);
 
     // 6. Let remainderSize be the remainder after dividing pullIntoDescriptor’s bytes filled by pullIntoDescriptor’s
     //    element size.
@@ -1754,6 +1757,7 @@ pub(crate) fn readable_byte_stream_controller_respond_with_new_view(
 
 // https://streams.spec.whatwg.org/#readable-byte-stream-controller-shift-pending-pull-into
 pub(crate) fn readable_byte_stream_controller_shift_pending_pull_into(
+    vm: &Vm,
     controller: Ref<ReadableByteStreamController>,
 ) -> PullIntoDescriptorRef {
     // 1. Assert: controller.[[byobRequest]] is null.
@@ -1764,7 +1768,7 @@ pub(crate) fn readable_byte_stream_controller_shift_pending_pull_into(
     // 4. Return descriptor.
     controller
         .pending_pull_intos
-        .borrow_mut()
+        .borrow_mut(vm)
         .pop_front()
         .expect("a controller shifts a pending pull-into it has")
 }
@@ -1848,7 +1852,7 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     controller.byob_request.set(None);
 
     // 6. Perform ! ResetQueue(controller).
-    controller.reset_queue();
+    controller.reset_queue(cx.vm());
 
     // 7. Set controller.[[closeRequested]] and controller.[[started]] to false.
     controller.close_requested.set(false);
@@ -1858,16 +1862,16 @@ pub(crate) fn set_up_readable_byte_stream_controller(
     controller.strategy_hwm.set(high_water_mark);
 
     // 9. Set controller.[[pullAlgorithm]] to pullAlgorithm.
-    *controller.pull_algorithm.borrow_mut() = Some(pull_algorithm);
+    controller.pull_algorithm.replace(Some(pull_algorithm));
 
     // 10. Set controller.[[cancelAlgorithm]] to cancelAlgorithm.
-    *controller.cancel_algorithm.borrow_mut() = Some(cancel_algorithm);
+    controller.cancel_algorithm.replace(Some(cancel_algorithm));
 
     // 11. Set controller.[[autoAllocateChunkSize]] to autoAllocateChunkSize.
     controller.auto_allocate_chunk_size.set(auto_allocate_chunk_size);
 
     // 12. Set controller.[[pendingPullIntos]] to a new empty list.
-    controller.pending_pull_intos.borrow_mut().clear();
+    controller.pending_pull_intos.borrow_mut(cx.vm()).clear();
 
     // 13. Set stream.[[controller]] to controller.
     stream.set_controller(Some(ReadableStreamController::ReadableByteStreamController(controller)));
@@ -1918,7 +1922,7 @@ pub(crate) fn set_up_readable_byte_stream_controller_from_underlying_source(
     high_water_mark: f64,
 ) -> WebIdlResult<()> {
     // 1. Let controller be a new ReadableByteStreamController.
-    let controller = allocate(cx.vm(), ReadableByteStreamController::new());
+    let controller = allocate(cx.vm(), ReadableByteStreamController::new);
 
     // 2. Let startAlgorithm be an algorithm that returns undefined.
     let mut start_algorithm = StartAlgorithm::ReturnsUndefined;

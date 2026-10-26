@@ -41,6 +41,7 @@
 #include <LibWeb/Editing/EditingHistory.h>
 #include <LibWeb/Editing/Internal/Algorithms.h>
 #include <LibWeb/Editing/SpellCheckController.h>
+#include <LibWeb/Editing/WritingSuggestionController.h>
 #include <LibWeb/Fetch/Fetching/Checks.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
@@ -97,6 +98,7 @@
 #include <LibWeb/UIEvents/InputEvent.h>
 #include <LibWeb/UIEvents/InputTypes.h>
 #include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
+#include <LibWeb/WebDriver/BiDi/BiDi.h>
 #include <LibWeb/WebIDL/Promise.h>
 #include <LibWeb/XHR/FormData.h>
 #include <LibWebCommon/CSS/SystemColor.h>
@@ -157,7 +159,7 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
     GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller;
     OpenerPolicyEnforcementResult coop_enforcement_result;
     SandboxingFlagSet final_sandbox_flags {};
-    GC::Ptr<PolicyContainer> response_policy_container;
+    RefPtr<PolicyContainer> response_policy_container;
     OpenerPolicy response_coop {};
     ErrorOr<Optional<URL::URL>> location_url { OptionalNone {} };
     URL::URL current_url;
@@ -204,7 +206,6 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
         Base::visit_edges(visitor);
         visitor.visit(response);
         visitor.visit(fetch_controller);
-        visitor.visit(response_policy_container);
         visitor.visit(commit_early_hints);
         visitor.visit(request);
         visitor.visit(navigable);
@@ -1098,7 +1099,7 @@ Vector<NonnullRefPtr<SessionHistoryEntry>> LocalNavigable::session_history_entri
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#initialize-the-navigable
-void LocalNavigable::initialize_navigable(NonnullRefPtr<DocumentState> document_state, GC::Ptr<Navigable> parent, GC::Ref<DOM::Document> document, VisibilityState system_visibility_state)
+void LocalNavigable::initialize_navigable(NonnullRefPtr<DocumentState> document_state, GC::Ptr<Navigable> parent, GC::Ref<DOM::Document> document, VisibilityState system_visibility_state, bool is_stand_in)
 {
     set_id(page().client().allocate_navigable_id());
 
@@ -1127,6 +1128,12 @@ void LocalNavigable::initialize_navigable(NonnullRefPtr<DocumentState> document_
 
     // 6. Set the initial visibility state of documentState's document to navigable's traversable navigable's system visibility state.
     document->set_initial_visibility_state(system_visibility_state);
+
+    // AD-HOC: A navigable's first document is active in it from the navigable's initialization, before scripts may run
+    //         for it, and WebDriver BiDi creates its realm and runs its preload scripts then. WebDriver BiDi names a
+    //         top-level traversable by the window handle it gets once it is created, so it does that once it has one.
+    if (WebDriver::BiDi::is_active() && !is_top_level_traversable() && !is_stand_in)
+        WebDriver::BiDi::document_is_ready_for_scripts(document);
 }
 
 // AD-HOC: The debug settings and the compositor tree are per page, so a child navigable starts from its parent's. A
@@ -2001,19 +2008,18 @@ bool LocalNavigable::is_familiar_with(Navigable& other)
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#determining-navigation-params-policy-container
-static GC::Ref<PolicyContainer> determine_navigation_params_policy_container(URL::URL const& response_url,
-    GC::Heap& heap,
-    GC::Ptr<PolicyContainer> history_policy_container,
-    GC::Ptr<PolicyContainer> initiator_policy_container,
-    GC::Ptr<PolicyContainer> parent_policy_container,
-    GC::Ptr<PolicyContainer> response_policy_container)
+static NonnullRefPtr<PolicyContainer> determine_navigation_params_policy_container(URL::URL const& response_url,
+    RefPtr<PolicyContainer> history_policy_container,
+    RefPtr<PolicyContainer> initiator_policy_container,
+    RefPtr<PolicyContainer> parent_policy_container,
+    RefPtr<PolicyContainer> response_policy_container)
 {
     // 1. If historyPolicyContainer is not null, then:
     if (history_policy_container) {
         // FIXME: 1. Assert: responseURL requires storing the policy container in history.
 
         // 2. Return a clone of historyPolicyContainer.
-        return history_policy_container->clone(heap);
+        return history_policy_container->clone();
     }
 
     // 2. If responseURL is about:srcdoc, then:
@@ -2022,20 +2028,20 @@ static GC::Ref<PolicyContainer> determine_navigation_params_policy_container(URL
         VERIFY(parent_policy_container);
 
         // 2. Return a clone of parentPolicyContainer.
-        return parent_policy_container->clone(heap);
+        return parent_policy_container->clone();
     }
 
     // 3. If responseURL is local and initiatorPolicyContainer is not null, then return a clone of initiatorPolicyContainer.
     if (Fetch::Infrastructure::is_local_url(response_url) && initiator_policy_container)
-        return initiator_policy_container->clone(heap);
+        return initiator_policy_container->clone();
 
     // 4. If responsePolicyContainer is not null, then return responsePolicyContainer.
     // FIXME: File a spec issue to say "a clone of" here for consistency
     if (response_policy_container)
-        return response_policy_container->clone(heap);
+        return response_policy_container->clone();
 
     // 5. Return a new policy container.
-    return heap.allocate<PolicyContainer>(heap);
+    return PolicyContainer::create();
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#hand-off-to-external-software
@@ -2139,22 +2145,22 @@ static GC::Ref<NavigationParams> create_navigation_params_from_a_srcdoc_resource
 
     // 6. Let policyContainer be the result of determining navigation params policy container given response's URL,
     //    entry's document state's history policy container, null, navigable's container document's policy container, and null.
-    GC::Ptr<PolicyContainer> history_policy_container = history_policy_container_variant.visit(
-        [&](SerializedPolicyContainer const& s) -> GC::Ptr<PolicyContainer> { return create_a_policy_container_from_serialized_policy_container(s); },
-        [](DocumentState::Client) -> GC::Ptr<PolicyContainer> { return {}; });
-    GC::Ptr<PolicyContainer> policy_container;
+    RefPtr<PolicyContainer> history_policy_container = history_policy_container_variant.visit(
+        [&](SerializedPolicyContainer const& s) -> RefPtr<PolicyContainer> { return create_a_policy_container_from_serialized_policy_container(s); },
+        [](DocumentState::Client) -> RefPtr<PolicyContainer> { return {}; });
+    RefPtr<PolicyContainer> policy_container;
     if (navigable->container()) {
         // NOTE: Specification assumes that only navigables corresponding to iframes can be navigated to about:srcdoc.
         //       We also use srcdoc to implement load_html() for top level navigables so we need to null check container
         //       because it might be null.
-        policy_container = determine_navigation_params_policy_container(*response->url(), realm.heap(), history_policy_container, {}, navigable->container_document()->policy_container(), {});
+        policy_container = determine_navigation_params_policy_container(*response->url(), history_policy_container, {}, navigable->container_document()->policy_container(), {});
     } else if (navigable->parent()) {
         // NB: The container document is in another process. Only its iframe element's srcdoc attribute navigates the
         //     navigable to about:srcdoc, so the container document is the source document, whose policy container the
         //     source snapshot params hold.
-        policy_container = determine_navigation_params_policy_container(*response->url(), realm.heap(), history_policy_container, {}, source_snapshot_params.source_policy_container, {});
+        policy_container = determine_navigation_params_policy_container(*response->url(), history_policy_container, {}, source_snapshot_params.source_policy_container, {});
     } else {
-        policy_container = realm.heap().allocate<PolicyContainer>(realm.heap());
+        policy_container = PolicyContainer::create();
     }
 
     // 7. Return a new navigation params, with
@@ -2274,18 +2280,12 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
             state_holder->continuation_steps->function()(NavigationParamsFetchStateHolder::ContinuationReason::GotResponse);
         };
 
+        Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::DeliverStreamToConsumerAgent };
+        fetch_algorithms_input.process_response = move(process_response);
         state_holder->fetch_controller = Fetch::Fetching::fetch(
             realm,
             state_holder->request,
-            Fetch::Infrastructure::FetchAlgorithms::create(realm.vm(),
-                {
-                    .process_request_body_chunk_length = {},
-                    .process_request_end_of_body = {},
-                    .process_early_hints_response = {},
-                    .process_response = move(process_response),
-                    .process_response_end_of_body = {},
-                    .process_response_consume_body = {},
-                }),
+            Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)),
             Fetch::Fetching::UseParallelQueue::Yes,
             Fetch::Fetching::CreateResponseBodyTransferLease::Yes);
     }
@@ -2349,7 +2349,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
         state_holder->response_policy_container = create_a_policy_container_from_a_fetch_response(*state_holder->response, state_holder->request->reserved_client());
 
         // 10. Set finalSandboxFlags to the union of targetSnapshotParams's sandboxing flags and responsePolicyContainer's CSP list's CSP-derived sandboxing flags.
-        state_holder->final_sandbox_flags = state_holder->target_snapshot_params.sandboxing_flags | state_holder->response_policy_container->csp_list->csp_derived_sandboxing_flags();
+        state_holder->final_sandbox_flags = state_holder->target_snapshot_params.sandboxing_flags | state_holder->response_policy_container->csp_list.csp_derived_sandboxing_flags();
 
         // 11. Set responseOrigin to the result of determining the origin given response's URL, finalSandboxFlags, and entry's document state's initiator origin.
         state_holder->response_origin = determine_the_origin(state_holder->response->url(), state_holder->final_sandbox_flags, state_holder->initiator_origin);
@@ -2768,10 +2768,10 @@ static void create_navigation_params_by_fetching(
 
         // 25. Let resultPolicyContainer be the result of determining navigation params policy container given response's URL,
         //     entry's document state's history policy container, sourceSnapshotParams's source policy container, null, and responsePolicyContainer.
-        GC::Ptr<PolicyContainer> history_policy_container = state_holder->history_policy_container.visit(
-            [&](SerializedPolicyContainer const& s) -> GC::Ptr<PolicyContainer> { return create_a_policy_container_from_serialized_policy_container(s); },
-            [](DocumentState::Client) -> GC::Ptr<PolicyContainer> { return {}; });
-        auto result_policy_container = determine_navigation_params_policy_container(*state_holder->response->url(), realm.heap(), history_policy_container, state_holder->source_snapshot_params->source_policy_container, {}, state_holder->response_policy_container);
+        RefPtr<PolicyContainer> history_policy_container = state_holder->history_policy_container.visit(
+            [&](SerializedPolicyContainer const& s) -> RefPtr<PolicyContainer> { return create_a_policy_container_from_serialized_policy_container(s); },
+            [](DocumentState::Client) -> RefPtr<PolicyContainer> { return {}; });
+        auto result_policy_container = determine_navigation_params_policy_container(*state_holder->response->url(), history_policy_container, state_holder->source_snapshot_params->source_policy_container, {}, state_holder->response_policy_container);
 
         // 26. If navigable's container is an iframe, and response's timing allow passed flag is set,
         //     then set navigable's container's pending resource-timing start time to null.
@@ -2954,7 +2954,7 @@ void LocalNavigable::populate_session_history_entry_document(NavigationPopulatio
         source_snapshot_params,
         request.target_snapshot_params,
         request.user_involvement,
-        {},
+        request.navigation_id.is_empty() ? Optional<Utf16String> {} : Optional<Utf16String> { request.navigation_id },
         NullOrError {},
         request.csp_navigation_type,
         navigation_timing_type,
@@ -3055,7 +3055,9 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
     // 5. Queue a global task on the navigation and traversal task source, given navigable's active window, to run these steps:
     queue_global_task(Task::Source::NavigationAndTraversal, HTML::relevant_global_object(*active_window()), GC::create_function(heap(), [this, url, source_allows_downloading, source_interface_origin, user_involvement, navigation_id, navigation_params, csp_navigation_type, navigation_timing_type, output, completion_steps]() mutable {
         // 1. If navigable's ongoing navigation no longer equals navigationId, then run completionSteps and abort these steps.
-        if (navigation_id.has_value() && ongoing_navigation() != navigation_id) {
+        // NB: A reload history job keeps the traversal marker while its document is populated.
+        auto is_reload_traversal = navigation_timing_type == Bindings::NavigationTimingType::Reload && ongoing_navigation().has<Traversal>();
+        if (navigation_id.has_value() && ongoing_navigation() != navigation_id && !is_reload_traversal) {
             stop_or_resume_response_body_delivery(navigation_params);
             if (completion_steps)
                 completion_steps->function()(nullptr);
@@ -3072,6 +3074,11 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
             //    NOTE: This can result in setting entry's document state's document to null, e.g., when handing-off to
             //    external software.
             output->document = attempt_to_create_a_non_fetch_scheme_document(navigation_params.get<GC::Ref<NonFetchSchemeNavigationParams>>());
+
+            // INTEROP: A navigation that loads no document is reported as failed to WebDriver BiDi, which is what other
+            //          implementations do, so that the navigation's waiters learn it ended.
+            if (!output->document && WebDriver::BiDi::is_active())
+                WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationFailed"sv, navigation_id, url);
 
             // 2. Set saveExtraDocumentState to false.
             output->save_extra_document_state = false;
@@ -3123,7 +3130,18 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
                     },
                     [](auto const&) { });
 
-                // FIXME: 2. Invoke WebDriver BiDi navigation failed with navigable and a new WebDriver BiDi navigation status whose id is navigationId, status is "canceled", and url is navigationParams's response's URL.
+                // 2. Invoke WebDriver BiDi navigation failed with navigable and a new WebDriver BiDi navigation status whose id is navigationId, status is "canceled", and url is navigationParams's response's URL.
+                if (WebDriver::BiDi::is_active()) {
+                    auto response_url = navigation_params.visit(
+                        [&](GC::Ref<NavigationParams> const& it) { return it->response->url().value_or(url); },
+                        [&](auto const&) { return url; });
+                    WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationFailed"sv, navigation_id, response_url);
+                }
+            }
+            // INTEROP: A navigation whose fetch failed is reported as failed to WebDriver BiDi too, which is what other
+            //          implementations do.
+            else if (WebDriver::BiDi::is_active()) {
+                WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationFailed"sv, navigation_id, error_url);
             }
         }
 
@@ -3143,18 +3161,21 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
 
             // Get sniff bytes for MIME type detection. For streaming responses where bytes
             // haven't arrived yet, we must wait asynchronously.
-            auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<ReadonlyBytes> { ReadonlyBytes {} };
+            auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<Fetch::Infrastructure::FetchBody::SniffBytes> { Fetch::Infrastructure::FetchBody::SniffBytes {} };
             if (!sniff_bytes.has_value()) {
                 // Async path: bytes not yet available, wait for them
                 nav_params->response->resume_body_delivery_up_to(Fetch::Infrastructure::MAX_SNIFF_BYTES);
                 body->wait_for_sniff_bytes(GC::create_function(heap(),
-                    [output, nav_params, navigation_params, completion_steps, source_allows_downloading, source_interface_origin, url](ReadonlyBytes sniff_bytes) {
+                    [output, nav_params, navigation_params, completion_steps, source_allows_downloading, source_interface_origin, url](Fetch::Infrastructure::FetchBody::SniffBytes sniff_bytes) {
                         // AD-HOC: The document may have been destroyed between when the fetch started and when the
-                        //         bytes arrived.
-                        if (nav_params->navigable->active_browsing_context()) {
-                            load_document_or_handle_download(nav_params, sniff_bytes, url, source_allows_downloading, source_interface_origin, *output);
+                        //         bytes arrived. A response that failed mid-sniff must not be loaded as a document
+                        //         off its partial bytes either.
+                        if (nav_params->navigable->active_browsing_context() && sniff_bytes.outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Complete) {
+                            load_document_or_handle_download(nav_params, sniff_bytes.bytes, url, source_allows_downloading, source_interface_origin, *output);
                         } else {
                             stop_or_resume_response_body_delivery(navigation_params);
+                            if (sniff_bytes.outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Failed)
+                                output->save_extra_document_state = false;
                         }
                         output->navigation_params = navigation_params;
                         report_a_document_with_an_origin_of_its_own(*nav_params->navigable, output);
@@ -3165,7 +3186,12 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
             }
 
             // Sync path: bytes available immediately
-            load_document_or_handle_download(nav_params, sniff_bytes.value(), url, source_allows_downloading, source_interface_origin, *output);
+            if (sniff_bytes->outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Complete) {
+                load_document_or_handle_download(nav_params, sniff_bytes->bytes, url, source_allows_downloading, source_interface_origin, *output);
+            } else {
+                stop_or_resume_response_body_delivery(navigation_params);
+                output->save_extra_document_state = false;
+            }
         } else {
             stop_or_resume_response_body_delivery(navigation_params);
         }
@@ -3280,14 +3306,14 @@ void LocalNavigable::continue_navigation_after_population_dispatch(PreparedNavig
         // 1. Let sourcePolicyContainer be a clone of the sourceDocument's policy container, if
         //    sourceDocument is not null; otherwise null.
         // NB: sourceDocument is null exactly for a "browser UI" user involvement, by steps 5 and 6.
-        GC::Ptr<PolicyContainer> source_policy_container;
+        RefPtr<PolicyContainer> source_policy_container;
         if (navigation.user_involvement != UserNavigationInvolvement::BrowserUI)
             source_policy_container = source_snapshot_params->source_policy_container;
 
         // 2. Let policyContainer be the result of determining navigation params policy container given
         //    response's URL, null, sourcePolicyContainer, navigable's container document's policy container,
         //    and null.
-        GC::Ptr<PolicyContainer> parent_policy_container;
+        RefPtr<PolicyContainer> parent_policy_container;
         if (auto container_document = this->container_document())
             parent_policy_container = container_document->policy_container();
         else if (*response_url == URL::about_srcdoc() && parent() && source_policy_container) {
@@ -3298,13 +3324,13 @@ void LocalNavigable::continue_navigation_after_population_dispatch(PreparedNavig
             // NOTE: Specification assumes that only navigables corresponding to iframes can be navigated to about:srcdoc.
             //       We also use srcdoc to implement load_html() for top level navigables so we need a policy container
             //       because the navigable might not have a container.
-            parent_policy_container = heap().allocate<PolicyContainer>(heap());
+            parent_policy_container = PolicyContainer::create();
         }
-        auto policy_container = determine_navigation_params_policy_container(*response_url, heap(), {}, source_policy_container, parent_policy_container, {});
+        auto policy_container = determine_navigation_params_policy_container(*response_url, {}, source_policy_container, parent_policy_container, {});
 
         // 3. Let finalSandboxFlags be the union of targetSnapshotParams's sandboxing flags and
         //    policyContainer's CSP list's CSP-derived sandboxing flags.
-        auto final_sandbox_flags = population_request.target_snapshot_params.sandboxing_flags | policy_container->csp_list->csp_derived_sandboxing_flags();
+        auto final_sandbox_flags = population_request.target_snapshot_params.sandboxing_flags | policy_container->csp_list.csp_derived_sandboxing_flags();
 
         // 4. Let responseOrigin be the result of determining the origin given response's URL,
         //    finalSandboxFlags, and documentState's initiator origin.
@@ -3430,7 +3456,7 @@ void LocalNavigable::navigate_to_a_javascript_url_from_ui_process(URL::URL const
 }
 
 // https://html.spec.whatwg.org/multipage/web-messaging.html#window-post-message-steps
-void LocalNavigable::deliver_posted_message_from_another_process(PostedMessageDescriptor message)
+void LocalNavigable::deliver_posted_message_from_another_process(MessageDescriptor message)
 {
     auto window = active_window();
     if (!window)
@@ -3504,8 +3530,8 @@ void LocalNavigable::begin_navigation(PreparedNavigation navigation)
     //    then invoke WebDriver BiDi navigation failed with navigable and a WebDriver BiDi navigation status whose id
     //    is navigationId, status is "canceled", and url is url, and return.
     if (active_document.unload_counter() > 0) {
-        // FIXME: invoke WebDriver BiDi navigation failed with navigable and a WebDriver BiDi navigation status whose id
-        //        is navigationId, status is "canceled", and url is url
+        if (WebDriver::BiDi::is_active())
+            WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationFailed"sv, navigation_id, url);
         return;
     }
 
@@ -3567,13 +3593,17 @@ void LocalNavigable::begin_navigation(PreparedNavigation navigation)
     // 16. Let targetSnapshotParams be the result of snapshotting target snapshot params given navigable.
     auto target_snapshot_params = snapshot_target_snapshot_params(*this);
 
-    // FIXME: 17. Invoke WebDriver BiDi navigation started with navigable and a new WebDriver BiDi navigation status whose id
-    //     is navigationId, status is "pending", and url is url.
+    // 17. Invoke WebDriver BiDi navigation started with navigable and a new WebDriver BiDi navigation status whose id is
+    //     navigationId, status is "pending", and url is url.
+    if (WebDriver::BiDi::is_active())
+        WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationStarted"sv, navigation_id, url);
 
     // 18. If navigable's ongoing navigation is "traversal", then:
     if (ongoing_navigation().has<Traversal>()) {
-        // FIXME: 1. Invoke WebDriver BiDi navigation failed with navigable and a new WebDriver BiDi navigation status whose id
+        // 1. Invoke WebDriver BiDi navigation failed with navigable and a new WebDriver BiDi navigation status whose id
         //    is navigationId, status is "canceled", and url is url.
+        if (WebDriver::BiDi::is_active())
+            WebDriver::BiDi::navigation_event(*this, "browsingContext.navigationFailed"sv, navigation_id, url);
 
         // 2. Return.
         return;
@@ -3933,9 +3963,10 @@ void LocalNavigable::navigate_to_a_fragment(URL::URL const& url, HistoryHandling
     //    historyHandling, and userInvolvement.
     page().history_executor().finalize_same_document_navigation(*this, history_entry, entry_to_replace, history_handling, user_involvement, move(previous_entry_persisted_state));
 
-    // FIXME: Invoke WebDriver BiDi fragment navigated with navigable and a new WebDriver BiDi navigation status whose
-    //        id is navigationId, url is url, and status is "complete".
-    (void)navigation_id;
+    // Invoke WebDriver BiDi fragment navigated with navigable and a new WebDriver BiDi navigation status whose id is
+    // navigationId, url is url, and status is "complete".
+    if (WebDriver::BiDi::is_active())
+        WebDriver::BiDi::navigation_event(*this, "browsingContext.fragmentNavigated"sv, navigation_id, url);
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#evaluate-a-javascript:-url
@@ -3992,7 +4023,7 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     auto const& policy_container = active_document()->policy_container();
 
     // 13. Let finalSandboxFlags be policyContainer's CSP list's CSP-derived sandboxing flags.
-    auto final_sandbox_flags = policy_container->csp_list->csp_derived_sandboxing_flags();
+    auto final_sandbox_flags = policy_container->csp_list.csp_derived_sandboxing_flags();
 
     // 14. Let coop be targetNavigable's active document's opener policy.
     auto const& coop = active_document()->opener_policy();
@@ -4414,7 +4445,10 @@ void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_
     //    historyHandling, and "none".
     navigable->page().history_executor().finalize_same_document_navigation(*navigable, new_entry, entry_to_replace, history_handling, UserNavigationInvolvement::None, move(previous_entry_persisted_state));
 
-    // FIXME: Invoke WebDriver BiDi history updated with navigable.
+    // 2. Invoke WebDriver BiDi history updated with navigable.
+    // NB: The browser process names the navigable and its URL, which is its active document's URL.
+    if (WebDriver::BiDi::is_active())
+        WebDriver::BiDi::navigation_event(*navigable, "browsingContext.historyUpdated"sv, {}, document.url());
 }
 
 void LocalNavigable::scroll_offset_did_change()
@@ -4523,7 +4557,7 @@ void LocalNavigable::initialize_stand_in(RemoteNavigable& remote_navigable, Sess
     document_state->set_about_base_url(document->about_base_url());
 
     // 8. Initialize the navigable navigable given documentState and parentNavigable.
-    initialize_navigable(document_state, remote_navigable.parent(), document, visibility_state);
+    initialize_navigable(document_state, remote_navigable.parent(), document, visibility_state, true);
     set_id_for_session_history_reconstruction(remote_navigable.id());
 
     // The WindowProxy scripts hold keeps standing for the document the navigable displays, which another page hosts,
@@ -6141,8 +6175,10 @@ void LocalNavigable::end_input_method_composition(Optional<Utf16View> final_text
     if (!was_active)
         return;
 
-    if (auto document = active_document())
+    if (auto document = active_document()) {
         document->spell_check_controller().did_end_input_method_composition();
+        document->writing_suggestion_controller().did_end_input_method_composition();
+    }
 
     // https://w3c.github.io/uievents/#event-type-compositionend
     // A user agent MUST dispatch this event when a text composition system completes or cancels the current composition
@@ -6247,6 +6283,8 @@ void LocalNavigable::replace_input_method_marked_text(Utf16View text)
     // of text.
     if (!m_input_method_composition_active) {
         document->set_is_input_method_composing(true);
+        if (auto* controller = document->writing_suggestion_controller_if_exists())
+            controller->did_start_input_method_composition();
         m_input_method_composition_active = true;
         // https://w3c.github.io/uievents/#events-composition-canceling
         // If the initial compositionstart event is canceled then the text composition session SHOULD be terminated.

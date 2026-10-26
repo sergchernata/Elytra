@@ -160,7 +160,7 @@ public:
 
     using BodyType = Variant<Empty, ByteBuffer, GC::Ref<Body>>;
     using OriginType = Variant<Origin, URL::Origin>;
-    using PolicyContainerType = Variant<PolicyContainer, GC::Ref<HTML::PolicyContainer>>;
+    using PolicyContainerType = Variant<PolicyContainer, NonnullRefPtr<HTML::PolicyContainer const>>;
     using ReferrerType = RequestReferrerType;
     using ReservedClientType = GC::Ptr<HTML::Environment>;
     using TraversableForUserPromptsType = Variant<TraversableForUserPrompts, GC::Ptr<HTML::EnvironmentSettingsObject>, GC::Ptr<HTML::Navigable>>;
@@ -223,7 +223,8 @@ public:
     void set_top_level_navigation_initiator_origin(Optional<URL::Origin> top_level_navigation_initiator_origin) { m_top_level_navigation_initiator_origin = move(top_level_navigation_initiator_origin); }
 
     [[nodiscard]] PolicyContainerType const& policy_container() const { return m_policy_container; }
-    void set_policy_container(PolicyContainerType policy_container) { m_policy_container = move(policy_container); }
+    void set_policy_container(PolicyContainerType);
+    void set_policy_container(NonnullRefPtr<HTML::PolicyContainer const>);
 
     [[nodiscard]] Mode mode() const { return m_mode; }
     void set_mode(Mode mode) { m_mode = mode; }
@@ -325,7 +326,11 @@ public:
     [[nodiscard]] String serialize_origin() const;
     [[nodiscard]] ByteString byte_serialize_origin() const;
 
-    [[nodiscard]] GC::Ref<Request> clone(JS::Realm&) const;
+    enum class BodyCloning : u8 {
+        Tee,
+        FromSource,
+    };
+    [[nodiscard]] GC::Ref<Request> clone(JS::Realm&, BodyCloning) const;
 
     void add_range_header(u64 first, Optional<u64> const& last);
     void add_origin_header();

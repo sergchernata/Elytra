@@ -125,7 +125,7 @@ impl Array {
         // 3. Let A be MakeBasicObject(« [[Prototype]], [[Extensible]] »).
         // 4. Set A.[[Prototype]] to proto.
         // 5. Set A.[[DefineOwnProperty]] as specified in 10.4.2.1.
-        let array = allocate_object(vm, Self::new(vm, realm, prototype));
+        let array = allocate_object(vm, |_| Self::new(vm, realm, prototype));
 
         // 6. Perform ! OrdinaryDefineOwnProperty(A, "length", PropertyDescriptor { [[Value]]: 𝔽(length), [[Writable]]: true, [[Enumerable]]: false, [[Configurable]]: false }).
         // OPTIMIZATION: The length of an array is the size of its indexed storage, and a new array's length is already
@@ -156,7 +156,7 @@ impl Array {
     /// CreateArrayFromList for a list that is kept alive while the array is allocated.
     pub fn create_from_list(vm: &Vm, realm: Gc<Realm>, elements: &MarkedVec<'_, Value>) -> Gc<Array> {
         let array = Self::create(vm, realm, 0, None).must();
-        elements.with_values(|elements| array.set_indexed_property_elements(elements));
+        array.set_indexed_property_elements(&elements.values());
         array
     }
 

@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	Computed min-width/min-height of specified auto for grid item.
+Pass	Computed min-width/min-height of specified auto inside display:none which would otherwise have been a grid item.
+Pass	Computed min-width/min-height of specified auto for grid item inside display:contents.
+Pass	Computed min-width/min-height of specified auto with display:none which would otherwise have been a grid item.

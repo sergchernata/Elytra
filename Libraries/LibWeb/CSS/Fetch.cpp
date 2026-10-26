@@ -90,7 +90,7 @@ static GC::Ptr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(Style
 
     // 3. Let req be a new request whose url is parsedUrl, whose destination is destination, mode is corsMode,
     //    origin is environmentSettings’s origin, credentials mode is "same-origin", use-url-credentials flag is set,
-    //    client is environmentSettings, and whose referrer is environmentSettings’s API base URL.
+    //    client is environmentSettings, and whose referrer is "client".
     auto request = Fetch::Infrastructure::Request::create();
     request->set_url(parsed_url.release_value());
     request->set_destination(destination);
@@ -99,11 +99,21 @@ static GC::Ptr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(Style
     request->set_credentials_mode(Fetch::Infrastructure::Request::CredentialsMode::SameOrigin);
     request->set_use_url_credentials(true);
     request->set_client(&environment_settings);
-    request->set_referrer(environment_settings.api_base_url());
+    request->set_referrer(Fetch::Infrastructure::Request::Referrer::Client);
 
     // 4. If corsMode is "no-cors", set req’s credentials mode to "include".
     if (cors_mode == CorsMode::NoCors)
         request->set_credentials_mode(Fetch::Infrastructure::Request::CredentialsMode::Include);
+
+    // INTEROP: Other engines fetch the resources of a style sheet that was itself fetched with the sheet's URL as the
+    //          referrer, and with the referrer policy of the response that the sheet was fetched from.
+    auto context = style_resource_context(css_rule_or_declaration);
+    if (context.sheet) {
+        if (auto referrer_policy = context.sheet->fetched_referrer_policy(); referrer_policy.has_value()) {
+            request->set_referrer(context.url);
+            request->set_referrer_policy(*referrer_policy);
+        }
+    }
 
     // 5. Apply any URL request modifier steps that apply to this request.
     if (auto const* css_url = url_value.get_pointer<CSS::URL>())
@@ -112,7 +122,6 @@ static GC::Ptr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(Style
     // 6. If req’s mode is "cors", and sheet is not null, then set req’s referrer to the style resource base URL given cssRuleOrDeclaration. [CSSOM]
     // FIXME: Spec issue - sheet is not defined as a variable, we use the sheet determined from 'style resource base URL' instead.
     //        https://github.com/w3c/csswg-drafts/issues/12288
-    auto context = style_resource_context(css_rule_or_declaration);
     if (request->mode() == Fetch::Infrastructure::Request::Mode::CORS && (context.sheet || context.parent_style_sheet_origin_clean.has_value()))
         request->set_referrer(context.url);
 
@@ -140,7 +149,7 @@ GC::Ptr<Fetch::Infrastructure::FetchController> fetch_a_style_resource(StyleReso
 
     auto& environment_settings = *css_rule_or_declaration.environment_settings_object;
 
-    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::ConsumeForCallback };
     fetch_algorithms_input.process_response_consume_body = move(process_response);
 
     return Fetch::Fetching::fetch(environment_settings.realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
@@ -164,7 +173,7 @@ GC::Ptr<HTML::SharedResourceRequest> fetch_an_external_image_for_a_stylesheet(St
     if (!request)
         return {};
 
-    auto shared_resource_request = HTML::SharedResourceRequest::get_or_create(document, request->url());
+    auto shared_resource_request = HTML::SharedResourceRequest::get_or_create(document, *request);
 
     if (shared_resource_request->needs_fetching())
         shared_resource_request->fetch_resource(*request);

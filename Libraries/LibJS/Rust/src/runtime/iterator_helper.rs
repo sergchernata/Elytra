@@ -139,24 +139,21 @@ impl IteratorHelper {
             .running_execution_context_if_any()
             .expect("an iterator helper is created by a running built-in")
             .copy();
-        let iterator = realm.create_object(
-            vm,
-            IteratorHelper {
-                base: GeneratorObject::new(
-                    vm,
-                    Self::CLASS,
-                    realm,
-                    Some(prototype),
-                    execution_context,
-                    Some(ITERATOR_HELPER_BRAND),
-                    IteratorHelper::execute,
-                ),
-                underlying_iterators: GcRefCell::new(Vec::new()),
-                closure: Cell::new(closure),
-                counter: Cell::new(0.0),
-            },
-        );
-        *iterator.underlying_iterators.borrow_mut() = underlying_iterators.to_vec();
+        let iterator = realm.create_object(vm, |_| IteratorHelper {
+            base: GeneratorObject::new(
+                vm,
+                Self::CLASS,
+                realm,
+                Some(prototype),
+                execution_context,
+                Some(ITERATOR_HELPER_BRAND),
+                IteratorHelper::execute,
+            ),
+            underlying_iterators: GcRefCell::new(Vec::new()),
+            closure: Cell::new(closure),
+            counter: Cell::new(0.0),
+        });
+        *iterator.underlying_iterators.borrow_mut(vm) = underlying_iterators.to_vec();
         iterator
     }
 

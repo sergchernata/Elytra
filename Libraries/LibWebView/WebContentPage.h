@@ -190,7 +190,7 @@ private:
     void maybe_record_history_visit_for_current_load(URL::URL const&, Optional<String> title, StringView reason);
 
     virtual void did_request_navigation_of_navigable(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId source_navigable_id, Web::HTML::CrossProcessId source_document_id, Web::HTML::PreparedNavigationDescriptor navigation) override;
-    virtual void did_post_message_to_navigable(Web::HTML::CrossProcessId navigable_id, Web::HTML::PostedMessageDescriptor message) override;
+    virtual void did_post_message_to_navigable(Web::HTML::CrossProcessId navigable_id, Web::HTML::PostedMessageDescriptor posted_message) override;
     virtual void did_request_focusing_steps_for_navigable(Web::HTML::CrossProcessId navigable_id, Web::HTML::FocusTrigger focus_trigger) override;
     virtual void did_request_window_focus_of_navigable(Web::HTML::CrossProcessId navigable_id) override;
     virtual void did_request_set_opener_of_navigable(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId opener_navigable_id) override;
@@ -255,6 +255,8 @@ private:
     virtual void webdriver_user_prompt_handling_complete(u64 request_id, Web::WebDriver::Response response) override;
     virtual void webdriver_did_set_current_browsing_context(u64 command_id, Web::HTML::CrossProcessId navigable_id) override;
     virtual void webdriver_command_complete(u64 command_id, Web::WebDriver::Response response) override;
+    virtual void webdriver_bidi_event(Web::HTML::CrossProcessId navigable_id, String name, JsonValue params) override;
+    virtual void webdriver_bidi_navigation_event(Web::HTML::CrossProcessId navigable_id, String name, Optional<Utf16String> navigation_id, URL::URL url) override;
     virtual void did_update_resource_count(i32 count_waiting) override;
     virtual void did_request_restore_window() override;
     virtual void did_request_reposition_window(Gfx::IntPoint position, u64 completion_id) override;
@@ -317,6 +319,7 @@ private:
     virtual void did_update_indexed_database(String update) override;
     virtual void did_request_clipboard_entries(u64 request_id) override;
     virtual void did_request_spell_check(u64 request_id, Utf16String text) override;
+    virtual void did_request_writing_suggestion(u64 request_id, Utf16String text, u32 caret_offset) override;
     virtual void did_request_set_system_focus(bool has_system_focus) override;
     virtual void did_request_set_system_visibility_state(Web::HTML::VisibilityState visibility_state) override;
     virtual void did_request_navigation_start(Web::HTML::CrossProcessId navigable_id, Web::NavigationTarget target, URL::URL url, Utf16String navigation_id, Optional<Web::HTML::NavigationStartRequest> start_request) override;

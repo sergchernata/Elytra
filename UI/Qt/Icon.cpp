@@ -47,6 +47,39 @@ QIcon icon_from_png(ReadonlyBytes favicon_png, int logical_size)
     return icon;
 }
 
+// Favicons get slightly rounded corners, so that square ones sit well in the round shapes of the chrome around them.
+static constexpr qreal FAVICON_CORNER_RADIUS_FRACTION = 3.0 / 16.0;
+
+QPixmap favicon_with_rounded_corners(QPixmap const& favicon)
+{
+    auto image = favicon.toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(1);
+
+    QImage rounded(image.size(), QImage::Format_ARGB32_Premultiplied);
+    rounded.fill(Qt::transparent);
+    {
+        QPainter painter(&rounded);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QBrush(image));
+        auto radius = image.width() * FAVICON_CORNER_RADIUS_FRACTION;
+        painter.drawRoundedRect(QRectF(image.rect()), radius, radius);
+    }
+    rounded.setDevicePixelRatio(favicon.devicePixelRatio());
+    return QPixmap::fromImage(rounded);
+}
+
+QIcon favicon_with_rounded_corners(QIcon const& favicon, int logical_size)
+{
+    if (favicon.isNull())
+        return {};
+
+    QIcon rounded;
+    for (auto device_pixel_ratio : ICON_DEVICE_PIXEL_RATIOS)
+        rounded.addPixmap(favicon_with_rounded_corners(favicon.pixmap(QSize(logical_size, logical_size), device_pixel_ratio)));
+    return rounded;
+}
+
 static QPen chrome_icon_pen(QColor const& color, qreal width)
 {
     return QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
@@ -160,23 +193,33 @@ static QPainterPath horizontally_flipped_path(QPainterPath const& path)
     return transform.map(path);
 }
 
+// The expanded sidebar's button shows the sidebar with an arrow into it. The collapsed sidebar's button is a double
+// chevron pointing away from the sidebar's edge of the window.
 static void draw_vertical_tab_bar_icon(QPainter& painter, QColor const& color, bool expanded, bool right_side)
 {
+    if (!expanded) {
+        QPainterPath chevrons;
+        chevrons.moveTo(6.0, 6.3);
+        chevrons.lineTo(9.7, 10.0);
+        chevrons.lineTo(6.0, 13.7);
+        chevrons.moveTo(10.6, 6.3);
+        chevrons.lineTo(14.3, 10.0);
+        chevrons.lineTo(10.6, 13.7);
+        if (right_side)
+            chevrons = horizontally_flipped_path(chevrons);
+        draw_stroked_icon_path(painter, chevrons, color, 1.7);
+        return;
+    }
+
     QPainterPath tab_bar;
     tab_bar.addRoundedRect(QRectF(3.8, 4.2, 12.4, 11.6), 1.6, 1.6);
     tab_bar.moveTo(7.8, 4.6);
     tab_bar.lineTo(7.8, 15.4);
 
     QPainterPath arrow;
-    if (expanded) {
-        arrow.moveTo(13.1, 7.8);
-        arrow.lineTo(10.3, 10.0);
-        arrow.lineTo(13.1, 12.2);
-    } else {
-        arrow.moveTo(10.7, 7.8);
-        arrow.lineTo(13.5, 10.0);
-        arrow.lineTo(10.7, 12.2);
-    }
+    arrow.moveTo(13.1, 7.8);
+    arrow.lineTo(10.3, 10.0);
+    arrow.lineTo(13.1, 12.2);
 
     if (right_side) {
         tab_bar = horizontally_flipped_path(tab_bar);
@@ -246,7 +289,7 @@ static QPixmap create_transparent_icon_pixmap(QSize logical_size, qreal device_p
 
 QPixmap create_chrome_icon_pixmap(ChromeIcon icon, QColor color, qreal device_pixel_ratio)
 {
-    auto pixmap = create_transparent_icon_pixmap({ 20, 20 }, device_pixel_ratio);
+    auto pixmap = create_transparent_icon_pixmap({ CHROME_ICON_CANVAS_SIZE, CHROME_ICON_CANVAS_SIZE }, device_pixel_ratio);
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);

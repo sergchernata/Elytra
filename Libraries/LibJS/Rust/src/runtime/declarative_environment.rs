@@ -9,7 +9,7 @@
 //! shared by every environment that one piece of code creates, or in the rare data for bindings the shape does not
 //! cover.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ops::Deref;
 use std::collections::HashMap;
 
@@ -127,11 +127,12 @@ impl Bitmap {
 /// The part of DeclarativeEnvironment::RareData that the interpreter does not read.
 #[derive(Default, Trace)]
 pub struct DeclarativeEnvironmentRareDataStorage {
-    binding_names: GcRefCell<Vec<Utf16FlyString>>,
     #[gc(untraced)]
-    deleted_bindings: GcRefCell<Bitmap>,
+    binding_names: RefCell<Vec<Utf16FlyString>>,
     #[gc(untraced)]
-    bindings_assoc: GcRefCell<HashMap<Utf16FlyString, usize, foldhash::fast::RandomState>>,
+    deleted_bindings: RefCell<Bitmap>,
+    #[gc(untraced)]
+    bindings_assoc: RefCell<HashMap<Utf16FlyString, usize, foldhash::fast::RandomState>>,
     dispose_capability: GcRefCell<DisposeCapability>,
     environment_shape_cache: Cell<Option<EnvironmentShapeCache>>,
     expected_binding_count: Cell<usize>,
@@ -140,7 +141,7 @@ pub struct DeclarativeEnvironmentRareDataStorage {
     tracks_assignments: Cell<bool>,
     /// The bindings that were assigned since their initialization, if the environment tracks assignments.
     #[gc(untraced)]
-    assigned_bindings: GcRefCell<Bitmap>,
+    assigned_bindings: RefCell<Bitmap>,
     /// Whether JIT code depends on the environment getting no bindings and on its bindings staying unassigned.
     has_dependent_code: Cell<bool>,
 }
@@ -232,11 +233,11 @@ pub fn allocate_environment<T: GcCell>(
 ) -> Gc<T> {
     let heap = vm.heap();
     let Some(size_class) = inline_binding_size_class(binding_capacity) else {
-        return heap.allocate(environment);
+        return heap.allocate(|_| environment);
     };
     let environment = heap.allocate_with_size_class(
         heap.size_classes(T::CLASS, cell_sizes)[size_class],
-        environment,
+        |_| environment,
         Value::EMPTY,
     );
     let declarative_environment = declarative(&environment);
@@ -307,7 +308,7 @@ impl DeclarativeEnvironment {
     }
 
     pub fn create(vm: &Vm, outer_environment: Option<Gc<Environment>>) -> Gc<DeclarativeEnvironment> {
-        vm.heap().allocate(Self::new(Self::CLASS, outer_environment))
+        vm.heap().allocate(|_| Self::new(Self::CLASS, outer_environment))
     }
 
     /// A new environment with room for `binding_capacity` bindings in its cell, if a size class has that much.
@@ -333,11 +334,11 @@ impl DeclarativeEnvironment {
 
     fn ensure_rare_data(&self) -> &DeclarativeEnvironmentRareData {
         if self.rare_data.get().is_null() {
-            let rare_data = Box::new(DeclarativeEnvironmentRareData {
-                binding_flags: InterpreterBuffer::new(),
-                storage: DeclarativeEnvironmentRareDataStorage::default(),
-            });
-            self.rare_data.set(Box::into_raw(rare_data));
+            self.rare_data
+                .set(Box::into_raw(Box::new(DeclarativeEnvironmentRareData {
+                    binding_flags: InterpreterBuffer::new(),
+                    storage: DeclarativeEnvironmentRareDataStorage::default(),
+                })));
         }
         self.rare_data().expect("the rare data was just allocated")
     }
@@ -354,8 +355,7 @@ impl DeclarativeEnvironment {
             return;
         }
         // SAFETY: ensure_rare_data allocated the rare data as a Box, and nothing refers to it anymore.
-        let rare_data = unsafe { Box::from_raw(rare_data) };
-        rare_data.binding_flags.clear();
+        unsafe { Box::from_raw(rare_data) }.binding_flags.clear();
     }
 
     fn increment_environment_serial_number(&self, vm: &Vm) {

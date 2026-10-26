@@ -10,13 +10,16 @@
 #include <UI/Qt/StringUtils.h>
 
 #include <QAbstractButton>
+#include <QCursor>
 #include <QElapsedTimer>
+#include <QFont>
 #include <QGuiApplication>
 #include <QImage>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
 #include <QStyleHints>
+#include <QWidget>
 
 namespace Ladybird::ChromeStyle {
 
@@ -74,6 +77,7 @@ static QColor chrome_base(QPalette const& palette)
 }
 
 struct MaterialColorAnchors {
+    QColor tab_strip;
     QColor background;
     QColor surface;
     QColor recessed;
@@ -86,6 +90,7 @@ static MaterialColorAnchors material_color_anchors(bool dark)
 {
     if (dark) {
         return {
+            .tab_strip = QColor(33, 36, 42),
             .background = QColor(13, 15, 18),
             .surface = QColor(34, 36, 40),
             .recessed = QColor(55, 58, 63),
@@ -96,7 +101,8 @@ static MaterialColorAnchors material_color_anchors(bool dark)
     }
 
     return {
-        .background = QColor(236, 236, 237),
+        .tab_strip = QColor(195, 197, 204),
+        .background = QColor(242, 243, 246),
         .surface = QColor(255, 255, 255),
         .recessed = QColor(150, 150, 152),
         .hover = QColor(229, 229, 230),
@@ -118,6 +124,26 @@ QColor mix(QColor const& from, QColor const& to, double amount)
     };
 }
 
+// The tab strip is darker than the toolbar below it, whose color the selected tab shares, so the selected tab stands out.
+WindowActivity window_activity(QWidget const& widget)
+{
+    return widget.isActiveWindow() ? WindowActivity::Active : WindowActivity::Inactive;
+}
+
+QColor chrome_tab_strip_background(QPalette const& palette, WindowActivity activity)
+{
+    auto dark = is_dark(palette);
+    auto color = mix(chrome_window(palette), material_color_anchors(dark).tab_strip, dark ? 0.70 : 0.68);
+    // An inactive window's tab strip is lifted toward the toolbar, so the window recedes behind the active one.
+    if (activity == WindowActivity::Inactive)
+        color = mix(color, chrome_background(palette), 0.4);
+    return color;
+}
+
+// In dark mode, the chrome is lifted from near black toward a cool slate rather than a plain gray.
+static constexpr QColor dark_chrome_base { 17, 20, 25 };
+static constexpr QColor dark_chrome_tint { 150, 165, 180 };
+
 // Fork hook (Arc)
 static QColor s_chrome_background_tint;
 static double s_chrome_background_tint_amount = 0;
@@ -130,11 +156,10 @@ void set_chrome_background_tint(QColor const& color, double amount)
 
 static QColor untinted_chrome_background(QPalette const& palette)
 {
-    auto window = chrome_window(palette);
     auto dark = is_dark(palette);
     if (dark)
-        return mix(window, QColor(17, 20, 25), 0.70);
-    return mix(window, material_color_anchors(dark).background, 0.68);
+        return mix(mix(chrome_window(palette), dark_chrome_base, 0.70), dark_chrome_tint, 0.27);
+    return mix(chrome_window(palette), material_color_anchors(dark).background, 0.68);
 }
 
 QColor chrome_background(QPalette const& palette)
@@ -194,16 +219,10 @@ QColor chrome_control_border(QPalette const& palette)
     return mix(chrome_border(palette), material_color_anchors(dark).border, 0.18);
 }
 
-// The active tab is lifted toward a cool slate rather than plain white, to match the tint of the dark chrome.
-static constexpr QColor active_tab_tint { 150, 165, 180 };
-
+// The active tab shares the color of the toolbar below it.
 QColor chrome_active_tab_surface(QPalette const& palette)
 {
-    auto dark = is_dark(palette);
-    if (!dark)
-        return QColor(255, 255, 255);
-
-    return mix(chrome_background(palette), active_tab_tint, 0.24);
+    return chrome_background(palette);
 }
 
 QColor chrome_border(QPalette const& palette)
@@ -265,6 +284,18 @@ QColor chrome_muted_text(QPalette const& palette)
         return is_dark(palette) ? QColor(154, 163, 176) : QColor(98, 108, 122);
 
     return palette.color(QPalette::PlaceholderText);
+}
+
+// The titles of tabs and bookmarks share one size.
+QFont chrome_title_font(QFont font)
+{
+#if defined(AK_OS_MACOS)
+    // NB: The macOS style gives tab bars and tool buttons small fonts of different sizes when it polishes them, so the
+    //     titles are drawn a point smaller than the application's font rather than in the font of their widget.
+    if (auto application_point_size = QGuiApplication::font().pointSizeF(); application_point_size > 0)
+        font.setPointSizeF(application_point_size - 1);
+#endif
+    return font;
 }
 
 static QColor chrome_destructive_hover()
@@ -504,7 +535,7 @@ QWidget#LadybirdToolbarContainer {{
 
 QString menu_bar_style_sheet(QPalette const& palette)
 {
-    auto background = style_sheet_color(chrome_background(palette));
+    auto background = style_sheet_color(chrome_tab_strip_background(palette));
     auto background_bottom = background;
     auto hover = style_sheet_color(chrome_control_surface_hover(palette));
     auto pressed = style_sheet_color(chrome_control_surface_pressed(palette));
@@ -652,14 +683,15 @@ QString location_edit_style_sheet(QPalette const& palette)
     auto dark = is_dark(palette);
     auto surface_color = chrome_surface(palette);
     if (dark)
-        surface_color = mix(chrome_background(palette), material_color_anchors(true).background, 0.34);
-    // Hovering the field lifts it with the same soft fill as the toolbar buttons, to show that it can be clicked.
-    auto soft_hover = chrome_control_soft_hover(palette);
-    auto hover_color = mix(surface_color, QColor(soft_hover.rgb()), soft_hover.alpha() / 255.0);
+        surface_color = mix(chrome_background(palette), material_color_anchors(true).background, 0.62);
+    // Hovering the field moves it a little toward the color of the toolbar around it, to show that it can be clicked,
+    // while it stays set apart from the toolbar.
+    auto hover_color = mix(surface_color, chrome_background(palette), 0.35);
     auto focus_color = dark ? mix(surface_color, QColor(255, 255, 255), 0.035) : surface_color;
 
-    auto border_color = location_edit_border(palette);
-    auto hover_border_color = border_color;
+    // NB: In dark mode, the field is set apart from the toolbar by its darker fill alone, so its border takes its fill.
+    auto border_color = dark ? surface_color : location_edit_border(palette);
+    auto hover_border_color = dark ? hover_color : border_color;
     auto focus_border_color = location_edit_focus_border(palette);
 
     auto surface = style_sheet_color(surface_color);
@@ -1204,8 +1236,9 @@ QWidget#LadybirdDevToolsBanner QPushButton:pressed {{
 QString tab_widget_style_sheet(QPalette const& palette)
 {
     auto dark = is_dark(palette);
-    auto chrome_background_color = chrome_background(palette);
-    auto background = style_sheet_color(chrome_background_color);
+    auto tab_strip_background = chrome_tab_strip_background(palette);
+    auto background = style_sheet_color(tab_strip_background);
+    auto inactive_background = style_sheet_color(chrome_tab_strip_background(palette, WindowActivity::Inactive));
     auto hover = style_sheet_color(chrome_control_surface_hover(palette));
     auto pressed = style_sheet_color(chrome_control_surface_pressed(palette));
     auto control_border = style_sheet_color(chrome_control_border(palette));
@@ -1213,14 +1246,14 @@ QString tab_widget_style_sheet(QPalette const& palette)
     auto close_hover = style_sheet_color(chrome_destructive_hover());
     auto close_text = style_sheet_color(chrome_destructive_text());
     auto sidebar_separator = style_sheet_color(chrome_content_separator(palette));
-    auto sidebar_separator_hover = style_sheet_color(mix(chrome_background_color, chrome_border(palette), dark ? 0.64 : 0.76));
+    // The sidebar's edge shows up clearly while it can be dragged, to show that the sidebar can be resized.
+    auto sidebar_separator_hover = style_sheet_color(mix(tab_strip_background, chrome_text(palette), dark ? 0.30 : 0.28));
 
     return qformatted(R"(
 QWidget#LadybirdTabStrip {{
     color: {4};
     background: {0};
     border: 0;
-    border-bottom: 1px solid {7};
 }}
 
 QWidget#LadybirdVerticalTabBar {{
@@ -1244,6 +1277,17 @@ QWidget#LadybirdVerticalTabBar[verticalTabsPosition="right"][hovered="true"],
 QWidget#LadybirdVerticalTabBar[verticalTabsPosition="right"][active="true"] {{
     border-right: 0;
     border-left: 1px solid {8};
+}}
+
+QToolButton#LadybirdVerticalTabsToggleButton {{
+    background: transparent;
+    border: 0;
+    padding: 0;
+}}
+
+QWidget#LadybirdTabStrip[windowInactive="true"],
+QWidget#LadybirdVerticalTabBar[windowInactive="true"] {{
+    background: {9};
 }}
 
 QWidget#LadybirdVerticalTabsResizeHandle {{
@@ -1379,7 +1423,7 @@ QWidget#LadybirdVerticalTabsContentSeparator {{
 )"
 #endif
         ,
-        background, hover, pressed, control_border, text, close_hover, close_text, sidebar_separator, sidebar_separator_hover);
+        background, hover, pressed, control_border, text, close_hover, close_text, sidebar_separator, sidebar_separator_hover, inactive_background);
 }
 
 QString autocomplete_popup_style_sheet(QPalette const& palette)
@@ -1695,15 +1739,18 @@ static void paint_circular_control_frame(QPainter& painter, QRect const& rect, q
     }
 }
 
-void paint_circular_control_frame(QPainter& painter, QAbstractButton const& button, CircularControlFrameStyle frame_style)
+Optional<ControlFrameColors> circular_control_frame_colors(QAbstractButton const& button, CircularControlFrameStyle frame_style)
 {
     if (!button.isEnabled())
-        return;
+        return {};
 
     auto pressed = button.isDown() || button.isChecked();
-    auto hovered = button.underMouse();
+    // NB: Qt keeps a button hovered until the pointer moves, even after a relayout has moved the button away from the
+    //     pointer, as when a button is clicked and its toolbar or sidebar changes around it. So also check that the
+    //     pointer is actually over the button.
+    auto hovered = button.underMouse() && button.rect().contains(button.mapFromGlobal(QCursor::pos()));
     if (!hovered && !pressed && frame_style == CircularControlFrameStyle::InteractionOnly)
-        return;
+        return {};
 
     auto const& palette = button.window()->palette();
     auto background = frame_style == CircularControlFrameStyle::ActiveTabOverlay
@@ -1730,7 +1777,13 @@ void paint_circular_control_frame(QPainter& painter, QAbstractButton const& butt
         border = chrome_control_border(palette);
     }
 
-    paint_circular_control_frame(painter, button.rect(), button.devicePixelRatioF(), background, border);
+    return ControlFrameColors { background, border };
+}
+
+void paint_circular_control_frame(QPainter& painter, QAbstractButton const& button, CircularControlFrameStyle frame_style)
+{
+    if (auto colors = circular_control_frame_colors(button, frame_style); colors.has_value())
+        paint_circular_control_frame(painter, button.rect(), button.devicePixelRatioF(), colors->background, colors->border);
 }
 
 // A purple gradient with two soft bright spots that moves steadily along a border, to show that something is loading.

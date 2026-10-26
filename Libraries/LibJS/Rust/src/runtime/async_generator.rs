@@ -93,27 +93,24 @@ impl AsyncGenerator {
         let generating_executable = generating_function.bytecode_executable(vm);
 
         let yield_continuation = execution_context.yield_continuation.get();
-        realm.create_object(
-            vm,
-            AsyncGenerator {
-                base: Object::new_with_realm_and_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm,
-                    Some(generating_function_prototype_object),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-                async_generator_state: Cell::new(AsyncGeneratorState::SuspendedStart),
-                async_generator_context: GcRefCell::new(Some(execution_context)),
-                async_generator_queue: GcRefCell::new(VecDeque::new()),
-                generator_brand: None,
-                generating_executable: Cell::new(generating_executable),
-                yield_continuation: Cell::new(yield_continuation),
-                current_promise: Cell::new(None),
-                pending_completion_value: Cell::new(Value::UNDEFINED),
-                pending_completion_type: Cell::new(CompletionType::Normal),
-            },
-        )
+        realm.create_object(vm, |_| AsyncGenerator {
+            base: Object::new_with_realm_and_prototype(
+                vm,
+                Self::CLASS,
+                realm,
+                Some(generating_function_prototype_object),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+            async_generator_state: Cell::new(AsyncGeneratorState::SuspendedStart),
+            async_generator_context: GcRefCell::new(Some(execution_context)),
+            async_generator_queue: GcRefCell::new(VecDeque::new()),
+            generator_brand: None,
+            generating_executable: Cell::new(generating_executable),
+            yield_continuation: Cell::new(yield_continuation),
+            current_promise: Cell::new(None),
+            pending_completion_value: Cell::new(Value::UNDEFINED),
+            pending_completion_type: Cell::new(CompletionType::Normal),
+        })
     }
 
     fn as_gc(&self) -> Gc<AsyncGenerator> {
@@ -170,7 +167,7 @@ impl AsyncGenerator {
     }
 
     // 27.6.3.4 AsyncGeneratorEnqueue ( generator, completion, promiseCapability ), https://tc39.es/ecma262/#sec-asyncgeneratorenqueue
-    pub fn async_generator_enqueue(&self, completion: Completion, promise_capability: Gc<PromiseCapability>) {
+    pub fn async_generator_enqueue(&self, vm: &Vm, completion: Completion, promise_capability: Gc<PromiseCapability>) {
         // 1. Let request be AsyncGeneratorRequest { [[Completion]]: completion, [[Capability]]: promiseCapability }.
         let request = AsyncGeneratorRequest {
             completion,
@@ -178,7 +175,7 @@ impl AsyncGenerator {
         };
 
         // 2. Append request to generator.[[AsyncGeneratorQueue]].
-        self.async_generator_queue.borrow_mut().push_back(request);
+        self.async_generator_queue.borrow_mut(vm).push_back(request);
 
         // 3. Return unused.
     }
@@ -578,7 +575,7 @@ impl AsyncGenerator {
         // 3. Remove the first element from generator.[[AsyncGeneratorQueue]].
         let next = self
             .async_generator_queue
-            .borrow_mut()
+            .borrow_mut(vm)
             .pop_front()
             .expect("the queue is not empty");
 

@@ -41,6 +41,8 @@ pub(crate) enum LayoutChange {
         mark: super::tree_update_marks::FfiLayoutTreeUpdateMark,
     },
     RecordPartialRelayoutEscape,
+    /// https://drafts.csswg.org/css-anchor-position-1/#record-the-last-successful-position-option
+    RecordLastSuccessfulPositionOptions,
     /// The DOM node identified by `old` took `new`. Its rows, and those of the pseudo-elements `generated_for` lists,
     /// take the new identity along with their bindings, and the old one leaves every row carrying it. The host clears the
     /// layout tree update marks the new one's previous holder left as it queues the change.
@@ -61,6 +63,8 @@ pub(crate) enum LayoutChange {
         element: StyleNodeID,
         offset: CssPixelPoint,
     },
+    /// The writing suggestion showing after the caret, or none.
+    SetWritingSuggestion(Option<super::layout_node_arena::PublishedWritingSuggestion>),
     /// What the pseudo-element of kind `generated_for` on `generator` has scrolled to.
     SetPseudoElementScrollOffset {
         generator: StyleNodeID,
@@ -160,7 +164,7 @@ impl LayoutChange {
     pub(crate) fn row_write(&self) -> crate::render_state::RowWrite {
         use crate::render_state::RowWrite;
         match self {
-            Self::InvalidateSearchableText => RowWrite::None,
+            Self::InvalidateSearchableText | Self::RecordLastSuccessfulPositionOptions => RowWrite::None,
             Self::StyleNodeChanged { .. } => RowWrite::Identities,
             Self::SetNodeFlag { flag, .. } if *flag as u32 & NodeFlag::IDENTITY != 0 => RowWrite::Identities,
             Self::SetNodeStyle { .. } => RowWrite::NamedStyles,
@@ -171,6 +175,7 @@ impl LayoutChange {
             | Self::RecordPartialRelayoutEscape
             | Self::SetAnchorNameElements { .. }
             | Self::SetElementScrollOffset { .. }
+            | Self::SetWritingSuggestion(_)
             | Self::SetPseudoElementScrollOffset { .. }
             | Self::SetIdentityInFocusedTextControl { .. }
             | Self::SvgAttributeFacts { .. }
@@ -200,6 +205,7 @@ impl LayoutChange {
             Self::MarkBox { marks, .. } => marks.may_lay_out(),
             Self::SetIdentityInFocusedTextControl { .. }
             | Self::InvalidateSearchableText
+            | Self::RecordLastSuccessfulPositionOptions
             | Self::PinBoundBoxStyleRecordForDetachment { .. }
             | Self::PinNodeStyleRecordForHost { .. }
             | Self::ReleaseNodeStyleRecordPinForHost { .. }
@@ -234,6 +240,7 @@ impl LayoutChange {
             Self::MarkBox { target, marks } => marks.apply(arena, target),
             Self::ApplyLayoutTreeUpdateMark { node, mark } => arena.apply_layout_tree_update_mark(node, mark),
             Self::RecordPartialRelayoutEscape => arena.record_partial_relayout_escape(),
+            Self::RecordLastSuccessfulPositionOptions => arena.record_last_successful_position_options(),
             Self::StyleNodeChanged {
                 old,
                 new,
@@ -255,6 +262,7 @@ impl LayoutChange {
                 elements,
             } => arena.set_anchor_name_elements(scope_host, anchor_name, elements.iter().copied()),
             Self::SetElementScrollOffset { element, offset } => arena.set_element_scroll_offset(element, offset),
+            Self::SetWritingSuggestion(suggestion) => arena.set_writing_suggestion(suggestion),
             Self::SetPseudoElementScrollOffset {
                 generator,
                 generated_for,
@@ -483,6 +491,19 @@ pub extern "C" fn render_state_record_partial_relayout_escape(host: &DocumentHos
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn render_state_record_last_successful_position_options(host: &DocumentHost) {
+    // NB: A document that laid out no box with position options records nothing, which the host knows right after the
+    //     round that laid it out.
+    if host
+        .known_arena_facts()
+        .is_some_and(|facts| !facts.may_have_position_options)
+    {
+        return;
+    }
+    queue(host, LayoutChange::RecordLastSuccessfulPositionOptions);
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn render_state_style_node_changed(
     host: &DocumentHost,
     old: u32,
@@ -529,6 +550,37 @@ pub extern "C" fn render_state_set_element_scroll_offset(host: &DocumentHost, el
     };
     let offset = offset.into();
     queue(host, LayoutChange::SetElementScrollOffset { element, offset });
+}
+
+/// Publishes the writing suggestion showing after the caret: `remainder` is what it would add at `offset` in the text
+/// node `text`. A zero `text` publishes that none shows.
+///
+/// # Safety
+///
+/// `host` must be a live document host, on the document's thread, and `remainder` must point at `length` readable code
+/// units.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn render_state_set_writing_suggestion(
+    host: &DocumentHost,
+    text: u32,
+    offset: usize,
+    remainder: *const u16,
+    length: usize,
+) {
+    let suggestion = StyleNodeID::from_raw(text).map(|text| {
+        let remainder: &[u16] = if length == 0 {
+            &[]
+        } else {
+            // SAFETY: Guaranteed by the caller.
+            unsafe { ak::slice_from_raw_parts(remainder, length) }
+        };
+        super::layout_node_arena::PublishedWritingSuggestion {
+            text,
+            offset,
+            remainder: remainder.to_vec(),
+        }
+    });
+    queue(host, LayoutChange::SetWritingSuggestion(suggestion));
 }
 
 #[unsafe(no_mangle)]

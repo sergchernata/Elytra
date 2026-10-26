@@ -1,0 +1,62 @@
+Harness status: OK
+
+Found 57 tests
+
+57 Pass
+Pass	Missing arguments
+Pass	Branding
+Pass	Invalid arguments
+Pass	Promise type
+Pass	Empty module without imports argument: BufferSource argument
+Pass	Empty module without imports argument: Module argument
+Pass	Empty module with undefined imports argument: BufferSource argument
+Pass	Empty module with undefined imports argument: Module argument
+Pass	Empty module with empty imports argument: BufferSource argument
+Pass	Empty module with empty imports argument: Module argument
+Pass	getter order for imports object: BufferSource argument
+Pass	getter order for imports object: Module argument
+Pass	imports: BufferSource argument
+Pass	imports: Module argument
+Pass	imports with empty module names: BufferSource argument
+Pass	imports with empty module names: Module argument
+Pass	imports with empty names: BufferSource argument
+Pass	imports with empty names: Module argument
+Pass	exports with empty name: function: BufferSource argument
+Pass	exports with empty name: function: Module argument
+Pass	exports with empty name: table: BufferSource argument
+Pass	exports with empty name: table: Module argument
+Pass	exports with empty name: global: BufferSource argument
+Pass	exports with empty name: global: Module argument
+Pass	No imports: BufferSource argument
+Pass	No imports: Module argument
+Pass	exports and imports: BufferSource argument
+Pass	exports and imports: Module argument
+Pass	i64 exports and imports: BufferSource argument
+Pass	i64 exports and imports: Module argument
+Pass	import with i32-returning function: BufferSource argument
+Pass	import with i32-returning function: Module argument
+Pass	import with function that takes and returns i32: BufferSource argument
+Pass	import with function that takes and returns i32: Module argument
+Pass	import with i64-returning function: BufferSource argument
+Pass	import with i64-returning function: Module argument
+Pass	import with function that takes and returns i64: BufferSource argument
+Pass	import with function that takes and returns i64: Module argument
+Pass	import with i32-taking function: BufferSource argument
+Pass	import with i32-taking function: Module argument
+Pass	import with i64-taking function: BufferSource argument
+Pass	import with i64-taking function: Module argument
+Pass	export i64-returning function: BufferSource argument
+Pass	export i64-returning function: Module argument
+Pass	i32 mutable WebAssembly.Global import: BufferSource argument
+Pass	i32 mutable WebAssembly.Global import: Module argument
+Pass	i64 mutable WebAssembly.Global import: BufferSource argument
+Pass	i64 mutable WebAssembly.Global import: Module argument
+Pass	Multiple i64 arguments: BufferSource argument
+Pass	Multiple i64 arguments: Module argument
+Pass	stray argument: BufferSource argument
+Pass	stray argument: Module argument
+Pass	Synchronous options handling: Buffer argument
+Pass	Synchronous options handling: Module argument
+Pass	Empty buffer
+Pass	Invalid code
+Pass	Changing the buffer

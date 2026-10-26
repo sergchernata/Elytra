@@ -13,7 +13,6 @@ use core::ptr::NonNull;
 
 use ak::{Utf16String, Utf16StringUnits};
 use libjs_rust::api::{MarkedVec, RawNativeFunctionResult, Trace};
-use libwebcommon_rust::mime_sniff::mime_type::MimeType;
 
 use super::file::File;
 use crate::bindings::conversions::{BufferSource, UsvString};
@@ -98,7 +97,8 @@ pub(crate) struct ForeignBytesAbi {
     pub(crate) length: usize,
 }
 
-/// Bytes that a C++ Web::FileAPI::BlobBytes owns: those that C++ created the Blob with, or moved to shared memory.
+/// Bytes that a C++ Web::FileAPI::BlobBytes owns: those that C++ created the Blob with, or moved into immutable bytes
+/// or shared memory.
 struct ForeignBytes {
     owner: NonNull<c_void>,
     data: *const u8,
@@ -149,7 +149,8 @@ impl ByteSequence {
 #[gc(crate = libjs_rust)]
 pub(crate) struct Blob {
     // https://w3c.github.io/FileAPI/#dfn-byte-sequence
-    // NB: The bytes move to shared memory the first time they are shared, and stay there.
+    // NB: The bytes move into immutable bytes or shared memory the first time C++ shares them, and stay in shared
+    //     memory once there.
     #[gc(untraced)]
     byte_sequence: RefCell<ByteSequence>,
     // https://w3c.github.io/FileAPI/#dfn-type
@@ -243,32 +244,30 @@ pub(crate) fn process_blob_parts(blob_parts: &MarkedVec<'_, BlobPart>, options: 
     let mut bytes = Vec::new();
 
     // 2. For each element in parts:
-    blob_parts.with_values(|blob_parts| {
-        for element in blob_parts {
-            match element {
-                // 1. If element is a USVString, run the following sub-steps:
-                BlobPart::USVString(string) => {
-                    // 1. Let s be element.
-                    // 2. If the endings member of options is "native", set s to the result of converting line endings
-                    //    to native of element.
-                    // 3. Append the result of UTF-8 encoding s to bytes.
-                    if options.endings == EndingType::Native {
-                        bytes.extend_from_slice(convert_line_endings_to_native(&string.to_utf8()).as_bytes());
-                    } else {
-                        append_utf8(&mut bytes, string);
-                    }
+    for element in blob_parts.values().iter() {
+        match element {
+            // 1. If element is a USVString, run the following sub-steps:
+            BlobPart::USVString(string) => {
+                // 1. Let s be element.
+                // 2. If the endings member of options is "native", set s to the result of converting line endings
+                //    to native of element.
+                // 3. Append the result of UTF-8 encoding s to bytes.
+                if options.endings == EndingType::Native {
+                    bytes.extend_from_slice(convert_line_endings_to_native(&string.to_utf8()).as_bytes());
+                } else {
+                    append_utf8(&mut bytes, string);
                 }
-                // 2. If element is a BufferSource, get a copy of the bytes held by the buffer source, and append those
-                //    bytes to bytes.
-                BlobPart::BufferSource(buffer_source) => {
-                    // SAFETY: Appending the bytes neither runs script nor allocates a cell.
-                    unsafe { buffer_source.with_bytes(|held_bytes| bytes.extend_from_slice(held_bytes)) };
-                }
-                // 3. If element is a Blob, append the bytes it represents to bytes.
-                BlobPart::Blob(blob) => bytes.extend_from_slice(&blob.raw_bytes()),
             }
+            // 2. If element is a BufferSource, get a copy of the bytes held by the buffer source, and append those
+            //    bytes to bytes.
+            BlobPart::BufferSource(buffer_source) => {
+                // SAFETY: Appending the bytes neither runs script nor allocates a cell.
+                unsafe { buffer_source.with_bytes(|held_bytes| bytes.extend_from_slice(held_bytes)) };
+            }
+            // 3. If element is a Blob, append the bytes it represents to bytes.
+            BlobPart::Blob(blob) => bytes.extend_from_slice(&blob.raw_bytes()),
         }
-    });
+    }
 
     // 3. Return bytes.
     bytes
@@ -283,23 +282,25 @@ fn is_basic_latin(string: &Utf16String) -> bool {
 
 /// The type of a Blob or a File that is constructed with the type member of its options.
 pub(crate) fn type_from_options(r#type: &Utf16String) -> Utf16String {
-    // FIXME: 1. If the type member is provided and is not the empty string, let t be set to the type dictionary member.
+    // 1. If the type member is provided and is not the empty string, let t be set to the type dictionary member.
     //    If t contains any characters outside the range U+0020 to U+007E, then set t to the empty string and return
     //    from these substeps.
-    // FIXME: 2. Convert every character in t to ASCII lowercase.
-
-    // NOTE: The spec is out of date, and we are supposed to call into the MimeType parser here.
     if !is_basic_latin(r#type) {
         return Utf16String::default();
     }
-    let input: Vec<char> = r#type
+
+    // 2. Convert every character in t to ASCII lowercase.
+    to_ascii_lowercase(r#type)
+}
+
+/// Converts a string whose code units are all in the range U+0020 to U+007E to ASCII lowercase.
+fn to_ascii_lowercase(string: &Utf16String) -> Utf16String {
+    let lowercase: Vec<u8> = string
         .to_utf16()
         .iter()
-        .map(|&code_unit| char::from(code_unit as u8))
+        .map(|&code_unit| (code_unit as u8).to_ascii_lowercase())
         .collect();
-    MimeType::parse(&input).map_or_else(Utf16String::default, |mime_type| {
-        Utf16String::from_ascii(mime_type.serialize().as_bytes())
-    })
+    Utf16String::from_ascii(&lowercase)
 }
 
 impl Blob {
@@ -399,7 +400,9 @@ impl Blob {
         // 3. If end is given, set sliceEnd to end.
         // 3. If contentType is given, set sliceContentType to contentType.
         // 4. Return the result of slice blob given this, sliceStart, sliceEnd, and sliceContentType.
-        Ok(allocate(cx.vm(), self.slice_blob(start, end, content_type.as_ref())))
+        Ok(allocate(cx.vm(), |_| {
+            self.slice_blob(start, end, content_type.as_ref())
+        }))
     }
 
     // https://w3c.github.io/FileAPI/#slice-blob
@@ -442,14 +445,7 @@ impl Blob {
             //    relativeContentType to the empty string and return from these substeps:
             Some(content_type) if !is_basic_latin(content_type) => Utf16String::default(),
             // 2. Convert every character in relativeContentType to ASCII lowercase.
-            Some(content_type) => {
-                let lowercase: Vec<u8> = content_type
-                    .to_utf16()
-                    .iter()
-                    .map(|&code_unit| (code_unit as u8).to_ascii_lowercase())
-                    .collect();
-                Utf16String::from_ascii(&lowercase)
-            }
+            Some(content_type) => to_ascii_lowercase(content_type),
         };
 
         // 5. Let span be max((relativeEnd - relativeStart), 0).

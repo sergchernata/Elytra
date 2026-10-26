@@ -153,8 +153,9 @@ pub unsafe extern "C" fn js_vm_stack_trace(vm: *mut JSVM, sink: *const JSStackTr
     // SAFETY: The caller passes a live VM and a valid sink.
     let (vm, sink) = unsafe { (vm_from_abi(vm), &*sink) };
     let append = sink.append.expect("a stack trace sink has an append function");
-    for element in vm.stack_trace() {
-        let element = stack_frame_into_abi(&element);
+    let stack_trace = vm.stack_trace();
+    for element in stack_trace.values().iter() {
+        let element = stack_frame_into_abi(element);
         // SAFETY: The embedder's sink takes elements with the context it came with, and only reads them during the
         //         call, while the trace's contexts and their executables are alive.
         unsafe { append(sink.context, &raw const element) };
@@ -376,5 +377,10 @@ pub unsafe extern "C" fn js_vm_default_host_call_job_callback(
         // SAFETY: The caller passes `argument_count` values, and a Value is a JSValue.
         unsafe { ak::slice_from_raw_parts(arguments.cast(), argument_count) }
     };
-    completion_into_abi(call_job_callback(vm, job_callback, Value(this_value), arguments))
+    completion_into_abi(call_job_callback(
+        vm,
+        job_callback,
+        Value::from_bits(this_value),
+        arguments,
+    ))
 }

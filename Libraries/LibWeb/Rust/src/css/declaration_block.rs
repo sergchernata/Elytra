@@ -32,7 +32,6 @@ pub(crate) struct CustomProperty {
 pub struct DeclarationBlockData {
     pub(crate) properties: Vec<DeclaredProperty>,
     pub(crate) custom_properties: Vec<CustomProperty>,
-    custom_property_references: std::sync::OnceLock<(Vec<Vec<u16>>, bool)>,
 }
 
 const _: () = {
@@ -51,12 +50,6 @@ impl DeclarationBlockData {
             );
         for property in &self.custom_properties {
             size = size.saturating_add(size_of_val(property.name.units()));
-        }
-        if let Some((names, _)) = self.custom_property_references.get() {
-            size = size.saturating_add(names.capacity().saturating_mul(size_of::<Vec<u16>>()));
-            for name in names {
-                size = size.saturating_add(name.capacity().saturating_mul(size_of::<u16>()));
-            }
         }
         size
     }
@@ -305,7 +298,6 @@ impl DeclarationBlock {
         let owner = self.owner();
         let mut owner = owner.borrow_mut();
         let data = Arc::make_mut(&mut owner.data);
-        data.custom_property_references.take();
         if !mutation(data) {
             return false;
         }
@@ -347,6 +339,29 @@ pub(crate) fn visit_declaration_images(data: &DeclarationBlockData, visit: &mut 
 pub extern "C" fn rust_declaration_block_is_empty(block: &DeclarationBlock) -> bool {
     let data = block.data();
     data.properties.is_empty() && data.custom_properties.is_empty()
+}
+
+/// Whether a declaration of the block holds an image or a gradient, as its value or as an item of its list.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_declaration_block_has_abstract_image_values(block: &DeclarationBlock) -> bool {
+    use crate::css::style_value::StyleValueData;
+    let is_abstract_image = |value: &StyleValueData| {
+        matches!(
+            value,
+            StyleValueData::Image { .. }
+                | StyleValueData::ImageSet { .. }
+                | StyleValueData::LinearGradient { .. }
+                | StyleValueData::ConicGradient { .. }
+                | StyleValueData::RadialGradient { .. }
+        )
+    };
+    block.data().properties.iter().any(|property| match &*property.value {
+        StyleValueData::ValueList { values, .. } => values
+            .as_slice()
+            .iter()
+            .any(|item| item.optional_data().is_some_and(is_abstract_image)),
+        value => is_abstract_image(value),
+    })
 }
 
 #[unsafe(no_mangle)]

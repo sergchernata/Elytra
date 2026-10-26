@@ -25,13 +25,16 @@ use std::collections::HashMap;
 
 use libjs_abi::register;
 use libjs_jit::code::{CALLEE_SLOT, FrameState, Repr, ResumeMode, Site, SiteKind, ValueLocation};
+use libjs_runtime_macros::Trace;
 
 use super::code::{CompileState, EXIT_COUNT_BEFORE_DISCARD, InlinedFunction, JitCode};
-use super::{DeferGc, executable_of, frame_of, frames_above};
+use super::{executable_of, frame_of, frames_above};
 use crate::bytecode::executable::Executable;
 use crate::bytecode::instruction::{OpCode, instruction_length_from_bytes};
 use crate::bytecode::instruction_at;
 use crate::bytecode::op;
+use crate::gc::defer_gc::{DeferGc, Deferred};
+use crate::gc::root::MarkedVec;
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::Gc;
 use crate::layout::execution_context::ExecutionContext;
@@ -102,7 +105,7 @@ impl RegisterDump {
 /// Reads a value that is not an object the code never created.
 fn read_location(location: ValueLocation, dump: &RegisterDump) -> Value {
     let (bits, repr) = match location {
-        ValueLocation::Constant(bits) => return Value(bits),
+        ValueLocation::Constant(bits) => return Value::from_bits(bits),
         ValueLocation::Register(encoding, repr) => {
             let bits = if repr == Repr::Float64 {
                 dump.fprs[usize::from(encoding)]
@@ -122,7 +125,7 @@ fn read_location(location: ValueLocation, dump: &RegisterDump) -> Value {
         }
     };
     match repr {
-        Repr::Tagged => Value(bits),
+        Repr::Tagged => Value::from_bits(bits),
         Repr::Int32 => Value::from_i32(bits as i32),
         Repr::Float64 => Value::from_f64(f64::from_bits(bits)),
         Repr::Bool => Value::from_bool(bits as u32 != 0),
@@ -139,7 +142,7 @@ struct SiteValues<'a> {
     root: *const ExecutionContext,
     site: &'a Site,
     dump: &'a RegisterDump,
-    created: HashMap<u32, Gc<Object>>,
+    created: Deferred<'a, HashMap<u32, Gc<Object>>>,
     /// Whether the objects created are remembered for the frame, for a frame that continues in compiled code until it
     /// leaves it, where the objects must be the same.
     remember: bool,
@@ -155,6 +158,7 @@ impl<'a> SiteValues<'a> {
         root: NonNull<ExecutionContext>,
         site: &'a Site,
         dump: &'a RegisterDump,
+        defer_gc: &'a DeferGc<'_>,
     ) -> Self {
         Self {
             vm,
@@ -162,7 +166,7 @@ impl<'a> SiteValues<'a> {
             root: root.as_ptr(),
             site,
             dump,
-            created: HashMap::new(),
+            created: defer_gc.cover(HashMap::new()),
             remember: false,
             deferred_arguments: None,
         }
@@ -242,7 +246,7 @@ impl<'a> SiteValues<'a> {
 const DEFERRED_ARGUMENT_MARKER: u64 = Value::EMPTY.0 | (1 << 47);
 
 fn deferred_argument_marker(frame_pointer: u64) -> Value {
-    Value(DEFERRED_ARGUMENT_MARKER | (frame_pointer & u64::from(u32::MAX)))
+    Value::from_bits(DEFERRED_ARGUMENT_MARKER | (frame_pointer & u64::from(u32::MAX)))
 }
 
 /// The low half of the frame pointer of the JIT frame that `value` is a marker of an object of (see
@@ -604,8 +608,8 @@ pub(super) fn exit(vm: &Vm, root: NonNull<ExecutionContext>, code: &JitCode, ind
     ));
 
     // NB: Nothing may collect the objects created here before the frames hold them.
-    let _defer_gc = DeferGc::new(vm);
-    let mut values = SiteValues::new(vm, code, root, site, dump);
+    let defer_gc = DeferGc::new(vm);
+    let mut values = SiteValues::new(vm, code, root, site, dump, &defer_gc);
     let innermost = push_site_frames(
         vm,
         code,
@@ -703,8 +707,8 @@ pub(super) fn leave(vm: &Vm, root: NonNull<ExecutionContext>, code: &JitCode, in
     let pushed = frames.len().min(frame_states.len() - 1);
 
     // NB: Nothing may collect the objects created here before the frames hold them.
-    let _defer_gc = DeferGc::new(vm);
-    let mut values = SiteValues::new(vm, code, root, site, dump);
+    let defer_gc = DeferGc::new(vm);
+    let mut values = SiteValues::new(vm, code, root, site, dump, &defer_gc);
     let mut write = |frame: &ExecutionContext, frame_state: &FrameState| {
         let expected = code.snapshot_executable(frame_state.executable).executable;
         assert!(executable_of(frame) == expected);
@@ -746,8 +750,8 @@ pub(super) fn publish(vm: &Vm, root: NonNull<ExecutionContext>, code: &JitCode, 
     let frame_states = &site.frames;
     assert!(frame_states.len() >= 2);
     // NB: Nothing may collect the objects created here before the frames hold them.
-    let _defer_gc = DeferGc::new(vm);
-    let mut values = SiteValues::new(vm, code, root, site, dump);
+    let defer_gc = DeferGc::new(vm);
+    let mut values = SiteValues::new(vm, code, root, site, dump, &defer_gc);
     // NB: The values of the site stay in the register dump of the JIT frame while the slow path runs.
     values.deferred_arguments = Some(dump.gprs[RegisterDump::FRAME_POINTER]);
     // NB: The compiled function's frame is at the call of the outermost inlined call, which stack walks show.
@@ -813,9 +817,9 @@ pub(super) fn materialize_call_site_frames(
     vm.head.running_execution_context.set(root.as_ptr());
 
     // NB: Nothing may collect the objects created here before the frames hold them.
-    let _defer_gc = DeferGc::new(vm);
+    let defer_gc = DeferGc::new(vm);
     let dump = RegisterDump::of_stack_slots(frame_pointer);
-    let mut values = SiteValues::new(vm, code, root, site, &dump);
+    let mut values = SiteValues::new(vm, code, root, site, &dump, &defer_gc);
     // NB: Compiled code keeps running once the call returns, and the call may read the frames' legacy arguments, which
     //     find their values through the site (see `resolve_deferred_arguments()`).
     values.deferred_arguments = Some(frame_pointer);
@@ -844,12 +848,15 @@ pub(super) fn materialize_call_site_frames(
 
 /// A frame of an inlined call that a call at a call site of the code running a frame is in, as stack walks see it while
 /// the call runs without it (View translation).
+#[derive(Clone, Trace)]
 pub struct CallSiteFrame {
     pub function: Gc<FunctionObject>,
     pub executable: Gc<Executable>,
     /// The pc of the call the frame makes.
+    #[gc(untraced)]
     pub program_counter: u32,
     /// The index of its frame state in the site.
+    #[gc(untraced)]
     pub frame_state: usize,
 }
 
@@ -869,7 +876,12 @@ pub fn frame_pointer_from_low_half(low_half: u32) -> u64 {
 
 /// View translation: the frames of the inlined calls that a call at the call site `index` of the code running `frame`
 /// is in, innermost first, while it runs without them, with the JIT frame at `frame_pointer`.
-pub fn call_site_frames(vm: &Vm, frame: &ExecutionContext, index: u32, frame_pointer: u64) -> Vec<CallSiteFrame> {
+pub fn call_site_frames<'vm>(
+    vm: &'vm Vm,
+    frame: &ExecutionContext,
+    index: u32,
+    frame_pointer: u64,
+) -> MarkedVec<'vm, CallSiteFrame> {
     let compiled_executable = executable_of(frame);
     let code = compiled_executable
         .jit_code(vm)
@@ -878,54 +890,53 @@ pub fn call_site_frames(vm: &Vm, frame: &ExecutionContext, index: u32, frame_poi
     assert_eq!(site.kind, SiteKind::Call);
     let dump = RegisterDump::of_stack_slots(frame_pointer);
     let (_, inlined) = site.frames.split_last().expect("a call site has frames");
-    inlined
-        .iter()
-        .enumerate()
-        .map(|(index, frame_state)| {
-            let snapshot_executable = code.snapshot_executable(frame_state.executable);
-            // NB: Frames of inlined closures run the closure that was called. Walks create no objects, and the closure
-            //     never is one the code did not create.
-            let closure = frame_state
-                .values
-                .iter()
-                .find(|(slot, _)| *slot == CALLEE_SLOT)
-                .and_then(|(_, location)| match location {
-                    ValueLocation::Stack(..) | ValueLocation::Constant(_) => Some(read_location(*location, &dump)),
-                    _ => None,
-                });
-            let function = match closure {
-                Some(closure) => as_ecmascript_function_object(closure.as_object())
-                    .expect("an inlined closure is a function")
-                    .as_function_object_gc(),
-                None => match snapshot_executable
-                    .function
-                    .expect("an inlined executable has a function")
-                {
-                    InlinedFunction::Ecmascript(function) => function.as_function_object_gc(),
-                    InlinedFunction::Builtin(function) => function.as_function_object_gc(),
-                },
-            };
-            CallSiteFrame {
-                function,
-                executable: snapshot_executable.executable,
-                program_counter: frame_state.pc,
-                frame_state: index,
-            }
-        })
-        .collect()
+    let frames = MarkedVec::with_capacity(vm, inlined.len());
+    for (index, frame_state) in inlined.iter().enumerate() {
+        let snapshot_executable = code.snapshot_executable(frame_state.executable);
+        // NB: Frames of inlined closures run the closure that was called. Walks create no objects, and the closure
+        //     never is one the code did not create.
+        let closure = frame_state
+            .values
+            .iter()
+            .find(|(slot, _)| *slot == CALLEE_SLOT)
+            .and_then(|(_, location)| match location {
+                ValueLocation::Stack(..) | ValueLocation::Constant(_) => Some(read_location(*location, &dump)),
+                _ => None,
+            });
+        let function = match closure {
+            Some(closure) => as_ecmascript_function_object(closure.as_object())
+                .expect("an inlined closure is a function")
+                .as_function_object_gc(),
+            None => match snapshot_executable
+                .function
+                .expect("an inlined executable has a function")
+            {
+                InlinedFunction::Ecmascript(function) => function.as_function_object_gc(),
+                InlinedFunction::Builtin(function) => function.as_function_object_gc(),
+            },
+        };
+        frames.push(CallSiteFrame {
+            function,
+            executable: snapshot_executable.executable,
+            program_counter: frame_state.pc,
+            frame_state: index,
+        });
+    }
+    frames
 }
 
 /// View translation: the passed arguments of the frame of an inlined call that a call at the call site `index` of the
 /// code running `frame` is in, the one with the frame state at `frame_state` of the site, while it runs without it,
 /// with the JIT frame at `frame_pointer`, for code reading the legacy `arguments` of the frame's function. Objects
 /// among them that the code never allocated are created for the frame (see `note_legacy_arguments_read()`).
-pub fn call_site_frame_arguments(
+pub fn call_site_frame_arguments<'d>(
     vm: &Vm,
     frame: &ExecutionContext,
     index: u32,
     frame_pointer: u64,
     frame_state: usize,
-) -> Vec<Value> {
+    defer_gc: &'d DeferGc<'_>,
+) -> Deferred<'d, Vec<Value>> {
     let compiled_executable = executable_of(frame);
     let code = compiled_executable
         .jit_code(vm)
@@ -938,16 +949,18 @@ pub fn call_site_frame_arguments(
     let executable = code.snapshot_executable(frame_state.executable).executable;
     // NB: The caller keeps collections deferred while it holds the objects created here.
     let dump = RegisterDump::of_stack_slots(frame_pointer);
-    let mut values = SiteValues::new(vm, code, NonNull::from(frame), site, &dump);
+    let mut values = SiteValues::new(vm, code, NonNull::from(frame), site, &dump, defer_gc);
     values.remember = true;
     let mut reads_objects = false;
-    let arguments = (0..passed_argument_count)
-        .map(|argument| {
-            let location = argument_location(frame_state, &executable, argument);
-            reads_objects |= matches!(location, Some(ValueLocation::VirtualObject(_)));
-            location.map_or(Value::UNDEFINED, |location| values.value(location))
-        })
-        .collect();
+    let arguments = defer_gc.cover(
+        (0..passed_argument_count)
+            .map(|argument| {
+                let location = argument_location(frame_state, &executable, argument);
+                reads_objects |= matches!(location, Some(ValueLocation::VirtualObject(_)));
+                location.map_or(Value::UNDEFINED, |location| values.value(location))
+            })
+            .collect(),
+    );
     if reads_objects {
         note_legacy_arguments_read(vm, frame, code, frame_state);
     }
@@ -1000,14 +1013,14 @@ fn deferred_argument(vm: &Vm, frame: &ExecutionContext, argument: u32, frame_poi
         argument_location(frame_state, &executable, argument).expect("the frame state lists arguments with markers");
     assert!(matches!(location, ValueLocation::VirtualObject(_)));
     // NB: The objects created here are remembered for the frame, which keeps them alive.
-    let _defer_gc = DeferGc::new(vm);
+    let defer_gc = DeferGc::new(vm);
     // NB: The values of a publication are in the JIT frame's register dump while its slow path runs; those of a call
     //     site, in stack slots.
     let dump = match site.kind {
         SiteKind::Publish => RegisterDump::in_jit_frame(code, frame_pointer),
         _ => RegisterDump::of_stack_slots(frame_pointer),
     };
-    let mut values = SiteValues::new(vm, code, root, site, &dump);
+    let mut values = SiteValues::new(vm, code, root, site, &dump, &defer_gc);
     values.remember = true;
     let object = values.value(location);
     note_legacy_arguments_read(vm, frame_of(root), code, frame_state);

@@ -6,13 +6,17 @@
 
 #pragma once
 
+#include <AK/Optional.h>
+#include <AK/Types.h>
 #include <QColor>
 #include <QString>
 
 class QAbstractButton;
+class QFont;
 class QPainter;
 class QPainterPath;
 class QPalette;
+class QWidget;
 
 namespace Ladybird::ChromeStyle {
 
@@ -26,6 +30,13 @@ bool is_dark(QPalette const&);
 QColor mix(QColor const& from, QColor const& to, double amount);
 QColor chrome_text(QPalette const&);
 QColor chrome_button_text(QPalette const&);
+enum class WindowActivity : u8 {
+    Active,
+    Inactive,
+};
+WindowActivity window_activity(QWidget const&);
+
+QColor chrome_tab_strip_background(QPalette const&, WindowActivity = WindowActivity::Active);
 QColor chrome_background(QPalette const&);
 QColor chrome_surface(QPalette const&);
 QColor chrome_surface_recessed(QPalette const&);
@@ -39,6 +50,7 @@ QColor chrome_separator(QPalette const&);
 QColor chrome_window_outline(QPalette const&);
 QColor chrome_accent();
 QColor chrome_muted_text(QPalette const&);
+QFont chrome_title_font(QFont);
 
 QString style_sheet_color(QColor const&);
 QString application_style_sheet(QPalette const&);
@@ -65,6 +77,12 @@ enum class CircularControlFrameStyle {
     InteractionOnly,
     ActiveTabOverlay,
 };
+struct ControlFrameColors {
+    QColor background;
+    QColor border;
+};
+// The colors of a button's frame in the button's current state, or nothing while it shows no frame.
+Optional<ControlFrameColors> circular_control_frame_colors(QAbstractButton const&, CircularControlFrameStyle = CircularControlFrameStyle::InteractionOnly);
 void paint_circular_control_frame(QPainter&, QAbstractButton const&, CircularControlFrameStyle = CircularControlFrameStyle::InteractionOnly);
 
 void paint_loading_swirl(QPainter&, QPainterPath const& border);

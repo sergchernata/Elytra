@@ -880,7 +880,7 @@ macro_rules! native_javascript_backed_function_accessors {
         impl Intrinsics {
             fn $create(&self, vm: &Vm) {
                 let shared_data_list = parse_builtin_file(vm, $source());
-                for shared_data in shared_data_list.to_vec() {
+                for &shared_data in shared_data_list.values().iter() {
                     let function_name = shared_data.name();
                     $(
                         if function_name == Utf16FlyString::from_utf8($function_name) {
@@ -1086,7 +1086,7 @@ impl Intrinsics {
     // 9.3.2 CreateIntrinsics ( realmRec ), https://tc39.es/ecma262/#sec-createintrinsics
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<Intrinsics> {
         // 1. Set realmRec.[[Intrinsics]] to a new Record.
-        let intrinsics = vm.heap().allocate(Intrinsics::new(realm));
+        let intrinsics = vm.heap().allocate(|_| Intrinsics::new(realm));
         realm.set_intrinsics(intrinsics);
 
         // 2. Set fields of realmRec.[[Intrinsics]] with the values listed in Table 6.
@@ -1130,10 +1130,10 @@ impl Intrinsics {
 
         // These are done first since other prototypes depend on their presence.
         self.empty_object_shape.set(Some(Shape::create(vm, realm)));
-        let object_prototype = allocate_object(vm, ObjectPrototype::new(vm, realm));
+        let object_prototype = allocate_object(vm, |_| ObjectPrototype::new(vm, realm));
         self.object_prototype.set(Some(object_prototype.upcast()));
         object_prototype.convert_to_prototype_if_needed(vm);
-        let function_prototype = allocate_object(vm, FunctionPrototype::new(vm, realm));
+        let function_prototype = allocate_object(vm, |_| FunctionPrototype::new(vm, realm));
         self.function_prototype.set(Some(function_prototype.upcast()));
         function_prototype.convert_to_prototype_if_needed(vm);
         let object_prototype: Gc<Object> = object_prototype.upcast();

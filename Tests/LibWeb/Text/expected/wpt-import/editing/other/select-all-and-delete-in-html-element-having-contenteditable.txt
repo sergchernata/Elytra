@@ -1,0 +1,17 @@
+Harness status: OK
+
+Found 12 tests
+
+12 Pass
+Pass	Select All, then, Backspace
+Pass	Select All, then, Delete
+Pass	execCommand("selectall"), then, Backspace
+Pass	execCommand("selectall"), then, Delete
+Pass	Select All, then, execCommand("forwarddelete")
+Pass	Select All, then, execCommand("delete")
+Pass	execCommand("selectall"), then, execCommand("forwarddelete")
+Pass	execCommand("selectall"), then, execCommand("delete")
+Pass	getSelection().selectAllChildren(document.documentElement), then, Backspace
+Pass	getSelection().selectAllChildren(document.documentElement), then, Delete
+Pass	getSelection().selectAllChildren(document.documentElement), then, execCommand("forwarddelete")
+Pass	getSelection().selectAllChildren(document.documentElement), then, execCommand("delete")

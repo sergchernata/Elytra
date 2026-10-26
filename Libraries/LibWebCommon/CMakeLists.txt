@@ -55,6 +55,7 @@ set(SOURCES
     Page/InputTrace.cpp
     Page/MediaContextMenu.cpp
     Page/SpellingError.cpp
+    Page/WritingSuggestion.cpp
     PermissionsPolicy/PermissionsPolicy.cpp
     PixelUnits.cpp
     ReferrerPolicy/ReferrerPolicy.cpp
@@ -62,9 +63,11 @@ set(SOURCES
     StorageAPI/StorageEndpoint.cpp
     StorageAPI/StorageKey.cpp
     UpgradeInsecureRequests/InsecureRequestsPolicy.cpp
+    WebDriver/BiDi.cpp
     WebDriver/Capabilities.cpp
     WebDriver/Client.cpp
     WebDriver/Error.cpp
+    WebDriver/Input.cpp
     WebDriver/Proxy.cpp
     WebDriver/Response.cpp
     WebDriver/TimeoutsConfiguration.cpp
@@ -110,6 +113,7 @@ compile_ipc(Page/TextEditingCommand.ipc Page/TextEditingCommandCodecs.h)
 compile_ipc(PixelUnits.ipc PixelUnitsCodecs.h)
 compile_ipc(WebView/AccessibilityNodeData.ipc WebView/AccessibilityNodeDataCodecs.h)
 compile_ipc(WebView/DictionaryLookup.ipc WebView/DictionaryLookupCodecs.h)
+compile_ipc(WebDriver/BiDi.ipc WebDriver/BiDiCodecs.h)
 
 # NB: The protocols between the UI process and the processes it hosts web content in only use LibWebCommon types, so
 #     both sides generate their endpoints from here.

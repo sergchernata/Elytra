@@ -2333,6 +2333,7 @@ impl<'pass> SizingContext<'pass> {
                     first_baseline: used.first_baseline.get(),
                     has_last_baseline: used.has_last_baseline.get(),
                     last_baseline: used.last_baseline.get(),
+                    inline_alignment_baseline: used.inline_alignment_baseline.get(),
                 }),
                 depends_on_percentage_block_size: result.depends_on_percentage_block_size,
                 depends_on_percentage_inline_basis: self.measurement_root_observes_percentage_inline_basis(node),
@@ -2378,6 +2379,7 @@ impl<'pass> SizingContext<'pass> {
         used.is_collapsed_borders_table_box
             .set(measurement.is_collapsed_borders_table_box);
         let baselines = DerivedBaselines {
+            inline_alignment: measurement.inline_alignment_baseline,
             first: measurement.has_first_baseline.then_some(measurement.first_baseline),
             last: measurement.has_last_baseline.then_some(measurement.last_baseline),
         };
@@ -2507,7 +2509,14 @@ impl<'pass> SizingContext<'pass> {
     ) -> CssPixels {
         let facts = self.facts(node);
         let style = self.style(node);
-        if facts.is_replaced_box() && (style.width().contains_percentage() || style.max_width().contains_percentage()) {
+        // https://drafts.csswg.org/css-sizing-3/#min-content-zero
+        // input with any type that is not "button-like"; this can vary depending on the UA.
+        // NB: Text entry inputs are compressible even when their layout boxes are not replaced boxes.
+        let is_compressible_text_input = facts.is_text_input() && style.width().contains_percentage();
+        if is_compressible_text_input
+            || (facts.is_replaced_box()
+                && (style.width().contains_percentage() || style.max_width().contains_percentage()))
+        {
             // https://www.w3.org/TR/css-sizing-3/#replaced-percentage-min-contribution
             // NOTE: If the box is replaced, a cyclic percentage in the value of any max size property or
             //       preferred size property (width/max-width/height/max-height), is resolved against zero
@@ -2516,17 +2525,19 @@ impl<'pass> SizingContext<'pass> {
             //        floored by any <length-percentage> minimum size from the opposite axis—resolving any
             //        such percentage against zero—transferred through the preferred aspect ratio.
             // Note: The min-content contribution is, as always, also floored by the minimum size in its own axis.
-            if !style.min_width().is_length_percentage() {
-                return CssPixels::default();
-            }
             let mut zero_constraints = constraints;
             zero_constraints.percentage_basis_inline_size = Some(CssPixels::default());
-            return self.calculate_inner_inline_size(
-                node,
-                AvailableSize::MinContent,
-                style.min_width(),
-                zero_constraints,
-            );
+            let minimum = if style.min_width().is_length_percentage() {
+                self.calculate_inner_inline_size(node, AvailableSize::MinContent, style.min_width(), zero_constraints)
+            } else {
+                CssPixels::default()
+            };
+            if is_compressible_text_input {
+                return self
+                    .calculate_inner_inline_size(node, AvailableSize::MinContent, style.width(), zero_constraints)
+                    .max(minimum);
+            }
+            return minimum;
         }
         if let Some(transferred) = self.calculate_transferred_inline_size_for_replaced_element(node, constraints) {
             return transferred;

@@ -90,7 +90,6 @@ custom
 
 [font-properties]
 # https://drafts.csswg.org/css-fonts/#property-index
-# FIXME: font-palette
 # FIXME: font-synthesis and longhands
 font
 font-family
@@ -98,6 +97,7 @@ font-feature-settings
 font-kerning
 font-language-override
 font-optical-sizing
+font-palette
 font-size
 font-size-adjust
 font-style
@@ -176,6 +176,7 @@ text-decoration-line
 text-decoration-skip-ink
 text-decoration-style
 text-decoration-thickness
+text-emphasis-position
 text-shadow
 text-underline-offset
 text-underline-position

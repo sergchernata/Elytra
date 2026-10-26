@@ -53,6 +53,7 @@
 #include <LibWeb/HTML/PreloadEntry.h>
 #include <LibWeb/HTML/Scripting/ScriptRegistry.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
+#include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/HTML/TextDirective.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/InvalidateDisplayList.h>
@@ -347,6 +348,9 @@ public:
     Editing::SpellingMarkers& spelling_markers();
     Editing::SpellCheckController& spell_check_controller();
     Editing::SpellCheckController* spell_check_controller_if_exists() { return m_spell_check_controller.ptr(); }
+    Editing::WritingSuggestionController& writing_suggestion_controller();
+    Editing::WritingSuggestionController* writing_suggestion_controller_if_exists() { return m_writing_suggestion_controller.ptr(); }
+    Editing::WritingSuggestionController const* writing_suggestion_controller_if_exists() const { return m_writing_suggestion_controller.ptr(); }
     bool has_spelling_markers() const;
     void recompute_search_text_paint_states(Layout::BegunRead const&);
     void note_spelling_markers_changed();
@@ -1031,6 +1035,10 @@ public:
 
     // https://html.spec.whatwg.org/multipage/dom.html#is-initial-about:blank
     bool is_initial_about_blank() const { return m_is_initial_about_blank; }
+
+    // https://html.spec.whatwg.org/multipage/dom.html#concept-document-navigation-id
+    Optional<Utf16String> const& during_loading_navigation_id_for_webdriver_bidi() const { return m_navigation_id; }
+    void set_during_loading_navigation_id_for_webdriver_bidi(Optional<Utf16String> navigation_id) { m_navigation_id = move(navigation_id); }
     void set_is_initial_about_blank(bool b) { m_is_initial_about_blank = b; }
 
     bool iframe_load_in_progress() const { return m_iframe_load_in_progress; }
@@ -1080,8 +1088,8 @@ public:
     void set_permissions_policy(PermissionsPolicy::PermissionsPolicy policy) { m_permissions_policy = move(policy); }
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-policy-container
-    GC::Ref<HTML::PolicyContainer> policy_container() const;
-    void set_policy_container(GC::Ref<HTML::PolicyContainer>);
+    NonnullRefPtr<HTML::PolicyContainer> policy_container() const;
+    void set_policy_container(NonnullRefPtr<HTML::PolicyContainer>);
 
     Vector<GC::Root<HTML::Navigable>> descendant_navigables();
     Vector<GC::Root<HTML::Navigable>> const descendant_navigables() const;
@@ -1199,8 +1207,8 @@ public:
 
     void update_for_history_step_application(NonnullRefPtr<HTML::SessionHistoryEntry>, bool do_not_reactivate, size_t script_history_length, size_t script_history_index, Optional<HTML::NavigationType> navigation_type, Optional<Vector<NonnullRefPtr<HTML::SessionHistoryEntry>>> entries_for_navigation_api = {}, RefPtr<HTML::SessionHistoryEntry> previous_entry_for_activation = {}, bool previous_entry_for_activation_document_is_initial_about_blank = false, bool allow_text_directive_scroll = false, Optional<URL::Origin> initiator_origin = {}, Optional<HTML::UserNavigationInvolvement> user_involvement = {});
 
-    HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>>& shared_resource_requests();
-    HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>> const& shared_resource_requests() const;
+    HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>>& shared_resource_requests();
+    HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>> const& shared_resource_requests() const;
     CSS::ImageStyleValueResource* css_image_resource(URL::URL const&);
     CSS::ImageStyleValueResource& create_css_image_resource(GC::Ref<HTML::SharedResourceRequest>);
     void remove_css_image_resource_if_unused(URL::URL const&);
@@ -2125,7 +2133,7 @@ private:
     PermissionsPolicy::PermissionsPolicy m_permissions_policy { PermissionsPolicy::PermissionsPolicy::empty_permissions_policy() };
 
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-policy-container
-    mutable GC::Ptr<HTML::PolicyContainer> m_policy_container;
+    mutable RefPtr<HTML::PolicyContainer> m_policy_container;
 
     // https://html.spec.whatwg.org/multipage/interaction.html#visibility-state
     HTML::VisibilityState m_visibility_state { HTML::VisibilityState::Hidden };
@@ -2154,6 +2162,7 @@ private:
     Vector<GC::Ref<Range>> m_find_in_page_highlighted_matches;
     OwnPtr<Editing::SpellingMarkers> m_spelling_markers;
     OwnPtr<Editing::SpellCheckController> m_spell_check_controller;
+    OwnPtr<Editing::WritingSuggestionController> m_writing_suggestion_controller;
     Vector<Utf16String> m_find_in_page_highlighted_match_texts;
     u64 m_find_in_page_highlighted_matches_dom_tree_version { 0 };
     u64 m_find_in_page_highlighted_matches_character_data_version { 0 };
@@ -2217,7 +2226,7 @@ private:
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#latest-entry
     RefPtr<HTML::SessionHistoryEntry> m_latest_entry;
 
-    HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>> m_shared_resource_requests;
+    HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>> m_shared_resource_requests;
     HashMap<URL::URL, OwnPtr<CSS::ImageStyleValueResource>> m_css_image_resources;
 
     // https://www.w3.org/TR/web-animations-1/#timeline-associated-with-a-document
@@ -2374,6 +2383,7 @@ private:
     GC::Ptr<Editing::EditingHistory> m_editing_history;
 
     bool m_inside_exec_command { false };
+    bool m_inside_clipboard_exec_command { false };
     bool m_running_editing_command_action { false };
     bool m_preserve_selection_offsets_during_identical_character_data_replacement { false };
 

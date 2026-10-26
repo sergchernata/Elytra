@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use core::cell::Cell;
 
 use ak::Utf16String;
-use libjs_rust::api::{Gc, GcRefCell, MarkedVec, Object, Realm, Trace, Value, Vm};
+use libjs_rust::api::{DeferGc, Gc, GcRefCell, MarkedVec, Object, Realm, Trace, Value, Vm};
 
 use crate::bindings::conversions::FromJs;
 use crate::bindings::interface::{Ref, Wrappable, allocate, with_temporary_execution_context_and_callbacks};
@@ -98,7 +98,7 @@ impl Wrappable for WritableStream {}
 
 impl WritableStream {
     /// A new WritableStream in the realm, which InitializeWritableStream has initialized.
-    pub(crate) fn new(realm: Gc<Realm>) -> Self {
+    pub(crate) fn new(_: &DeferGc<'_>, realm: Gc<Realm>) -> Self {
         Self {
             realm: Cell::new(realm),
             backpressure: Cell::new(false),
@@ -158,7 +158,7 @@ impl WritableStream {
         for write_request in self.write_requests.borrow().iter() {
             write_requests.push(*write_request);
         }
-        self.write_requests.borrow_mut().clear();
+        self.write_requests.borrow_mut(vm).clear();
         write_requests
     }
 
@@ -180,7 +180,7 @@ impl WritableStream {
         }
 
         // 4. Perform ! InitializeWritableStream(this).
-        let this = allocate(cx.vm(), Self::new(cx.realm()));
+        let this = allocate(cx.vm(), |defer_gc| Self::new(defer_gc, cx.realm()));
 
         // 5. Let sizeAlgorithm be ! ExtractSizeAlgorithm(strategy).
         let size_algorithm = extract_size_algorithm(&strategy);
@@ -273,7 +273,7 @@ impl Transferable for WritableStream {
             let (port1, port2) = create_entangled_ports(cx);
 
             // 5. Let readable be a new ReadableStream in the current Realm.
-            let readable = allocate(cx.vm(), ReadableStream::new(cx.realm()));
+            let readable = allocate(cx.vm(), |_| ReadableStream::new(cx.realm()));
 
             // 6. Perform ! SetUpCrossRealmTransformReadable(readable, port1).
             set_up_cross_realm_transform_readable(cx, readable, port1);
@@ -294,7 +294,7 @@ impl Transferable for WritableStream {
     fn transfer_receiving_steps(cx: &mut CallContext, data_holder: &mut TransferDataReader) -> WebIdlResult<Ref<Self>> {
         let cx: &CallContext = cx;
         with_temporary_execution_context_and_callbacks(cx.realm(), || {
-            let value = allocate(cx.vm(), Self::new(cx.realm()));
+            let value = allocate(cx.vm(), |defer_gc| Self::new(defer_gc, cx.realm()));
 
             // 1. Let deserializedRecord be ! StructuredDeserializeWithTransfer(dataHolder.[[port]], the current
             //    Realm).
@@ -314,7 +314,7 @@ pub(crate) fn acquire_writable_stream_default_writer(
     stream: Ref<WritableStream>,
 ) -> WebIdlResult<Ref<WritableStreamDefaultWriter>> {
     // 1. Let writer be a new WritableStreamDefaultWriter.
-    let writer = allocate(cx.vm(), WritableStreamDefaultWriter::new());
+    let writer = allocate(cx.vm(), |_| WritableStreamDefaultWriter::new());
 
     // 2. Perform ? SetUpWritableStreamDefaultWriter(writer, stream).
     set_up_writable_stream_default_writer(cx, writer, stream)?;
@@ -338,13 +338,13 @@ pub(crate) fn create_writable_stream(
     assert!(is_non_negative_number(Value::from_f64(high_water_mark)));
 
     // 2. Let stream be a new WritableStream.
-    let stream = allocate(cx.vm(), WritableStream::new(cx.realm()));
+    let stream = allocate(cx.vm(), |defer_gc| WritableStream::new(defer_gc, cx.realm()));
 
     // 3. Perform ! InitializeWritableStream(stream).
-    initialize_writable_stream(stream);
+    initialize_writable_stream(cx.vm(), stream);
 
     // 4. Let controller be a new WritableStreamDefaultController.
-    let controller = allocate(cx.vm(), WritableStreamDefaultController::new());
+    let controller = allocate(cx.vm(), WritableStreamDefaultController::new);
 
     // 5. Perform ? SetUpWritableStreamDefaultController(stream, controller, startAlgorithm, writeAlgorithm,
     //    closeAlgorithm, abortAlgorithm, highWaterMark, sizeAlgorithm).
@@ -365,7 +365,7 @@ pub(crate) fn create_writable_stream(
 }
 
 // https://streams.spec.whatwg.org/#initialize-writable-stream
-pub(crate) fn initialize_writable_stream(stream: Ref<WritableStream>) {
+pub(crate) fn initialize_writable_stream(vm: &Vm, stream: Ref<WritableStream>) {
     // 1. Set stream.[[state]] to "writable".
     stream.state.set(WritableStreamState::Writable);
 
@@ -380,7 +380,7 @@ pub(crate) fn initialize_writable_stream(stream: Ref<WritableStream>) {
     stream.pending_abort_request.set(None);
 
     // 3. Set stream.[[writeRequests]] to a new empty list.
-    stream.write_requests.borrow_mut().clear();
+    stream.write_requests.borrow_mut(vm).clear();
 
     // 4. Set stream.[[backpressure]] to false.
     stream.backpressure.set(false);
@@ -618,7 +618,7 @@ pub(crate) fn writable_stream_add_write_request(cx: &CallContext, stream: Ref<Wr
     let promise = create_promise(cx.vm(), cx.realm());
 
     // 4. Append promise to stream.[[writeRequests]].
-    stream.write_requests.borrow_mut().push_back(promise);
+    stream.write_requests.borrow_mut(cx.vm()).push_back(promise);
 
     // 5. Return promise.
     promise
@@ -667,7 +667,7 @@ pub(crate) fn writable_stream_finish_erroring(cx: &CallContext, stream: Ref<Writ
 
     // 4. Perform ! stream.[[controller]].[[ErrorSteps]]().
     let controller = stream.controller().expect("a stream that is set up has a controller");
-    WritableStreamDefaultController::error_steps(controller);
+    WritableStreamDefaultController::error_steps(vm, controller);
 
     // 5. Let storedError be stream.[[storedError]].
     let stored_error = stream.stored_error();
@@ -888,7 +888,7 @@ pub(crate) fn writable_stream_mark_close_request_in_flight(stream: Ref<WritableS
 }
 
 // https://streams.spec.whatwg.org/#writable-stream-mark-first-write-request-in-flight
-pub(crate) fn writable_stream_mark_first_write_request_in_flight(stream: Ref<WritableStream>) {
+pub(crate) fn writable_stream_mark_first_write_request_in_flight(vm: &Vm, stream: Ref<WritableStream>) {
     // 1. Assert: stream.[[inFlightWriteRequest]] is undefined.
     assert!(stream.in_flight_write_request.get().is_none());
 
@@ -897,7 +897,7 @@ pub(crate) fn writable_stream_mark_first_write_request_in_flight(stream: Ref<Wri
     // 4. Remove writeRequest from stream.[[writeRequests]].
     let write_request = stream
         .write_requests
-        .borrow_mut()
+        .borrow_mut(vm)
         .pop_front()
         .expect("a stream has a write request to mark in flight");
 

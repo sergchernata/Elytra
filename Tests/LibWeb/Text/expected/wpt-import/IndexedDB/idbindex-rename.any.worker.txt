@@ -1,0 +1,14 @@
+Harness status: OK
+
+Found 9 tests
+
+9 Pass
+Pass	IndexedDB index rename in new transaction
+Pass	IndexedDB index rename in the transaction where it is created
+Pass	IndexedDB index rename to the same name succeeds
+Pass	IndexedDB index rename to the name of a deleted index succeeds
+Pass	IndexedDB index swapping via renames succeeds
+Pass	IndexedDB index rename stringifies non-string names
+Pass	IndexedDB index can be renamed to ""
+Pass	IndexedDB index can be renamed to "\u0000"
+Pass	IndexedDB index can be renamed to "\uDC00\uD800"

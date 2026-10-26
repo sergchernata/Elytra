@@ -37,17 +37,14 @@ impl AsyncGeneratorFunctionConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<AsyncGeneratorFunctionConstructor> {
         // NB: The spec has %Function% as the [[Prototype]] of %AsyncGeneratorFunction%, but this uses
         //     %Function.prototype%.
-        realm.create_object(
-            vm,
-            AsyncGeneratorFunctionConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.AsyncGeneratorFunction.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| AsyncGeneratorFunctionConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.AsyncGeneratorFunction.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -83,7 +80,7 @@ impl AsyncGeneratorFunctionConstructor {
         for index in 0..vm.argument_count() {
             marked_arguments.push(vm.argument(index));
         }
-        let arguments = marked_arguments.to_vec();
+        let arguments = marked_arguments.values();
 
         let parameter_args = &arguments[..arguments.len().saturating_sub(1)];
 

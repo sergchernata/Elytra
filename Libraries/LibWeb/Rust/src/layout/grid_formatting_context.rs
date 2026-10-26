@@ -1099,6 +1099,8 @@ pub(crate) struct GridFormattingContext<'pass> {
     // Set once the rows are sized, so that the columns can be resolved again with percentage heights resolved against
     // them.
     use_row_sizes_for_column_percentages: bool,
+    // Whether resolving column item sizes transfers the stretched block sizes of replaced items to their inline sizes.
+    transfer_stretched_block_sizes: bool,
     // Whether the grid's columns run vertically and its rows horizontally, as they do in a vertical writing mode.
     grid_axes_are_transposed: bool,
     // Whether the Column and Row axes run from right to left and from bottom to top, respectively.
@@ -1204,6 +1206,7 @@ impl<'pass> GridFormattingContext<'pass> {
             row_alignment_container_size: CssPixels::default(),
             use_row_alignment_container_size: false,
             use_row_sizes_for_column_percentages: false,
+            transfer_stretched_block_sizes: false,
             grid_axes_are_transposed: geometry::Frame::of(container_style.writing_mode())
                 .is_orthogonal_to(run.callbacks.frame),
             columns_are_reversed: !geometry::start_is_low_side_in_frame(
@@ -3536,6 +3539,46 @@ impl<'pass> GridFormattingContext<'pass> {
 
     fn resolve_item_sizes(&mut self, axis: Axis) {
         self.resolve_sizes_of_items_where(axis, |_| true);
+        if axis.is_column() {
+            return;
+        }
+        // NB: A replaced item stretched in the row axis has its automatic inline size transferred from the stretched
+        //     block size through its aspect ratio, which is only known once the rows are sized.
+        let transferring_items: Vec<Node> = self
+            .items
+            .iter()
+            .filter(|&&item| self.inline_size_transfers_from_stretched_block_size(item))
+            .map(|item| item.box_)
+            .collect();
+        if !transferring_items.is_empty() {
+            self.transfer_stretched_block_sizes = true;
+            self.resolve_sizes_of_items_where(Axis::Column, |item| transferring_items.contains(&item.box_));
+            self.transfer_stretched_block_sizes = false;
+        }
+    }
+
+    // https://drafts.csswg.org/css-grid-2/#grid-item-sizing
+    // stretch: Use the inline size calculation rules for non-replaced boxes (defined in CSS 2 § 10.3.3 Block-level,
+    //          non-replaced elements in normal flow), i.e. the stretch-fit size.
+    // NB: This applies to replaced items too, which are otherwise sized by their natural size.
+    fn replaced_item_is_explicitly_stretched(&self, item: GridItem, axis: Axis) -> bool {
+        self.facts(item.box_).is_replaced_box()
+            && self.item_alignment(item, axis) == Alignment::Stretch
+            && self.item_is_stretched(item, axis)
+    }
+
+    /// Whether the automatic size of a replaced item in the given axis follows, through its aspect ratio, the size it
+    /// is stretched to in the other axis.
+    fn size_transfers_from_stretched_size(&self, item: GridItem, axis: Axis) -> bool {
+        let other_axis = axis.select(Axis::Row, Axis::Column);
+        self.facts(item.box_).has_preferred_aspect_ratio()
+            && self.item_preferred_size(item, axis).is_auto()
+            && !self.replaced_item_is_explicitly_stretched(item, axis)
+            && self.replaced_item_is_explicitly_stretched(item, other_axis)
+    }
+
+    fn inline_size_transfers_from_stretched_block_size(&self, item: GridItem) -> bool {
+        self.size_transfers_from_stretched_size(item, Axis::Column)
     }
 
     fn resolve_sizes_of_items_where(&mut self, axis: Axis, filter: impl Fn(GridItem) -> bool) {
@@ -3600,7 +3643,22 @@ impl<'pass> GridFormattingContext<'pass> {
             }
 
             let mut transferred_block_size = None;
-            let size = if use_replaced {
+            let size = if self.replaced_item_is_explicitly_stretched(item, axis) {
+                containing - self.item_margin_box_start(item, axis) - self.item_margin_box_end(item, axis)
+            } else if self.size_transfers_from_stretched_size(item, axis)
+                && (!axis.is_column() || self.transfer_stretched_block_sizes)
+            {
+                // NB: The item is sized consistent with the size calculation rules for block-level replaced elements,
+                //     which transfer the used size of the other axis through the aspect ratio.
+                let used = self.used(item);
+                if axis.is_column() {
+                    self.sizing()
+                        .content_inline_size_from_aspect_ratio(item.box_, used.content_block_size.get())
+                } else {
+                    self.sizing()
+                        .content_block_size_from_aspect_ratio(item.box_, used.content_inline_size.get())
+                }
+            } else if use_replaced {
                 if axis.is_column() {
                     self.sizing()
                         .compute_inline_size_for_replaced_element(item.box_, available, constraints)
@@ -4087,6 +4145,7 @@ impl<'pass> GridFormattingContext<'pass> {
         }
         self.place_baseline_aligned_items(&baseline_aligned_items);
         self.derived_baselines_of_root_box = DerivedBaselines {
+            inline_alignment: None,
             first: self.baseline_of_items(formatting_context::BaselineSet::First),
             last: self.baseline_of_items(formatting_context::BaselineSet::Last),
         };
@@ -4548,13 +4607,40 @@ impl<'pass> GridFormattingContext<'pass> {
         if self.run.layout_mode != LayoutMode::Normal {
             return;
         }
+        // https://drafts.csswg.org/css-grid-2/#static-position
+        // The static position of an absolutely-positioned child of a grid container is determined as if it were the
+        // sole grid item in a grid area whose edges coincide with the content edges of the grid container.
+        // NOTE: Note that this position is affected by the values of 'justify-self' and 'align-self' on the child,
+        //       and that, as in most other layout models, the absolutely-positioned child has no effect on the size of
+        //       the containing block or layout of its contents.
+        let static_position_alignment = |child: Node, axis: Axis| {
+            let reversed = self.axis_is_reversed(axis);
+            match self.item_alignment_for_node(child, axis) {
+                Alignment::Center => StaticPositionAlignment::Center,
+                Alignment::End if reversed => StaticPositionAlignment::Start,
+                Alignment::End => StaticPositionAlignment::End,
+                _ if reversed => StaticPositionAlignment::End,
+                _ => StaticPositionAlignment::Start,
+            }
+        };
+        let (horizontal_axis, vertical_axis) = if self.grid_axes_are_transposed {
+            (Axis::Row, Axis::Column)
+        } else {
+            (Axis::Column, Axis::Row)
+        };
         for child in self.run.callbacks.children(self.run.box_) {
             if self.facts(child).is_absolutely_positioned() {
                 let rect = abspos_inputs::StaticPositionRect {
-                    rect: geometry::LogicalRect::default(),
-                    inline_alignment: StaticPositionAlignment::Start,
-                    block_alignment: StaticPositionAlignment::Start,
-                    alignment_derives_from_own_computed_values: false,
+                    rect: geometry::LogicalRect {
+                        offset: Default::default(),
+                        size: geometry::LogicalSize {
+                            inline_size: self.container_used().content_inline_size.get(),
+                            block_size: self.container_used().content_block_size.get(),
+                        },
+                    },
+                    inline_alignment: static_position_alignment(child, horizontal_axis),
+                    block_alignment: static_position_alignment(child, vertical_axis),
+                    alignment_derives_from_own_computed_values: true,
                     is_known: true,
                 };
                 // The grid area supplies both the containing block and the
@@ -5235,8 +5321,7 @@ pub(crate) fn expand_flexible_tracks_indefinite(tracks: &mut [Track<'_>], items:
     // the track’s base size by its flex factor; otherwise, the track’s base size.
     for track in tracks.iter() {
         if let Some(factor) = track.max_sizing.flex_factor() {
-            let divisor = CssPixels::nearest_value_for(factor.max(1.0));
-            flex_fraction = flex_fraction.max(formatting_context::PixelFraction::new(track.base_size, divisor));
+            flex_fraction = flex_fraction.max(fr_size_fraction(track.base_size, factor.max(1.0)));
         }
     }
     // For each grid item that crosses a flexible track, the result of finding the size of an fr using all the
@@ -5253,9 +5338,7 @@ pub(crate) fn expand_flexible_tracks_indefinite(tracks: &mut [Track<'_>], items:
     }
     for track in tracks {
         if let Some(factor) = track.max_sizing.flex_factor() {
-            track.base_size = track
-                .base_size
-                .max(flex_fraction.multiply(CssPixels::nearest_value_for(factor)));
+            track.base_size = track.base_size.max(size_of_flex_factor(flex_fraction, factor));
         }
     }
 }
@@ -5946,6 +6029,20 @@ pub(crate) fn initialize_track_sizes(tracks: &mut [Track<'_>], available: Availa
     has_flexible_tracks
 }
 
+/// The size of an fr as `space` divided by a sum of flex factors, keeping the precision of fractional flex factors.
+fn fr_size_fraction(space: CssPixels, flex_factor_sum: f64) -> formatting_context::PixelFraction {
+    let (numerator, denominator) = CssPixels::fraction_nearest_values_for(space.to_double(), flex_factor_sum);
+    if denominator == CssPixels::default() {
+        return formatting_context::PixelFraction::zero();
+    }
+    formatting_context::PixelFraction::new(numerator, denominator)
+}
+
+/// The product of the size of an fr and a flex factor.
+fn size_of_flex_factor(fr_size: formatting_context::PixelFraction, flex_factor: f64) -> CssPixels {
+    CssPixels::nearest_value_for(fr_size.numerator.to_double() / fr_size.denominator.to_double() * flex_factor)
+}
+
 pub(crate) fn find_fr_size(tracks: &[Track<'_>], space_to_fill: CssPixels) -> formatting_context::PixelFraction {
     // https://www.w3.org/TR/css-grid-2/#algo-find-fr-size
     let mut inflexible = vec![false; tracks.len()];
@@ -5960,20 +6057,20 @@ pub(crate) fn find_fr_size(tracks: &[Track<'_>], space_to_fill: CssPixels) -> fo
 
         // 2. Let flex factor sum be the sum of the flex factors of the flexible tracks.
         //    If this value is less than 1, set it to 1 instead.
-        let mut flex_factor_sum = CssPixels::default();
+        let mut flex_factor_sum = 0.0;
         for (index, track) in tracks.iter().enumerate() {
             if inflexible[index] {
                 continue;
             }
             if let Some(factor) = track.max_sizing.flex_factor() {
-                flex_factor_sum += CssPixels::nearest_value_for(factor);
+                flex_factor_sum += factor;
             }
         }
-        if flex_factor_sum < CssPixels::from_integer(1) {
-            flex_factor_sum = CssPixels::from_integer(1);
+        if flex_factor_sum < 1.0 {
+            flex_factor_sum = 1.0;
         }
         // 3. Let the hypothetical fr size be the leftover space divided by the flex factor sum.
-        let hypothetical_fr_size = formatting_context::PixelFraction::new(leftover_space, flex_factor_sum);
+        let hypothetical_fr_size = fr_size_fraction(leftover_space, flex_factor_sum);
 
         // 4. If the product of the hypothetical fr size and a flexible track’s flex factor is less than the track’s
         //    base size, restart this algorithm treating all such tracks as inflexible.
@@ -5985,7 +6082,7 @@ pub(crate) fn find_fr_size(tracks: &[Track<'_>], space_to_fill: CssPixels) -> fo
             let Some(factor) = track.max_sizing.flex_factor() else {
                 continue;
             };
-            let scaled = hypothetical_fr_size.multiply(CssPixels::nearest_value_for(factor));
+            let scaled = size_of_flex_factor(hypothetical_fr_size, factor);
             if scaled < track.base_size {
                 inflexible[index] = true;
                 restart = true;
@@ -6006,7 +6103,7 @@ pub(crate) fn expand_flexible_tracks(tracks: &mut [Track<'_>], space_to_fill: Cs
         let Some(factor) = track.max_sizing.flex_factor() else {
             continue;
         };
-        let scaled = flex_fraction.multiply(CssPixels::nearest_value_for(factor));
+        let scaled = size_of_flex_factor(flex_fraction, factor);
         if scaled > track.base_size {
             track.base_size = scaled;
         }

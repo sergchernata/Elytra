@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	.anchored 1
+Pass	.anchored 2
+Pass	.anchored 3

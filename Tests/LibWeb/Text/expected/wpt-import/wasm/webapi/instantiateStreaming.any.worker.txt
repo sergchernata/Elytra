@@ -1,0 +1,30 @@
+Harness status: OK
+
+Found 25 tests
+
+25 Pass
+Pass	Empty module without imports argument
+Pass	Empty module with undefined imports argument
+Pass	Empty module with empty imports argument
+Pass	getter order for imports object
+Pass	imports
+Pass	imports with empty module names
+Pass	imports with empty names
+Pass	exports with empty name: function
+Pass	exports with empty name: table
+Pass	exports with empty name: global
+Pass	No imports
+Pass	exports and imports
+Pass	i64 exports and imports
+Pass	import with i32-returning function
+Pass	import with function that takes and returns i32
+Pass	import with i64-returning function
+Pass	import with function that takes and returns i64
+Pass	import with i32-taking function
+Pass	import with i64-taking function
+Pass	export i64-returning function
+Pass	i32 mutable WebAssembly.Global import
+Pass	i64 mutable WebAssembly.Global import
+Pass	Multiple i64 arguments
+Pass	stray argument
+Pass	Synchronous options handling

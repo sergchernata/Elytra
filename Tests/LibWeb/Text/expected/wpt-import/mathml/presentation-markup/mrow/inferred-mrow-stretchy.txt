@@ -1,0 +1,20 @@
+Harness status: OK
+
+Found 14 tests
+
+13 Pass
+1 Fail
+Pass	operator stretching inside Mrow
+Pass	operator stretching inside Sqrt
+Pass	operator stretching inside Style
+Pass	operator stretching inside Error
+Pass	operator stretching inside Phantom
+Pass	operator stretching inside Math
+Pass	operator stretching inside Menclose
+Pass	operator stretching inside Mpadded
+Pass	operator stretching inside Unknown
+Fail	operator stretching inside Mtd
+Pass	operator stretching inside None
+Pass	operator stretching inside Mprescripts
+Pass	operator stretching inside Mfenced
+Pass	operator stretching inside A

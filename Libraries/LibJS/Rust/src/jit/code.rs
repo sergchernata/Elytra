@@ -12,10 +12,13 @@ use core::ffi::c_void;
 use libjs_jit::bytecode::{EnvironmentCoordinate, decode_instruction};
 pub use libjs_jit::code::INLINED_CALL_SITE_BIT;
 use libjs_jit::code::{ExitKind, Site};
+use libjs_runtime_macros::Trace;
 
 use super::entry_table::{JIT_ENTRY_SLOT_MASK, JitEntryTable, NO_JIT_ENTRY_SLOT};
 use super::executable_memory::ExecutableMemory;
 use crate::bytecode::executable::{Executable, PropertyLookupCache, PropertyLookupCacheTier};
+use crate::gc::defer_gc::DeferGc;
+use crate::gc::sweep::Sweep;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::{CellHeader, Gc};
@@ -85,17 +88,20 @@ impl CompileState {
 
 /// An executable of a compile job's snapshot, by index. Index 0 is the compiled executable (without a function); the
 /// others are inlining candidates, whose frames exits materialize.
-#[derive(Clone)]
+#[derive(Clone, Trace)]
 pub struct SnapshotExecutable {
     pub executable: Gc<Executable>,
     pub function: Option<InlinedFunction>,
     /// How many sites where JIT code exited the executable had recorded when the code was compiled, which the code
     /// knew of (see `Executable::add_jit_exit_site()`). The sites are only ever appended to.
+    #[gc(untraced)]
     pub known_exit_sites: usize,
     /// For the compiled executable, how many sites in inlined builtins it had recorded then.
+    #[gc(untraced)]
     pub known_builtin_exit_sites: usize,
     /// The size of each property lookup cache of the executable when the code was compiled (see
     /// `speculated_cache_size()`): how many shapes the code speculated on there.
+    #[gc(untraced)]
     pub property_cache_sizes: Box<[u8]>,
 }
 
@@ -114,20 +120,11 @@ pub fn speculated_cache_size(cache: &PropertyLookupCache) -> u8 {
 }
 
 /// The function object of an inlined executable, which its materialized frames run.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Trace)]
 pub enum InlinedFunction {
     Ecmascript(Gc<EcmascriptFunctionObject>),
     /// A builtin written in JavaScript, whose frames are set up like those of other builtins.
     Builtin(Gc<NativeJavaScriptBackedFunction>),
-}
-
-impl InlinedFunction {
-    pub fn visit(self, visitor: &mut Visitor) {
-        match self {
-            InlinedFunction::Ecmascript(function) => visitor.visit(function),
-            InlinedFunction::Builtin(function) => visitor.visit(function),
-        }
-    }
 }
 
 /// Installed machine code for one executable, with what exits need to rebuild interpreter frames. While JIT code runs
@@ -182,6 +179,7 @@ struct MaterializedObject {
 }
 
 impl JitCode {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         memory: ExecutableMemory,
         entry_offset: u32,
@@ -190,6 +188,7 @@ impl JitCode {
         sites: Vec<Site>,
         embedded_cells: Vec<Gc<CellHeader>>,
         snapshot_executables: Vec<SnapshotExecutable>,
+        _defer_gc: &DeferGc<'_>,
     ) -> Self {
         let entry_at = |offset: u32| {
             assert!((offset as usize) < memory.size());
@@ -222,10 +221,9 @@ impl JitCode {
     }
 
     /// Gives the code where its frames keep the index of a site and the register dump the runtime reads.
-    pub fn with_frame_offsets(mut self, site_index_frame_offset: i32, register_dump_frame_offset: i32) -> Self {
+    pub fn set_frame_offsets(&mut self, site_index_frame_offset: i32, register_dump_frame_offset: i32) {
         self.site_index_frame_offset = site_index_frame_offset;
         self.register_dump_frame_offset = register_dump_frame_offset;
-        self
     }
 
     pub fn register_dump_frame_offset(&self) -> i32 {
@@ -273,21 +271,18 @@ impl JitCode {
     }
 
     /// Gives the code its id among all code the VM installed, and the bytes that invalidate it.
-    pub fn with_invalidation(mut self, id: u64, invalidation_patches: Vec<(u32, Vec<u8>)>) -> Self {
+    pub fn set_invalidation(&mut self, id: u64, invalidation_patches: Vec<(u32, Vec<u8>)>) {
         self.id = id;
         self.invalidation_patches = invalidation_patches;
-        self
     }
 
     /// Gives the code the loop back edges in the loops around those of its on-stack replacement entries.
-    pub fn with_osr_outer_loop_back_edges(mut self, osr_outer_loop_back_edges: Vec<u32>) -> Self {
+    pub fn set_osr_outer_loop_back_edges(&mut self, osr_outer_loop_back_edges: Vec<u32>) {
         self.osr_outer_loop_back_edges = osr_outer_loop_back_edges;
-        self
     }
 
-    pub fn with_uncaught_handlers(mut self, uncaught_handlers: Vec<u32>) -> Self {
+    pub fn set_uncaught_handlers(&mut self, uncaught_handlers: Vec<u32>) {
         self.uncaught_handlers = uncaught_handlers;
-        self
     }
 
     /// Whether the handler whose `Catch` is at `pc` has no catch entry only because it never caught an exception
@@ -374,12 +369,7 @@ unsafe impl Trace for JitCode {
         for materialized in self.materialized_objects.borrow().iter() {
             visitor.visit(materialized.object);
         }
-        for executable in &self.snapshot_executables {
-            visitor.visit(executable.executable);
-            if let Some(function) = executable.function {
-                function.visit(visitor);
-            }
-        }
+        self.snapshot_executables.trace(visitor);
     }
 }
 
@@ -502,11 +492,15 @@ impl Executable {
     }
 
     /// Frees the slot of the executable, which died, and drops its JIT code.
-    pub fn free_jit_entry_slot(&self, vm: &Vm) {
+    pub fn free_jit_entry_slot(&self, vm: &Vm, sweep: &Sweep<'_>) {
         let Some(table) = vm.jit.entry_table.as_ref() else {
             return;
         };
-        let Some(mut code) = table.free(self.head.jit_entry_slot.get(), core::ptr::from_ref(&self.head) as u64) else {
+        let Some(mut code) = table.free(
+            self.head.jit_entry_slot.get(),
+            core::ptr::from_ref(&self.head) as u64,
+            sweep,
+        ) else {
             return;
         };
         // OPTIMIZATION: The compile threads allocated the sites, so one of them frees them, outside the collection
@@ -632,12 +626,12 @@ impl Executable {
 
     /// Makes new frames of the executable run in its JIT code. Frames of it that run in the interpreter count down
     /// `tier_up_budget` from here, and continue in the code at an on-stack replacement entry once it runs out.
-    pub fn install_jit_code(&self, vm: &Vm, code: Box<JitCode>, tier_up_budget: i32) {
+    pub fn install_jit_code(&self, vm: &Vm, code: JitCode, tier_up_budget: i32, defer_gc: &DeferGc<'_>) {
         let (table, slot) = self
             .jit_entry_table_slot(vm)
             .expect("only executables with a JIT entry slot are compiled");
         table.set_entry(slot, Some(code.entry() as *const c_void));
-        assert!(table.set_code(slot, Some(code)).is_none());
+        table.attach_code(slot, code, defer_gc);
         self.set_jit_compile_state(CompileState::Installed);
         self.head.tier_up_budget.set(tier_up_budget);
     }
@@ -697,7 +691,7 @@ impl Executable {
     fn detach_jit_code(&self, vm: &Vm) {
         let state = self.jit_state();
         let (table, slot) = self.jit_entry_table_slot(vm).expect("the code is attached");
-        drop(table.set_code(slot, None));
+        table.detach_code(slot);
         vm.jit.count_coverage("discard");
         let discard_count = state.discard_count.get() + 1;
         state.discard_count.set(discard_count);

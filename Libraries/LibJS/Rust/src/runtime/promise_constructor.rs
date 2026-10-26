@@ -111,7 +111,7 @@ fn run_promise_all_resolve_element_job(
     value: Value,
 ) -> ThrowCompletionOr<Value> {
     // 5. Set values[thisIndex] to value.
-    values.set(index, value);
+    values.set(vm, index, value);
 
     // 6. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] - 1.
     // 7. If remainingElementsCount.[[Value]] = 0, then
@@ -296,7 +296,7 @@ fn perform_promise_common(
         };
 
         // c. Append undefined to values.
-        values.append(Value::UNDEFINED);
+        values.append(vm, Value::UNDEFINED);
 
         // d. Let nextPromise be ? Call(promiseResolve, constructor, « next »).
         let next_promise = call(vm, promise_resolve, constructor, &[next])?;
@@ -603,17 +603,14 @@ define_native_function_class!(
 
 impl PromiseConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<PromiseConstructor> {
-        realm.create_object(
-            vm,
-            PromiseConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.Promise.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| PromiseConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.Promise.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -745,7 +742,7 @@ impl PromiseConstructor {
             realm,
             new_target,
             |intrinsics, vm| intrinsics.promise_prototype(vm),
-            |prototype| Promise::new(vm, Promise::CLASS, prototype),
+            |defer_gc, prototype| Promise::new(defer_gc, vm, Promise::CLASS, prototype),
         )?;
 
         // 8. Let resolvingFunctions be CreateResolvingFunctions(promise).

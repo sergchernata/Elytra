@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	precommitHandler redirect() on non-API navigation does not serialize state
+Pass	precommitHandler redirect() with state on non-API navigation (link click)

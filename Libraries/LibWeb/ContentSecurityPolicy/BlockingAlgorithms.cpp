@@ -5,9 +5,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AnyOf.h>
 #include <LibGC/Heap.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/DirectiveOperations.h>
+#include <LibWeb/ContentSecurityPolicy/Directives/HTMLIntegration.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/KeywordSources.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/Names.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
@@ -16,10 +18,10 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
-#include <LibWeb/SRI/SRI.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedScript.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
@@ -29,209 +31,12 @@
 
 namespace Web::ContentSecurityPolicy {
 
-// https://w3c.github.io/webappsec-csp/#does-resource-hint-violate-policy
-[[nodiscard]] static GC::Ptr<Directives::Directive> does_resource_hint_request_violate_policy(GC::Heap& heap, GC::Ref<Fetch::Infrastructure::Request const> request, GC::Ref<Policy const> policy)
+ViolationReporter violation_reporter_for_request(JS::Realm& realm, GC::Ref<Fetch::Infrastructure::Request> request)
 {
-    // 1. Let defaultDirective be policy’s first directive whose name is "default-src".
-    auto default_directive_iterator = policy->directives().find_if([](auto const& directive) {
-        return directive->name() == Directives::Names::DefaultSrc;
-    });
-
-    // 2. If defaultDirective does not exist, return "Does Not Violate".
-    if (default_directive_iterator.is_end())
-        return {};
-
-    // 3. For each directive of policy:
-    for (auto directive : policy->directives()) {
-        // 1. Let result be the result of executing directive’s pre-request check on request and policy.
-        auto result = directive->pre_request_check(heap, request, policy);
-
-        // 2. If result is "Allowed", then return "Does Not Violate".
-        if (result == Directives::Directive::Result::Allowed) {
-            return {};
-        }
-    }
-
-    // 4. Return defaultDirective.
-    return *default_directive_iterator;
-}
-
-// https://w3c.github.io/webappsec-csp/#does-request-violate-policy
-[[nodiscard]] static GC::Ptr<Directives::Directive> does_request_violate_policy(GC::Heap& heap, GC::Ref<Fetch::Infrastructure::Request const> request, GC::Ref<Policy const> policy)
-{
-    // 1. If request’s initiator is "prefetch", then return the result of executing § 6.7.2.2 Does resource hint
-    //    request violate policy? on request and policy.
-    if (request->initiator() == Fetch::Infrastructure::Request::Initiator::Prefetch)
-        return does_resource_hint_request_violate_policy(heap, request, policy);
-
-    // 2. Let violates be "Does Not Violate".
-    GC::Ptr<Directives::Directive> violates;
-
-    // 3. For each directive of policy:
-    for (auto directive : policy->directives()) {
-        // 1. Let result be the result of executing directive’s pre-request check on request and policy.
-        auto result = directive->pre_request_check(heap, request, policy);
-
-        // 2. If result is "Blocked", then let violates be directive.
-        if (result == Directives::Directive::Result::Blocked) {
-            violates = directive;
-        }
-    }
-
-    // 4. Return violates.
-    return violates;
-}
-
-// https://w3c.github.io/webappsec-csp/#report-for-request
-void report_content_security_policy_violations_for_request(JS::Realm& realm, GC::Ref<Fetch::Infrastructure::Request> request)
-{
-    // 1. Let CSP list be request’s policy container's CSP list.
-    auto csp_list = request->policy_container().get<GC::Ref<HTML::PolicyContainer>>()->csp_list;
-
-    // 2. For each policy of CSP list:
-    for (auto policy : csp_list->policies()) {
-        // 1. If policy’s disposition is "enforce", then skip to the next policy.
-        if (policy->disposition() == Policy::Disposition::Enforce)
-            continue;
-
-        // 2. Let violates be the result of executing § 6.7.2.1 Does request violate policy? on request and policy.
-        auto violates = does_request_violate_policy(GC::Heap::the(), request, policy);
-
-        // 3. If violates is not "Does Not Violate", then execute § 5.5 Report a violation on the result of executing
-        //    § 2.4.2 Create a violation object for request, and policy. on request, and policy.
-        if (violates) {
-            auto violation = Violation::create_a_violation_object_for_request_and_policy(request, policy);
-            violation->report_a_violation(realm);
-        }
-    }
-}
-
-// https://w3c.github.io/webappsec-csp/#should-block-request
-Directives::Directive::Result should_request_be_blocked_by_content_security_policy(JS::Realm& realm, GC::Ref<Fetch::Infrastructure::Request> request)
-{
-    // 1. Let CSP list be request’s policy container's CSP list.
-    auto csp_list = request->policy_container().get<GC::Ref<HTML::PolicyContainer>>()->csp_list;
-
-    // 2. Let result be "Allowed".
-    auto result = Directives::Directive::Result::Allowed;
-
-    // 3. For each policy of CSP list:
-    for (auto policy : csp_list->policies()) {
-        // 1. If policy’s disposition is "report", then skip to the next policy.
-        if (policy->disposition() == Policy::Disposition::Report)
-            continue;
-
-        // 2. Let violates be the result of executing § 6.7.2.1 Does request violate policy? on request and policy.
-        auto violates = does_request_violate_policy(GC::Heap::the(), request, policy);
-
-        // 3. If violates is not "Does Not Violate", then:
-        if (violates) {
-            // 1. Execute § 5.5 Report a violation on the result of executing § 2.4.2 Create a violation object for
-            //    request, and policy. on request, and policy.
-            auto violation = Violation::create_a_violation_object_for_request_and_policy(request, policy);
-            violation->report_a_violation(realm);
-
-            // 2. Set result to "Blocked".
-            result = Directives::Directive::Result::Blocked;
-        }
-    }
-
-    // 4. Return result.
-    return result;
-}
-
-// https://w3c.github.io/webappsec-subresource-integrity/#should-request-be-blocked-by-integrity-policy
-Directives::Directive::Result should_request_be_blocked_by_integrity_policy(GC::Ref<Fetch::Infrastructure::Request> request)
-{
-    VERIFY(request->policy_container().has<GC::Ref<HTML::PolicyContainer>>());
-
-    // 1. Let policyContainer be request’s policy container.
-    auto const& policy_container = request->policy_container().get<GC::Ref<HTML::PolicyContainer>>();
-
-    // 2. Let parsedMetadata be the result of calling parse metadata with request’s integrity metadata.
-    auto parsed_metadata = MUST(SRI::parse_metadata(request->integrity_metadata().utf16_view()));
-
-    // 3. If parsedMetadata is not the empty set and request’s mode is either "cors" or "same-origin", return "Allowed".
-    if (!parsed_metadata.is_empty() && (request->mode() == Fetch::Infrastructure::Request::Mode::CORS || request->mode() == Fetch::Infrastructure::Request::Mode::SameOrigin))
-        return Directives::Directive::Result::Allowed;
-
-    // 4. If request’s url is local, return "Allowed".
-    if (Fetch::Infrastructure::is_local_url(request->url()))
-        return Directives::Directive::Result::Allowed;
-
-    // 5. Let policy be policyContainer’s integrity policy.
-    auto const& policy = policy_container->integrity_policy;
-
-    // 6. Let reportPolicy be policyContainer’s report only integrity policy.
-    auto const& report_policy = policy_container->report_only_integrity_policy;
-
-    // 7. If both policy and reportPolicy are empty integrity policys, return "Allowed".
-    if (policy.is_empty() && report_policy.is_empty())
-        return Directives::Directive::Result::Allowed;
-
-    // 8. Let global be request’s client’s global object.
-    auto& global = request->client()->global_object();
-
-    // 9. If global is not a Window nor a WorkerGlobalScope, return "Allowed".
-    if (!HTML::window_or_worker_global_scope_from_global_object(global))
-        return Directives::Directive::Result::Allowed;
-
-    // 10. Let block be a boolean, initially false.
-    bool block = false;
-
-    // FIXME: 11. Let reportBlock be a boolean, initially false.
-    [[maybe_unused]] auto report_block = false;
-
-    // 12. If policy’s sources contains "inline" and policy’s blocked destinations contains request’s destination, set block to true.
-    if (policy.sources.contains_slow(u"inline"sv)
-        && request->destination().has_value()
-        && policy.blocked_destinations.contains_slow(request->destination().value()))
-        block = true;
-
-    // 13. If reportPolicy’s sources contains "inline" and reportPolicy’s blocked destinations contains request’s destination, set reportBlock to true.
-    if (report_policy.sources.contains_slow(u"inline"sv)
-        && request->destination().has_value()
-        && report_policy.blocked_destinations.contains_slow(request->destination().value()))
-        report_block = true;
-
-    // FIXME: 14. If block is true or reportBlock is true, then report violation with request, block, reportBlock, policy and reportPolicy.
-
-    // 15. If block is true, then return "Blocked"; otherwise "Allowed".
-    return block ? Directives::Directive::Result::Blocked : Directives::Directive::Result::Allowed;
-}
-
-// https://w3c.github.io/webappsec-csp/#should-block-response
-Directives::Directive::Result should_response_to_request_be_blocked_by_content_security_policy(JS::Realm& realm, GC::Ref<Fetch::Infrastructure::Response> response, GC::Ref<Fetch::Infrastructure::Request> request)
-{
-    // 1. Let CSP list be request’s policy container's CSP list.
-    auto csp_list = request->policy_container().get<GC::Ref<HTML::PolicyContainer>>()->csp_list;
-
-    // 2. Let result be "Allowed".
-    auto result = Directives::Directive::Result::Allowed;
-
-    // 3. For each policy of CSP list:
-    // Spec Note: This portion of the check verifies that the page can load the response. That is, that a Service
-    //            Worker hasn't substituted a file which would violate the page’s CSP.
-    for (auto policy : csp_list->policies()) {
-        // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
-            // 1. If the result of executing directive’s post-request check is "Blocked", then:
-            if (directive->post_request_check(GC::Heap::the(), request, response, policy) == Directives::Directive::Result::Blocked) {
-                // 1. Execute § 5.5 Report a violation on the result of executing § 2.4.2 Create a violation object for
-                //    request, and policy. on request, and policy.
-                auto violation = Violation::create_a_violation_object_for_request_and_policy(request, policy);
-                violation->report_a_violation(realm);
-
-                // 2. If policy’s disposition is "enforce", then set result to "Blocked".
-                if (policy->disposition() == Policy::Disposition::Enforce) {
-                    result = Directives::Directive::Result::Blocked;
-                }
-            }
-        }
-    }
-
-    // 4. Return result.
-    return result;
+    return [&realm, request](NonnullRefPtr<Policy const> policy) {
+        auto violation = Violation::create_a_violation_object_for_request_and_policy(request, move(policy));
+        violation->report_a_violation(realm);
+    };
 }
 
 // https://w3c.github.io/webappsec-csp/#should-block-navigation-request
@@ -241,19 +46,19 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
     auto result = Directives::Directive::Result::Allowed;
 
     // 2. For each policy of navigation request’s policy container’s CSP list:
-    auto policy_container = navigation_request->policy_container().get<GC::Ref<HTML::PolicyContainer>>();
-    for (auto policy : policy_container->csp_list->policies()) {
+    auto policy_container = navigation_request->policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>();
+    for (auto const& policy : policy_container->csp_list.policies()) {
         // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. If directive’s pre-navigation check returns "Allowed" when executed upon navigation request, type, and policy skip to the next directive.
-            auto directive_result = directive->pre_navigation_check(navigation_request, navigation_type, policy);
+            auto directive_result = Directives::pre_navigation_check(directive, navigation_request, navigation_type, policy);
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
             // 2. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on navigation request’s
             //    client’s global object, policy, and directive’s name.
             auto& realm = navigation_request->client()->realm();
-            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(navigation_request->client()->global_object(), policy, directive->name().view().to_utf8_but_should_be_ported_to_utf16());
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(navigation_request->client()->global_object(), policy, directive.name().view().to_utf8_but_should_be_ported_to_utf16());
 
             // 3. Set violation’s resource to navigation request’s URL.
             violation->set_resource(navigation_request->url());
@@ -270,12 +75,12 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
     // 3. If result is "Allowed", and if navigation request’s current URL’s scheme is javascript:
     if (result == Directives::Directive::Result::Allowed && navigation_request->current_url().scheme() == "javascript"sv) {
         // 1. For each policy of navigation request’s policy container’s CSP list:
-        VERIFY(navigation_request->policy_container().has<GC::Ref<HTML::PolicyContainer>>());
-        auto csp_list = navigation_request->policy_container().get<GC::Ref<HTML::PolicyContainer>>()->csp_list;
+        VERIFY(navigation_request->policy_container().has<NonnullRefPtr<HTML::PolicyContainer const>>());
+        auto const& csp_list = navigation_request->policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 
-        for (auto policy : csp_list->policies()) {
+        for (auto const& policy : csp_list.policies()) {
             // 1. For each directive of policy:
-            for (auto directive : policy->directives()) {
+            for (auto const& directive : policy->directives()) {
                 // 1. Let directive-name be the result of executing § 6.8.2 Get the effective directive for inline
                 //    checks on type.
                 // FIXME: File spec issue that the type should probably always be "navigation", as NavigationType would
@@ -286,23 +91,22 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
                 //        just which directive is reported to have been violated.
                 auto directive_name = Directives::get_the_effective_directive_for_inline_checks(Directives::Directive::InlineType::Navigation);
 
-                // 2. If directive’s inline check returns "Allowed" when executed upon null, "navigation" and
+                // 2. If directive’s inline check returns "Allowed" when executed upon null, "navigation", policy, and
                 //    navigation request’s current URL, skip to the next directive.
-                // FIXME: File spec issue that they forgot to pass in "policy" here.
                 // FIXME: File spec issue that current URL is a URL object and not a string, therefore they must use a
                 //        spec operation to serialize the URL.
                 auto& realm = navigation_request->client()->realm();
                 auto serialized_url = navigation_request->current_url().to_string();
                 auto serialized_url_utf16 = Utf16String::from_utf8(serialized_url);
-                if (directive->inline_check(GC::Heap::the(), nullptr, Directives::Directive::InlineType::Navigation, policy, serialized_url_utf16.utf16_view()) == Directives::Directive::Result::Allowed)
+                if (Directives::inline_check(directive, nullptr, Directives::Directive::InlineType::Navigation, policy, serialized_url_utf16.utf16_view()) == Directives::Directive::Result::Allowed)
                     continue;
 
                 // 3. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global,
                 //    policy, and directive on navigation request’s client’s global object, policy, and directive-name.
                 auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(navigation_request->client()->global_object(), policy, directive_name.view().to_utf8_but_should_be_ported_to_utf16());
 
-                // 4. Set violation’s resource to navigation request’s URL.
-                violation->set_resource(navigation_request->url());
+                // 4. Set violation’s resource to "inline".
+                violation->set_resource(Violation::Resource::Inline);
 
                 // 5. Execute § 5.5 Report a violation on violation.
                 violation->report_a_violation(realm);
@@ -322,7 +126,7 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
 Directives::Directive::Result should_navigation_response_to_navigation_request_of_type_in_target_be_blocked_by_content_security_policy(
     GC::Ptr<Fetch::Infrastructure::Request> navigation_request,
     GC::Ref<Fetch::Infrastructure::Response> navigation_response,
-    GC::Ref<PolicyList> response_csp_list,
+    PolicyList const& response_csp_list,
     Directives::Directive::NavigationType navigation_type,
     GC::Ref<HTML::LocalNavigable> target)
 {
@@ -333,13 +137,27 @@ Directives::Directive::Result should_navigation_response_to_navigation_request_o
     if (!navigation_request)
         return result;
 
+    // NB: Only frame-ancestors reads the target's container documents. Each is the next parent navigable's active
+    //     document, and a parent navigable answers for a document hosted in another process.
+    auto has_frame_ancestors = any_of(response_csp_list.policies(), [](auto const& policy) {
+        return policy->contains_directive_with_name(Directives::Names::FrameAncestors);
+    });
+    Vector<URL::Origin> target_container_document_origins;
+    if (has_frame_ancestors) {
+        for (auto ancestor = target->parent(); ancestor; ancestor = ancestor->parent()) {
+            // AD-HOC: An ancestor whose document was destroyed has no active document, so its origin counts as opaque.
+            auto origin = ancestor->active_document_origin();
+            target_container_document_origins.append(origin.has_value() ? origin.release_value() : URL::Origin::create_opaque());
+        }
+    }
+
     // 2. For each policy of response CSP list:
-    for (auto policy : response_csp_list->policies()) {
+    for (auto const& policy : response_csp_list.policies()) {
         // Spec Note: Some directives (like frame-ancestors) allow a response’s Content Security Policy to act on the navigation.
         // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. If directive’s navigation response check returns "Allowed" when executed upon navigation request, type, navigation response, target, "response", and policy skip to the next directive.
-            auto directive_result = directive->navigation_response_check(*navigation_request, navigation_type, navigation_response, target, Directives::Directive::CheckType::Response, policy);
+            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response, target_container_document_origins, Directives::Directive::CheckType::Response, policy);
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
@@ -347,7 +165,7 @@ Directives::Directive::Result should_navigation_response_to_navigation_request_o
             // Spec Note: We use null for the global object, as no global exists: we haven’t processed the navigation to create a Document yet.
             // FIXME: What should the realm be here?
             auto& realm = navigation_request->client()->realm();
-            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(nullptr, policy, directive->name().view().to_utf8_but_should_be_ported_to_utf16());
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(nullptr, policy, directive.name().view().to_utf8_but_should_be_ported_to_utf16());
 
             // 3. Set violation’s resource to navigation response’s URL.
             if (navigation_response->url().has_value()) {
@@ -366,19 +184,19 @@ Directives::Directive::Result should_navigation_response_to_navigation_request_o
     }
 
     // 3. For each policy of navigation request’s policy container’s CSP list:
-    auto request_policy_container = navigation_request->policy_container().get<GC::Ref<HTML::PolicyContainer>>();
-    for (auto policy : request_policy_container->csp_list->policies()) {
+    auto request_policy_container = navigation_request->policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>();
+    for (auto const& policy : request_policy_container->csp_list.policies()) {
         // Spec Note: NOTE: Some directives in the navigation request’s context (like frame-ancestors) need the response before acting on the navigation.
         // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. If directive’s navigation response check returns "Allowed" when executed upon navigation request, type, navigation response, target, "source", and policy skip to the next directive.
-            auto directive_result = directive->navigation_response_check(*navigation_request, navigation_type, navigation_response, target, Directives::Directive::CheckType::Source, policy);
+            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response, target_container_document_origins, Directives::Directive::CheckType::Source, policy);
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
             // 2. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on navigation request’s client’s global object, policy, and directive’s name.
             auto& realm = navigation_request->client()->realm();
-            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(navigation_request->client()->global_object(), policy, directive->name().view().to_utf8_but_should_be_ported_to_utf16());
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(navigation_request->client()->global_object(), policy, directive.name().view().to_utf8_but_should_be_ported_to_utf16());
 
             // 3. Set violation’s resource to navigation request’s URL.
             violation->set_resource(navigation_request->url());
@@ -411,14 +229,14 @@ Directives::Directive::Result should_elements_inline_type_behavior_be_blocked_by
     // 3. For each policy of element’s Document's global object’s CSP list:
     auto& settings = element->document().relevant_settings_object();
     auto& global_object = settings.global_object();
-    auto csp_list = settings.policy_container()->csp_list;
+    auto const& csp_list = settings.policy_container()->csp_list;
 
-    for (auto const policy : csp_list->policies()) {
+    for (auto const& policy : csp_list.policies()) {
         // 1. For each directive of policy’s directive set:
-        for (auto const directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. If directive’s inline check returns "Allowed" when executed upon element, type, policy and source,
             //    skip to the next directive.
-            if (directive->inline_check(GC::Heap::the(), element, type, policy, source) == Directives::Directive::Result::Allowed)
+            if (Directives::inline_check(directive, element, type, policy, source) == Directives::Directive::Result::Allowed)
                 continue;
 
             // 2. Let directive-name be the result of executing § 6.8.2 Get the effective directive for inline checks
@@ -440,7 +258,7 @@ Directives::Directive::Result should_elements_inline_type_behavior_be_blocked_by
             // 6. If directive’s value contains the expression "'report-sample'", then set violation’s sample to the
             //    substring of source containing its first 40 characters.
             // FIXME: Should this be case insensitive?
-            auto maybe_report_sample = directive->value().find_if([](auto const& directive_value) {
+            auto maybe_report_sample = directive.value().find_if([](auto const& directive_value) {
                 return directive_value.equals_ignoring_ascii_case(Directives::KeywordSources::ReportSample.view());
             });
 
@@ -531,27 +349,27 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_string_compilation(JS::Rea
     auto& global = realm.global_object();
 
     // 5. For each policy of global’s CSP list:
-    auto csp_list = HTML::relevant_settings_object(global).policy_container()->csp_list;
-    for (auto const policy : csp_list->policies()) {
+    auto const& csp_list = HTML::relevant_settings_object(global).policy_container()->csp_list;
+    for (auto const& policy : csp_list.policies()) {
         // 1. Let source-list be null.
         Optional<Vector<Utf16String>> maybe_source_list;
 
         // 2. If policy contains a directive whose name is "script-src", then set source-list to that directive's value.
         auto maybe_script_src = policy->directives().find_if([](auto const& directive) {
-            return directive->name() == Directives::Names::ScriptSrc;
+            return directive.kind() == Directives::Directive::Kind::ScriptSrc;
         });
 
         if (!maybe_script_src.is_end()) {
-            maybe_source_list = (*maybe_script_src)->value();
+            maybe_source_list = maybe_script_src->value();
         } else {
             //   Otherwise if policy contains a directive whose name is "default-src", then set source-list to that
             //   directive’s value.
             auto maybe_default_src = policy->directives().find_if([](auto const& directive) {
-                return directive->name() == Directives::Names::DefaultSrc;
+                return directive.kind() == Directives::Directive::Kind::DefaultSrc;
             });
 
             if (!maybe_default_src.is_end())
-                maybe_source_list = (*maybe_default_src)->value();
+                maybe_source_list = maybe_default_src->value();
         }
 
         // 3. If source-list is not null, and does not contain a source expression which is an ASCII case-insensitive
@@ -612,27 +430,27 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_wasm_byte_compilation(JS::
     auto result = Directives::Directive::Result::Allowed;
 
     // 3. For each policy of global’s CSP list:
-    auto csp_list = HTML::relevant_settings_object(global).policy_container()->csp_list;
-    for (auto const policy : csp_list->policies()) {
+    auto const& csp_list = HTML::relevant_settings_object(global).policy_container()->csp_list;
+    for (auto const& policy : csp_list.policies()) {
         // 1. Let source-list be null.
         Optional<Vector<Utf16String>> maybe_source_list;
 
         // 2. If policy contains a directive whose name is "script-src", then set source-list to that directive's value.
         auto maybe_script_src = policy->directives().find_if([](auto const& directive) {
-            return directive->name() == Directives::Names::ScriptSrc;
+            return directive.kind() == Directives::Directive::Kind::ScriptSrc;
         });
 
         if (!maybe_script_src.is_end()) {
-            maybe_source_list = (*maybe_script_src)->value();
+            maybe_source_list = maybe_script_src->value();
         } else {
             //   Otherwise if policy contains a directive whose name is "default-src", then set source-list to that
             //   directive’s value.
             auto maybe_default_src = policy->directives().find_if([](auto const& directive) {
-                return directive->name() == Directives::Names::DefaultSrc;
+                return directive.kind() == Directives::Directive::Kind::DefaultSrc;
             });
 
             if (!maybe_default_src.is_end())
-                maybe_source_list = (*maybe_default_src)->value();
+                maybe_source_list = maybe_default_src->value();
         }
 
         // 3. If source-list is non-null, and does not contain a source expression which is an ASCII case-insensitive
@@ -677,22 +495,22 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_wasm_byte_compilation(JS::
 Directives::Directive::Result is_base_allowed_for_document(URL::URL const& base, GC::Ref<DOM::Document const> document)
 {
     // 1. For each policy of document’s global object’s csp list:
-    auto csp_list = document->relevant_settings_object().policy_container()->csp_list;
-    for (auto const policy : csp_list->policies()) {
+    auto const& csp_list = document->relevant_settings_object().policy_container()->csp_list;
+    for (auto const& policy : csp_list.policies()) {
         // 1. Let source list be null.
         // NOTE: Not necessary.
 
         // 2. If a directive whose name is "base-uri" is present in policy’s directive set, set source list to that
         //    directive’s value.
         auto maybe_base_uri = policy->directives().find_if([](auto const& directive) {
-            return directive->name() == Directives::Names::BaseUri;
+            return directive.kind() == Directives::Directive::Kind::BaseUri;
         });
 
         // 3. If source list is null, skip to the next policy.
         if (maybe_base_uri.is_end())
             continue;
 
-        auto const& source_list = (*maybe_base_uri)->value();
+        auto const& source_list = maybe_base_uri->value();
 
         // 4. If the result of executing § 6.7.2.7 Does url match source list in origin with redirect count? on base,
         //    source list, policy’s self-origin, and 0 is "Does Not Match":

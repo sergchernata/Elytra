@@ -1,0 +1,15 @@
+Harness status: OK
+
+Found 10 tests
+
+10 Pass
+Pass	Nonceable script element 0
+Pass	Non-nonceable script element 1
+Pass	Non-nonceable script element 2
+Pass	Non-nonceable script element 3
+Pass	Non-nonceable script element 4
+Pass	Non-nonceable script element 5
+Pass	Non-nonceable script element 6
+Pass	Non-nonceable script element 7
+Pass	Non-nonceable script element 8
+Pass	Non-nonceable script element 9

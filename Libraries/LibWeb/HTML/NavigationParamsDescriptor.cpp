@@ -36,7 +36,7 @@ static SerializedPolicyContainer serialize_request_policy_container(Fetch::Infra
             VERIFY(request.client());
             return request.client()->policy_container()->serialize();
         },
-        [](GC::Ref<PolicyContainer> policy_container) {
+        [](NonnullRefPtr<PolicyContainer const> const& policy_container) {
             return policy_container->serialize();
         });
 }
@@ -59,11 +59,9 @@ static NavigationRequestDescriptor create_navigation_request_descriptor(Fetch::I
 
 static Optional<ByteBuffer> copy_body_source(Fetch::Infrastructure::Body const& body)
 {
-    return body.source().visit(
-        [](Empty) -> Optional<ByteBuffer> { return {}; },
-        [](ByteBuffer const& bytes) -> Optional<ByteBuffer> { return MUST(ByteBuffer::copy(bytes)); },
-        [](Core::ImmutableBytes const& bytes) -> Optional<ByteBuffer> { return MUST(ByteBuffer::copy(bytes.bytes())); },
-        [](GC::Ref<FileAPI::Blob> const& blob) -> Optional<ByteBuffer> { return MUST(ByteBuffer::copy(blob->raw_bytes())); });
+    if (auto const& source = body.source(); source.has_value())
+        return MUST(source->copy_to_byte_buffer());
+    return {};
 }
 
 static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch::Infrastructure::Response const& response)
@@ -304,7 +302,7 @@ static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::R
                 return;
             }
 
-            body->set_sniff_bytes_complete();
+            body->set_sniff_bytes_failed();
             if (stream->is_readable())
                 stream->error(JS::TypeError::create(realm, "Transferred navigation response failed"_utf16));
         });

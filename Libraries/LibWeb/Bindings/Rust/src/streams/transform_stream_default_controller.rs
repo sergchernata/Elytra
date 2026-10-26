@@ -77,7 +77,7 @@ impl TransformStreamDefaultController {
     }
 
     pub(crate) fn set_cancel_algorithm(&self, algorithm: Option<CancelAlgorithm>) {
-        *self.cancel_algorithm.borrow_mut() = algorithm;
+        self.cancel_algorithm.replace(algorithm);
     }
 
     pub(crate) fn flush_algorithm(&self) -> Option<FlushAlgorithm> {
@@ -85,7 +85,7 @@ impl TransformStreamDefaultController {
     }
 
     pub(crate) fn set_flush_algorithm(&self, algorithm: Option<FlushAlgorithm>) {
-        *self.flush_algorithm.borrow_mut() = algorithm;
+        self.flush_algorithm.replace(algorithm);
     }
 
     pub(crate) fn transform_algorithm(&self) -> Option<TransformAlgorithm> {
@@ -93,7 +93,7 @@ impl TransformStreamDefaultController {
     }
 
     pub(crate) fn set_transform_algorithm(&self, algorithm: Option<TransformAlgorithm>) {
-        *self.transform_algorithm.borrow_mut() = algorithm;
+        self.transform_algorithm.replace(algorithm);
     }
 
     // https://streams.spec.whatwg.org/#ts-default-controller-desired-size
@@ -168,7 +168,7 @@ pub(crate) fn set_up_transform_stream_default_controller_from_transformer(
     transformer_dict: Transformer,
 ) {
     // 1. Let controller be a new TransformStreamDefaultController.
-    let controller = allocate(cx.vm(), TransformStreamDefaultController::new());
+    let controller = allocate(cx.vm(), |_| TransformStreamDefaultController::new());
 
     // 2. Let transformAlgorithm be the following steps, taking a chunk argument:
     let mut transform_algorithm = TransformAlgorithm::Enqueue(controller);

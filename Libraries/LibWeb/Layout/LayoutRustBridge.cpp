@@ -357,25 +357,35 @@ void publish_element_scroll_offset(DOM::Element const& element)
     RustFFI::render_state_set_element_scroll_offset(document.layout_node_arena().host(), element.style_node_id().value(), offset);
 }
 
+void publish_writing_suggestion(DOM::Document& document, DOM::Text const* text, size_t offset, Utf16View remainder)
+{
+    // A text node without a style node identity has no box to show a suggestion in, so it publishes that none shows.
+    auto identity = text ? text->style_node_id().value() : 0;
+    // Nothing is published before a layout tree exists, so there's nothing to withdraw.
+    if (identity == 0 && !document.layout_node_arena_if_created())
+        return;
+    Vector<u16> code_units;
+    code_units.ensure_capacity(remainder.length_in_code_units());
+    for (size_t i = 0; i < remainder.length_in_code_units(); ++i)
+        code_units.unchecked_append(remainder.code_unit_at(i));
+    RustFFI::render_state_set_writing_suggestion(document.layout_node_arena().host(), identity, offset, code_units.data(), code_units.size());
+}
+
 void publish_table_spans(DOM::Element const& element)
 {
     if (element.style_node_id().value() == 0)
         return;
     u16 column_span = 1;
     u16 row_span = 1;
-    u32 raw_column_span = 1;
     if (auto const* cell = as_if<HTML::HTMLTableCellElement>(element)) {
         column_span = static_cast<u16>(cell->col_span());
         row_span = static_cast<u16>(cell->row_span());
     } else if (auto const* column = as_if<HTML::HTMLTableColElement>(element)) {
         column_span = static_cast<u16>(column->span());
-        // The raw span keeps the unclamped attribute value; its only consumer is the table formatting context's column
-        // handling, so other elements' span attributes stay out of the mirror.
-        raw_column_span = column->get_attribute_value(HTML::AttributeNames::span).to_number<u32>().value_or(1);
     } else {
         return;
     }
-    CSS::StyleEngineFFI::style_engine_set_element_table_spans(const_cast<DOM::Document&>(element.document()).style_computer().style_engine().host(), element.style_node_id(), column_span, row_span, raw_column_span);
+    CSS::StyleEngineFFI::style_engine_set_element_table_spans(const_cast<DOM::Document&>(element.document()).style_computer().style_engine().host(), element.style_node_id(), column_span, row_span);
 }
 
 // The publication is keyed by the element's style node rather than by a row, because an element that draws nothing

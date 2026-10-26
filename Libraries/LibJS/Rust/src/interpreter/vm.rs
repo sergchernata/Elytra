@@ -4,14 +4,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use core::cell::{Cell, OnceCell, RefCell};
+use core::cell::{Cell, OnceCell, Ref, RefCell};
 use core::ffi::c_void;
 use core::ops::ControlFlow;
 use core::ptr::NonNull;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use ak::{Utf16FlyString, Utf16String};
 use libjs_runtime_macros::Trace;
@@ -30,9 +29,10 @@ use crate::gc::capi::{self, GCVisitor};
 use crate::gc::class::{GcCell, define_cell};
 use crate::gc::foreign::ForeignCellSlot;
 use crate::gc::gc_ref_cell::GcRefCell;
-use crate::gc::heap::{Heap, cell_is_dead};
+use crate::gc::heap::Heap;
 use crate::gc::heap_function::HeapFunction;
 use crate::gc::root::{MarkedVec, RootSet};
+use crate::gc::sweep::Sweep;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::gc::weak_container::WeakContainer;
 use crate::jit::code::INLINED_CALL_SITE_BIT;
@@ -566,7 +566,7 @@ pub struct Vm {
     weak_containers: RefCell<Vec<WeakContainer>>,
     /// The finalization registries whose targets died in the collection in progress, which are handed to
     /// HostEnqueueFinalizationRegistryCleanupJob once it is over.
-    finalization_registries_with_dead_cells: RefCell<Vec<Gc<FinalizationRegistry>>>,
+    finalization_registries_with_dead_cells: GcRefCell<Vec<Gc<FinalizationRegistry>>>,
     host_resize_array_buffer: Cell<HostResizeArrayBuffer>,
     host_grow_shared_array_buffer: Cell<HostGrowSharedArrayBuffer>,
     host_load_imported_module: Cell<HostLoadImportedModule>,
@@ -584,7 +584,7 @@ pub struct Vm {
     /// their object. The objects are weak: the sweep callback forgets the ones that die.
     intrinsic_accessors: RefCell<IntrinsicAccessorMap>,
     /// The debugger, which the head points to while it is attached.
-    debugger: RefCell<Option<Rc<Debugger>>>,
+    debugger: RefCell<Option<Box<Debugger>>>,
     /// The properties defined with Object::define_unimplemented_property. The objects are weak: the sweep callback
     /// forgets the ones that die.
     unimplemented_properties: RefCell<UnimplementedPropertyMap>,
@@ -682,7 +682,7 @@ impl Vm {
             ),
             interned_strings: RefCell::default(),
             json_parse_cache: JsonParseCache::default(),
-            json_stringify_cache: JsonStringifyCache::default(),
+            json_stringify_cache: JsonStringifyCache::new(),
             empty_string: OnceCell::new(),
             cached_strings: OnceCell::new(),
             single_ascii_character_strings: OnceCell::new(),
@@ -712,7 +712,7 @@ impl Vm {
             job_queues: OnceCell::new(),
             run_executable_depth: Cell::new(0),
             weak_containers: RefCell::new(Vec::new()),
-            finalization_registries_with_dead_cells: RefCell::new(Vec::new()),
+            finalization_registries_with_dead_cells: GcRefCell::new(Vec::new()),
             host_resize_array_buffer: Cell::new(default_host_resize_array_buffer),
             host_grow_shared_array_buffer: Cell::new(default_host_grow_shared_array_buffer),
             host_load_imported_module: Cell::new(Vm::load_imported_module),
@@ -768,7 +768,7 @@ impl Vm {
         let allocate_interned_string = |string: &str| {
             let string = self
                 .heap()
-                .allocate(PrimitiveString::new(Utf16String::from_utf8(string)));
+                .allocate(|_| PrimitiveString::new(Utf16String::from_utf8(string)));
             string.set_interned();
             string
         };
@@ -797,12 +797,12 @@ impl Vm {
 
         let _ = self.well_known_symbols.set(WellKnownSymbols::create(self));
         let _ = self.global_symbol_registry.set(GlobalSymbolRegistry::create(self));
-        let _ = self.job_queues.set(self.heap().allocate(JobQueues {
+        let _ = self.job_queues.set(self.heap().allocate(|_| JobQueues {
             header: CellHeader::for_class(JobQueues::CLASS),
             promise_jobs: GcRefCell::new(VecDeque::new()),
             finalization_registry_cleanup_jobs: GcRefCell::new(Vec::new()),
         }));
-        let _ = self.loaded_modules.set(self.heap().allocate(LoadedModules {
+        let _ = self.loaded_modules.set(self.heap().allocate(|_| LoadedModules {
             header: CellHeader::for_class(LoadedModules::CLASS),
             stored_modules: GcRefCell::new(Vec::new()),
         }));
@@ -1092,26 +1092,26 @@ impl Vm {
         if self.debugger.borrow().is_some() {
             return;
         }
-        let debugger = Rc::new(Debugger::new());
-        self.head.debugger.set(Rc::as_ptr(&debugger).cast_mut().cast());
-        *self.debugger.borrow_mut() = Some(debugger);
+        let debugger: *const Debugger = self.debugger.borrow_mut().insert(Box::new(Debugger::new())).as_ref();
+        self.head.debugger.set(debugger.cast_mut().cast());
         self.update_dispatch_tables();
         // NB: Debuggers step through bytecode, so nothing enters JIT code while one is attached, not even JIT code
         //     that runs already, which calls other JIT code only through the entries of executables.
-        let executables = self.executables.borrow().clone();
-        for executable in executables {
+        let executables = MarkedVec::new(self);
+        executables.extend_from_slice(&self.executables.borrow());
+        for executable in executables.values().iter() {
             if executable.jit_compile_state() == crate::jit::code::CompileState::Installed {
                 executable.discard_jit_code(self);
             }
         }
     }
 
+    /// Detaches the debugger, which must not be paused. Nothing may hold the debugger meanwhile.
     pub fn disable_debugging(&self) {
-        let debugger = self.debugger.borrow_mut().take();
-        if let Some(debugger) = &debugger {
-            assert!(!debugger.is_paused());
-        }
+        let mut debugger = self.debugger.borrow_mut();
+        assert!(!debugger.as_ref().is_some_and(|debugger| debugger.is_paused()));
         self.head.debugger.set(core::ptr::null_mut());
+        *debugger = None;
         drop(debugger);
         self.update_dispatch_tables();
     }
@@ -1121,12 +1121,13 @@ impl Vm {
         !self.head.debugger.get().is_null()
     }
 
+    /// Lends the attached debugger, which cannot be detached while it is lent.
     #[inline]
-    pub fn debugger(&self) -> Option<Rc<Debugger>> {
+    pub fn debugger(&self) -> Option<Ref<'_, Debugger>> {
         if !self.debugging_enabled() {
             return None;
         }
-        self.debugger.borrow().clone()
+        Ref::filter_map(self.debugger.borrow(), |debugger| debugger.as_deref()).ok()
     }
 
     pub fn register_weak_container(&self, weak_container: WeakContainer) {
@@ -1135,23 +1136,24 @@ impl Vm {
 
     /// Has the weak containers that survived this collection forget the cells that died in it, as LibGC does before
     /// it runs its sweep callbacks.
-    fn remove_dead_cells_from_weak_containers(&self) {
+    fn remove_dead_cells_from_weak_containers(&self, sweep: &Sweep<'_>) {
         self.weak_containers.borrow_mut().retain(|weak_container| {
-            if cell_is_dead(weak_container.owner()) {
+            if sweep.is_dead(weak_container.owner()) {
                 return false;
             }
-            weak_container.remove_dead_cells(self);
+            weak_container.remove_dead_cells(sweep);
             true
         });
     }
 
     /// Hands `finalization_registry` to HostEnqueueFinalizationRegistryCleanupJob once the collection in progress is
-    /// over. Only a weak container's remove_dead_cells() calls this.
-    pub fn enqueue_finalization_registry_cleanup_job_after_collection(
+    /// over. Only the sweep callback calls this, through its Sweep.
+    pub(crate) fn enqueue_finalization_registry_cleanup_job_after_collection(
         &self,
+        sweep: &Sweep<'_>,
         finalization_registry: Gc<FinalizationRegistry>,
     ) {
-        let mut finalization_registries = self.finalization_registries_with_dead_cells.borrow_mut();
+        let mut finalization_registries = self.finalization_registries_with_dead_cells.borrow_mut_in_sweep(sweep);
         if finalization_registries.is_empty() {
             let context = core::ptr::from_ref::<Vm>(self).cast_mut().cast();
             // SAFETY: The VM outlives its heap, which runs the task before it is destroyed.
@@ -1167,7 +1169,7 @@ impl Vm {
         // NB: Each registry stays in the rooted list until it is handed to the host, which may allocate.
         loop {
             let finalization_registry = {
-                let mut finalization_registries = self.finalization_registries_with_dead_cells.borrow_mut();
+                let mut finalization_registries = self.finalization_registries_with_dead_cells.borrow_mut(self);
                 if finalization_registries.is_empty() {
                     break;
                 }
@@ -1178,12 +1180,12 @@ impl Vm {
     }
 
     /// Forgets the intrinsic accessors and unimplemented properties of objects that died in this collection.
-    fn remove_dead_objects_from_intrinsic_accessors_and_unimplemented_properties(&self) {
+    fn remove_dead_objects_from_intrinsic_accessors_and_unimplemented_properties(&self, sweep: &Sweep<'_>) {
         let is_live = |object: usize| {
             // SAFETY: The maps only hold objects that were live when their entries were added, and a dead object is
             //         intact until the sweep that follows this callback.
             let object = unsafe { Gc::from_non_null(NonNull::new_unchecked(object as *mut Object)) };
-            !cell_is_dead(object)
+            !sweep.is_dead(object)
         };
         self.intrinsic_accessors
             .borrow_mut()
@@ -1292,8 +1294,8 @@ impl Vm {
     }
 
     /// The frames of every execution context, from the running one down, with where each is in its executable.
-    pub fn stack_trace(&self) -> Vec<StackTraceElement> {
-        let mut stack_trace = Vec::new();
+    pub fn stack_trace(&self) -> MarkedVec<'_, StackTraceElement> {
+        let stack_trace = MarkedVec::new(self);
         self.for_each_stack_frame_top_to_bottom(|frame| {
             // NB: Builtins written in JavaScript show up like other builtins, without a position in their source.
             let runs_builtin = frame
@@ -1336,7 +1338,10 @@ impl Vm {
             let caller = unsafe { &*caller };
             let site = return_pc & !INLINED_CALL_SITE_BIT;
             let frame_pointer = crate::jit::translate::frame_pointer_from_low_half(context.caller_dst_raw.get());
-            for frame in crate::jit::translate::call_site_frames(self, caller, site, frame_pointer) {
+            for frame in crate::jit::translate::call_site_frames(self, caller, site, frame_pointer)
+                .values()
+                .iter()
+            {
                 callback(StackFrame {
                     execution_context: caller,
                     function: Some(frame.function),
@@ -1354,8 +1359,8 @@ impl Vm {
     }
 
     /// Drops the weak cache entries of strings that died in this collection.
-    fn remove_dead_strings_from_weak_caches(&self) {
-        let is_dead = |string: Gc<PrimitiveString>| !string.header.mark.get();
+    fn remove_dead_strings_from_weak_caches(&self, sweep: &Sweep<'_>) {
+        let is_dead = |string: Gc<PrimitiveString>| sweep.is_dead(string);
         for cache_slot in self.fly_string_cache.iter() {
             if cache_slot.get().is_some_and(is_dead) {
                 cache_slot.set(None);
@@ -1370,20 +1375,20 @@ impl Vm {
     }
 
     /// Forgets the cells that died in this collection from the inline caches of executables and static call sites.
-    fn remove_dead_cells_from_property_lookup_caches(&self) {
+    fn remove_dead_cells_from_property_lookup_caches(&self, sweep: &Sweep<'_>) {
         self.executables.borrow_mut().retain(|executable| {
-            if cell_is_dead(*executable) {
-                executable.free_jit_entry_slot(self);
+            if sweep.is_dead(*executable) {
+                executable.free_jit_entry_slot(self, sweep);
                 return false;
             }
-            executable.remove_dead_cells();
+            executable.remove_dead_cells(sweep);
             true
         });
-        self.static_property_lookup_caches.remove_dead_entries();
-        self.keyed_property_lookup_cache.remove_dead_entries();
-        self.prototype_transition_cache.remove_dead_entries();
-        self.keyed_property_store_cache.remove_dead_entries();
-        self.jit.dependents.remove_dead_entries();
+        self.static_property_lookup_caches.remove_dead_entries(sweep);
+        self.keyed_property_lookup_cache.remove_dead_entries(sweep);
+        self.prototype_transition_cache.remove_dead_entries(sweep);
+        self.keyed_property_store_cache.remove_dead_entries(sweep);
+        self.jit.dependents.remove_dead_entries(sweep);
     }
 
     pub fn register_executable(&self, executable: Gc<Executable>) {
@@ -1547,7 +1552,7 @@ impl Vm {
     fn run_queued_promise_jobs_impl(&self) {
         let job_queues = self.job_queues();
         loop {
-            let Some(job) = job_queues.promise_jobs.borrow_mut().pop_front() else {
+            let Some(job) = job_queues.promise_jobs.borrow_mut(self).pop_front() else {
                 break;
             };
             let _ = HeapFunction::call(job, self);
@@ -1561,13 +1566,14 @@ impl Vm {
         // - FIXME: Let scriptOrModule be GetActiveScriptOrModule() at the time HostEnqueuePromiseJob is invoked. If realm is not null, each time job is invoked the implementation must perform implementation-defined steps
         //          such that scriptOrModule is the active script or module at the time of job's invocation.
         // - Jobs must run in the same order as the HostEnqueuePromiseJob invocations that scheduled them.
-        self.job_queues().promise_jobs.borrow_mut().push_back(job);
+        self.job_queues().promise_jobs.borrow_mut(self).push_back(job);
     }
 
     pub fn run_queued_finalization_registry_cleanup_jobs(&self) {
         let job_queues = self.job_queues();
         loop {
-            let Some(finalization_registry) = job_queues.finalization_registry_cleanup_jobs.borrow_mut().pop() else {
+            let Some(finalization_registry) = job_queues.finalization_registry_cleanup_jobs.borrow_mut(self).pop()
+            else {
                 break;
             };
             // FIXME: Handle any uncatched exceptions here.
@@ -1575,7 +1581,7 @@ impl Vm {
             if result.is_err() && finalization_registry.has_empty_cells() {
                 job_queues
                     .finalization_registry_cleanup_jobs
-                    .borrow_mut()
+                    .borrow_mut(self)
                     .push(finalization_registry);
             }
         }
@@ -1585,7 +1591,7 @@ impl Vm {
     pub fn enqueue_finalization_registry_cleanup_job(&self, finalization_registry: Gc<FinalizationRegistry>) {
         self.job_queues()
             .finalization_registry_cleanup_jobs
-            .borrow_mut()
+            .borrow_mut(self)
             .push(finalization_registry);
     }
 
@@ -2011,6 +2017,14 @@ impl Drop for Vm {
     }
 }
 
+// SAFETY: gather_roots() visits the VM's roots. The caches it skips are weak, and the VM clears them of dead cells after
+// each collection.
+unsafe impl Trace for Vm {
+    fn trace(&self, visitor: &mut Visitor) {
+        self.gather_roots(visitor);
+    }
+}
+
 unsafe extern "C" fn gather_roots(context: *mut c_void, visitor: *mut GCVisitor) {
     // SAFETY: The heap was created with the VM as its context, and LibGC passes a live visitor.
     let (vm, mut visitor) = unsafe { (&*context.cast::<Vm>(), Visitor::from_raw(visitor)) };
@@ -2020,12 +2034,14 @@ unsafe extern "C" fn gather_roots(context: *mut c_void, visitor: *mut GCVisitor)
 unsafe extern "C" fn sweep(context: *mut c_void) {
     // SAFETY: The sweep callback was registered with the VM as its context.
     let vm = unsafe { &*context.cast::<Vm>() };
-    vm.remove_dead_cells_from_weak_containers();
-    vm.remove_dead_strings_from_weak_caches();
-    vm.remove_dead_cells_from_property_lookup_caches();
-    vm.remove_dead_objects_from_intrinsic_accessors_and_unimplemented_properties();
+    // SAFETY: LibGC runs sweep callbacks once the marks are final, before it sweeps the cells that died.
+    let sweep = unsafe { Sweep::new(vm) };
+    vm.remove_dead_cells_from_weak_containers(&sweep);
+    vm.remove_dead_strings_from_weak_caches(&sweep);
+    vm.remove_dead_cells_from_property_lookup_caches(&sweep);
+    vm.remove_dead_objects_from_intrinsic_accessors_and_unimplemented_properties(&sweep);
     if let Some(debugger) = vm.debugger() {
-        debugger.remove_dead_executables();
+        debugger.remove_dead_executables(&sweep);
     }
 }
 
@@ -2056,9 +2072,12 @@ pub struct TypeErrorRealmOverride {
 
 /// An element of VM::stack_trace(): a frame's execution context, its function and where it is in its executable, if it
 /// runs one. A frame of a call that JIT code inlined has the execution context of the function it is inlined in.
+#[derive(Clone, Trace)]
 pub struct StackTraceElement {
+    #[gc(untraced)]
     pub execution_context: NonNull<ExecutionContext>,
     pub function: Option<Gc<FunctionObject>>,
+    #[gc(untraced)]
     pub source_range: Option<SourceRange>,
 }
 
@@ -2216,13 +2235,16 @@ impl Vm {
     }
 
     fn store_module(&self, referrer: ImportedModuleReferrer, filename: String, module: Gc<Module>) {
-        self.loaded_modules().stored_modules.borrow_mut().push(StoredModule {
-            referrer,
-            filename,
-            module_type: String::new(),
-            module,
-            has_once_started_linking: true,
-        });
+        self.loaded_modules()
+            .stored_modules
+            .borrow_mut(self)
+            .push(StoredModule {
+                referrer,
+                filename,
+                module_type: String::new(),
+                module,
+                has_once_started_linking: true,
+            });
     }
 
     pub fn link_and_eval_module(&self, module: Gc<CyclicModule>) -> ThrowCompletionOr<()> {

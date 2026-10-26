@@ -18,6 +18,7 @@ use num_traits::{Signed, Zero};
 use crate::bytecode::executable::{Executable, StaticPropertyLookupCacheSite};
 use crate::compile::{CompiledEval, EvalContext, parse_eval};
 use crate::gc::class::{Extends, GcCell};
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::root::MarkedVec;
 use crate::hash_table::Utf16FlyStringHashTable;
@@ -57,7 +58,7 @@ use crate::runtime::private_environment::PrivateEnvironment;
 use crate::runtime::promise_capability::{new_promise_capability, try_or_reject};
 use crate::runtime::property_attributes::PropertyAttributes;
 use crate::runtime::property_descriptor::PropertyDescriptor;
-use crate::runtime::property_key::PropertyKey;
+use crate::runtime::property_key::{NonSymbolPropertyKey, PropertyKey};
 use crate::runtime::proxy_object::ProxyObject;
 use crate::runtime::realm::Realm;
 use crate::runtime::shared_function_instance_data::{
@@ -377,7 +378,7 @@ pub struct PropertyKeyGroups<'vm> {
     keys: MarkedVec<'vm, PropertyKey>,
     elements: Vec<MarkedVec<'vm, Value>>,
     /// Symbol keys are only kept in the marked list of keys and looked up one by one.
-    index_of_string_or_number_key: HashMap<PropertyKey, usize>,
+    index_of_string_or_number_key: HashMap<NonSymbolPropertyKey, usize>,
 }
 
 impl<'vm> PropertyKeyGroups<'vm> {
@@ -443,8 +444,8 @@ impl<'vm> KeyedGroups<'vm> for PropertyKeyGroups<'vm> {
         new_elements.push(value);
 
         // 3. Append group as the last element of groups.
-        if !key.is_symbol() {
-            self.index_of_string_or_number_key.insert(key.clone(), self.keys.len());
+        if let Some(key) = NonSymbolPropertyKey::new(key.clone()) {
+            self.index_of_string_or_number_key.insert(key, self.keys.len());
         }
         self.keys.push(key);
         self.elements.push(new_elements);
@@ -735,23 +736,23 @@ pub fn ordinary_create_from_constructor(
     constructor: Gc<FunctionObject>,
     intrinsic_default_prototype: IntrinsicDefaultPrototype,
 ) -> ThrowCompletionOr<Gc<Object>> {
-    ordinary_create_from_constructor_of(vm, realm, constructor, intrinsic_default_prototype, |prototype| {
+    ordinary_create_from_constructor_of(vm, realm, constructor, intrinsic_default_prototype, |_, prototype| {
         Object::new_with_prototype(vm, Object::CLASS, prototype, MayInterfereWithIndexedPropertyAccess::No)
     })
 }
 
 // 10.1.13 OrdinaryCreateFromConstructor ( constructor, intrinsicDefaultProto [ , internalSlotsList ] ), https://tc39.es/ecma262/#sec-ordinarycreatefromconstructor
 /// The form of OrdinaryCreateFromConstructor that creates an object with the internal slots of a T, which `create`
-/// makes from the prototype.
+/// builds from the prototype, as Heap::allocate() does.
 pub fn ordinary_create_from_constructor_of<T: GcCell + Extends<Object>>(
     vm: &Vm,
     realm: Gc<Realm>,
     constructor: Gc<FunctionObject>,
     intrinsic_default_prototype: IntrinsicDefaultPrototype,
-    create: impl FnOnce(Gc<Object>) -> T,
+    create: impl FnOnce(&DeferGc<'_>, Gc<Object>) -> T,
 ) -> ThrowCompletionOr<Gc<T>> {
     let prototype = get_prototype_from_constructor(vm, constructor, intrinsic_default_prototype)?;
-    Ok(realm.create_object(vm, create(prototype)))
+    Ok(realm.create_object(vm, |defer_gc| create(defer_gc, prototype)))
 }
 
 // 10.1.14 GetPrototypeFromConstructor ( constructor, intrinsicDefaultProto ), https://tc39.es/ecma262/#sec-getprototypefromconstructor
@@ -2110,6 +2111,10 @@ pub struct DisposableResource {
 }
 
 // 2.1.3 NewDisposeCapability ( ), https://tc39.es/proposal-explicit-resource-management/#sec-newdisposecapability
+#[cfg_attr(
+    ladybird_gc_lints,
+    expect(gc_container_on_stack, reason = "a new capability holds no resources")
+)]
 pub fn new_dispose_capability() -> DisposeCapability {
     // 1. Let stack be a new empty List.
     // 2. Return the DisposeCapability Record { [[DisposableResourceStack]]: stack }.
@@ -2152,7 +2157,7 @@ pub fn add_disposable_resource(
     // 3. Append resource to disposeCapability.[[DisposableResourceStack]].
     // NB: Creating the resource can run JavaScript, so the capability is only borrowed to append to it.
     dispose_capability
-        .borrow_mut()
+        .borrow_mut(vm)
         .disposable_resource_stack
         .get_or_insert_with(Vec::new)
         .push(resource);
@@ -2417,7 +2422,7 @@ pub fn dispose_resources(
     //    collection, at this point.
 
     // 6. Set disposeCapability.[[DisposableResourceStack]] to a new empty List.
-    dispose_capability.borrow_mut().disposable_resource_stack = None;
+    dispose_capability.borrow_mut(vm).disposable_resource_stack = None;
 
     // 7. Return completion.
     completion

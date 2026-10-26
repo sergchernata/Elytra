@@ -43,7 +43,14 @@ static void report_worker_exception(WindowOrWorkerGlobalScopeMixin& window_or_wo
 {
     auto& realm = relevant_realm(window_or_worker);
     auto wrapped_error = Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm, GC::Ref { error });
-    report_an_exception(relevant_global_object(window_or_worker), wrapped_error, OmitError::Yes);
+    ErrorInformation error_info {
+        .message = error.message(),
+        .filename = error.filename(),
+        .error = wrapped_error,
+        .lineno = error.lineno(),
+        .colno = error.colno(),
+    };
+    report_an_exception(relevant_global_object(window_or_worker), wrapped_error, move(error_info), OmitError::Yes);
 }
 
 GC::Ref<WorkerAgentParent> WorkerAgentParent::create(URL::URL url, WorkerOptions const& options,
@@ -233,7 +240,7 @@ void WorkerAgentParent::report_content_security_policy_violation(u64 policy_inde
     //     only grows, so policy_index names the policy that was violated. The worker's process is less trusted than
     //     this one, so we only report violations of policies in outside settings' CSP list, and of worker-src, which
     //     is the effective directive of every worker script request.
-    auto const& policies = m_outside_settings->policy_container()->csp_list->policies();
+    auto const& policies = m_outside_settings->policy_container()->csp_list.policies();
     if (policy_index >= policies.size() || ContentSecurityPolicy::Directives::Names::WorkerSrc != effective_directive.bytes_as_string_view())
         return;
 

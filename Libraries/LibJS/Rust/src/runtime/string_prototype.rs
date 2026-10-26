@@ -279,12 +279,9 @@ impl StringPrototype {
     }
 
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<StringPrototype> {
-        realm.create_object(
-            vm,
-            StringPrototype {
-                base: StringObject::new(vm, Self::CLASS, vm.empty_string(), realm.object_prototype()),
-            },
-        )
+        realm.create_object(vm, |_| StringPrototype {
+            base: StringObject::new(vm, Self::CLASS, vm.empty_string(), realm.object_prototype()),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -2199,13 +2196,9 @@ impl<'vm> SubstringList<'vm> {
                 Array::create_from(vm, realm, &self.first_substrings[..self.length]).upcast::<Object>(),
             );
         }
-        // NB: The array is allocated before the first substrings are copied off the stack, so the collector still
-        //     finds them there if the allocation collects.
-        let array = Array::create(vm, realm, 0, None).must();
-        let mut elements = self.first_substrings.to_vec();
-        self.other_substrings
-            .with_values(|others| elements.extend_from_slice(others));
-        array.set_indexed_property_elements(&elements);
-        Value::from_object(array.upcast::<Object>())
+        let elements = MarkedVec::with_capacity(vm, self.length);
+        elements.extend_from_slice(&self.first_substrings);
+        elements.extend_from_slice(&self.other_substrings.values());
+        Value::from_object(Array::create_from_list(vm, realm, &elements).upcast::<Object>())
     }
 }

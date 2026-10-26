@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	col visibility:collapse doesn't change table height
+Pass	col visibility:collapse changes table width

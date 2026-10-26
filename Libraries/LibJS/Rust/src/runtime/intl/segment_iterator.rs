@@ -4,14 +4,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ops::Deref;
 
 use ak::Utf16String;
 use libjs_runtime_macros::Trace;
 
 use crate::gc::class::{Finalize, GcCell, define_cell};
-use crate::gc::gc_ref_cell::GcRefCell;
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::Gc;
 use crate::layout::object::Object;
@@ -27,7 +26,7 @@ use crate::utf16::Utf16View;
 pub struct SegmentIterator {
     base: Object,
     #[gc(untraced)]
-    iterating_segmenter: GcRefCell<Option<unicode::Segmenter>>, // [[IteratingSegmenter]]
+    iterating_segmenter: RefCell<Option<unicode::Segmenter>>, // [[IteratingSegmenter]]
     #[gc(untraced)]
     iterated_string: Utf16String, // [[IteratedString]]
 
@@ -67,23 +66,20 @@ impl SegmentIterator {
         // 5. Set iterator.[[IteratedStringNextSegmentCodeUnitIndex]] to 0.
         // 6. Return iterator.
         segmenter.set_segmented_text(Utf16View::of_string(&string));
-        realm.create_object(
-            vm,
-            SegmentIterator {
-                base: Object::new_with_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm.intrinsics().intl_segment_iterator_prototype(),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-                iterating_segmenter: GcRefCell::new(Some(segmenter)),
-                iterated_string: string,
-                segments: Cell::new(segments),
-            },
-        )
+        realm.create_object(vm, |_| SegmentIterator {
+            base: Object::new_with_prototype(
+                vm,
+                Self::CLASS,
+                realm.intrinsics().intl_segment_iterator_prototype(),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+            iterating_segmenter: RefCell::new(Some(segmenter)),
+            iterated_string: string,
+            segments: Cell::new(segments),
+        })
     }
 
-    pub fn iterating_segmenter(&self) -> &GcRefCell<Option<unicode::Segmenter>> {
+    pub fn iterating_segmenter(&self) -> &RefCell<Option<unicode::Segmenter>> {
         &self.iterating_segmenter
     }
 

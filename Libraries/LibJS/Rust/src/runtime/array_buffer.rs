@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU64;
@@ -847,7 +847,8 @@ pub struct ArrayBuffer {
     detach_key: Cell<Value>,
     /// The views that cache the offset of this buffer's data in the cage, which has to be invalidated once the data
     /// moves or goes away.
-    cached_views: GcRefCell<Vec<GcWeak<TypedArrayBase>>>,
+    #[gc(untraced)]
+    cached_views: RefCell<Vec<GcWeak<TypedArrayBase>>>,
 }
 
 define_cell!(
@@ -893,7 +894,7 @@ impl ArrayBuffer {
             data_block: GcRefCell::new(DataBlock::new(buffer, is_shared)),
             max_byte_length: Cell::new(None),
             detach_key: Cell::new(Value::UNDEFINED),
-            cached_views: GcRefCell::new(Vec::new()),
+            cached_views: RefCell::new(Vec::new()),
         }
     }
 
@@ -903,7 +904,7 @@ impl ArrayBuffer {
             data_block: GcRefCell::new(DataBlock::empty(is_shared)),
             max_byte_length: Cell::new(None),
             detach_key: Cell::new(Value::UNDEFINED),
-            cached_views: GcRefCell::new(Vec::new()),
+            cached_views: RefCell::new(Vec::new()),
         }
     }
 
@@ -922,7 +923,7 @@ impl ArrayBuffer {
         };
 
         let prototype = prototype_for_shared_state(vm, realm, is_shared);
-        Ok(realm.create_object(vm, ArrayBuffer::new_with_buffer(vm, buffer, is_shared, prototype)))
+        Ok(realm.create_object(vm, |_| ArrayBuffer::new_with_buffer(vm, buffer, is_shared, prototype)))
     }
 
     /// ArrayBuffer::create(Realm&, ByteBuffer, DataBlock::Shared)
@@ -930,8 +931,9 @@ impl ArrayBuffer {
         let owned_buffer =
             OwnedBackingStore::create_uninitialized(bytes.len()).expect("allocating the data block succeeds");
         let prototype = prototype_for_shared_state(vm, realm, is_shared);
-        let array_buffer =
-            realm.create_object(vm, ArrayBuffer::new_with_buffer(vm, owned_buffer, is_shared, prototype));
+        let array_buffer = realm.create_object(vm, |_| {
+            ArrayBuffer::new_with_buffer(vm, owned_buffer, is_shared, prototype)
+        });
         array_buffer.overwrite(0, bytes);
         vm.heap()
             .did_allocate_external_memory(array_buffer.external_memory_size());
@@ -958,7 +960,7 @@ impl ArrayBuffer {
             );
         };
         let prototype = prototype_for_shared_state(vm, realm, is_shared);
-        let array_buffer = realm.create_object(vm, ArrayBuffer::new_with_buffer(vm, buffer, is_shared, prototype));
+        let array_buffer = realm.create_object(vm, |_| ArrayBuffer::new_with_buffer(vm, buffer, is_shared, prototype));
         array_buffer.with_data_block(|data_block| {
             let written = if byte_length == 0 {
                 write(&mut [])
@@ -982,7 +984,7 @@ impl ArrayBuffer {
     pub fn create_from_data_block(vm: &Vm, realm: Gc<Realm>, block: DataBlock) -> Gc<ArrayBuffer> {
         let is_shared = block.is_shared;
         let prototype = prototype_for_shared_state(vm, realm, is_shared);
-        let array_buffer = realm.create_object(vm, ArrayBuffer::new(vm, is_shared, prototype));
+        let array_buffer = realm.create_object(vm, |_| ArrayBuffer::new(vm, is_shared, prototype));
         array_buffer.set_data_block(vm, block);
         array_buffer
     }
@@ -1209,7 +1211,9 @@ impl ArrayBuffer {
 
         let old_external_memory_size = self.external_memory_size();
         let old_data_offset = self.data_offset();
-        self.data_block.borrow_mut().try_resize(new_size, zero_fill_new_bytes)?;
+        self.data_block
+            .borrow_mut(vm)
+            .try_resize(new_size, zero_fill_new_bytes)?;
         if self.data_offset() != old_data_offset {
             self.invalidate_cached_typed_array_view_offsets();
         }
@@ -1220,7 +1224,7 @@ impl ArrayBuffer {
     pub fn try_ensure_capacity(&self, vm: &Vm, new_capacity: usize) -> Result<(), OutOfMemory> {
         let old_external_memory_size = self.external_memory_size();
         let old_data_offset = self.data_offset();
-        self.data_block.borrow_mut().try_ensure_capacity(new_capacity)?;
+        self.data_block.borrow_mut(vm).try_ensure_capacity(new_capacity)?;
         if self.data_offset() != old_data_offset {
             self.invalidate_cached_typed_array_view_offsets();
         }
@@ -1651,7 +1655,7 @@ pub fn allocate_array_buffer(
         realm,
         constructor,
         Intrinsics::array_buffer_prototype,
-        |prototype| ArrayBuffer::new(vm, Shared::No, prototype),
+        |_, prototype| ArrayBuffer::new(vm, Shared::No, prototype),
     )?;
 
     // 5. Let block be ? CreateByteDataBlock(byteLength).
@@ -1856,7 +1860,7 @@ pub fn allocate_shared_array_buffer(
         realm,
         constructor,
         Intrinsics::shared_array_buffer_prototype,
-        |prototype| ArrayBuffer::new(vm, Shared::Yes, prototype),
+        |_, prototype| ArrayBuffer::new(vm, Shared::Yes, prototype),
     )?;
 
     // 6. If allocatingGrowableBuffer is true, let allocLength be maxByteLength; otherwise let allocLength be byteLength.

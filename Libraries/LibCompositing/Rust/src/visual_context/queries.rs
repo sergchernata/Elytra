@@ -334,8 +334,8 @@ impl VisualContextTree {
                 // NOTE: The clip path is in absolute device-pixel coordinates. After inverse-transforming, `point`
                 //       is also in device-pixel coordinates, so we compare them directly.
                 if !clip_path.bounding_rect.contains_point(IntPoint {
-                    x: point.x as i32,
-                    y: point.y as i32,
+                    x: point.x.floor() as i32,
+                    y: point.y.floor() as i32,
                 }) {
                     return false;
                 }
@@ -548,6 +548,23 @@ impl VisualContextTree {
                 SpatialData::Sticky(sticky) => Some(sticky.parent_sticky.unwrap_or(sticky.scroller)),
                 _ => nearest_scroll_like_ancestor(node_index),
             };
+        }
+        offset
+    }
+
+    /// The sum of the resolved offsets of the sticky nodes on the spatial chain from `index` up to the viewport, in
+    /// device pixels.
+    pub fn accumulated_sticky_offset(&self, index: SpatialNodeIndex, resolved_offsets: &[FloatPoint]) -> FloatPoint {
+        let mut offset = FloatPoint::default();
+        let mut current = index;
+        while current != VISUAL_VIEWPORT_NODE_INDEX && (current.0 as usize) < self.spatial_nodes.len() {
+            let node = &self.spatial_nodes[current.0 as usize];
+            if matches!(node.data, SpatialData::Sticky(_)) {
+                let entry = device_offset_for_index(resolved_offsets, current);
+                offset.x += entry.x;
+                offset.y += entry.y;
+            }
+            current = node.parent;
         }
         offset
     }

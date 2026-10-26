@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Find.h>
 #include <AK/HashTable.h>
 #include <AK/JsonObject.h>
 #include <AK/NumericLimits.h>
@@ -21,9 +22,9 @@
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Date.h>
+#include <LibJS/Runtime/Environment.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/Object.h>
-#include <LibJS/Runtime/Reference.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibMediaClient/Client.h>
 #include <LibURL/Parser.h>
@@ -59,6 +60,7 @@
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Editing/SpellingMarkers.h>
+#include <LibWeb/Editing/WritingSuggestionController.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/NetworkPartitionKey.h>
 #include <LibWeb/Geolocation/Geolocation.h>
@@ -104,6 +106,7 @@
 #include <LibWeb/Painting/Scrolling.h>
 #include <LibWeb/PictureInPicture/PictureInPictureController.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
+#include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/StyleValueRustFFI.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Promise.h>
@@ -418,14 +421,16 @@ WebIDL::ExceptionOr<void> Internals::mark_as_garbage(Utf16String const& variable
     if (!outer_environment.has_value())
         return vm.throw_completion<JS::ReferenceError>(JS::ErrorType::UnknownIdentifier, variable_name_fly);
 
-    auto reference = TRY(vm.resolve_binding(variable_name_fly, JS::Strict::No, outer_environment.value()->lexical_environment));
-    auto value = TRY(reference.get_value(vm));
+    auto environment = TRY(vm.resolve_binding(variable_name_fly, JS::Strict::No, outer_environment.value()->lexical_environment));
+    if (!environment)
+        return vm.throw_completion<JS::ReferenceError>(JS::ErrorType::UnknownIdentifier, variable_name_fly);
+    auto value = TRY(environment->get_binding_value(vm, variable_name_fly, false));
 
     if (!JS::can_be_held_weakly(value))
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::CannotBeHeldWeakly, value);
 
-    TRY(reference.put_value(vm, JS::js_undefined()));
-    (void)TRY(reference.delete_(vm));
+    TRY(environment->set_mutable_binding(vm, variable_name_fly, JS::js_undefined(), false));
+    (void)TRY(environment->delete_binding(vm, variable_name_fly));
     vm.heap().uproot_cell(&value.as_cell());
     return {};
 }
@@ -1098,6 +1103,13 @@ void Internals::spoof_current_url(Utf16String const& url_string)
     window.associated_document().set_origin(origin);
     HTML::relevant_settings_object(window.associated_document()).creation_url = url.release_value();
     page().client().page_did_spoof_document_origin_for_testing(window.associated_document().relevant_settings_object(), origin);
+}
+
+void Internals::spoof_current_origin_in_this_process(Utf16String const& url_string)
+{
+    auto url = DOMURL::parse(url_string.utf16_view());
+    VERIFY(url.has_value());
+    window().associated_document().set_origin(url->origin());
 }
 
 void Internals::load_url(Utf16String const& url_string)
@@ -2701,8 +2713,9 @@ WebIDL::ExceptionOr<GC::Ref<JS::Object>> Internals::image_animation_state_for_ur
     if (!parsed_url.has_value())
         return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = Utf16String::formatted("Invalid URL: '{}'", url_utf8) };
 
-    auto it = document.shared_resource_requests().find(*parsed_url);
-    if (it == document.shared_resource_requests().end())
+    auto& shared_resource_requests = document.shared_resource_requests();
+    auto it = find_if(shared_resource_requests.begin(), shared_resource_requests.end(), [&](auto const& entry) { return entry.key.url == *parsed_url; });
+    if (it == shared_resource_requests.end())
         return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = Utf16String::formatted("URL doesn't have any associated shared resource requests: '{}'", url_utf8) };
 
     auto image_data = it->value->image_data();
@@ -2747,6 +2760,45 @@ String Internals::viewport_overflow_x()
         return "visible"_string;
     }
     VERIFY_NOT_REACHED();
+}
+
+namespace {
+
+// The bytes of a stream from create_stream_pulling_from_bytes() that it has not pulled yet.
+struct UnpulledBytes final : public RefCounted<UnpulledBytes> {
+    explicit UnpulledBytes(ByteBuffer bytes)
+        : bytes(move(bytes))
+    {
+    }
+
+    ByteBuffer bytes;
+};
+
+}
+
+GC::Ref<Streams::ReadableStream> Internals::create_stream_pulling_from_bytes(String const& bytes, WebIDL::UnsignedLong pull_size)
+{
+    auto& realm = window().principal_realm();
+    auto stream = Streams::ReadableStream::create(realm);
+    auto unpulled = make_ref_counted<UnpulledBytes>(MUST(ByteBuffer::copy(bytes.bytes())));
+
+    auto pull_algorithm = GC::create_function(realm.heap(), [realm = GC::Ref { realm }, stream, unpulled, pull_size] {
+        auto& remaining = unpulled->bytes;
+        auto size = min(remaining.size(), static_cast<size_t>(pull_size));
+        if (auto view_byte_length = stream->current_byob_request_view_byte_length(); view_byte_length.has_value())
+            size = min(size, static_cast<size_t>(*view_byte_length));
+
+        if (size > 0) {
+            MUST(stream->pull_from_bytes(remaining.bytes().trim(size)));
+            remaining = MUST(remaining.slice(size, remaining.size() - size));
+        }
+        if (remaining.is_empty())
+            stream->close();
+        return WebIDL::create_resolved_promise(*realm, JS::js_undefined());
+    });
+
+    stream->set_up_with_byte_reading_support(realm, pull_algorithm);
+    return stream;
 }
 
 static GC::Ref<JS::Object> create_hit_testing_result(JS::Realm& realm, Painting::HitTestResult& result)
@@ -2852,6 +2904,60 @@ GC::Ref<WebIDL::Promise> Internals::spell_check_settled()
     auto& realm = window().principal_realm();
     auto promise = WebIDL::create_promise_for(window());
     page().when_spell_checking_settled(GC::create_function(heap(), [&realm, promise] {
+        HTML::TemporaryExecutionContext execution_context { realm };
+        WebIDL::resolve_promise(promise);
+    }));
+    return promise;
+}
+
+GC::Ref<WebIDL::Promise> Internals::request_writing_suggestion_for_testing(Utf16String const& text, WebIDL::UnsignedLong caret_offset)
+{
+    auto& realm = window().principal_realm();
+    auto promise = WebIDL::create_promise_for(window());
+    auto& page = this->page();
+    if (!page.writing_suggestions_available()) {
+        WebIDL::reject_promise(realm, promise, JS::PrimitiveString::create(vm(), "Writing suggestions are unavailable"_utf16));
+        return promise;
+    }
+    page.request_writing_suggestion(text, caret_offset, GC::create_function(heap(), [&realm, promise](Optional<WritingSuggestion> suggestion) {
+        HTML::TemporaryExecutionContext execution_context { realm };
+        auto result = suggestion.has_value()
+            ? Utf16String::formatted("{}-{}:{}", suggestion->replacement_start, suggestion->replacement_length, suggestion->text)
+            : "(none)"_utf16;
+        WebIDL::resolve_promise(realm, promise, JS::PrimitiveString::create(realm.vm(), move(result)));
+    }));
+    return promise;
+}
+
+// The writing suggestion showing in any document of the page.
+Utf16String Internals::writing_suggestion()
+{
+    for (auto const& navigable : page().hosted_navigables()) {
+        auto document = navigable->active_document();
+        if (!document)
+            continue;
+        if (auto* controller = document->writing_suggestion_controller_if_exists(); controller && controller->showing().has_value())
+            return controller->showing()->remainder;
+    }
+    return "(none)"_utf16;
+}
+
+GC::Ref<WebIDL::Promise> Internals::writing_suggestion_settled()
+{
+    auto& realm = window().principal_realm();
+    auto promise = WebIDL::create_promise_for(window());
+    page().when_writing_suggestions_settled(GC::create_function(heap(), [&realm, promise] {
+        HTML::TemporaryExecutionContext execution_context { realm };
+        WebIDL::resolve_promise(promise);
+    }));
+    return promise;
+}
+
+GC::Ref<WebIDL::Promise> Internals::writing_suggestion_request_sent()
+{
+    auto& realm = window().principal_realm();
+    auto promise = WebIDL::create_promise_for(window());
+    page().when_writing_suggestion_requested(GC::create_function(heap(), [&realm, promise] {
         HTML::TemporaryExecutionContext execution_context { realm };
         WebIDL::resolve_promise(promise);
     }));

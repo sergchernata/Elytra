@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 
 use ak::Utf16FlyString;
 
 use crate::gc::class::{GcCell, define_cell};
-use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::{CellHeader, Gc};
@@ -55,7 +54,7 @@ impl PrivateName {
 /// The parts of a private environment the interpreter does not read.
 pub struct PrivateEnvironmentStorage {
     /// [[Names]]
-    private_names: GcRefCell<Vec<PrivateName>>,
+    private_names: RefCell<Vec<PrivateName>>,
     unique_id: u64,
 }
 
@@ -75,11 +74,11 @@ impl PrivateEnvironment {
         let unique_id = vm.next_private_environment_id().get();
         assert!(unique_id != u64::MAX);
         vm.next_private_environment_id().set(unique_id + 1);
-        vm.heap().allocate(PrivateEnvironment {
+        vm.heap().allocate(|_| PrivateEnvironment {
             header: CellHeader::for_class(Self::CLASS),
             outer: Cell::new(parent),
             storage: PrivateEnvironmentStorage {
-                private_names: GcRefCell::new(Vec::new()),
+                private_names: RefCell::new(Vec::new()),
                 unique_id,
             },
         })

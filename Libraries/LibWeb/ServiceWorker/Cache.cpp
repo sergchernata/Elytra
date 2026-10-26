@@ -286,7 +286,7 @@ void Cache::add_all(JS::Realm& realm, ReadonlySpan<Fetch::RequestInfo> requests,
         // 6. Run the following substeps in parallel:
         Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), [&realm, fetch_controllers, inner_request, response_promise]() {
             // * Append the result of fetching r.
-            Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+            Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::DeliverStreamToConsumerAgent };
 
             // * To processResponse for response, run these substeps:
             fetch_algorithms_input.process_response = [&realm, fetch_controllers, response_promise](GC::Ref<Fetch::Infrastructure::Response> response) {
@@ -825,7 +825,7 @@ GC::Ref<RequestResponseList> Cache::query_cache(JS::Realm& realm, GC::Ref<Fetch:
             }
 
             // 1. Let requestCopy be a copy of cachedRequest.
-            auto request_copy = cached_request->clone(realm);
+            auto request_copy = cached_request->clone(realm, Fetch::Infrastructure::Request::BodyCloning::Tee);
 
             // 2. Let responseCopy be a copy of cachedResponse.
             auto response_copy = cached_response->clone(realm);
@@ -849,7 +849,7 @@ WebIDL::ExceptionOr<bool> Cache::batch_cache_operations(JS::Realm& realm, GC::Re
     auto backup_cache = GC::Heap::the().allocate<RequestResponseList>();
 
     for (auto request_response : cache->elements()) {
-        auto backup_request = request_response->request->clone(realm);
+        auto backup_request = request_response->request->clone(realm, Fetch::Infrastructure::Request::BodyCloning::Tee);
         auto backup_response = request_response->response->clone(realm);
 
         auto backup_request_response = GC::Heap::the().allocate<RequestResponse>(backup_request, backup_response);

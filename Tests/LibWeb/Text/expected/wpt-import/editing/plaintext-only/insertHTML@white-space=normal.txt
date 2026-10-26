@@ -1,0 +1,28 @@
+Harness status: OK
+
+Found 20 tests
+
+16 Pass
+4 Fail
+Pass	execCommand("insertHTML", false, "plaintext") when ""
+Pass	execCommand("insertHTML", false, "1st line
+2nd line") when ""
+Fail	execCommand("insertHTML", false, "<pre>1st line
+2nd line</pre>") when ""
+Pass	execCommand("insertHTML", false, "plaintext") when "<b>{}</b>"
+Pass	execCommand("insertHTML", false, "plaintext") when "<b>{}<br></b>"
+Pass	execCommand("insertHTML", false, "plaintext") when "<b>A[]B</b>"
+Pass	execCommand("insertHTML", false, "plaintext") when "<span>A[]B</span>"
+Pass	execCommand("insertHTML", false, "<div>abc</div>") when ""
+Fail	execCommand("insertHTML", false, "<div>abc<br>def</div>") when ""
+Fail	execCommand("insertHTML", false, "<div>abc</div><div>def</div>") when ""
+Fail	execCommand("insertHTML", false, "<div>abc<br>def</div><div>ghi<br>jkl</div>") when ""
+Pass	execCommand("insertHTML", false, "<noscript>no script</noscript>") when ""
+Pass	execCommand("insertHTML", false, "<noframes>no frames</noframes>") when ""
+Pass	execCommand("insertHTML", false, "<script>script</script>") when ""
+Pass	execCommand("insertHTML", false, "<style>style</style>") when ""
+Pass	execCommand("insertHTML", false, "<html><head><title>title</title></head><body>body</body></html>") when ""
+Pass	execCommand("insertHTML", false, "plain  text") when ""
+Pass	execCommand("insertHTML", false, "<span>plain  text</span>") when ""
+Pass	execCommand("insertHTML", false, "<pre>plain  text</pre>") when ""
+Pass	execCommand("insertHTML", false, "") when "A[B]C"

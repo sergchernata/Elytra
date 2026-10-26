@@ -1,0 +1,180 @@
+name: Build and Test
+
+on:
+  workflow_call:
+    inputs:
+      toolchain:
+        required: true
+        type: string
+      os_name:
+        required: true
+        type: string
+      runner_labels:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      build_preset:
+        required: true
+        type: string
+      clang_plugins:
+        required: false
+        type: boolean
+        default: false
+      container:
+        required: false
+        type: string
+        default: 'null'
+    secrets:
+      VCPKG_CACHE_SAS:
+        required: false
+
+jobs:
+  CI:
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    container: ${{ fromJSON(inputs.container) }}
+
+    steps:
+      # Pull requests can trail behind `master` and can cause breakage if merging before running the CI checks on an updated branch.
+      # Luckily, GitHub creates and maintains a merge branch that is updated whenever the target or source branch is modified. By
+      # checking this branch out, we gain a stabler `master` at the cost of reproducibility.
+      - uses: actions/checkout@v7.0.1
+        if: ${{ github.event_name != 'pull_request' }}
+
+      - uses: actions/checkout@v7.0.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+
+      - name: Build
+        uses: ./.github/actions/build
+        with:
+          os: ${{ inputs.os_name }}
+          arch: ${{ inputs.arch }}
+          toolchain: ${{ inputs.toolchain }}
+          build_preset: ${{ inputs.build_preset }}
+          clang_plugins: ${{ inputs.clang_plugins }}
+          vcpkg_cache_sas: ${{ secrets.VCPKG_CACHE_SAS }}
+
+      # The macOS AX tests run against this bundle on another machine (see macos-accessibility-tests.yml). So the
+      # bundle has to be self-contained. To make it self-contained, this script copies the libraries in, Qt included,
+      # adds the Qt platform plugin, re-signs the executables with the entitlements the build used, and tars the result.
+      - name: Package the macOS app bundle for the accessibility tests
+        if: ${{ inputs.os_name == 'macOS' && inputs.build_preset == 'Sanitizer' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          "${{ env.pythonLocation }}/bin/python" Meta/package-macos-test-bundle.py \
+            --build-dir Build --install-dir Install --output ladybird-app-bundle.tar.gz
+
+      - name: Upload the macOS app bundle
+        if: ${{ inputs.os_name == 'macOS' && inputs.build_preset == 'Sanitizer' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-app-bundle-${{ inputs.os_name }}-${{ inputs.arch }}-${{ inputs.build_preset }}
+          path: ladybird-app-bundle.tar.gz
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+      # === TEST ===
+
+      - name: Start PulseAudio
+        if: ${{ inputs.os_name == 'Linux' }}
+        run: |
+          echo "PULSE_SERVER=unix:/tmp/pulse-native" >> "$GITHUB_ENV"
+          pulseaudio --system -D --exit-idle-time=1800 \
+            --load="module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-native" \
+            --load="module-null-sink sink_name=virtual_sink"
+
+      - name: Verify StyleEngine invariants
+        if: ${{ inputs.os_name == 'Linux' && (inputs.build_preset == 'Release' || inputs.build_preset == 'Sanitizer') }}
+        timeout-minutes: 5
+        working-directory: ${{ github.workspace }}/Build/Tests/LibWeb/test-web
+        run: |
+          ../../../bin/test-web --verify-style -j10 \
+            -f Text/input/css/style-engine/ \
+            -f Text/input/css/style-invalidation/
+
+      - name: Check new tests for flakiness
+        if: ${{ github.event_name == 'pull_request' && inputs.build_preset == 'Sanitizer' && (inputs.os_name == 'Linux' || inputs.os_name == 'macOS') }}
+        timeout-minutes: 30
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=2 origin "$(git rev-parse HEAD)"
+          "${{ env.pythonLocation }}/bin/python" Meta/check-test-flakiness.py \
+            --test-web-binary Build/bin/test-web \
+            --base-ref HEAD^1 \
+            --deadline-seconds 1200 \
+            --python-executable "${{ env.pythonLocation }}/bin/python" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run WPT Smoke Tests
+        if: ${{ inputs.os_name == 'Linux' && (inputs.build_preset == 'Release' || inputs.build_preset == 'Sanitizer') }}
+        timeout-minutes: 5
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          export ASAN_OPTIONS="log_path=\"${GITHUB_WORKSPACE}/Build/asan.log\""
+          export UBSAN_OPTIONS="log_path=\"${GITHUB_WORKSPACE}/Build/ubsan.log\""
+          Meta/WPT.sh run --test-list Tests/LibWeb/WPT/ci-smoke-tests.txt
+        env:
+          BUILD_LADYBIRD: 'false'
+          LADYBIRD_BINARY: ${{ github.workspace }}/Build/bin/Ladybird
+          WEBDRIVER_BINARY: ${{ github.workspace }}/Build/bin/WebDriver
+          WPT_PROCESSES: '4'
+
+      - name: Test
+        if: ${{ inputs.build_preset == 'Sanitizer' }}
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          export ASAN_OPTIONS="log_path=\"${GITHUB_WORKSPACE}/Build/asan.log\""
+          export UBSAN_OPTIONS="log_path=\"${GITHUB_WORKSPACE}/Build/ubsan.log\""
+          ctest --preset ${{ inputs.build_preset }} --output-on-failure -E 'LibWebAccessibilityBridge|AccessibilityBridgeMac' --test-dir Build --timeout 1800
+        env:
+          TESTS_ONLY: 1
+
+      - name: Test
+        if: ${{ inputs.build_preset != 'Fuzzers' && inputs.build_preset != 'All_Debug' && inputs.build_preset != 'Sanitizer' }}
+        working-directory: ${{ github.workspace }}
+        run: ctest --output-on-failure -E 'LibWebAccessibilityBridge|AccessibilityBridgeMac' --test-dir Build --timeout 1800
+        env:
+          TESTS_ONLY: 1
+
+      # The AT-SPI2 tests need a Linux build that is neither Sanitizer nor All_Debug:
+      # - Sanitizer's ASan-instrumented Qt-on-XCB hits a buffer overflow in libxkbcommon-x11.
+      # - All_Debug's ENABLE_ALL_THE_DEBUG_MACROS log volume starves the Qt event loop, so AT-SPI2 registration never
+      #   completes within any reasonable wait window.
+      # Release builds hit neither problem — so we run these tests on the Release runner.
+      - name: Test - LibWeb AT-SPI2 bridge (Release)
+        if: ${{ inputs.os_name == 'Linux' && inputs.build_preset == 'Release' }}
+        working-directory: ${{ github.workspace }}
+        run: ctest --output-on-failure --no-tests=error --test-dir Build -R LibWebAccessibilityBridge --timeout 1800
+        env:
+          TESTS_ONLY: 1
+
+      - name: Upload LibWeb Test Artifacts
+        if: ${{ always() && inputs.build_preset != 'Fuzzers' && inputs.build_preset != 'All_Debug' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: libweb-test-artifacts-${{ inputs.os_name }}-${{ inputs.arch }}-${{ inputs.build_preset }}-${{ inputs.toolchain }}-${{ inputs.clang_plugins }}
+          path: |
+            Build/Tests/LibWeb/test-web/test-dumps/
+            Build/**/asan.log.*
+            Build/**/ubsan.log.*
+          retention-days: 0
+          if-no-files-found: ignore
+
+      - name: Sanitizer Output
+        if: ${{ !cancelled() && inputs.os_name != 'Windows' && inputs.build_preset == 'Sanitizer' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          log_output=$(find Build \( -name 'asan.log.*' -o -name 'ubsan.log.*' \) -exec cat {} \; )
+          if [ -z "$log_output" ]; then
+            echo "No sanitizer issues found."
+          else
+            echo "$log_output"
+            echo "Sanitizer errors happened while running tests; see the Test step above."
+          fi

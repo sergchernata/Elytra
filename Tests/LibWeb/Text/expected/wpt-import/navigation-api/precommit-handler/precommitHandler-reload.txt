@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	precommitHandler for a reload navigation, reject before commit
+Pass	precommitHandler for a reload navigation, reject after commit
+Pass	precommitHandler for a reload navigation, success

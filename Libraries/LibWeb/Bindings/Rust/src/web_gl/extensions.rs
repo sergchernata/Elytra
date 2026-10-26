@@ -227,7 +227,7 @@ impl ContextState {
         match extension.kind {
             Kind::Interface(interface) => {
                 let object = interface.create(cx.vm(), self);
-                self.enabled_extensions.borrow_mut().push(EnabledExtension {
+                self.enabled_extensions.borrow_mut(cx.vm()).push(EnabledExtension {
                     name: extension.name,
                     object,
                 });
@@ -311,7 +311,7 @@ macro_rules! modules_of_extension_interfaces_without_operations {
                     $($(context.enable_compressed_texture_format($crate::web_gl::constants::$format);)+)?
                     allocate(
                         vm,
-                        Self {
+                        |_| Self {
                             context: context.context_ref(),
                         },
                     )

@@ -80,7 +80,7 @@ impl Symbol {
     }
 
     pub fn create(vm: &Vm, description: Option<Utf16String>, kind: Kind) -> Gc<Symbol> {
-        vm.heap().allocate(Self::new(description, kind))
+        vm.heap().allocate(|_| Self::new(description, kind))
     }
 
     pub fn create_private(vm: &Vm) -> Gc<Symbol> {
@@ -151,7 +151,7 @@ define_cell!(GlobalSymbolRegistry, Other);
 
 impl GlobalSymbolRegistry {
     pub fn create(vm: &Vm) -> Gc<GlobalSymbolRegistry> {
-        vm.heap().allocate(GlobalSymbolRegistry {
+        vm.heap().allocate(|_| GlobalSymbolRegistry {
             header: CellHeader::for_class(Self::CLASS),
             symbols: GcRefCell::new(SymbolsByKey(HashMap::new())),
         })
@@ -162,8 +162,8 @@ impl GlobalSymbolRegistry {
         self.symbols.borrow().0.get(&key).copied()
     }
 
-    pub fn set(&self, key: &Utf16String, symbol: Gc<Symbol>) {
+    pub fn set(&self, vm: &Vm, key: &Utf16String, symbol: Gc<Symbol>) {
         let key = Utf16View::of_string(key).code_units().collect();
-        self.symbols.borrow_mut().0.insert(key, symbol);
+        self.symbols.borrow_mut(vm).0.insert(key, symbol);
     }
 }

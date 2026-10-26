@@ -33,8 +33,10 @@ use core::ptr::NonNull;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use libjs_runtime_macros::Trace;
+
 use crate::bytecode::executable::Executable;
-use crate::gc::capi;
+use crate::gc::defer_gc::{DeferGc, Deferred};
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::dispatch_tables::DispatchTable;
 use crate::interpreter::vm::Vm;
@@ -111,6 +113,7 @@ impl InterpreterTier {
 
 /// A compile job running on a compile thread. The VM keeps the executable and every cell its snapshot refers to
 /// alive until the job's code is installed or the job is abandoned.
+#[derive(Trace)]
 pub struct CompileJob {
     pub executable: Gc<Executable>,
     pub cells: Vec<Gc<CellHeader>>,
@@ -195,6 +198,10 @@ pub struct JitState {
 }
 
 impl JitState {
+    #[cfg_attr(
+        ladybird_gc_lints,
+        expect(gc_container_on_stack, reason = "the VM makes its JIT state before its heap")
+    )]
     pub fn new(options: Options) -> Self {
         translate::RegisterDump::assert_layout();
         let warming_up_dispatch_table = options
@@ -379,7 +386,7 @@ impl JitState {
         self.compile_queue.get()
     }
 
-    pub(crate) fn add_job(&self, job: CompileJob) -> u64 {
+    pub(crate) fn add_job(&self, job: CompileJob, _defer_gc: &DeferGc<'_>) -> u64 {
         let id = self.next_job_id.get();
         self.next_job_id.set(id + 1);
         self.jobs.borrow_mut().insert(id, job);
@@ -398,8 +405,8 @@ impl JitState {
             .retain(|_, job| !core::ptr::eq(job.executable.as_ptr(), executable));
     }
 
-    pub(crate) fn take_job(&self, id: u64) -> Option<CompileJob> {
-        self.jobs.borrow_mut().remove(&id)
+    pub(crate) fn take_job<'d>(&self, id: u64, defer_gc: &'d DeferGc<'_>) -> Option<Deferred<'d, CompileJob>> {
+        self.jobs.borrow_mut().remove(&id).map(|job| defer_gc.cover(job))
     }
 
     /// The entry trampoline (see `libjs_jit::codegen::generate_entry_trampoline()`).
@@ -456,34 +463,8 @@ impl Drop for JitState {
 unsafe impl Trace for JitState {
     fn trace(&self, visitor: &mut Visitor) {
         for job in self.jobs.borrow().values() {
-            visitor.visit(job.executable);
-            for cell in &job.cells {
-                visitor.visit(*cell);
-            }
-            for executable in &job.snapshot_executables {
-                visitor.visit(executable.executable);
-                if let Some(function) = executable.function {
-                    function.visit(visitor);
-                }
-            }
+            job.trace(visitor);
         }
-    }
-}
-
-/// Keeps the heap from collecting garbage while it lives.
-pub(crate) struct DeferGc<'vm>(&'vm Vm);
-
-impl<'vm> DeferGc<'vm> {
-    pub(crate) fn new(vm: &'vm Vm) -> Self {
-        capi::gc_heap_defer_gc(vm.heap().handle());
-        Self(vm)
-    }
-}
-
-impl Drop for DeferGc<'_> {
-    fn drop(&mut self) {
-        // NB: This undoes the deferral of new().
-        capi::gc_heap_undefer_gc(self.0.heap().handle());
     }
 }
 

@@ -10,6 +10,7 @@ use core::ops::Deref;
 use libjs_runtime_macros::Trace;
 
 use crate::gc::class::{Class, define_cell};
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::foreign::ForeignCellSlot;
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::root::MarkedVec;
@@ -111,6 +112,7 @@ fn new_intrinsic_promise_capability(vm: &Vm, realm: Gc<Realm>) -> Gc<PromiseCapa
 impl CyclicModule {
     /// A cyclic module of `realm`, for `class`, which extends CyclicModule.
     pub fn new(
+        _: &DeferGc<'_>,
         class: &'static Class,
         realm: Gc<Realm>,
         filename: String,
@@ -572,7 +574,7 @@ impl CyclicModule {
                 // 2. Append module to requiredModule.[[AsyncParentModules]].
                 cyclic_module
                     .async_parent_modules
-                    .borrow_mut()
+                    .borrow_mut(vm)
                     .push(self.as_cyclic_module_gc());
             }
         }
@@ -819,18 +821,12 @@ impl CyclicModule {
 
         // 11. Let _sortedExecList_ be a List whose elements are the elements of _execList_, sorted by their
         //     [[AsyncEvaluationOrder]] field in ascending order.
-        // NB: The sorted copy holds the same modules as the list, which keeps them alive, and nothing collects while
-        //     it is sorted.
-        let mut sorted_exec_list = exec_list.to_vec();
-        sorted_exec_list.sort_by_key(|module| {
+        exec_list.values_mut().sort_by_key(|module| {
             module
                 .async_evaluation_order
                 .get()
                 .expect("the module has an async evaluation order")
         });
-        for (index, module) in sorted_exec_list.into_iter().enumerate() {
-            exec_list.set(index, module);
-        }
 
         // 12. For each Cyclic Module Record m of sortedExecList, do
         for index in 0..exec_list.len() {
@@ -973,7 +969,7 @@ pub fn inner_module_loading(vm: &Vm, state: Gc<GraphLoadingState>, module: Gc<Mo
         let cyclic_module = cyclic_module.as_cyclic_module_gc();
 
         // a. Append module to state.[[Visited]].
-        state.append_to_visited(cyclic_module);
+        state.append_to_visited(vm, cyclic_module);
 
         // b. Let requestedModulesCount be the number of elements in module.[[RequestedModules]].
         let requested_modules_count = cyclic_module.requested_modules().len();

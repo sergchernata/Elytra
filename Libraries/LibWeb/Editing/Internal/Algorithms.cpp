@@ -9,9 +9,15 @@
 #include <LibGC/RootVector.h>
 #include <LibGfx/Color.h>
 #include <LibWeb/Bindings/Document.h>
+#include <LibWeb/CSS/CSSGroupingRule.h>
+#include <LibWeb/CSS/CSSRuleList.h>
+#include <LibWeb/CSS/CSSStyleProperties.h>
+#include <LibWeb/CSS/CSSStyleRule.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -29,11 +35,14 @@
 #include <LibWeb/Editing/EditCommand.h>
 #include <LibWeb/Editing/Internal/Algorithms.h>
 #include <LibWeb/Editing/MutationTrackedRange.h>
+#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
 #include <LibWeb/HTML/HTMLBRElement.h>
+#include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLDivElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/HTMLFontElement.h>
+#include <LibWeb/HTML/HTMLHeadElement.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLLIElement.h>
 #include <LibWeb/HTML/HTMLOListElement.h>
@@ -101,14 +110,19 @@ JustifyAlignment alignment_value_of_node(GC::Ptr<DOM::Node> node)
         return element->directionality() == DOM::Element::Directionality::Ltr ? JustifyAlignment::Right : JustifyAlignment::Left;
 
     // 5. If node's "text-align" property has resolved value "center", "justify", "left", or "right", return that value.
+    // INTEROP: The align attribute maps to the internal "text-align" values that also align block-level descendants.
+    //          Browsers give these the alignment value of the matching regular "text-align" value.
     switch (text_align_value.value()) {
     case CSS::Keyword::Center:
+    case CSS::Keyword::LibwebCenter:
         return JustifyAlignment::Center;
     case CSS::Keyword::Justify:
         return JustifyAlignment::Justify;
     case CSS::Keyword::Left:
+    case CSS::Keyword::LibwebLeft:
         return JustifyAlignment::Left;
     case CSS::Keyword::Right:
+    case CSS::Keyword::LibwebRight:
         return JustifyAlignment::Right;
     default:
         // 6. Return "left".
@@ -394,8 +408,28 @@ void canonicalize_collapsed_selection_for_editing(Selection& selection)
 
     Web::Selection::CaretNavigator navigator(selection.document());
     auto canonical_location = navigator.canonical_location_for_editing({ range->start_container(), range->start_offset(), selection.focus_affinity() });
-    if (canonical_location.node != range->start_container() || canonical_location.offset != range->start_offset())
-        MUST(selection.collapse(canonical_location.node, canonical_location.offset));
+    if (canonical_location.node == range->start_container() && canonical_location.offset == range->start_offset())
+        return;
+
+    // NB: Moving the caret unsets the overrides, but the canonical point is equivalent to the old one. Keep the
+    //     overrides that add formatting, such as the ones that deleting the selection set to keep the formatting of
+    //     deleted content.
+    auto& document = *selection.document();
+    auto overrides = record_current_overrides(document);
+    MUST(selection.collapse(canonical_location.node, canonical_location.offset));
+    restore_overrides_that_add_formatting(document, overrides);
+}
+
+void restore_overrides_that_add_formatting(DOM::Document& document, Vector<RecordedOverride> const& overrides)
+{
+    for (auto const& override : overrides) {
+        override.value.visit(
+            [&](bool value) {
+                if (value)
+                    document.set_command_state_override(override.command, value);
+            },
+            [&](Utf16String const& value) { document.set_command_value_override(override.command, value); });
+    }
 }
 
 enum class PreserveLeadingSpaceAcrossNodeBoundary {
@@ -696,6 +730,149 @@ void canonicalize_whitespace_after_node_insertion(DOM::BoundaryPoint boundary)
     canonicalize_whitespace_impl(boundary, false, PreserveLeadingSpaceAcrossNodeBoundary::Yes);
 }
 
+// Whether the spaces in text are preserved, so that they do not collapse.
+bool text_preserves_spaces(DOM::Text& text)
+{
+    if (!text.parent())
+        return false;
+    auto white_space_collapse = resolved_keyword(*text.parent(), CSS::PropertyID::WhiteSpaceCollapse);
+    return white_space_collapse.has_value()
+        && first_is_one_of(*white_space_collapse, CSS::Keyword::Preserve, CSS::Keyword::PreserveSpaces, CSS::Keyword::BreakSpaces);
+}
+
+// INTEROP: Before inserting or deleting text, browsers remove the collapsible spaces around the caret that are not
+//          rendered: the spaces that follow another space, and the spaces at the start or the end of a line. This does
+//          this for the whitespace sequence around offset in text, and returns the offsets of the removed spaces.
+Vector<size_t> remove_collapsed_spaces_in_text_node(DOM::Text& text, size_t offset)
+{
+    if (!text.is_editable() || !text.parent() || text_preserves_spaces(text))
+        return {};
+
+    auto is_whitespace = [](char16_t code_unit) { return code_unit == ' ' || code_unit == u'\u00A0'; };
+    auto data = text.data();
+    auto length = data.length_in_code_units();
+    if (offset > length)
+        return {};
+
+    auto upstream = offset;
+    while (upstream > 0 && is_whitespace(data.code_unit_at(upstream - 1)))
+        --upstream;
+    auto downstream = offset;
+    while (downstream < length && is_whitespace(data.code_unit_at(downstream)))
+        ++downstream;
+    if (upstream == downstream)
+        return {};
+
+    // Whether the sequence follows a collapsible space in a preceding Text node of the same line.
+    auto follows_collapsible_space = [&] {
+        auto block = block_node_of_node(text);
+        for (auto* node = text.previous_in_pre_order(); node && node != block.ptr(); node = node->previous_in_pre_order()) {
+            if (node->is_inclusive_ancestor_of(text))
+                continue;
+            if (auto* previous_text = as_if<DOM::Text>(*node)) {
+                if (previous_text->length() == 0)
+                    continue;
+                return previous_text->data().code_unit_at(previous_text->length() - 1) == ' ';
+            }
+            if (!is<DOM::Element>(*node) || !is_inline_node(*node) || editing_ignores_content(*node))
+                return false;
+        }
+        return false;
+    };
+
+    // NB: The trailing spaces of the sequence collapse if it is at the end of a line.
+    auto trailing_spaces_start = downstream;
+    if (downstream == length && precedes_a_line_break(text)) {
+        while (trailing_spaces_start > upstream && data.code_unit_at(trailing_spaces_start - 1) == ' ')
+            --trailing_spaces_start;
+    }
+
+    Vector<size_t> collapsed_offsets;
+    auto previous_collapses = upstream == 0 && (follows_a_line_break(text) || follows_collapsible_space());
+    for (auto index = upstream; index < downstream; ++index) {
+        auto code_unit = data.code_unit_at(index);
+        if (code_unit == ' ' && (previous_collapses || index >= trailing_spaces_start)) {
+            collapsed_offsets.append(index);
+            continue;
+        }
+        previous_collapses = code_unit == ' ';
+    }
+
+    // NB: Delete each run of adjacent collapsed spaces at once, from the end, so that the offsets stay valid.
+    for (size_t run_end = collapsed_offsets.size(); run_end > 0;) {
+        auto run_start = run_end - 1;
+        while (run_start > 0 && collapsed_offsets[run_start - 1] + 1 == collapsed_offsets[run_start])
+            --run_start;
+        MUST(delete_data(text, collapsed_offsets[run_start], run_end - run_start));
+        run_end = run_start;
+    }
+    return collapsed_offsets;
+}
+
+size_t offset_after_removing(Vector<size_t> const& removed_offsets, size_t offset)
+{
+    size_t removed_before_offset = 0;
+    for (auto removed_offset : removed_offsets) {
+        if (removed_offset < offset)
+            ++removed_before_offset;
+    }
+    return offset - removed_before_offset;
+}
+
+// INTEROP: After inserting or deleting text, browsers do not canonicalize a whitespace sequence across node boundaries.
+//          They rebalance the whitespace around offset within its Text node only. The sequence alternates between
+//          non-breaking spaces and spaces, a sequence of two or more starts with a non-breaking space, and there is a
+//          non-breaking space at the start of the Text node and at its end, unless a sibling Text node that starts with
+//          visible text follows it.
+void rebalance_whitespace_in_text_node(DOM::Text& text, size_t offset)
+{
+    if (!text.is_editable() || !text.parent() || text_preserves_spaces(text))
+        return;
+
+    auto is_whitespace = [](char16_t code_unit) { return code_unit == ' ' || code_unit == u'\u00A0'; };
+    auto data = text.data();
+    auto length = data.length_in_code_units();
+    if (offset > length)
+        return;
+
+    auto upstream = offset;
+    while (upstream > 0 && is_whitespace(data.code_unit_at(upstream - 1)))
+        --upstream;
+    auto downstream = offset;
+    while (downstream < length && is_whitespace(data.code_unit_at(downstream)))
+        ++downstream;
+    if (upstream == downstream)
+        return;
+
+    auto* next_text = as_if<DOM::Text>(text.next_sibling());
+    auto next_text_starts_with_visible_text = next_text && next_text->length() > 0 && !is_whitespace(next_text->data().code_unit_at(0));
+    auto starts_with_non_breaking_space = upstream == 0;
+    auto ends_with_non_breaking_space = downstream == length && !next_text_starts_with_visible_text;
+
+    char16_t previous = 0;
+    for (auto index = upstream; index < downstream; ++index) {
+        char16_t replacement;
+        if (index == upstream && starts_with_non_breaking_space)
+            replacement = u'\u00A0';
+        else if (index + 1 == downstream && ends_with_non_breaking_space)
+            replacement = u'\u00A0';
+        else if (previous == ' ')
+            replacement = u'\u00A0';
+        else if (previous == u'\u00A0')
+            replacement = ' ';
+        else if (index + 1 < downstream)
+            replacement = u'\u00A0';
+        else
+            replacement = ' ';
+        previous = replacement;
+
+        if (text.data().code_unit_at(index) == replacement)
+            continue;
+        MUST(insert_data(text, index, Utf16String::from_code_point(replacement)));
+        MUST(delete_data(text, index + 1, 1));
+    }
+}
+
 // https://w3c.github.io/editing/docs/execCommand/#clear-the-value
 GC::RootVector<GC::Ref<DOM::Node>> clear_the_value(Utf16FlyString const& command, GC::Ref<DOM::Element> element)
 {
@@ -944,15 +1121,46 @@ static GC::Ptr<DOM::Element> element_establishing_white_space(GC::Ref<DOM::Node>
     return as_if<DOM::Element>(establishing_node.ptr());
 }
 
+// Whether a style rule in one of the author style sheets of element's document sets its white-space style.
+// NB: This looks at the rules that match element, and not at the cascade, so it also finds rules that are overridden.
+static bool author_style_sheet_sets_white_space(DOM::Element& element)
+{
+    auto rule_list_sets_white_space = [&](auto& self, CSS::CSSRuleList& rules) -> bool {
+        for (size_t index = 0; index < rules.length(); ++index) {
+            auto* rule = rules.item(index);
+            if (auto* style_rule = as_if<CSS::CSSStyleRule>(rule); style_rule
+                && style_rule->style()->has_property(CSS::PropertyID::WhiteSpaceCollapse)) {
+                auto matches = element.matches(style_rule->selector_text());
+                if (!matches.is_error() && matches.value())
+                    return true;
+            }
+            if (auto* grouping_rule = as_if<CSS::CSSGroupingRule>(rule); grouping_rule && self(self, grouping_rule->css_rules()))
+                return true;
+        }
+        return false;
+    };
+
+    auto& style_sheets = element.document().style_sheets();
+    for (size_t index = 0; index < style_sheets.length(); ++index) {
+        auto* style_sheet = style_sheets.item(index);
+        if (!style_sheet || style_sheet->disabled())
+            continue;
+        auto rules = style_sheet->css_rules();
+        if (!rules.is_error() && rule_list_sets_white_space(rule_list_sets_white_space, *rules.value()))
+            return true;
+    }
+    return false;
+}
+
 // INTEROP: Browsers do not keep white-space styles that come from the default style of elements such as pre, and do not
-//          add white-space styles to content that is joined into such an element.
-// FIXME: Distinguish these from white-space styles that author style sheets set on such elements.
-static bool white_space_is_from_default_style(GC::Ref<DOM::Node> node)
+//          add white-space styles to content that is joined into such an element. They do keep white-space styles that
+//          the style attribute or author style sheets set on such elements.
+bool white_space_is_from_default_style(GC::Ref<DOM::Node> node)
 {
     auto element = element_establishing_white_space(node);
     return element
         && element->local_name().is_one_of(HTML::TagNames::pre, HTML::TagNames::listing, HTML::TagNames::xmp, HTML::TagNames::plaintext)
-        && !sets_white_space_in_style_attribute(*element);
+        && !sets_white_space_in_style_attribute(*element) && !author_style_sheet_sets_white_space(*element);
 }
 
 // Whether element gives its children formatting that its parent does not, as one of the command values that are
@@ -1223,6 +1431,17 @@ void delete_the_selection(Selection& selection, bool block_merging, bool strip_w
     // 19. Record current states and values, and let overrides be the result.
     auto overrides = record_current_states_and_values(document);
 
+    // INTEROP: Browsers keep the formatting of the deleted content for the text that is inserted next only if the
+    //          selection starts with text. They do not keep it if it starts with an image or an empty element.
+    GC::Ptr<DOM::Node> first_leaf = start.node;
+    if (!is<DOM::Text>(*start.node) || start.offset == start.node->length()) {
+        first_leaf = start.node->child_at_index(start.offset);
+        while (first_leaf && first_leaf->first_child())
+            first_leaf = first_leaf->first_child();
+    }
+    if (first_leaf && !is<DOM::Text>(*first_leaf))
+        overrides.clear();
+
     // 21. If start node and end node are the same, and start node is an editable Text node:
     if (start.node == end.node && is<DOM::Text>(*start.node) && start.node->is_editable()) {
         // 1. Call deleteData(start offset, end offset − start offset) on start node.
@@ -1270,6 +1489,11 @@ void delete_the_selection(Selection& selection, bool block_merging, bool strip_w
         if (!node->is_editable())
             return IterationDecision::Continue;
 
+        // INTEROP: Browsers do not delete the body or the head element, or the content of the head element, in an
+        //          editable html element. They delete the children of the body element instead.
+        if (is<HTML::HTMLBodyElement>(*node) || node->first_ancestor_of_type<HTML::HTMLHeadElement>() || is<HTML::HTMLHeadElement>(*node))
+            return IterationDecision::Continue;
+
         if (!is<HTML::HTMLTableSectionElement>(*node) && !is<HTML::HTMLTableRowElement>(*node) && !is<HTML::HTMLTableCellElement>(*node))
             node_list.append(node);
 
@@ -1287,22 +1511,37 @@ void delete_the_selection(Selection& selection, bool block_merging, bool strip_w
         // 2. Remove node from parent.
         remove_node(*node);
 
+        // INTEROP: Browsers remove the inline elements that the deletion leaves empty before they add a line break to
+        //          an empty block, so that the line break is not inside them. The overrides keep their formatting for
+        //          the text that is inserted next. So if the block node of parent has no visible children, do step 4
+        //          before step 3 as well.
+        auto strip_empty_wrappers = [&] {
+            // 4. If strip wrappers is true or parent is not an inclusive ancestor of start node, while parent is an
+            //    editable inline node with length 0, let grandparent be the parent of parent, then remove parent from
+            //    grandparent, then set parent to grandparent.
+            if (strip_wrappers || !parent->is_inclusive_ancestor_of(start.node)) {
+                while (parent->parent() && parent->is_editable() && is_inline_node(*parent) && parent->length() == 0) {
+                    auto grandparent = parent->parent();
+                    remove_node(*parent);
+                    parent = grandparent;
+                }
+            }
+        };
+        // NB: Keep a font element, and put the line break in it as the spec does. The overrides would create a new
+        //     font element for the text that is inserted next, but with the resolved values instead of the attributes
+        //     of the old one, such as color="#0000ff" instead of color="blue". The editing tests expect the old font
+        //     element to be kept, for example when typing after deleting all of <font color=blue>[foo]</font>.
+        auto block_node_of_parent = block_node_of_node(*parent);
+        if (block_node_of_parent && !has_visible_children(*block_node_of_parent) && !is<HTML::HTMLFontElement>(*parent))
+            strip_empty_wrappers();
+
         // 3. If the block node of parent has no visible children, and parent is editable or an editing host, call
         //    createElement("br") on the context object and append the result as the last child of parent.
-        auto block_node_of_parent = block_node_of_node(*parent);
+        block_node_of_parent = block_node_of_node(*parent);
         if (block_node_of_parent && !has_visible_children(*block_node_of_parent) && parent->is_editable_or_editing_host())
             MUST(append_node(MUST(DOM::create_element(document, HTML::TagNames::br, Namespace::HTML)), *parent));
 
-        // 4. If strip wrappers is true or parent is not an inclusive ancestor of start node, while parent is an
-        //    editable inline node with length 0, let grandparent be the parent of parent, then remove parent from
-        //    grandparent, then set parent to grandparent.
-        if (strip_wrappers || !parent->is_inclusive_ancestor_of(start.node)) {
-            while (parent->parent() && parent->is_editable() && is_inline_node(*parent) && parent->length() == 0) {
-                auto grandparent = parent->parent();
-                remove_node(*parent);
-                parent = grandparent;
-            }
-        }
+        strip_empty_wrappers();
     }
 
     // 26. If end node is an editable Text node, call deleteData(0, end offset) on it.
@@ -2421,9 +2660,26 @@ bool is_collapsed_line_break(GC::Ref<DOM::Node> node)
 
     // that begins a line box which has nothing else in it, and therefore has zero height.
     // AD-HOC: We check this on the DOM level by seeing if the next node is neither a non-empty text node nor a <br>.
-    if (auto text_node = as_if<DOM::Text>(node->next_sibling()))
-        return text_node->text_content().value_or({}).is_empty();
-    return !is<HTML::HTMLBRElement>(node->next_sibling());
+    //         The line box can continue after the end of the inline ancestors of the br, so look at the nodes that
+    //         follow it in tree order within its block.
+    //         The line box ends at the end of an inline editing host.
+    auto block = block_node_of_node(node);
+    if (auto editing_host = node->editing_host(); editing_host && (!block || block->is_inclusive_ancestor_of(*editing_host)))
+        block = editing_host;
+    for (auto* following = node->next_in_pre_order(block.ptr()); following; following = following->next_in_pre_order(block.ptr())) {
+        if (auto text_node = as_if<DOM::Text>(*following)) {
+            if (is_whitespace_node(*text_node))
+                continue;
+            return false;
+        }
+        if (!is<DOM::Element>(*following))
+            continue;
+        if (!is_inline_node(*following))
+            return true;
+        if (editing_ignores_content(*following))
+            return false;
+    }
+    return true;
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#collapsed-whitespace-node
@@ -2608,6 +2864,14 @@ Optional<Utf16FlyString const&> formattable_block_name_from_utf16(Utf16View loca
         return HTML::TagNames::p;
     if (local_name == "pre"sv)
         return HTML::TagNames::pre;
+
+    // NB: See the INTEROP note at is_formattable_block_name().
+    for (auto const* name : { &HTML::TagNames::article, &HTML::TagNames::aside, &HTML::TagNames::blockquote,
+             &HTML::TagNames::footer, &HTML::TagNames::header, &HTML::TagNames::hgroup, &HTML::TagNames::main,
+             &HTML::TagNames::nav, &HTML::TagNames::section }) {
+        if (local_name == name->view())
+            return *name;
+    }
     return {};
 }
 
@@ -2615,9 +2879,20 @@ Optional<Utf16FlyString const&> formattable_block_name_from_utf16(Utf16View loca
 bool is_formattable_block_name(Utf16FlyString const& local_name)
 {
     // A formattable block name is "address", "dd", "div", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "p", or "pre".
-    return local_name.is_one_of(HTML::TagNames::address, HTML::TagNames::dd, HTML::TagNames::div, HTML::TagNames::dt,
-        HTML::TagNames::h1, HTML::TagNames::h2, HTML::TagNames::h3, HTML::TagNames::h4, HTML::TagNames::h5,
-        HTML::TagNames::h6, HTML::TagNames::p, HTML::TagNames::pre);
+    if (local_name.is_one_of(HTML::TagNames::address, HTML::TagNames::dd, HTML::TagNames::div, HTML::TagNames::dt,
+            HTML::TagNames::h1, HTML::TagNames::h2, HTML::TagNames::h3, HTML::TagNames::h4, HTML::TagNames::h5,
+            HTML::TagNames::h6, HTML::TagNames::p, HTML::TagNames::pre))
+        return true;
+
+    // INTEROP: Browsers also support the formatBlock command with these sectioning and grouping elements.
+    return is_additional_formattable_block_name(local_name);
+}
+
+bool is_additional_formattable_block_name(Utf16FlyString const& local_name)
+{
+    return local_name.is_one_of(HTML::TagNames::article, HTML::TagNames::aside, HTML::TagNames::blockquote,
+        HTML::TagNames::footer, HTML::TagNames::header, HTML::TagNames::hgroup, HTML::TagNames::main,
+        HTML::TagNames::nav, HTML::TagNames::section);
 }
 
 // https://w3c.github.io/editing/docs/execCommand/#formattable-node
@@ -3134,8 +3409,9 @@ void justify_the_selection(DOM::Document& document, JustifyAlignment alignment)
         if (!node->is_editable() || !is<DOM::Element>(*node))
             return IterationDecision::Continue;
 
+        // AD-HOC: The align attribute of HTML elements is not in the HTML namespace, but in no namespace.
         auto& element = static_cast<DOM::Element&>(*node);
-        if (element.has_attribute_ns(Namespace::HTML, HTML::AttributeNames::align)
+        if (element.has_attribute(HTML::AttributeNames::align)
             || property_in_style_attribute(element, CSS::PropertyID::TextAlign)
             || element.local_name() == HTML::TagNames::center)
             element_list.append(element);
@@ -3146,8 +3422,9 @@ void justify_the_selection(DOM::Document& document, JustifyAlignment alignment)
     // 3. For each element in element list:
     for (auto element : element_list) {
         // 1. If element has an attribute in the HTML namespace whose local name is "align", remove that attribute.
-        if (element->has_attribute_ns(Namespace::HTML, HTML::AttributeNames::align))
-            remove_attribute_ns(*element, Namespace::HTML, HTML::AttributeNames::align);
+        // AD-HOC: See the note at step 2.
+        if (element->has_attribute(HTML::AttributeNames::align))
+            remove_attribute(*element, HTML::AttributeNames::align);
 
         // 2. Unset the CSS property "text-align" on element, if it's set by a style attribute.
         auto inline_style = element->style();
@@ -4319,6 +4596,12 @@ void set_the_selections_value(DOM::Document& document, Utf16FlyString const& com
         // 1. Push down values on node.
         push_down_values(command, node, new_value);
 
+        // INTEROP: Browsers do not change the font size of a br that is the only child of a block, which is the line
+        //          break of an empty line.
+        if (command == CommandNames::fontSize && is<HTML::HTMLBRElement>(*node) && node->parent()
+            && node->parent()->child_count() == 1 && is_block_node(*node->parent()))
+            continue;
+
         // 2. If node is an allowed child of "span", force the value of node.
         if (is_allowed_child_of_node(node, HTML::TagNames::span))
             force_the_value(node, command, new_value);
@@ -4989,8 +5272,27 @@ bool values_are_loosely_equivalent(Utf16FlyString const& command, Optional<Utf16
                            .value_or_lazy_evaluated_optional([&] { return size_quantities.first_index_of(a.value()); });
         auto b_index = named_quantities.first_index_of(b.value())
                            .value_or_lazy_evaluated_optional([&] { return size_quantities.first_index_of(b.value()); });
+        if (a_index.has_value() && a_index == b_index)
+            return true;
 
-        return a_index.has_value() && a_index == b_index;
+        // NB: Compare the resolved value of "font-size" with the font sizes of font elements with each size attribute.
+        auto resolved_value_index = [](Utf16View quantity) -> Optional<size_t> {
+            if (!quantity.ends_with(u"px"sv))
+                return {};
+            auto pixel_size = font_size_to_pixel_size(quantity).to_float();
+            for (size_t index = 0; index < 7; ++index) {
+                if (fabsf(font_size_to_pixel_size(Utf16String::number(index + 1)).to_float() - pixel_size) < 0.05f)
+                    return index;
+            }
+            return {};
+        };
+        auto a_named_index = named_quantities.first_index_of(a.value());
+        auto b_named_index = named_quantities.first_index_of(b.value());
+        if (a_named_index.has_value() && a_named_index == resolved_value_index(b.value()))
+            return true;
+        if (b_named_index.has_value() && b_named_index == resolved_value_index(a.value()))
+            return true;
+        return false;
     }
 
     return false;
@@ -5375,6 +5677,26 @@ bool value_contains_keyword(CSS::StyleValue const& value, CSS::Keyword keyword)
         }
     }
     return value.to_keyword() == keyword;
+}
+
+// Where the user's caret is in text: The focused text control's selection end, or else the selection's focus.
+Optional<CaretTextPosition> caret_text_position(DOM::Document& document)
+{
+    auto focused = document.focused_area();
+    if (auto* text_control = as_if<HTML::FormAssociatedTextControlElement>(focused.ptr())) {
+        auto text = text_control->form_associated_element_to_text_node();
+        if (!text)
+            return {};
+        auto offset = min<size_t>(text_control->selection_end(), text->length_in_utf16_code_units());
+        return CaretTextPosition { *text, offset, text_control->selection_start() == text_control->selection_end() };
+    }
+    auto selection = document.get_selection();
+    if (!selection)
+        return {};
+    auto* text = as_if<DOM::Text>(selection->focus_node().ptr());
+    if (!text)
+        return {};
+    return CaretTextPosition { *text, selection->focus_offset(), selection->is_collapsed() };
 }
 
 // The paragraph around a point in a text node, for triple-click selection and spellchecking. A paragraph is delimited

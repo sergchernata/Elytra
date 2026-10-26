@@ -85,6 +85,17 @@ impl ErrorData {
         }
     }
 
+    /// Error data for an exception whose source location came from another agent.
+    pub fn from_source_range(source_range: SourceRange) -> Self {
+        Self {
+            traceback: vec![TracebackFrame {
+                function_name: Utf16String::default(),
+                cached_source_range: Some(source_range),
+            }],
+            cached_string: Cell::new(None),
+        }
+    }
+
     pub fn traceback_storage_size(&self) -> usize {
         self.traceback.capacity() * size_of::<TracebackFrame>()
     }
@@ -101,13 +112,13 @@ impl ErrorData {
     fn populate_stack(vm: &Vm, skipped_innermost_frames: usize) -> Vec<TracebackFrame> {
         let stack_trace = vm.stack_trace();
         let mut traceback = Vec::with_capacity(stack_trace.len().saturating_sub(skipped_innermost_frames));
-        for element in stack_trace.into_iter().skip(skipped_innermost_frames) {
+        for element in stack_trace.values().iter().skip(skipped_innermost_frames) {
             traceback.push(TracebackFrame {
                 function_name: element
                     .function
                     .map(|function| function.name_for_call_stack())
                     .unwrap_or_default(),
-                cached_source_range: element.source_range,
+                cached_source_range: element.source_range.clone(),
             });
         }
         traceback
@@ -237,7 +248,7 @@ impl ExternalMemorySize for ErrorDataCell {
 impl ErrorDataCell {
     /// ErrorDataCell::capture(vm): error data with the call stack of the running execution context.
     pub fn capture(vm: &Vm) -> Gc<ErrorDataCell> {
-        let cell = vm.heap().allocate(Self {
+        let cell = vm.heap().allocate(|_| Self {
             header: CellHeader::for_class(Self::CLASS),
             error_data: ErrorData::new(vm),
         });

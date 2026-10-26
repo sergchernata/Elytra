@@ -1,0 +1,23 @@
+Harness status: OK
+
+Found 18 tests
+
+18 Pass
+Pass	Default Content-Type for Request with empty body
+Pass	Default Content-Type for Request with Blob body (no type set)
+Pass	Default Content-Type for Request with Blob body (empty type)
+Pass	Default Content-Type for Request with Blob body (set type)
+Pass	Default Content-Type for Request with buffer source body
+Pass	Default Content-Type for Request with FormData body
+Pass	Default Content-Type for Request with URLSearchParams body
+Pass	Default Content-Type for Request with string body
+Pass	Default Content-Type for Request with ReadableStream body
+Pass	Can override Content-Type for Request with empty body
+Pass	Can override Content-Type for Request with Blob body (no type set)
+Pass	Can override Content-Type for Request with Blob body (empty type)
+Pass	Can override Content-Type for Request with Blob body (set type)
+Pass	Can override Content-Type for Request with buffer source body
+Pass	Can override Content-Type for Request with FormData body
+Pass	Can override Content-Type for Request with URLSearchParams body
+Pass	Can override Content-Type for Request with string body
+Pass	Can override Content-Type for Request with ReadableStream body

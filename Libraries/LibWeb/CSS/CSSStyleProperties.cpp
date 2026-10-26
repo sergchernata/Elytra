@@ -85,7 +85,12 @@ GC::Ref<CSSStyleProperties> CSSStyleProperties::create_element_inline_style(DOM:
     // https://drafts.csswg.org/cssom/#dom-elementcssinlinestyle-style
     // The style attribute must return a CSS declaration block object whose readonly flag is unset, whose parent CSS
     // rule is null, and whose owner node is the context object.
-    return GC::Heap::the().allocate<CSSStyleProperties>(Computed::No, Readonly::No, RustDeclarationBlock { {}, {} }, move(element_reference));
+    return create_element_inline_style(move(element_reference), RustDeclarationBlock { {}, {} });
+}
+
+GC::Ref<CSSStyleProperties> CSSStyleProperties::create_element_inline_style(DOM::AbstractElement element_reference, RustDeclarationBlock declarations)
+{
+    return GC::Heap::the().allocate<CSSStyleProperties>(Computed::No, Readonly::No, move(declarations), move(element_reference));
 }
 
 CSSStyleProperties::CSSStyleProperties(Computed computed, Readonly readonly, RustDeclarationBlock declarations, Optional<DOM::AbstractElement> owner_node)
@@ -684,6 +689,26 @@ static NonnullRefPtr<StyleValue const> resolve_unresolvable_anchor_functions(Pro
     return computed_value;
 }
 
+// NB: An element without a layout node may still generate a box whose layout is not up to date yet, so this only
+//     looks at whether the element's style places it outside the box tree.
+static bool element_generates_no_box(Layout::BegunRead const& read, DOM::AbstractElement abstract_element, ComputedValues const& style)
+{
+    if (style.display().is_none() || style.display().is_contents())
+        return true;
+    // NB: content: none keeps ::before, ::after and ::marker out of the box tree, as normal (which computes to none
+    //     for them) does for ::before and ::after.
+    if (auto pseudo_element = abstract_element.pseudo_element(); pseudo_element.has_value()) {
+        bool is_before_or_after = first_is_one_of(*pseudo_element, PseudoElement::Before, PseudoElement::After);
+        if (is_before_or_after && style.content_is_normal())
+            return true;
+        auto content = style.computed_content();
+        if ((is_before_or_after || *pseudo_element == PseudoElement::Marker) && content->is_keyword() && content->to_keyword() == Keyword::None)
+            return true;
+    }
+    auto style_record = abstract_element.style_record_identity();
+    return !!style_record && has_flag(abstract_element.document().style_computer().style_engine().style_record_dependency_flags(read, style_record), StyleRecordDependencyFlag::InDisplayNoneSubtree);
+}
+
 // Brings style (and, when the property needs it, layout) up to date for computed-style property
 // access, and returns the layout node to read used values from (may be null). An empty Optional
 // means the element cannot expose computed style at all (disconnected, or no browsing context).
@@ -905,10 +930,17 @@ Optional<StyleProperty> CSSStyleProperties::get_direct_property(PropertyNameAndI
                     return resolve_touch_action_style_value(move(computed_value));
                 case PropertyID::TransformOrigin:
                     return style_value_for_transform_origin(computed_values->transform_origin(), {});
-                case PropertyID::MaxHeight:
-                case PropertyID::MaxWidth:
                 case PropertyID::MinHeight:
                 case PropertyID::MinWidth:
+                    // https://drafts.csswg.org/css-sizing-3/#valdef-width-auto
+                    // For backwards-compatibility, the resolved value of this keyword is zero for boxes of all [CSS2]
+                    // display types (block and inline boxes, inline blocks, and all table display types) when
+                    // 'aspect-ratio' is 'auto'. It also resolves to zero when no box is generated.
+                    if (computed_value->to_keyword() == Keyword::Auto && element_generates_no_box(read, abstract_element, *computed_values))
+                        return LengthStyleValue::create(Length::make_px(0));
+                    return resolve_unresolvable_anchor_functions(computed_property_id, move(computed_value));
+                case PropertyID::MaxHeight:
+                case PropertyID::MaxWidth:
                     return resolve_unresolvable_anchor_functions(computed_property_id, move(computed_value));
                 default:
                     return computed_value;

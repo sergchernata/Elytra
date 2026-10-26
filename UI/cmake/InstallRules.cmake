@@ -53,21 +53,30 @@ if (APPLE)
     # Fixup the app bundle and copy:
     #   - Shared libraries from lib/ to Ladybird.app/Contents/lib
     # Static libraries are linked into the executables, so nothing loads them from the bundle.
+    # CMake strips every executable it installs except the one inside an application bundle, so strip that one here.
     # Remove the symlink we created at build time for the lib directory first
     install(CODE "
-    file(REMOVE \${CMAKE_INSTALL_PREFIX}/bundle/Ladybird.app/Contents/lib)
-    set(lib_dir \${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
+    set(contents_dir \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/bundle/Ladybird.app/Contents)
+    file(REMOVE \${contents_dir}/lib)
+    set(lib_dir \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
     if (IS_ABSOLUTE ${CMAKE_INSTALL_LIBDIR})
-      set(lib_dir ${CMAKE_INSTALL_LIBDIR})
+      set(lib_dir \$ENV{DESTDIR}${CMAKE_INSTALL_LIBDIR})
     endif()
 
-    set(contents_dir \${CMAKE_INSTALL_PREFIX}/bundle/Ladybird.app/Contents)
+    if (CMAKE_INSTALL_DO_STRIP)
+      execute_process(COMMAND \"${CMAKE_STRIP}\" -u -r \${contents_dir}/MacOS/$<TARGET_FILE_NAME:ladybird>
+        COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+
     file(GLOB shared_libraries \${lib_dir}/*.dylib)
     if (shared_libraries)
       file(COPY \${shared_libraries} DESTINATION \${contents_dir}/lib)
     endif()
   "
             COMPONENT ladybird_Runtime)
+
+    install(FILES "${LADYBIRD_SOURCE_DIR}/Meta/Entitlements.plist" DESTINATION entitlements
+        RENAME Ladybird.release.entitlements COMPONENT ladybird_Runtime)
 endif()
 
 install(TARGETS ${all_required_lagom_libraries}
@@ -82,6 +91,40 @@ install(TARGETS ${all_required_lagom_libraries}
   FILE_SET ladybird
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+if (LADYBIRD_GENERATE_SYMBOL_FILES)
+    set(symbol_files_dir "${CMAKE_BINARY_DIR}/symbols")
+    set(symbol_files)
+    foreach (target IN LISTS ladybird_applications)
+        get_target_property(name ${target} OUTPUT_NAME)
+        if (NOT name)
+            set(name ${target})
+        endif()
+        if (APPLE)
+            get_target_property(is_bundle ${target} MACOSX_BUNDLE)
+            if (is_bundle)
+                string(APPEND name ".app")
+            endif()
+            set(symbol_file "${symbol_files_dir}/${name}.dSYM")
+            set(output "${symbol_file}/Contents/Info.plist")
+            set(command dsymutil "$<TARGET_FILE:${target}>" -o "${symbol_file}")
+        else()
+            set(symbol_file "${symbol_files_dir}/${name}.debug")
+            set(output "${symbol_file}")
+            set(command "${CMAKE_OBJCOPY}" --only-keep-debug "$<TARGET_FILE:${target}>" "${symbol_file}")
+        endif()
+        add_custom_command(OUTPUT "${output}" COMMAND ${command} DEPENDS ${target}
+            COMMENT "Writing the symbols of ${name}" VERBATIM)
+        list(APPEND symbol_files "${output}")
+    endforeach()
+    add_custom_target(ladybird_symbol_files ALL DEPENDS ${symbol_files})
+
+    install(DIRECTORY "${symbol_files_dir}/"
+        DESTINATION symbols
+        COMPONENT ladybird_Symbols
+        EXCLUDE_FROM_ALL
+    )
+endif()
 
 write_basic_package_version_file(
     "${package}ConfigVersion.cmake"

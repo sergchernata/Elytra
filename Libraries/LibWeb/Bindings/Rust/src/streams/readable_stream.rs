@@ -11,8 +11,8 @@ use core::cell::Cell;
 use core::ffi::c_void;
 
 use libjs_rust::api::{
-    Array, Gc, IteratorHint, IteratorRecord, Object, Realm, Trace, Value, Vm, call, get_iterator, iterator_complete,
-    iterator_next, iterator_value,
+    Array, Gc, IteratorHint, IteratorRecord, MarkedVec, Object, Realm, Trace, Value, Vm, call, get_iterator,
+    iterator_complete, iterator_next, iterator_value,
 };
 
 use crate::bindings::async_iterable::{AsyncIterable, END_OF_ITERATION};
@@ -34,9 +34,9 @@ use crate::streams::queuing_strategy::{QueuingStrategy, extract_high_water_mark,
 use crate::streams::read_request::{ReadIntoRequest, ReadRequest};
 use crate::streams::readable_byte_stream_controller::{
     ReadableByteStreamController, readable_byte_stream_controller_close, readable_byte_stream_controller_enqueue,
-    readable_byte_stream_controller_error, readable_byte_stream_controller_get_byob_request,
-    readable_byte_stream_controller_respond, set_up_readable_byte_stream_controller,
-    set_up_readable_byte_stream_controller_from_underlying_source,
+    readable_byte_stream_controller_enqueue_native_bytes, readable_byte_stream_controller_error,
+    readable_byte_stream_controller_get_byob_request, readable_byte_stream_controller_respond,
+    set_up_readable_byte_stream_controller, set_up_readable_byte_stream_controller_from_underlying_source,
 };
 use crate::streams::readable_stream_byob_reader::{ReadableStreamBYOBReader, set_up_readable_stream_byob_reader};
 use crate::streams::readable_stream_default_controller::{
@@ -227,7 +227,7 @@ impl ReadableStream {
         let underlying_source_dict = UnderlyingSource::from_js(cx.vm(), underlying_source)?;
 
         // 3. Perform ! InitializeReadableStream(this).
-        let this = allocate(cx.vm(), Self::new(cx.realm()));
+        let this = allocate(cx.vm(), |_| Self::new(cx.realm()));
 
         // 4. If underlyingSourceDict["type"] is "bytes":
         if underlying_source_dict.r#type == Some(ReadableStreamType::Bytes) {
@@ -410,12 +410,16 @@ impl ReadableStream {
     }
 
     // https://streams.spec.whatwg.org/#rs-tee
-    pub(crate) fn tee(this: &Ref<Self>, cx: &mut CallContext) -> WebIdlResult<Vec<Ref<Self>>> {
-        let cx = &this.context(cx.vm());
+    pub(crate) fn tee<'vm>(this: &Ref<Self>, cx: &mut CallContext<'vm>) -> WebIdlResult<MarkedVec<'vm, Ref<Self>>> {
+        let vm = cx.vm();
+        let cx = &this.context(vm);
 
         // 1. Return ? ReadableStreamTee(this, false).
         let (branch1, branch2) = readable_stream_tee(cx, *this, false)?;
-        Ok(vec![branch1, branch2])
+        let branches = MarkedVec::with_capacity(vm, 2);
+        branches.push(branch1);
+        branches.push(branch2);
+        Ok(branches)
     }
 
     // https://streams.spec.whatwg.org/#ref-for-asynchronous-iterator-initialization-steps
@@ -570,7 +574,7 @@ impl Transferable for ReadableStream {
             let (port1, port2) = create_entangled_ports(cx);
 
             // 5. Let writable be a new WritableStream in the current Realm.
-            let writable = allocate(cx.vm(), WritableStream::new(cx.realm()));
+            let writable = allocate(cx.vm(), |defer_gc| WritableStream::new(defer_gc, cx.realm()));
 
             // 6. Perform ! SetUpCrossRealmTransformWritable(writable, port1).
             set_up_cross_realm_transform_writable(cx, writable, port1);
@@ -591,7 +595,7 @@ impl Transferable for ReadableStream {
     fn transfer_receiving_steps(cx: &mut CallContext, data_holder: &mut TransferDataReader) -> WebIdlResult<Ref<Self>> {
         let cx = &*cx;
         with_temporary_execution_context_and_callbacks(cx.realm(), || {
-            let value = allocate(cx.vm(), Self::new(cx.realm()));
+            let value = allocate(cx.vm(), |_| Self::new(cx.realm()));
 
             // 1. Let deserializedRecord be ! StructuredDeserializeWithTransfer(dataHolder.[[port]], the current Realm).
             // 2. Let port be deserializedRecord.[[Deserialized]].
@@ -627,7 +631,7 @@ impl ReadableStream {
 
         // 4. Perform ! InitializeReadableStream(stream).
         // 5. Let controller be a new ReadableByteStreamController.
-        let controller = allocate(cx.vm(), ReadableByteStreamController::new());
+        let controller = allocate(cx.vm(), ReadableByteStreamController::new);
 
         // 6. Perform ! SetUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithmWrapper,
         //    cancelAlgorithmWrapper, highWaterMark, undefined).
@@ -764,6 +768,56 @@ impl ReadableStream {
         Ok(())
     }
 
+    // https://streams.spec.whatwg.org/#readablestream-pull-from-bytes
+    pub(crate) fn pull_from_bytes(this: Ref<Self>, vm: &Vm, bytes: &[u8]) -> WebIdlResult<()> {
+        let cx = &this.context(vm);
+
+        // 1. Assert: stream.[[controller]] implements ReadableByteStreamController.
+        let Some(ReadableStreamController::ReadableByteStreamController(controller)) = this.controller() else {
+            panic!("the stream has a ReadableByteStreamController");
+        };
+
+        // 2. Let available be bytes’s length.
+        let available = bytes.len();
+
+        // 3. Let desiredSize be available.
+        // 4. If stream’s current BYOB request view is non-null, then set desiredSize to stream’s current BYOB request
+        //    view's byte length.
+        let byob_view = Self::current_byob_request_view(this, vm);
+        let desired_size = byob_view.map_or(available, |byob_view| {
+            BufferSource::from(byob_view).extent().byte_length
+        });
+
+        // 5. Let pullSize be the smaller value of available and desiredSize.
+        let pull_size = available.min(desired_size);
+
+        // 6. Let pulled be the first pullSize bytes of bytes.
+        let pulled = &bytes[..pull_size];
+
+        // 7. Remove the first pullSize bytes from bytes.
+        // NB: The caller removes them from its own buffer, having sized bytes by the current BYOB request view.
+        assert!(pull_size == available);
+
+        // 8. If stream’s current BYOB request view is non-null, then:
+        if let Some(byob_view) = byob_view {
+            // 1. Write pulled into stream’s current BYOB request view.
+            let extent = BufferSource::from(byob_view).extent();
+            extent.buffer.overwrite(extent.byte_offset, pulled);
+
+            // 2. Perform ? ReadableByteStreamControllerRespond(stream.[[controller]], pullSize).
+            readable_byte_stream_controller_respond(cx, controller, pull_size as u64)?;
+        }
+        // 9. Otherwise,
+        else {
+            // 1. Set view to the result of creating a Uint8Array from pulled in stream’s relevant Realm.
+            // 2. Perform ? ReadableByteStreamControllerEnqueue(stream.[[controller]], view).
+            // NB: The bytes are enqueued without the view, which nothing could observe.
+            readable_byte_stream_controller_enqueue_native_bytes(cx, controller, pulled)?;
+        }
+
+        Ok(())
+    }
+
     // https://streams.spec.whatwg.org/#readablestream-pipe-through
     pub(crate) fn piped_through(
         this: Ref<Self>,
@@ -816,7 +870,7 @@ pub(crate) fn acquire_readable_stream_byob_reader(
     stream: Ref<ReadableStream>,
 ) -> WebIdlResult<Ref<ReadableStreamBYOBReader>> {
     // 1. Let reader be a new ReadableStreamBYOBReader.
-    let reader = allocate(cx.vm(), ReadableStreamBYOBReader::new());
+    let reader = allocate(cx.vm(), ReadableStreamBYOBReader::new);
 
     // 2. Perform ? SetUpReadableStreamBYOBReader(reader, stream).
     set_up_readable_stream_byob_reader(cx, reader, stream)?;
@@ -831,7 +885,7 @@ pub(crate) fn acquire_readable_stream_default_reader(
     stream: Ref<ReadableStream>,
 ) -> WebIdlResult<Ref<ReadableStreamDefaultReader>> {
     // 1. Let reader be a new ReadableStreamDefaultReader.
-    let reader = allocate(cx.vm(), ReadableStreamDefaultReader::new());
+    let reader = allocate(cx.vm(), ReadableStreamDefaultReader::new);
 
     // 2. Perform ? SetUpReadableStreamDefaultReader(reader, stream).
     set_up_readable_stream_default_reader(cx, reader, stream)?;
@@ -851,7 +905,7 @@ pub(crate) fn create_readable_stream(
 ) -> WebIdlResult<Ref<ReadableStream>> {
     // 4. Let stream be a new ReadableStream.
     // 5. Perform ! InitializeReadableStream(stream).
-    let stream = allocate(cx.vm(), ReadableStream::new(cx.realm()));
+    let stream = allocate(cx.vm(), |_| ReadableStream::new(cx.realm()));
     create_readable_stream_with_existing_stream(
         cx,
         stream,
@@ -889,7 +943,7 @@ pub(crate) fn create_readable_stream_with_existing_stream(
     initialize_readable_stream(stream);
 
     // 6. Let controller be a new ReadableStreamDefaultController.
-    let controller = allocate(cx.vm(), ReadableStreamDefaultController::new());
+    let controller = allocate(cx.vm(), ReadableStreamDefaultController::new);
 
     // 7. Perform ? SetUpReadableStreamDefaultController(stream, controller, startAlgorithm, pullAlgorithm,
     //    cancelAlgorithm, highWaterMark, sizeAlgorithm).
@@ -916,10 +970,10 @@ pub(crate) fn create_readable_byte_stream(
 ) -> WebIdlResult<Ref<ReadableStream>> {
     // 1. Let stream be a new ReadableStream.
     // 2. Perform ! InitializeReadableStream(stream).
-    let stream = allocate(cx.vm(), ReadableStream::new(cx.realm()));
+    let stream = allocate(cx.vm(), |_| ReadableStream::new(cx.realm()));
 
     // 3. Let controller be a new ReadableByteStreamController.
-    let controller = allocate(cx.vm(), ReadableByteStreamController::new());
+    let controller = allocate(cx.vm(), ReadableByteStreamController::new);
 
     // 4. Perform ? SetUpReadableByteStreamController(stream, controller, startAlgorithm, pullAlgorithm,
     //    cancelAlgorithm, 0, undefined).
@@ -965,7 +1019,7 @@ pub(crate) fn readable_stream_from_iterable(
 ) -> WebIdlResult<Ref<ReadableStream>> {
     // 1. Let stream be undefined.
     // NB: The algorithms below refer to the stream, so it is created here.
-    let stream = allocate(cx.vm(), ReadableStream::new(cx.realm()));
+    let stream = allocate(cx.vm(), |_| ReadableStream::new(cx.realm()));
 
     // 2. Let iteratorRecord be ? GetIterator(asyncIterable, async).
     let iterator_record = get_iterator(cx.vm(), async_iterable, IteratorHint::Async)?;
@@ -1106,7 +1160,11 @@ pub(crate) fn readable_stream_from_iterable_cancel_algorithm(
 }
 
 // https://streams.spec.whatwg.org/#readable-stream-add-read-into-request
-pub(crate) fn readable_stream_add_read_into_request(stream: Ref<ReadableStream>, read_into_request: ReadIntoRequest) {
+pub(crate) fn readable_stream_add_read_into_request(
+    vm: &Vm,
+    stream: Ref<ReadableStream>,
+    read_into_request: ReadIntoRequest,
+) {
     // 1. Assert: stream.[[reader]] implements ReadableStreamBYOBReader.
     let Some(ReadableStreamReader::ReadableStreamBYOBReader(reader)) = stream.reader() else {
         panic!("the stream is locked to a ReadableStreamBYOBReader");
@@ -1119,11 +1177,11 @@ pub(crate) fn readable_stream_add_read_into_request(stream: Ref<ReadableStream>,
     ));
 
     // 3. Append readRequest to stream.[[reader]].[[readIntoRequests]].
-    reader.append_read_into_request(read_into_request);
+    reader.append_read_into_request(vm, read_into_request);
 }
 
 // https://streams.spec.whatwg.org/#readable-stream-add-read-request
-pub(crate) fn readable_stream_add_read_request(stream: Ref<ReadableStream>, read_request: ReadRequest) {
+pub(crate) fn readable_stream_add_read_request(vm: &Vm, stream: Ref<ReadableStream>, read_request: ReadRequest) {
     // 1. Assert: stream.[[reader]] implements ReadableStreamDefaultReader.
     let Some(ReadableStreamReader::ReadableStreamDefaultReader(reader)) = stream.reader() else {
         panic!("the stream is locked to a ReadableStreamDefaultReader");
@@ -1133,7 +1191,7 @@ pub(crate) fn readable_stream_add_read_request(stream: Ref<ReadableStream>, read
     assert!(stream.state() == ReadableStreamState::Readable);
 
     // 3. Append readRequest to stream.[[reader]].[[readRequests]].
-    reader.append_read_request(read_request);
+    reader.append_read_request(vm, read_request);
 }
 
 // https://streams.spec.whatwg.org/#readable-stream-cancel
@@ -1289,7 +1347,7 @@ pub(crate) fn readable_stream_fulfill_read_into_request(
     // 3. Assert: reader.[[readIntoRequests]] is not empty.
     // 4. Let readIntoRequest be reader.[[readIntoRequests]][0].
     // 5. Remove readIntoRequest from reader.[[readIntoRequests]].
-    let read_into_request = reader.take_first_read_into_request();
+    let read_into_request = reader.take_first_read_into_request(vm);
 
     // 6. If done is true, perform readIntoRequest’s close steps, given chunk.
     if done {
@@ -1312,7 +1370,7 @@ pub(crate) fn readable_stream_fulfill_read_request(vm: &Vm, stream: Ref<Readable
     // 3. Assert: reader.[[readRequests]] is not empty.
     // 4. Let readRequest be reader.[[readRequests]][0].
     // 5. Remove readRequest from reader.[[readRequests]].
-    let read_request = reader.take_first_read_request();
+    let read_request = reader.take_first_read_request(vm);
 
     // 6. If done is true, perform readRequest’s close steps.
     if done {

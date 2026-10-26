@@ -17,6 +17,7 @@ use crate::bytecode::executable::PropertyLookupCache;
 use crate::bytecode::property_access::{Strict, put_by_property_key};
 use crate::embedding::abi_types::JSRealm;
 use crate::gc::class::{Class, Extends, ExternalMemorySize, GcCell, define_cell};
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::heap::{Heap, RuntimeClassAllocator, SizeClassAllocator};
 use crate::gc::root::MarkedVec;
@@ -51,7 +52,7 @@ use crate::runtime::primitive_string::PrimitiveString;
 use crate::runtime::private_environment::PrivateName;
 use crate::runtime::property_attributes::{DEFAULT_ATTRIBUTES, PropertyAttributes};
 use crate::runtime::property_descriptor::{PropertyDescriptor, to_property_descriptor};
-use crate::runtime::property_key::PropertyKey;
+use crate::runtime::property_key::{NonSymbolPropertyKey, PropertyKey};
 use crate::runtime::realm::Realm;
 use crate::runtime::shape::{AssignCopy, Shape};
 use crate::runtime::special_property_cache::{self, SpecialPropertyKey};
@@ -89,8 +90,8 @@ impl PrivateElements {
 
     fn ensure(&self) -> &GcRefCell<Vec<PrivateElement>> {
         if self.0.get().is_none() {
-            let elements = Box::new(GcRefCell::new(Vec::new()));
-            self.0.set(Some(NonNull::from(Box::leak(elements))));
+            self.0
+                .set(Some(NonNull::from(Box::leak(Box::new(GcRefCell::new(Vec::new()))))));
         }
         self.get().expect("the private elements were just allocated")
     }
@@ -552,15 +553,19 @@ fn are_dense_enough(filled: usize, length: usize) -> bool {
 }
 pub(crate) const MAX_TRANSITIONS_BEFORE_CONVERTING_TO_DICTIONARY: u32 = 64;
 
-/// Moves an object into the heap and finishes what its constructor could not do before it had an address: its named
-/// properties start out in its inline storage. Every object, of any class, is allocated through this.
-pub fn allocate_object<T: GcCell + Extends<Object>>(vm: &Vm, object: T) -> Gc<T> {
-    set_up_named_storage(vm.heap().allocate(object))
+/// Moves the object that `build` returns into the heap, as Heap::allocate() does, and finishes what its constructor
+/// could not do before it had an address: its named properties start out in its inline storage.
+pub fn allocate_object<T: GcCell + Extends<Object>>(vm: &Vm, build: impl FnOnce(&DeferGc<'_>) -> T) -> Gc<T> {
+    set_up_named_storage(vm.heap().allocate(build))
 }
 
 /// allocate_object() for an object whose class was derived at run time, from that class's allocator.
-pub fn allocate_object_in<T: GcCell + Extends<Object>>(vm: &Vm, allocator: RuntimeClassAllocator, object: T) -> Gc<T> {
-    set_up_named_storage(vm.heap().allocate_in(allocator, object))
+pub fn allocate_object_in<T: GcCell + Extends<Object>>(
+    vm: &Vm,
+    allocator: RuntimeClassAllocator,
+    build: impl FnOnce(&DeferGc<'_>) -> T,
+) -> Gc<T> {
+    set_up_named_storage(vm.heap().allocate_in(allocator, build))
 }
 
 #[inline(always)]
@@ -673,29 +678,26 @@ impl Object {
     // 10.1.12 OrdinaryObjectCreate ( proto [ , additionalInternalSlotsList ] ), https://tc39.es/ecma262/#sec-ordinaryobjectcreate
     pub fn create(vm: &Vm, realm: Gc<Realm>, prototype: Option<Gc<Object>>) -> Gc<Object> {
         let Some(prototype) = prototype else {
-            return allocate_object(
-                vm,
+            return allocate_object(vm, |_| {
                 Self::new_with_shape(
                     Self::CLASS,
                     realm.empty_object_shape(),
                     MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            );
+                )
+            });
         };
         if prototype == realm.object_prototype() {
-            return allocate_object(
-                vm,
+            return allocate_object(vm, |_| {
                 Self::new_with_shape(
                     Self::CLASS,
                     realm.new_object_shape(),
                     MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            );
+                )
+            });
         }
-        allocate_object(
-            vm,
-            Self::new_with_prototype(vm, Self::CLASS, prototype, MayInterfereWithIndexedPropertyAccess::No),
-        )
+        allocate_object(vm, |_| {
+            Self::new_with_prototype(vm, Self::CLASS, prototype, MayInterfereWithIndexedPropertyAccess::No)
+        })
     }
 
     pub fn create_prototype(vm: &Vm, realm: Gc<Realm>, prototype: Option<Gc<Object>>) -> Gc<Object> {
@@ -703,20 +705,18 @@ impl Object {
         if let Some(prototype) = prototype {
             shape.set_prototype_without_transition(vm, prototype);
         }
-        allocate_object(
-            vm,
-            Self::new_with_shape(Self::CLASS, shape, MayInterfereWithIndexedPropertyAccess::No),
-        )
+        allocate_object(vm, |_| {
+            Self::new_with_shape(Self::CLASS, shape, MayInterfereWithIndexedPropertyAccess::No)
+        })
     }
 
     pub fn create_with_premade_shape(vm: &Vm, shape: Gc<Shape>) -> Gc<Object> {
         let property_count = shape.property_count();
         // OPTIMIZATION: Objects with up to two properties, the most common ones, are in the first size class.
         if property_count <= INLINE_NAMED_STORAGE_CAPACITY as u32 {
-            return allocate_object(
-                vm,
-                Self::new_with_shape(Self::CLASS, shape, MayInterfereWithIndexedPropertyAccess::No),
-            );
+            return allocate_object(vm, |_| {
+                Self::new_with_shape(Self::CLASS, shape, MayInterfereWithIndexedPropertyAccess::No)
+            });
         }
         Self::create_in_size_class(vm, shape, property_count)
     }
@@ -749,7 +749,7 @@ impl Object {
         let object = Self::new_with_shape(Self::CLASS, shape, MayInterfereWithIndexedPropertyAccess::No);
         let size_class = plain_object_size_class(property_count);
         if size_class == 0 {
-            return allocate_object(vm, object);
+            return allocate_object(vm, |_| object);
         }
         object
             .inline_named_capacity
@@ -757,7 +757,7 @@ impl Object {
         let size_class_allocator = plain_object_size_classes(vm.heap())[size_class - 1];
         set_up_named_storage(
             vm.heap()
-                .allocate_with_size_class(size_class_allocator, object, Value::UNDEFINED),
+                .allocate_with_size_class(size_class_allocator, |_| object, Value::UNDEFINED),
         )
     }
 
@@ -1190,6 +1190,13 @@ impl Object {
             return false;
         }
 
+        #[cfg_attr(
+            ladybird_gc_lints,
+            expect(
+                gc_container_on_stack,
+                reason = "the keys are those of `shape`, which keeps their symbols alive"
+            )
+        )]
         let mut properties = Vec::with_capacity(shape.property_count() as usize);
         let mut has_accessors = false;
         shape.for_each_property_in_insertion_order(|property_key, metadata| {
@@ -1218,7 +1225,7 @@ impl Object {
                         target_shape = target_shape.create_configure_transition(vm, property_key, new_attributes);
                     }
                 }
-                shape.set_cached_integrity_level_shape(level, target_shape);
+                shape.set_cached_integrity_level_shape(vm, level, target_shape);
                 target_shape
             }
         };
@@ -1448,6 +1455,13 @@ impl Object {
                     return false;
                 }
                 let mut copy_shape = new_object_shape;
+                #[cfg_attr(
+                    ladybird_gc_lints,
+                    expect(
+                        gc_container_on_stack,
+                        reason = "the keys are those of `from_shape`, which keeps their symbols alive"
+                    )
+                )]
                 let mut enumerable_keys = Vec::new();
                 from_shape.for_each_property_in_insertion_order(|property_key, metadata| {
                     if metadata.attributes.is_enumerable() {
@@ -1458,10 +1472,13 @@ impl Object {
                 for property_key in &enumerable_keys {
                     copy_shape = copy_shape.create_put_transition(vm, property_key, DEFAULT_ATTRIBUTES);
                 }
-                from_shape.set_cached_assign_copy(AssignCopy {
-                    prototype_validity,
-                    copy_shape,
-                });
+                from_shape.set_cached_assign_copy(
+                    vm,
+                    AssignCopy {
+                        prototype_validity,
+                        copy_shape,
+                    },
+                );
                 copy_shape
             }
         };
@@ -1694,7 +1711,7 @@ impl Object {
         }
 
         // 4. Append PrivateElement { [[Key]]: P, [[Kind]]: field, [[Value]]: value } to O.[[PrivateElements]].
-        self.private_elements.ensure().borrow_mut().push(PrivateElement {
+        self.private_elements.ensure().borrow_mut(vm).push(PrivateElement {
             key: name.clone(),
             kind: PrivateElementKind::Field,
             value,
@@ -1725,7 +1742,7 @@ impl Object {
         }
 
         // 5. Append method to O.[[PrivateElements]].
-        self.private_elements.ensure().borrow_mut().push(element);
+        self.private_elements.ensure().borrow_mut(vm).push(element);
 
         // 6. Return unused.
         Ok(())
@@ -1792,7 +1809,7 @@ impl Object {
             self.private_elements
                 .get()
                 .expect("the object has private elements")
-                .borrow_mut()[entry_index]
+                .borrow_mut(vm)[entry_index]
                 .value = value;
             return Ok(());
         }
@@ -2968,7 +2985,6 @@ impl Object {
         mut callback: impl FnMut(&PropertyKey, bool) -> ThrowCompletionOr<()>,
     ) -> ThrowCompletionOr<()> {
         if self.eligible_for_own_property_enumeration_fast_path() {
-            // NB: These are index and string keys, which hold no cells, so they need no rooting.
             let mut keys = Vec::with_capacity(
                 self.indexed_real_size()
                     + self.shape().property_count() as usize
@@ -2984,18 +3000,21 @@ impl Object {
                     {
                         enumerable = result.attributes.is_enumerable();
                     }
-                    keys.push((PropertyKey::from(index), enumerable));
+                    keys.push((NonSymbolPropertyKey::from(index), enumerable));
                 }
             }
 
             if self.has_magical_length_property() {
-                keys.push((vm.names.length.clone(), false));
+                keys.push((NonSymbolPropertyKey::from(vm.names.length.as_string().clone()), false));
             }
 
             self.shape()
                 .for_each_property_in_insertion_order(|property_key, metadata| {
                     if property_key.is_string() {
-                        keys.push((property_key.clone(), metadata.attributes.is_enumerable()));
+                        keys.push((
+                            NonSymbolPropertyKey::from(property_key.as_string().clone()),
+                            metadata.attributes.is_enumerable(),
+                        ));
                     }
                     ControlFlow::Continue(())
                 });
@@ -3907,27 +3926,29 @@ impl Object {
     }
 
     fn transition_to_dictionary(&self) {
-        let mut dictionary = GenericIndexedPropertyStorage::default();
+        DeferGc::scope(self.vm(), |_| {
+            let mut dictionary = GenericIndexedPropertyStorage::default();
 
-        let kind = self.indexed_storage_kind();
-        if kind == IndexedStorageKind::Packed || kind == IndexedStorageKind::Holey {
-            // Transfer existing elements
-            let count = self.indexed_packed_element_count();
-            for index in 0..count {
-                let value = self.indexed_element(index);
-                if !value.is_empty() {
-                    dictionary.put(index, value, DEFAULT_ATTRIBUTES);
+            let kind = self.indexed_storage_kind();
+            if kind == IndexedStorageKind::Packed || kind == IndexedStorageKind::Holey {
+                // Transfer existing elements
+                let count = self.indexed_packed_element_count();
+                for index in 0..count {
+                    let value = self.indexed_element(index);
+                    if !value.is_empty() {
+                        dictionary.put(index, value, DEFAULT_ATTRIBUTES);
+                    }
                 }
+                self.release_indexed_elements();
             }
-            self.release_indexed_elements();
-        }
 
-        // Set the array_like_size on the dictionary
-        dictionary.set_array_like_size(self.indexed_array_like_size() as usize);
+            // Set the array_like_size on the dictionary
+            dictionary.set_array_like_size(self.indexed_array_like_size() as usize);
 
-        let dictionary = Box::into_raw(Box::new(GcRefCell::new(dictionary)));
-        self.indexed_elements.set(dictionary.cast::<Value>());
-        self.indexed_storage_kind.set(IndexedStorageKind::Dictionary);
+            let dictionary = Box::into_raw(Box::new(GcRefCell::new(dictionary)));
+            self.indexed_elements.set(dictionary.cast::<Value>());
+            self.indexed_storage_kind.set(IndexedStorageKind::Dictionary);
+        });
     }
 
     #[cold]
@@ -3985,7 +4006,7 @@ impl Object {
     #[cold]
     fn indexed_put_into_dictionary(&self, index: u32, value: Value, attributes: PropertyAttributes) {
         let promote = {
-            let mut dictionary = self.indexed_dictionary().borrow_mut();
+            let mut dictionary = self.indexed_dictionary().borrow_mut(self.vm());
             let old_size = dictionary.size();
             dictionary.put(index, value, attributes);
             let length = dictionary.array_like_size();
@@ -4041,7 +4062,7 @@ impl Object {
     }
 
     fn indexed_put_dictionary_and_update_size(&self, index: u32, value: Value, attributes: PropertyAttributes) {
-        let mut dictionary = self.indexed_dictionary().borrow_mut();
+        let mut dictionary = self.indexed_dictionary().borrow_mut(self.vm());
         dictionary.put(index, value, attributes);
         self.indexed_array_like_size.set(dictionary.array_like_size() as u32);
     }
@@ -4156,7 +4177,7 @@ impl Object {
                 }
                 self.set_indexed_element(index, Value::EMPTY);
             }
-            IndexedStorageKind::Dictionary => self.indexed_dictionary().borrow_mut().remove(index),
+            IndexedStorageKind::Dictionary => self.indexed_dictionary().borrow_mut(self.vm()).remove(index),
         }
     }
 
@@ -4166,7 +4187,7 @@ impl Object {
         }
 
         if self.indexed_storage_kind() == IndexedStorageKind::Dictionary {
-            let mut dictionary = self.indexed_dictionary().borrow_mut();
+            let mut dictionary = self.indexed_dictionary().borrow_mut(self.vm());
             let result = dictionary.set_array_like_size(new_size);
             self.indexed_array_like_size.set(dictionary.array_like_size() as u32);
             return result;
@@ -4265,7 +4286,7 @@ impl Object {
 
     pub fn indexed_take_first(&self) -> ValueAndAttributes {
         if self.indexed_storage_kind() == IndexedStorageKind::Dictionary {
-            let mut dictionary = self.indexed_dictionary().borrow_mut();
+            let mut dictionary = self.indexed_dictionary().borrow_mut(self.vm());
             let result = dictionary.take_first();
             self.indexed_array_like_size.set(dictionary.array_like_size() as u32);
             return result;
@@ -4300,7 +4321,7 @@ impl Object {
 
     pub fn indexed_take_last(&self) -> ValueAndAttributes {
         if self.indexed_storage_kind() == IndexedStorageKind::Dictionary {
-            let mut dictionary = self.indexed_dictionary().borrow_mut();
+            let mut dictionary = self.indexed_dictionary().borrow_mut(self.vm());
             let result = dictionary.take_last();
             self.indexed_array_like_size.set(dictionary.array_like_size() as u32);
             return result;
@@ -4422,10 +4443,10 @@ impl Object {
     // For FunctionPrototype.apply fast path
     pub fn indexed_packed_elements<'vm>(&self, vm: &'vm Vm) -> MarkedVec<'vm, Value> {
         let count = self.indexed_packed_elements_span_size();
-        // NB: Reading the elements does not collect, so they need no root until they are copied out.
-        let values: Vec<Value> = (0..count).map(|index| self.indexed_element(index)).collect();
-        let elements = MarkedVec::new(vm);
-        elements.extend_from_slice(&values);
+        let elements = MarkedVec::with_capacity(vm, count as usize);
+        for index in 0..count {
+            elements.push(self.indexed_element(index));
+        }
         elements
     }
 
@@ -4461,6 +4482,35 @@ impl Object {
         assert!(self.indexed_storage_kind() == IndexedStorageKind::Packed);
         assert!(index < self.indexed_packed_element_count());
         self.set_indexed_element(index, value);
+    }
+
+    /// Splices packed storage whose ordinary property operations the caller
+    /// has established have no observable effects. Storage growth never
+    /// collects, and `items` must come from outside this object's storage.
+    #[cfg(feature = "jit")]
+    pub(crate) fn splice_packed_indexed_elements(&self, start: u32, delete_count: u32, items: &[Value]) {
+        assert_eq!(self.indexed_storage_kind(), IndexedStorageKind::Packed);
+        let old_size = self.indexed_array_like_size();
+        assert!(start <= old_size && delete_count <= old_size - start);
+        let new_size = u32::try_from(u64::from(old_size - delete_count) + items.len() as u64)
+            .expect("the caller checked the new array length");
+        self.ensure_indexed_elements(new_size);
+        let elements = self.indexed_elements.get();
+        // SAFETY: Packed storage holds all old_size elements, and growing it
+        // above made room for new_size. Both ranges are in that storage and
+        // may overlap. The inserted values do not alias the storage.
+        unsafe {
+            core::ptr::copy(
+                elements.add((start + delete_count) as usize),
+                elements.add(start as usize + items.len()),
+                (old_size - start - delete_count) as usize,
+            );
+            core::ptr::copy_nonoverlapping(items.as_ptr(), elements.add(start as usize), items.len());
+            for index in new_size..old_size {
+                elements.add(index as usize).write(Value::EMPTY);
+            }
+        }
+        self.indexed_array_like_size.set(new_size);
     }
 }
 

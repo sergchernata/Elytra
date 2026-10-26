@@ -5,7 +5,6 @@ set(TEST_SOURCES
     TestFont.cpp
     TestImageDecoder.cpp
     TestImageWriter.cpp
-    TestPath.cpp
     TestRect.cpp
     TestSharedFontProvider.cpp
     TestWOFF.cpp
@@ -26,7 +25,7 @@ target_compile_definitions(TestSharedFontProvider PRIVATE LADYBIRD_SOURCE_DIR="$
 ladybird_test(TestBitmapSequence.cpp LibGfx LIBS LibGfx LibIPC)
 ladybird_test(TestShareableBitmap.cpp LibGfx LIBS LibGfx LibIPC)
 
-# Opens LibWeb by name to reach its copy of the Rust graphics crate.
-if (APPLE OR LINUX)
+# Opens the LibGfx and LibWeb shared libraries by name to reach their copies of the Rust graphics crate.
+if (BUILD_SHARED_LIBS AND (APPLE OR LINUX))
     ladybird_test(TestRustCrateCopies.cpp LibGfx LIBS LibGfx LibWeb)
 endif()

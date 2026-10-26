@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	handler added in addHandler() delays navigation finish
+Pass	handler added in addHandler() is executed in the correct order

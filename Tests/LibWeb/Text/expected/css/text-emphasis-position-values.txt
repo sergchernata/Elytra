@@ -1,0 +1,10 @@
+over right: specified=over right, computed=over, inherited=over
+right under: specified=under right, computed=under, inherited=under
+left over: specified=over left, computed=over left, inherited=over left
+under left: specified=under left, computed=under left, inherited=under left
+initial=over
+unset=under left
+time=0: over
+time=499: over
+time=500: under left
+time=1000: under left

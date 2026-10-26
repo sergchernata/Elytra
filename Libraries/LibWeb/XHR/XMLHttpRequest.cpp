@@ -381,7 +381,12 @@ Utf16String XMLHttpRequest::get_text_response() const
 
     // 3. If xhr’s response type is the empty string, charset is null, and the result of get a final MIME type for xhr is an XML MIME type,
     if (m_response_type == XMLHttpRequest::ResponseType::Empty && !charset.has_value() && get_final_mime_type().is_xml()) {
-        // FIXME: then use the rules set forth in the XML specifications to determine the encoding. Let charset be the determined encoding. [XML] [XML-NAMES]
+        // then use the rules set forth in the XML specifications to determine the encoding. Let charset be the determined encoding. [XML] [XML-NAMES]
+        // NB: The encoding declaration names the encoding, which this finds the way the HTML Standard does when
+        //     sniffing an encoding. Without one, charset stays null and is set to UTF-8 below, as the XML
+        //     specification requires.
+        if (auto xml_encoding = HTML::get_an_xml_encoding(m_received_bytes); xml_encoding.has_value())
+            charset = TextCodec::get_standardized_encoding(*xml_encoding);
     }
 
     // 4. If charset is null, then set charset to UTF-8.
@@ -457,7 +462,7 @@ void XMLHttpRequest::set_document_response()
     // 6. Otherwise, let document be a document that represents the result of running the XML parser with XML scripting support disabled on xhr’s received bytes. If that fails (unsupported character encoding, namespace well-formedness error, etc.), then return null.
     else {
         document = DOM::XMLDocument::create(page, *m_global_object, m_response->url().value_or({}));
-        if (!Web::build_xml_document(*document, m_received_bytes, {})) {
+        if (!Web::build_xml_document(*document, m_received_bytes, get_final_encoding())) {
             reset_response_object();
             return;
         }
@@ -553,19 +558,17 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::set_request_header(String const& name,
     if (m_send)
         return WebIDL::InvalidStateError::create("XHR send() flag is already set"_utf16);
 
+    // NB: The ByteString arguments hold their bytes as code points, which have to be isomorphic encoded back into bytes.
+    auto header = HTTP::Header::isomorphic_encode(name, value);
+
     // 3. Normalize value.
-    auto normalized_value = HTTP::normalize_header_value(value);
+    header.value = HTTP::normalize_header_value(header.value);
 
     // 4. If name is not a header name or value is not a header value, then throw a "SyntaxError" DOMException.
-    if (!HTTP::is_header_name(name))
+    if (!HTTP::is_header_name(header.name))
         return WebIDL::SyntaxError::create("Header name contains invalid characters."_utf16);
-    if (!HTTP::is_header_value(normalized_value))
+    if (!HTTP::is_header_value(header.value))
         return WebIDL::SyntaxError::create("Header value contains invalid characters."_utf16);
-
-    auto header = HTTP::Header {
-        .name = name.to_byte_string(),
-        .value = move(normalized_value),
-    };
 
     // 5. If (name, value) is a forbidden request-header, then return.
     if (HTTP::is_forbidden_request_header(header))
@@ -1016,18 +1019,11 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(NullableDocumentOrXMLHttpRequestB
         };
 
         // 10. Set this’s fetch controller to the result of fetching req with processRequestBodyChunkLength set to processRequestBodyChunkLength, processRequestEndOfBody set to processRequestEndOfBody, and processResponse set to processResponse.
-        m_fetch_controller = Fetch::Fetching::fetch(
-            associated_realm,
-            request,
-            Fetch::Infrastructure::FetchAlgorithms::create(
-                {
-                    .process_request_body_chunk_length = move(process_request_body_chunk_length),
-                    .process_request_end_of_body = move(process_request_end_of_body),
-                    .process_early_hints_response = {},
-                    .process_response = move(process_response),
-                    .process_response_end_of_body = {},
-                    .process_response_consume_body = {},
-                }));
+        Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::DeliverStreamToConsumerAgent };
+        fetch_algorithms_input.process_request_body_chunk_length = move(process_request_body_chunk_length);
+        fetch_algorithms_input.process_request_end_of_body = move(process_request_end_of_body);
+        fetch_algorithms_input.process_response = move(process_response);
+        m_fetch_controller = Fetch::Fetching::fetch(associated_realm, request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
 
         // AD-HOC: Stopping the fetch, as aborting the document does, discards it without a response. Hand this an
         //         aborted network error instead, so that it fires abort as for a canceled fetch.
@@ -1087,19 +1083,9 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(NullableDocumentOrXMLHttpRequestB
         };
 
         // 3. Set this’s fetch controller to the result of fetching req with processResponseConsumeBody set to processResponseConsumeBody and useParallelQueue set to true.
-        m_fetch_controller = Fetch::Fetching::fetch(
-            associated_realm,
-            request,
-            Fetch::Infrastructure::FetchAlgorithms::create(
-                {
-                    .process_request_body_chunk_length = {},
-                    .process_request_end_of_body = {},
-                    .process_early_hints_response = {},
-                    .process_response = {},
-                    .process_response_end_of_body = {},
-                    .process_response_consume_body = move(process_response_consume_body),
-                }),
-            Fetch::Fetching::UseParallelQueue::Yes);
+        Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::SyncAccumulate };
+        fetch_algorithms_input.process_response_consume_body = move(process_response_consume_body);
+        m_fetch_controller = Fetch::Fetching::fetch(associated_realm, request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)), Fetch::Fetching::UseParallelQueue::Yes);
 
         // 4. Let now be the present time.
         // 5. Pause until either processedResponse is true or this’s timeout is not 0 and this’s timeout milliseconds have passed since now.
@@ -1118,8 +1104,8 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(NullableDocumentOrXMLHttpRequestB
             //     (https://html.spec.whatwg.org/multipage/webappapis.html#pause). The fetch above runs on a parallel
             //     queue, and progresses on the platform event loop (deferred invocations, IPC, timers) — all that's
             //     pumped here. So, the response arrives and is read to completion while the HTML event loop stays
-            //     paused; see the parallel-queue path in fetch_response_handover(), and the direct delivery in
-            //     FetchedDataReceiver::queue_delivery_task(). Blink/WebKit block the thread outright for a sync load:
+            //     paused; see the sync XHR body path in fetch_response_handover(), and the direct delivery in
+            //     BodyStreamPullSource::deliver_while_paused(). Blink/WebKit block the thread outright for a sync load:
             //     Blink on a WaitableEvent (ResourceRequestSender::SendSync), WebKit on a sync IPC reply
             //     (WebLoaderStrategy::loadResourceSynchronously). Gecko instead spins a nested event loop
             //     (XMLHttpRequestMainThread::SendInternal), with the top window suspended and its documents' microtasks

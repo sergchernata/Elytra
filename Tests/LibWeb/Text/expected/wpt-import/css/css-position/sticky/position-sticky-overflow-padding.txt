@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	A sticky element should not be affected by ancestor padding until it reaches it
+Pass	A sticky element should be offset by ancestor padding even when stuck
+Pass	Ancestor overflow padding does not allow a sticky element to escape its container

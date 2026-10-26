@@ -11,7 +11,7 @@ use crate::interpreter::vm::Vm;
 use crate::layout::cell::Gc;
 use crate::layout::object::Object;
 use crate::layout::value::Value;
-use crate::runtime::abstract_operations::{new_dispose_capability, ordinary_create_from_constructor_of};
+use crate::runtime::abstract_operations::ordinary_create_from_constructor_of;
 use crate::runtime::async_disposable_stack::AsyncDisposableStack;
 use crate::runtime::completion::ThrowCompletionOr;
 use crate::runtime::error::ErrorKind;
@@ -37,17 +37,14 @@ define_native_function_class!(
 
 impl AsyncDisposableStackConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<AsyncDisposableStackConstructor> {
-        realm.create_object(
-            vm,
-            AsyncDisposableStackConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.AsyncDisposableStack.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| AsyncDisposableStackConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.AsyncDisposableStack.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -90,7 +87,7 @@ impl AsyncDisposableStackConstructor {
             realm,
             new_target,
             Intrinsics::async_disposable_stack_prototype,
-            |prototype| AsyncDisposableStack::new(vm, new_dispose_capability(), prototype),
+            |defer_gc, prototype| AsyncDisposableStack::new(defer_gc, vm, prototype),
         )?;
         Ok(async_disposable_stack.upcast())
     }

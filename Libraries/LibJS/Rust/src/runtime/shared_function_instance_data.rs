@@ -21,6 +21,7 @@ use crate::compile::FunctionPrecompileMode;
 use crate::compile::SharedFunctionDescription;
 use crate::gc::class::{GcCell, define_cell};
 use crate::gc::gc_ref_cell::GcRefCell;
+use crate::gc::root::MarkedVec;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::run::should_dump_bytecode;
 use crate::interpreter::vm::Vm;
@@ -75,7 +76,8 @@ pub struct SharedFunctionInstanceDataStorage {
     //     dynamically created functions via Function constructor).
     #[gc(untraced)]
     source_code: RefCell<Option<Rc<SourceCode>>>,
-    source_text_owner: GcRefCell<Utf16String>,
+    #[gc(untraced)]
+    source_text_owner: RefCell<Utf16String>,
     source_text_offset: Cell<usize>,
     source_text_length: Cell<usize>, // [[SourceText]]
 
@@ -228,7 +230,7 @@ impl SharedFunctionInstanceData {
             storage: SharedFunctionInstanceDataStorage {
                 name,
                 source_code: RefCell::new(None),
-                source_text_owner: GcRefCell::new(Utf16String::default()),
+                source_text_owner: RefCell::new(Utf16String::default()),
                 source_text_offset: Cell::new(0),
                 source_text_length: Cell::new(0),
                 function_length,
@@ -280,17 +282,19 @@ impl SharedFunctionInstanceData {
             Vec::new()
         };
 
-        let shared = vm.heap().allocate(Self::new(
-            description.function_kind,
-            name,
-            description.function_length,
-            description.formal_parameter_count,
-            description.strict,
-            description.is_arrow,
-            description.has_simple_parameter_list,
-            mapped_parameter_names,
-            Some(description.payload),
-        ));
+        let shared = vm.heap().allocate(|_| {
+            Self::new(
+                description.function_kind,
+                name,
+                description.function_length,
+                description.formal_parameter_count,
+                description.strict,
+                description.is_arrow,
+                description.has_simple_parameter_list,
+                mapped_parameter_names,
+                Some(description.payload),
+            )
+        });
         shared.update_can_inline_call();
 
         // Set parsing insights that must be available before lazy compilation.
@@ -332,17 +336,19 @@ impl SharedFunctionInstanceData {
         let source_text_length = source_text_range.end.saturating_sub(source_text_range.start);
         let is_arrow_function = function.is_arrow();
 
-        let shared = vm.heap().allocate(Self::new(
-            function.function_kind(),
-            name,
-            function.length(),
-            function.parameter_count(),
-            function.has_strict_code() || outer_strict,
-            is_arrow_function,
-            has_simple_parameter_list,
-            simple_parameter_names.unwrap_or_default(),
-            None,
-        ));
+        let shared = vm.heap().allocate(|_| {
+            Self::new(
+                function.function_kind(),
+                name,
+                function.length(),
+                function.parameter_count(),
+                function.has_strict_code() || outer_strict,
+                is_arrow_function,
+                has_simple_parameter_list,
+                simple_parameter_names.unwrap_or_default(),
+                None,
+            )
+        });
         shared.update_can_inline_call();
 
         // Set parsing insights that must be available before lazy compilation.
@@ -442,17 +448,19 @@ impl SharedFunctionInstanceData {
         has_simple_parameter_list: bool,
         parameter_names_for_mapped_arguments: Vec<Utf16FlyString>,
     ) -> Gc<SharedFunctionInstanceData> {
-        let shared = vm.heap().allocate(Self::new(
-            kind,
-            name,
-            function_length,
-            formal_parameter_count,
-            strict,
-            is_arrow_function,
-            has_simple_parameter_list,
-            parameter_names_for_mapped_arguments,
-            None,
-        ));
+        let shared = vm.heap().allocate(|_| {
+            Self::new(
+                kind,
+                name,
+                function_length,
+                formal_parameter_count,
+                strict,
+                is_arrow_function,
+                has_simple_parameter_list,
+                parameter_names_for_mapped_arguments,
+                None,
+            )
+        });
         shared.update_can_inline_call();
         shared
     }
@@ -596,22 +604,26 @@ impl SharedFunctionInstanceData {
         self.storage.cached_bytecode_executable.borrow().is_some()
     }
 
-    /// The functions that `executable` creates and that have not been compiled yet, with a copy of the AST of each, so
-    /// that they can be compiled elsewhere, such as on another thread, while their own ASTs stay in place for a first
-    /// call that comes sooner.
+    /// Appends the functions that `executable` creates and that have not been compiled yet to `functions`, and returns
+    /// a copy of the AST of each, so that they can be compiled elsewhere, such as on another thread, while their own
+    /// ASTs stay in place for a first call that comes sooner.
     pub fn uncompiled_functions_of(
         executable: Gc<Executable>,
-    ) -> Vec<(Gc<SharedFunctionInstanceData>, Box<FunctionPayload>)> {
-        (0..executable.shared_function_data_count())
-            .filter_map(|index| {
-                let shared_data = executable.shared_function_data(u32::try_from(index).expect("the index fits in u32"));
-                if shared_data.executable().is_some() {
-                    return None;
-                }
-                let function_ast = shared_data.storage.rust_function_ast.borrow().clone()?;
-                Some((shared_data, function_ast))
-            })
-            .collect()
+        functions: &MarkedVec<'_, Gc<SharedFunctionInstanceData>>,
+    ) -> Vec<Box<FunctionPayload>> {
+        let mut function_asts = Vec::new();
+        for index in 0..executable.shared_function_data_count() {
+            let shared_data = executable.shared_function_data(u32::try_from(index).expect("the index fits in u32"));
+            if shared_data.executable().is_some() {
+                continue;
+            }
+            let Some(function_ast) = shared_data.storage.rust_function_ast.borrow().clone() else {
+                continue;
+            };
+            functions.push(shared_data);
+            function_asts.push(function_ast);
+        }
+        function_asts
     }
 
     /// Records what scope analysis found out about the function's body, as rust_sfd_set_metadata does.

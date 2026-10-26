@@ -14,6 +14,7 @@ use libjs_runtime_macros::Trace;
 
 use crate::bytecode::executable::Executable;
 use crate::gc::class::{Extends, GcCell, cast_ref, define_cell};
+use crate::gc::defer_gc::{DeferGc, Deferred};
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::root::MarkedVec;
 use crate::gc::visitor::{Trace, Visitor};
@@ -156,10 +157,16 @@ impl EcmascriptFunctionObject {
         prototype: Gc<Object>,
     ) -> Gc<EcmascriptFunctionObject> {
         shared_data.note_closure_created();
-        let function = allocate_object(
-            vm,
-            Self::new(vm, shared_data, parent_environment, private_environment, prototype),
-        );
+        let function = allocate_object(vm, |defer_gc| {
+            Self::new(
+                defer_gc,
+                vm,
+                shared_data,
+                parent_environment,
+                private_environment,
+                prototype,
+            )
+        });
         function.initialize(vm, realm);
         function
     }
@@ -183,6 +190,7 @@ impl EcmascriptFunctionObject {
     }
 
     fn new(
+        _: &DeferGc<'_>,
         vm: &Vm,
         shared_data: Gc<SharedFunctionInstanceData>,
         parent_environment: Option<Gc<Environment>>,
@@ -716,8 +724,8 @@ impl EcmascriptFunctionObject {
         self.name.get().unwrap_or_else(|| self.shared_data().name())
     }
 
-    fn ensure_class_data(&self) {
-        let mut class_data = self.storage.class_data.borrow_mut();
+    fn ensure_class_data(&self, vm: &Vm) {
+        let mut class_data = self.storage.class_data.borrow_mut(vm);
         if class_data.is_none() {
             *class_data = Some(Box::default());
         }
@@ -746,11 +754,11 @@ impl EcmascriptFunctionObject {
             .clone()
     }
 
-    pub fn add_field(&self, field: ClassFieldDefinition) {
-        self.ensure_class_data();
+    pub fn add_field(&self, vm: &Vm, field: ClassFieldDefinition) {
+        self.ensure_class_data(vm);
         self.storage
             .class_data
-            .borrow_mut()
+            .borrow_mut(vm)
             .as_mut()
             .expect("the function has class data")
             .fields
@@ -776,11 +784,11 @@ impl EcmascriptFunctionObject {
             .clone()
     }
 
-    pub fn add_private_method(&self, method: PrivateElement) {
-        self.ensure_class_data();
+    pub fn add_private_method(&self, vm: &Vm, method: PrivateElement) {
+        self.ensure_class_data(vm);
         self.storage
             .class_data
-            .borrow_mut()
+            .borrow_mut(vm)
             .as_mut()
             .expect("the function has class data")
             .private_methods
@@ -989,8 +997,8 @@ impl EcmascriptFunctionObject {
         let this_function = self.as_function_object_gc();
         // NB: The arguments of a frame of an inlined call may be objects JIT code never created, which only the
         //     arguments object holds once it exists.
-        let _defer_gc = crate::jit::DeferGc::new(vm);
-        let mut passed_arguments: Option<Vec<Cell<Value>>> = None;
+        let defer_gc = DeferGc::new(vm);
+        let mut passed_arguments: Option<Deferred<'_, Vec<Cell<Value>>>> = None;
 
         vm.for_each_stack_frame_top_to_bottom(|frame| {
             if frame.function != Some(this_function) {
@@ -998,28 +1006,32 @@ impl EcmascriptFunctionObject {
             }
 
             // NB: The frame of a call that JIT code inlined has its arguments in the JIT frame.
-            passed_arguments = Some(match frame.inlined_call {
-                Some(inlined_call) => crate::jit::translate::call_site_frame_arguments(
-                    vm,
-                    frame.execution_context,
-                    inlined_call.site,
-                    inlined_call.frame_pointer,
-                    inlined_call.frame_state,
-                )
-                .into_iter()
-                .map(Cell::new)
-                .collect(),
-                None => {
-                    let context = frame.execution_context;
-                    // NB: The frame of an inlined call that JIT code published or materialized for a call it made has
-                    //     markers for the objects among its arguments that the code never allocated.
-                    crate::jit::translate::resolve_deferred_arguments(vm, context);
-                    context.arguments()[..context.passed_argument_count.get() as usize]
-                        .iter()
-                        .map(|argument| Cell::new(argument.get()))
-                        .collect()
-                }
-            });
+            passed_arguments = Some(
+                defer_gc.cover(match frame.inlined_call {
+                    Some(inlined_call) => crate::jit::translate::call_site_frame_arguments(
+                        vm,
+                        frame.execution_context,
+                        inlined_call.site,
+                        inlined_call.frame_pointer,
+                        inlined_call.frame_state,
+                        &defer_gc,
+                    )
+                    .into_inner()
+                    .into_iter()
+                    .map(Cell::new)
+                    .collect(),
+                    None => {
+                        let context = frame.execution_context;
+                        // NB: The frame of an inlined call that JIT code published or materialized for a call it made has
+                        //     markers for the objects among its arguments that the code never allocated.
+                        crate::jit::translate::resolve_deferred_arguments(vm, context);
+                        context.arguments()[..context.passed_argument_count.get() as usize]
+                            .iter()
+                            .map(|argument| Cell::new(argument.get()))
+                            .collect()
+                    }
+                }),
+            );
             ControlFlow::Break(())
         });
 

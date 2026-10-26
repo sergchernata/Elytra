@@ -2506,6 +2506,22 @@
       "font-optical-sizing"
     ]
   },
+  "font-palette": {
+    "__comment": "FIXME: Select the COLR palette when the font API supports palette selection. INTEROP: Animate discretely until palette-mix() is supported by multiple engines.",
+    "affects-layout": false,
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "normal",
+    "requires-computation": "never",
+    "valid-types": [
+      "dashed-ident"
+    ],
+    "valid-identifiers": [
+      "normal",
+      "light",
+      "dark"
+    ]
+  },
   "font-size": {
     "style-group": "FontValues",
     "animation-type": "by-computed-value",
@@ -3003,6 +3019,19 @@
       "unitless-length"
     ],
     "needs-layout-for-getcomputedstyle": true
+  },
+  "hyphenate-character": {
+    "__comment": "FIXME: Use this string when hyphenation is implemented.",
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "auto",
+    "requires-computation": "never",
+    "valid-types": [
+      "string"
+    ],
+    "valid-identifiers": [
+      "auto"
+    ]
   },
   "image-rendering": {
     "style-group": "InheritedBoxValues",
@@ -5258,6 +5287,19 @@
       "from-font"
     ],
     "percentages-resolve-to": "length"
+  },
+  "text-emphasis-position": {
+    "__comment": "FIXME: Use this position when text emphasis rendering is implemented.",
+    "animation-type": "discrete",
+    "inherited": true,
+    "initial": "over right",
+    "requires-computation": "non-inherited-value",
+    "valid-identifiers": [
+      "over",
+      "under",
+      "left",
+      "right"
+    ]
   },
   "text-indent": {
     "style-group": "InheritedTextValues",

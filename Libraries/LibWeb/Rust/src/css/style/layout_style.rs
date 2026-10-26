@@ -33,6 +33,8 @@ pub(crate) enum AnonymousStyleKind {
     ButtonContentBox,
     FieldsetContentWrapper,
     InlineStyleWrapper,
+    /// The inline box a writing suggestion's text renders in after the caret.
+    WritingSuggestion,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,8 +193,68 @@ impl LayoutStyle {
         );
     }
 
+    /// Draws text in its color at half its alpha, i.e. `color-mix(in srgb, currentColor 50%, transparent)`, which
+    /// reads as a suggestion in light and dark color schemes alike.
+    fn fade_text_color(&mut self) {
+        let fade = |color: u32| (color >> 24).div_ceil(2) << 24 | (color & 0x00ff_ffff);
+        let index = group_index::INHERITED_TEXT;
+        // SAFETY: The clone is uniquely owned and is the inherited text group.
+        let payload = SharedPayload::new(unsafe { clone_group_payload(index, self.payloads[index].as_ptr()) });
+        // SAFETY: As above; the colors are plain values the payload doesn't retain.
+        unsafe {
+            let values = &mut *payload.cast::<InheritedTextValues>().cast_mut();
+            values.color = fade(values.color);
+            values.webkit_text_fill_color = fade(values.webkit_text_fill_color);
+        }
+        release_group_payload(index, std::mem::replace(&mut self.payloads[index], payload).as_ptr());
+        self.changed = true;
+    }
+
     pub(crate) fn is_unchanged(&self) -> bool {
         !self.changed
+    }
+
+    /// Builds the payloads of `groups` again from `table`, a longhand table holding the style's computed values with
+    /// some of them replaced.
+    /// The values `animated_overlay` samples over the table win over it where they do over the style's own table.
+    pub(crate) fn replace_groups_from_table(
+        &mut self,
+        table: &ComputedLonghandTable,
+        animated_overlay: Option<&crate::css::animated_overlay::AnimatedOverlay>,
+        groups: &[usize],
+    ) {
+        for &group in groups {
+            let current = self.payloads[group].as_ptr();
+            // SAFETY: The style holds a reference to its payload of every group.
+            let parent = unsafe { crate::css::computed_values::GroupPayloadRef::new(group, current) };
+            let payload = crate::css::table_group_builder::rebuild_group_from_table_and_overlay(
+                table,
+                animated_overlay,
+                group,
+                parent,
+                0,
+                0,
+                None,
+            )
+            .expect("a group of the accepted @position-try properties builds from a longhand table");
+            if payload == current {
+                release_group_payload(group, payload);
+                continue;
+            }
+            self.changed = true;
+            release_group_payload(
+                group,
+                std::mem::replace(&mut self.payloads[group], SharedPayload::new(payload)).as_ptr(),
+            );
+        }
+    }
+
+    pub(crate) fn position_area(&self) -> Vec<u8> {
+        self.group::<AnchorValues>().position_area.as_slice().to_vec()
+    }
+
+    pub(crate) fn set_position_area(&mut self, codes: Vec<u8>) {
+        self.edit::<AnchorValues>(|values| values.position_area = RetainedPositionAreaList::from_vec(codes));
     }
 
     pub(crate) fn set_display(&mut self, display: FfiDisplay) {
@@ -405,11 +467,12 @@ impl LayoutStyle {
                 });
                 style.set_overflow(overrides.overflow_x, overrides.overflow_y);
             }
-            AnonymousStyleKind::InlineStyleWrapper => style.set_display(FfiDisplay::outside_and_inside(
-                display_outside::INLINE,
-                display_inside::FLOW,
-                false,
-            )),
+            AnonymousStyleKind::InlineStyleWrapper | AnonymousStyleKind::WritingSuggestion => style.set_display(
+                FfiDisplay::outside_and_inside(display_outside::INLINE, display_inside::FLOW, false),
+            ),
+        }
+        if kind == AnonymousStyleKind::WritingSuggestion {
+            style.fade_text_color();
         }
         if kind == AnonymousStyleKind::MissingTableCell {
             style.edit::<BoxValues>(|values| {

@@ -24,9 +24,11 @@ use crate::bytecode::generator::{ConstantValue, ExceptionHandler};
 use crate::bytecode::generator::{LocalVariable, PendingClassBlueprint};
 use crate::bytecode_cache::{DecodedBytecodeBytes, DecodedExecutableRecord};
 use crate::gc::class::{Finalize, GcCell, define_cell};
-use crate::gc::heap::cell_is_dead;
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::root::MarkedVec;
+use crate::gc::sweep::Sweep;
 use crate::gc::visitor::{Trace, Visitor};
+use crate::gc::weak::SweptAfterCollection;
 use crate::interpreter::vm::Vm;
 use crate::jit::InterpreterTier;
 use crate::jit::code::ExecutableJitState;
@@ -128,14 +130,20 @@ impl PropertyLookupCacheEntryData {
         }
     }
 
-    fn has_dead_cell(&self) -> bool {
-        (self.key != 0 && cell_is_dead(Value(self.key).as_cell()))
-            || self.from_shape.is_some_and(cell_is_dead)
-            || self.shape.is_some_and(cell_is_dead)
-            || self.prototype.is_some_and(cell_is_dead)
-            || self.prototype_chain_validity.is_some_and(cell_is_dead)
+    fn has_dead_cell(&self, sweep: &Sweep<'_>) -> bool {
+        (self.key != 0 && sweep.is_dead(Value::from_bits(self.key).as_cell()))
+            || self.from_shape.is_some_and(|shape| sweep.is_dead(shape))
+            || self.shape.is_some_and(|shape| sweep.is_dead(shape))
+            || self.prototype.is_some_and(|prototype| sweep.is_dead(prototype))
+            || self
+                .prototype_chain_validity
+                .is_some_and(|validity| sweep.is_dead(validity))
     }
 }
+
+// SAFETY: Entries live in the inline caches of executables and of the VM, which the VM sweeps after each collection (see
+// Vm::remove_dead_cells_from_property_lookup_caches()).
+unsafe impl SweptAfterCollection for PropertyLookupCacheEntry {}
 
 impl PropertyLookupCacheEntry {
     pub fn new() -> Self {
@@ -186,11 +194,11 @@ impl PropertyLookupCacheEntry {
     }
 
     /// Forgets the whole entry if one of its cells died in this collection, as clear_cache_entry_if_dead does.
-    fn clear_if_it_has_a_dead_cell(&self) {
-        if self.get().has_dead_cell() {
+    fn clear_if_it_has_a_dead_cell(&self, sweep: &Sweep<'_>) {
+        if self.get().has_dead_cell(sweep) {
             self.set(PropertyLookupCacheEntryData::default());
         }
-        if self.getter.get().is_some_and(cell_is_dead) {
+        if self.getter.get().is_some_and(|getter| sweep.is_dead(getter)) {
             self.getter.set(None);
         }
     }
@@ -650,8 +658,8 @@ impl PropertyLookupCache {
         }
     }
 
-    /// Forgets the entries with a cell that died in this collection. Only the VM's sweep callback calls this.
-    pub fn remove_dead_entries(&self) {
+    /// Forgets the entries with a cell that died in this collection.
+    pub fn remove_dead_entries(&self, sweep: &Sweep<'_>) {
         if let Some(data) = self.megamorphic_data() {
             for entry in data
                 .primary_entries
@@ -659,13 +667,13 @@ impl PropertyLookupCache {
                 .chain(&data.secondary_entries)
                 .chain(core::iter::once(&data.entry))
             {
-                entry.clear_if_it_has_a_dead_cell();
+                entry.clear_if_it_has_a_dead_cell(sweep);
             }
             return;
         }
 
         for entry in self.entries() {
-            entry.clear_if_it_has_a_dead_cell();
+            entry.clear_if_it_has_a_dead_cell(sweep);
         }
     }
 }
@@ -827,9 +835,9 @@ impl StaticPropertyLookupCaches {
         &self.caches[site as usize]
     }
 
-    pub fn remove_dead_entries(&self) {
+    pub fn remove_dead_entries(&self, sweep: &Sweep<'_>) {
         for cache in &self.caches {
-            cache.remove_dead_entries();
+            cache.remove_dead_entries(sweep);
         }
     }
 }
@@ -884,6 +892,10 @@ pub struct KeyedPropertyLookupCacheEntry {
 }
 
 const _: () = assert!(size_of::<KeyedPropertyLookupCacheEntry>() == 64);
+
+// SAFETY: Entries only live in the VM's keyed property lookup caches, which the VM sweeps after each collection (see
+// Vm::remove_dead_cells_from_property_lookup_caches()).
+unsafe impl SweptAfterCollection for KeyedPropertyLookupCacheEntry {}
 // NB: The interpreter reads entries with the layout of KeyedPropertyLookupCacheEntryLayout, and finds them the way
 //     entry_index_for() does.
 const _: () = assert!(
@@ -996,15 +1008,17 @@ impl KeyedPropertyLookupCache {
         }
     }
 
-    /// Forgets the entries with a cell that died in this collection. Only the VM's sweep callback calls this.
-    pub fn remove_dead_entries(&self) {
+    /// Forgets the entries with a cell that died in this collection.
+    pub fn remove_dead_entries(&self, sweep: &Sweep<'_>) {
         for entry in self.entries.borrow_mut().iter_mut() {
             let lookup = &entry.lookup;
             // NB: Entries of the keyed property store cache for puts it does not make have a shape but no type.
-            if lookup.shape.is_some_and(cell_is_dead)
-                || lookup.prototype.is_some_and(cell_is_dead)
-                || lookup.prototype_chain_validity.is_some_and(cell_is_dead)
-                || lookup.new_shape.is_some_and(cell_is_dead)
+            if lookup.shape.is_some_and(|shape| sweep.is_dead(shape))
+                || lookup.prototype.is_some_and(|prototype| sweep.is_dead(prototype))
+                || lookup
+                    .prototype_chain_validity
+                    .is_some_and(|validity| sweep.is_dead(validity))
+                || lookup.new_shape.is_some_and(|shape| sweep.is_dead(shape))
             {
                 *entry = KeyedPropertyLookupCacheEntry::default();
             }
@@ -1031,7 +1045,7 @@ define_cell!(TemplateObjectCache, Other);
 
 impl TemplateObjectCache {
     pub fn create(vm: &Vm) -> Gc<TemplateObjectCache> {
-        vm.heap().allocate(TemplateObjectCache {
+        vm.heap().allocate(|_| TemplateObjectCache {
             header: CellHeader::for_class(Self::CLASS),
             cached_template_object: Cell::new(None),
         })
@@ -1060,7 +1074,7 @@ pub struct ObjectShapeCache {
 }
 
 /// The parts of an ObjectPropertyIteratorCacheData the interpreter does not read.
-#[derive(Default)]
+#[derive(Default, Trace)]
 pub struct ObjectPropertyIteratorCacheDataStorage {
     properties: Box<[PropertyKey]>,
 }
@@ -1073,7 +1087,7 @@ unsafe impl Trace for ObjectPropertyIteratorCacheData {
         self.shape.trace(visitor);
         self.prototype_chain_validity.trace(visitor);
         self.property_values.trace(visitor);
-        self.storage.properties.trace(visitor);
+        self.storage.trace(visitor);
     }
 }
 
@@ -1099,7 +1113,7 @@ impl ObjectPropertyIteratorCacheData {
         } else {
             (false, 0)
         };
-        let cache_data = vm.heap().allocate(Self {
+        let cache_data = vm.heap().allocate(|_| Self {
             header: CellHeader::for_class(Self::CLASS),
             shape_is_dictionary: Cell::new(shape_is_dictionary),
             fast_path: Cell::new(fast_path),
@@ -1136,7 +1150,7 @@ impl ObjectPropertyIteratorCacheData {
     pub fn create(vm: &Vm, properties: &MarkedVec<'_, PropertyKey>) -> Gc<ObjectPropertyIteratorCacheData> {
         // The slow path keeps only the key list. Values are converted lazily during enumeration,
         // because deleted keys have to be filtered with has_property() at each step anyway.
-        vm.heap().allocate(Self {
+        vm.heap().allocate(|_| Self {
             header: CellHeader::for_class(Self::CLASS),
             shape_is_dictionary: Cell::new(false),
             fast_path: Cell::new(ObjectPropertyIteratorFastPath::None),
@@ -1326,13 +1340,6 @@ fn interpreter_buffer<T>(elements: &[T]) -> InterpreterBuffer<T> {
 }
 
 impl Executable {
-    /// Moves `executable` into the heap and has the VM prune its inline caches after every collection.
-    pub fn create_from_parts(vm: &Vm, executable: Executable) -> Gc<Executable> {
-        let executable = vm.heap().allocate(executable);
-        vm.register_executable(executable);
-        executable
-    }
-
     pub fn property_lookup_cache(&self, index: usize) -> &PropertyLookupCache {
         &self.property_lookup_caches[index]
     }
@@ -1383,47 +1390,28 @@ impl Executable {
     }
 
     /// Forgets the cells the inline caches remember that died in this collection.
-    pub fn remove_dead_cells(&self) {
+    pub fn remove_dead_cells(&self, sweep: &Sweep<'_>) {
         for cache in &self.property_lookup_caches {
-            cache.remove_dead_entries();
+            cache.remove_dead_entries(sweep);
         }
         for cache in self
             .global_variable_caches
             .iter()
             .chain(self.dynamic_global_variable_caches.get().into_iter().flatten())
         {
-            cache.entry.clear_if_it_has_a_dead_cell();
+            cache.entry.clear_if_it_has_a_dead_cell(sweep);
         }
         for cache in &self.object_shape_caches {
-            if cache.shape.get().is_some_and(cell_is_dead) {
+            if cache.shape.get().is_some_and(|shape| sweep.is_dead(shape)) {
                 cache.shape.set(None);
             }
         }
         if let Some(feedback) = self.feedback() {
-            feedback.remove_dead_cells();
+            feedback.remove_dead_cells(sweep);
         }
     }
 
-    pub fn new(
-        bytecode: Box<[u8]>,
-        number_of_registers: u32,
-        number_of_locals: u32,
-        number_of_arguments: u32,
-        constants: Box<[Value]>,
-        cache_counts: &ExecutableCacheCounts,
-        is_strict_mode: bool,
-    ) -> Self {
-        Self::new_with_bytecode(
-            ExecutableBytecode::Owned(bytecode),
-            number_of_registers,
-            number_of_locals,
-            number_of_arguments,
-            constants,
-            cache_counts,
-            is_strict_mode,
-        )
-    }
-
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_bytecode(
         bytecode: ExecutableBytecode,
         number_of_registers: u32,
@@ -1432,6 +1420,7 @@ impl Executable {
         constants: Box<[Value]>,
         cache_counts: &ExecutableCacheCounts,
         is_strict_mode: bool,
+        _defer_gc: &DeferGc<'_>,
     ) -> Self {
         let property_lookup_caches: Box<[PropertyLookupCache]> = (0..cache_counts.property_lookup_caches)
             .map(|_| PropertyLookupCache::new())
@@ -1606,41 +1595,61 @@ impl Executable {
         source_code: Option<&Rc<SourceCode>>,
         replaced_executable: Option<Gc<Executable>>,
     ) -> Gc<Executable> {
-        // The literal values of class elements stay rooted until the executable that holds them is allocated.
-        let rooted_literal_values = MarkedVec::new(vm);
+        let executable = vm.heap().allocate(|defer_gc| {
+            Self::build(
+                vm,
+                parts,
+                rooted_shared_function_data,
+                source_code,
+                replaced_executable,
+                defer_gc,
+            )
+        });
+        vm.register_executable(executable);
+        if let Some(replaced_executable) = replaced_executable {
+            Self::copy_runtime_caches_from(executable, &replaced_executable);
+            Self::take_over_warm_up_from(executable, &replaced_executable);
+        }
+
+        if let Some(debugger) = vm.debugger() {
+            debugger.register_executable(vm, executable);
+        }
+
+        executable
+    }
+
+    fn build(
+        vm: &Vm,
+        parts: ExecutableParts,
+        rooted_shared_function_data: &MarkedVec<'_, Gc<SharedFunctionInstanceData>>,
+        source_code: Option<&Rc<SourceCode>>,
+        replaced_executable: Option<Gc<Executable>>,
+        defer_gc: &DeferGc<'_>,
+    ) -> Executable {
         let class_blueprints: Box<[ClassBlueprint]> = parts
             .class_blueprints
             .iter()
-            .map(|blueprint| ClassBlueprint::create(vm, blueprint, source_code, &rooted_literal_values))
+            .map(|blueprint| ClassBlueprint::create(vm, blueprint, source_code, defer_gc))
             .collect();
         let shared_function_data: Box<[Gc<SharedFunctionInstanceData>]> =
-            rooted_shared_function_data.to_vec().into_boxed_slice();
-
-        // The constants stay rooted until the executable that holds them is allocated.
-        let rooted_constants = MarkedVec::with_capacity(vm, parts.constants.len());
-        for constant in &parts.constants {
-            rooted_constants.push(constant_value(vm, constant));
-        }
-        let constants: Box<[Value]> = rooted_constants.to_vec().into_boxed_slice();
-        // The template object caches stay rooted until the executable that holds them is allocated. An executable this
-        // one replaces shares its own, so that both hand out the same template objects.
-        let rooted_template_object_caches = MarkedVec::with_capacity(vm, parts.cache_counts.template_object as usize);
-        match replaced_executable {
+            (*rooted_shared_function_data.values()).into();
+        let constants: Box<[Value]> = parts
+            .constants
+            .iter()
+            .map(|constant| constant_value(vm, constant))
+            .collect();
+        // An executable this one replaces shares its template object caches, so that both hand out the same template
+        // objects.
+        let template_object_caches: Box<[Gc<TemplateObjectCache>]> = match replaced_executable {
             Some(replaced_executable)
                 if replaced_executable.template_object_caches.len() == parts.cache_counts.template_object as usize =>
             {
-                for cache in &replaced_executable.template_object_caches {
-                    rooted_template_object_caches.push(*cache);
-                }
+                replaced_executable.template_object_caches.clone()
             }
-            _ => {
-                for _ in 0..parts.cache_counts.template_object {
-                    rooted_template_object_caches.push(TemplateObjectCache::create(vm));
-                }
-            }
-        }
-        let template_object_caches: Box<[Gc<TemplateObjectCache>]> =
-            rooted_template_object_caches.to_vec().into_boxed_slice();
+            _ => (0..parts.cache_counts.template_object)
+                .map(|_| TemplateObjectCache::create(vm))
+                .collect(),
+        };
         let counts = ExecutableCacheCounts {
             property_lookup_caches: parts.cache_counts.property_lookup,
             global_variable_caches: parts.cache_counts.global_variable,
@@ -1656,6 +1665,7 @@ impl Executable {
             constants,
             &counts,
             parts.is_strict,
+            defer_gc,
         );
         executable.identifier_table = parts.identifier_table;
         executable.set_property_key_table(parts.property_key_table);
@@ -1700,19 +1710,6 @@ impl Executable {
             .collect();
         executable.argument_variable_names = parts.argument_variable_names.into_boxed_slice();
         executable.source_code = source_code.cloned();
-        let executable = Self::create_from_parts(vm, executable);
-        if let Some(replaced_executable) = replaced_executable {
-            Self::copy_runtime_caches_from(executable, &replaced_executable);
-            Self::take_over_warm_up_from(executable, &replaced_executable);
-        }
-        drop(rooted_template_object_caches);
-        drop(rooted_constants);
-        drop(rooted_literal_values);
-
-        if let Some(debugger) = vm.debugger() {
-            debugger.register_executable(vm, executable);
-        }
-
         executable
     }
 

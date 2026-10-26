@@ -167,30 +167,7 @@ class Violation;
 
 namespace Web::ContentSecurityPolicy::Directives {
 
-class BaseUriDirective;
-class ChildSourceDirective;
-class ConnectSourceDirective;
-class DefaultSourceDirective;
 class Directive;
-class FontSourceDirective;
-class FormActionDirective;
-class FrameAncestorsDirective;
-class FrameSourceDirective;
-class ImageSourceDirective;
-class ManifestSourceDirective;
-class MediaSourceDirective;
-class ObjectSourceDirective;
-class ReportToDirective;
-class ReportUriDirective;
-class SandboxDirective;
-class ScriptSourceAttributeDirective;
-class ScriptSourceDirective;
-class ScriptSourceElementDirective;
-class StyleSourceAttributeDirective;
-class StyleSourceDirective;
-class StyleSourceElementDirective;
-class WebRTCDirective;
-class WorkerSourceDirective;
 
 }
 
@@ -453,6 +430,7 @@ using StyleValueVector = Vector<ValueComparingNonnullRefPtr<StyleValue const>>;
 
 namespace Web::CSS::Parser::ValueParserFFI {
 
+struct DeclarationBlock;
 struct FfiMediaFeatureValue;
 
 }
@@ -542,6 +520,7 @@ class EditCommand;
 class EditingHistory;
 class SpellCheckController;
 class SpellingMarkers;
+class WritingSuggestionController;
 class UndoStep;
 enum class HistoryAction : u8;
 

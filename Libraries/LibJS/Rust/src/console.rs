@@ -6,7 +6,7 @@
 
 //! The console namespace of https://console.spec.whatwg.org, and the client a host gives it to print with.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,6 @@ use libjs_runtime_macros::Trace;
 
 use crate::console_log_level::ConsoleLogLevel;
 use crate::gc::class::{GcCell, define_cell};
-use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::root::MarkedVec;
 use crate::interpreter::vm::Vm;
 use crate::layout::cell::{CellHeader, Gc};
@@ -68,11 +67,11 @@ pub struct Console {
     client: Cell<Option<Gc<ConsoleClient>>>,
 
     #[gc(untraced)]
-    counters: GcRefCell<HashMap<Utf16FlyString, u32>>,
+    counters: RefCell<HashMap<Utf16FlyString, u32>>,
     #[gc(untraced)]
-    timer_table: GcRefCell<HashMap<Utf16FlyString, Instant>>,
+    timer_table: RefCell<HashMap<Utf16FlyString, Instant>>,
     #[gc(untraced)]
-    group_stack: GcRefCell<Vec<Group>>,
+    group_stack: RefCell<Vec<Group>>,
 }
 
 define_cell!(Console, Other);
@@ -95,13 +94,13 @@ fn message_with_label(vm: &Vm, before: &str, label: &Utf16String, after: &str) -
 
 impl Console {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<Console> {
-        vm.heap().allocate(Console {
+        vm.heap().allocate(|_| Console {
             header: CellHeader::for_class(Self::CLASS),
             realm,
             client: Cell::new(None),
-            counters: GcRefCell::default(),
-            timer_table: GcRefCell::default(),
-            group_stack: GcRefCell::default(),
+            counters: RefCell::default(),
+            timer_table: RefCell::default(),
+            group_stack: RefCell::default(),
         })
     }
 
@@ -113,7 +112,7 @@ impl Console {
         self.realm
     }
 
-    pub fn counters(&self) -> &GcRefCell<HashMap<Utf16FlyString, u32>> {
+    pub fn counters(&self) -> &RefCell<HashMap<Utf16FlyString, u32>> {
         &self.counters
     }
 
@@ -359,7 +358,7 @@ impl Console {
         let stack_trace = vm.stack_trace();
 
         // NOTE: Skip the first frame (console.trace() itself)
-        for element in stack_trace.iter().skip(1) {
+        for element in stack_trace.values().iter().skip(1) {
             let function_name = element
                 .function
                 .map(|function| function.name_for_call_stack())

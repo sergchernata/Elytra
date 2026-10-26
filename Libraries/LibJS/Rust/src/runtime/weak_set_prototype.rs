@@ -42,17 +42,14 @@ fn typed_this_weak_set(vm: &Vm) -> ThrowCompletionOr<Gc<WeakSet>> {
 
 impl WeakSetPrototype {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<WeakSetPrototype> {
-        realm.create_object(
-            vm,
-            WeakSetPrototype {
-                base: Object::new_with_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm.object_prototype(),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            },
-        )
+        realm.create_object(vm, |_| WeakSetPrototype {
+            base: Object::new_with_prototype(
+                vm,
+                Self::CLASS,
+                realm.object_prototype(),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -116,7 +113,7 @@ impl WeakSetPrototype {
         //         i. Replace the element of S.[[WeakSetData]] whose value is e with an element whose value is empty.
         //         ii. Return true.
         // 5. Return false.
-        Ok(Value::from_bool(weak_set.weak_set_remove(value.as_cell())))
+        Ok(Value::from_bool(weak_set.weak_set_remove(vm, value.as_cell())))
     }
 
     // 24.4.3.4 WeakSet.prototype.has ( value ), https://tc39.es/ecma262/#sec-weakset.prototype.has

@@ -8,7 +8,7 @@ use core::cell::Cell;
 use core::ptr::NonNull;
 
 use crate::gc::class::{GcCell, define_cell};
-use crate::gc::heap::cell_is_dead;
+use crate::gc::sweep::Sweep;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::gc::weak_container::WeakContainer;
 use crate::interpreter::vm::Vm;
@@ -61,7 +61,9 @@ impl WeakRef {
     }
 
     pub fn create(vm: &Vm, realm: Gc<Realm>, value: Value) -> Gc<WeakRef> {
-        realm.create_object(vm, WeakRef::new(vm, value, realm.intrinsics().weak_ref_prototype(vm)))
+        realm.create_object(vm, |_| {
+            WeakRef::new(vm, value, realm.intrinsics().weak_ref_prototype(vm))
+        })
     }
 
     /// Registers the new WeakRef as a weak container.
@@ -78,13 +80,13 @@ impl WeakRef {
         self.last_execution_generation.set(vm.head.execution_generation.get());
     }
 
-    fn remove_dead_cells(object: &Object, _: &Vm) {
+    fn remove_dead_cells(object: &Object, sweep: &Sweep<'_>) {
         let weak_ref = object
             .as_gc()
             .downcast::<WeakRef>()
             .expect("the weak container is a WeakRef");
         let value = weak_ref.value.get();
-        let is_alive = value.is_empty() || !cell_is_dead(value.as_cell());
+        let is_alive = value.is_empty() || !sweep.is_dead(value.as_cell());
         if is_alive {
             return;
         }

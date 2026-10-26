@@ -84,7 +84,7 @@ WEB_API CSSPixelRect caret_rect_for_child_offset(Layout::BegunRead const&, Layou
 // Per-document paint facts the recording inputs carry, resolved once per recording.
 WEB_API Layout::RustFFI::FfiCaretPaint resolve_document_caret_paint(Layout::BegunRead const&, DOM::Document&);
 WEB_API Layout::RustFFI::FfiFocusedTextControlSelection resolve_focused_text_control_selection(Layout::BegunRead const&, DOM::Document const&);
-WEB_API Layout::RustFFI::FfiFocusedAreaOutline resolve_focused_area_outline(Layout::BegunRead const&, DOM::Document const&, Vector<u8>& path_bytes);
+WEB_API Layout::RustFFI::FfiFocusedAreaOutline resolve_focused_area_outline(Layout::BegunRead const&, DOM::Document const&);
 WEB_API void push_highlight_pseudo_styles(DOM::Element const&);
 
 // The node a layout row stands for, as the arena names it.
@@ -109,6 +109,8 @@ WEB_API Layout::RustFFI::FfiRectToViewportTransform identity_rect_to_viewport_tr
 WEB_API Layout::RustFFI::FfiRectToViewportTransform rect_to_viewport_transform(DOM::Document const&, Compositing::AccumulatedVisualContextTree const&);
 WEB_API Vector<CSSPixelRect> client_rects(Layout::Node const&, Layout::RustFFI::FfiRectToViewportTransform const&);
 WEB_API CSSPixelRect bounding_client_rect(Layout::Node const&, Layout::RustFFI::FfiRectToViewportTransform const&);
+WEB_API bool has_sticky_positioned_inclusive_ancestor(Layout::Node const&);
+WEB_API CSSPixelPoint accumulated_sticky_offset(Layout::Node const&, Layout::RustFFI::FfiRectToViewportTransform const&);
 
 WEB_API CSSPixelPoint cumulative_scroll_compensation(Layout::Node const&);
 

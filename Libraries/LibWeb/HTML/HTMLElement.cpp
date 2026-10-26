@@ -909,6 +909,18 @@ GC::Ptr<DOM::Element> HTMLElement::offset_parent() const
     }
 }
 
+// NB: Sticky positioning moves a box by an offset that depends on the scroll position and is resolved after layout, so
+//     it is added to the box's position separately.
+static CSSPixelPoint sticky_offset_of(Layout::Node const& layout_node)
+{
+    if (!Painting::has_sticky_positioned_inclusive_ancestor(layout_node))
+        return {};
+    auto& document = const_cast<DOM::Document&>(layout_node.document());
+    document.update_paint_and_hit_testing_properties_if_needed();
+    auto visual_context_tree = document.visual_context_tree();
+    return Painting::accumulated_sticky_offset(layout_node, Painting::rect_to_viewport_transform(document, visual_context_tree));
+}
+
 // https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsettop
 int HTMLElement::offset_top() const
 {
@@ -925,7 +937,8 @@ int HTMLElement::offset_top() const
     if (!layout_node || !Painting::has_committed_box(*layout_node))
         return 0;
 
-    CSSPixels top_border_edge_of_element = Painting::absolute_border_box_rect(*layout_node).y();
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
+    CSSPixels top_border_edge_of_element = Painting::absolute_border_box_rect(*layout_node).y() + sticky_offset_of(*layout_node).y();
 
     // 2. If the offsetParent of the element is null
     //    return the y-coordinate of the top border edge of the first CSS layout box associated with the element,
@@ -934,7 +947,7 @@ int HTMLElement::offset_top() const
     auto offset_parent = this->offset_parent();
     auto const* offset_parent_layout_node = offset_parent ? offset_parent->layout_node(read) : nullptr;
     if (!offset_parent_layout_node || !Painting::has_committed_box(*offset_parent_layout_node)) {
-        return top_border_edge_of_element.to_int();
+        return round(top_border_edge_of_element).to_int();
     }
 
     // 3. Return the result of subtracting the y-coordinate of the top padding edge
@@ -950,9 +963,9 @@ int HTMLElement::offset_top() const
     if (offset_parent->is_html_body_element() && !Painting::is_positioned(*offset_parent_layout_node)) {
         top_padding_edge_of_offset_parent = 0;
     } else {
-        top_padding_edge_of_offset_parent = Painting::absolute_padding_box_rect(*offset_parent_layout_node).y();
+        top_padding_edge_of_offset_parent = Painting::absolute_padding_box_rect(*offset_parent_layout_node).y() + sticky_offset_of(*offset_parent_layout_node).y();
     }
-    return (top_border_edge_of_element - top_padding_edge_of_offset_parent).to_int();
+    return round(top_border_edge_of_element - top_padding_edge_of_offset_parent).to_int();
 }
 
 // https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsetleft
@@ -970,7 +983,8 @@ int HTMLElement::offset_left() const
     if (!layout_node || !Painting::has_committed_box(*layout_node))
         return 0;
 
-    CSSPixels left_border_edge_of_element = Painting::absolute_border_box_rect(*layout_node).x();
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
+    CSSPixels left_border_edge_of_element = Painting::absolute_border_box_rect(*layout_node).x() + sticky_offset_of(*layout_node).x();
 
     // 2. If the offsetParent of the element is null
     //    return the x-coordinate of the left border edge of the first CSS layout box associated with the element,
@@ -979,7 +993,7 @@ int HTMLElement::offset_left() const
     auto offset_parent = this->offset_parent();
     auto const* offset_parent_layout_node = offset_parent ? offset_parent->layout_node(read) : nullptr;
     if (!offset_parent_layout_node || !Painting::has_committed_box(*offset_parent_layout_node)) {
-        return left_border_edge_of_element.to_int();
+        return round(left_border_edge_of_element).to_int();
     }
 
     // 3. Return the result of subtracting the x-coordinate of the left padding edge
@@ -995,9 +1009,9 @@ int HTMLElement::offset_left() const
     if (offset_parent->is_html_body_element() && !Painting::is_positioned(*offset_parent_layout_node)) {
         left_padding_edge_of_offset_parent = 0;
     } else {
-        left_padding_edge_of_offset_parent = Painting::absolute_padding_box_rect(*offset_parent_layout_node).x();
+        left_padding_edge_of_offset_parent = Painting::absolute_padding_box_rect(*offset_parent_layout_node).x() + sticky_offset_of(*offset_parent_layout_node).x();
     }
-    return (left_border_edge_of_element - left_padding_edge_of_offset_parent).to_int();
+    return round(left_border_edge_of_element - left_padding_edge_of_offset_parent).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-htmlelement-offsetwidth
@@ -1194,7 +1208,12 @@ bool HTMLElement::fire_a_synthetic_pointer_event(Utf16FlyString const& type, DOM
     // 1. Let event be the result of creating an event using PointerEvent.
     // 2. Initialize event's type attribute to e.
     auto event_name = FlyString { type.to_utf16_string().to_utf8() };
-    auto event = UIEvents::PointerEvent::create(event_name, {}, 0, 0, 0, 0, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(*this)));
+    // NB: Synthetic pointer events are not generated by a pointing device. Pointer Events requires their pointerId to
+    //     be -1 and their pointerType to be the empty string.
+    //     https://w3c.github.io/pointerevents/#click-auxclick-and-contextmenu
+    UIEvents::PointerEventOptions options;
+    options.pointer_id = -1;
+    auto event = UIEvents::PointerEvent::create(event_name, move(options), 0, 0, 0, 0, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(*this)));
 
     // 3. Initialize event's bubbles and cancelable attributes to true.
     event->set_bubbles(true);

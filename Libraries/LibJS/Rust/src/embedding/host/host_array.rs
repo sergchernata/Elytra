@@ -161,7 +161,7 @@ impl HostArray {
         };
         // SAFETY: The caller passes an absent or live cell, which the slot then keeps alive.
         unsafe { array.host_data.set(host_data) };
-        let array = allocate_object_in(vm, allocator, array);
+        let array = allocate_object_in(vm, allocator, |_| array);
         array.initialize(vm, realm);
         array
     }
@@ -236,8 +236,8 @@ pub unsafe extern "C" fn js_host_array_array_set(
     completion_into_abi(as_host_array(&host_array).array_set(
         vm,
         key,
-        Value(value),
-        Value(receiver),
+        Value::from_bits(value),
+        Value::from_bits(receiver),
         cache_metadata,
         lookup_phase_from_abi(phase),
     ))

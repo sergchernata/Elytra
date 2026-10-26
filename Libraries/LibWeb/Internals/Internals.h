@@ -88,6 +88,11 @@ public:
     Utf16String spelling_error_ranges(GC::Ref<DOM::Node>);
     GC::Ref<WebIDL::Promise> check_spelling_for_testing(Utf16String const& text);
     GC::Ref<WebIDL::Promise> spell_check_settled();
+
+    GC::Ref<WebIDL::Promise> request_writing_suggestion_for_testing(Utf16String const& text, WebIDL::UnsignedLong caret_offset);
+    Utf16String writing_suggestion();
+    GC::Ref<WebIDL::Promise> writing_suggestion_settled();
+    GC::Ref<WebIDL::Promise> writing_suggestion_request_sent();
     GC::Ref<WebIDL::Promise> activate_spelling_menu_item(Bindings::SpellingMenuItem, WebIDL::UnsignedLong guess_index);
 
     void send_text(HTML::HTMLElement&, Utf16String const&, WebIDL::UnsignedShort modifiers);
@@ -139,6 +144,7 @@ public:
     WebIDL::ExceptionOr<bool> dispatch_user_activated_event(DOM::EventTarget&, DOM::Event& event);
 
     void spoof_current_url(Utf16String const& url);
+    void spoof_current_origin_in_this_process(Utf16String const& url);
     void set_navigator_compatibility_mode(Bindings::InternalsNavigatorCompatibilityMode);
     void load_url(Utf16String const& url);
 
@@ -315,6 +321,8 @@ public:
     void disconnect_media_server();
     void set_page_muted(bool muted);
     String viewport_overflow_x();
+
+    GC::Ref<Streams::ReadableStream> create_stream_pulling_from_bytes(String const& bytes, WebIDL::UnsignedLong pull_size);
 
 private:
     GC::Ref<JS::Object> first_wheel_step_route_to_object(Compositing::FirstWheelStepRouteForTesting const&);

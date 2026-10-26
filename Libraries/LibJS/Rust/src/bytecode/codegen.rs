@@ -1733,7 +1733,7 @@ fn generate_yield_from(
         generator.emit(Instruction::IteratorClose {
             iterator_object: iterator.operand(),
             iterator_next: next_method.operand(),
-            iterator_done: done.operand(),
+            iterator_done: iterator_done_property.operand(),
             completion_type: CompletionType::Normal as u32,
             completion_value: undef.operand(),
             cache,
@@ -5843,6 +5843,8 @@ fn generate_switch_statement(
         generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
     }
 
+    let initialized_locals_at_entry = generator.initialized_locals.clone();
+
     // Create first test block and jump to it.
     let first_test_block = generator.make_block();
     generator.emit(Instruction::Jump {
@@ -5904,6 +5906,7 @@ fn generate_switch_statement(
     // Emit case bodies (fall-through by default).
     for (i, case) in data.cases.iter().enumerate() {
         generator.switch_to_basic_block(case_blocks[i]);
+        generator.initialized_locals.clone_from(&initialized_locals_at_entry);
 
         let saved_completion = generator.current_completion_register.clone();
         if let Some(ref c) = completion {
@@ -5953,6 +5956,7 @@ fn generate_switch_statement(
 
     generator.end_breakable_scope();
     generator.switch_to_basic_block(end_block);
+    generator.initialized_locals = initialized_locals_at_entry;
 
     if did_create_env {
         generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
@@ -6888,6 +6892,7 @@ fn generate_class_expression(
         is_catch_environment: false,
     });
     generator.push_static_lexical_environment(class_env.clone());
+    generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
 
     // https://tc39.es/ecma262/#sec-runtime-semantics-classdefinitionevaluation
     // If _classBinding_ is not *undefined*, then
@@ -7219,6 +7224,7 @@ fn generate_class_expression(
     generator.emit(Instruction::SetLexicalEnvironment {
         environment: parent_env.operand(),
     });
+    generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
     generator.pop_tracked_lexical_environment();
 
     // Allocate dst after element keys.
@@ -7435,6 +7441,7 @@ fn enter_for_in_of_head_tdz(generator: &mut Generator, lhs: &ForInOfLhs) -> bool
         }
         if !names.is_empty() {
             generator.push_new_lexical_environment(u32_from_usize(names.len()));
+            generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
             for (name, _) in &names {
                 let id = generator.intern_identifier(name);
                 generator.emit(Instruction::CreateVariable {
@@ -7453,6 +7460,7 @@ fn enter_for_in_of_head_tdz(generator: &mut Generator, lhs: &ForInOfLhs) -> bool
 
 /// Tear down the TDZ environment after RHS evaluation.
 fn leave_for_in_of_head_tdz(generator: &mut Generator) {
+    generator.end_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
     generator.pop_tracked_lexical_environment();
     if !generator.is_current_block_terminated() {
         let parent = generator.current_lexical_environment();
@@ -7579,9 +7587,6 @@ fn generate_for_in_statement(
         create_for_in_of_lexical_env(generator, lhs);
     }
 
-    // Assign to LHS
-    assign_to_for_in_of_lhs(generator, lhs, &next_value);
-
     // Body — break/continue handle environment restoration via LeaveLexicalEnvironment boundary.
     let labels = std::mem::take(&mut generator.pending_labels);
     generator.begin_continuable_scope(update_block, labels.clone(), completion.clone());
@@ -7589,6 +7594,9 @@ fn generate_for_in_statement(
     if needs_lexical_env {
         generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
     }
+
+    // Assign to LHS
+    assign_to_for_in_of_lhs(generator, lhs, &next_value);
 
     if !generator.is_current_block_terminated() {
         generate_with_completion(body, generator, completion.as_ref(), preferred_dst);
@@ -7834,13 +7842,14 @@ fn generate_for_of_statement_inner(
         _ => None,
     };
 
+    generator.begin_continuable_scope(update_block, labels, completion.clone());
+    if needs_lexical_env {
+        generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
+    }
+
     if let Some(disposal_kind) = disposal_kind {
         // NB: The resource of a `using` or `await using` declaration is disposed of at the end of each iteration,
         //     including when the declaration is abrupt, and before the iterator is closed.
-        generator.begin_continuable_scope(update_block, labels, completion.clone());
-        if needs_lexical_env {
-            generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        }
         generate_with_disposable_resource_stack(generator, disposal_kind, |generator| {
             assign_to_for_in_of_lhs(generator, lhs, &next_value);
             if !generator.is_current_block_terminated() {
@@ -7853,11 +7862,6 @@ fn generate_for_of_statement_inner(
         assign_to_for_in_of_lhs(generator, lhs, &next_value);
 
         // Body
-        generator.begin_continuable_scope(update_block, labels, completion.clone());
-        if needs_lexical_env {
-            generator.start_boundary(BlockBoundaryType::LeaveLexicalEnvironment);
-        }
-
         if !generator.is_current_block_terminated() {
             generate_with_completion(body, generator, completion.as_ref(), preferred_dst);
         }
@@ -8828,7 +8832,7 @@ fn generate_try_statement(
     let saved_env = generator.current_lexical_environment();
 
     let mut next_block: Option<Label> = None;
-    let mut completion: Option<ScopedOperand> = None;
+    let completion = generator.allocate_completion_register();
 
     // --- Set up FinallyContext if we have a finalizer ---
     let has_finally = data.finalizer.is_some();
@@ -8977,13 +8981,11 @@ fn generate_try_statement(
 
         // Save catch completion BEFORE restoring the lexical environment
         // from the catch scope.
-        if generator.must_propagate_completion
+        if let Some(ref completion) = completion
             && let Some(ref cc) = catch_completion
             && !generator.is_current_block_terminated()
         {
-            let reg = generator.allocate_register();
-            generator.emit_mov(&reg, cc);
-            completion = Some(reg);
+            generator.emit_mov(completion, cc);
         }
 
         if created_catch_scope {
@@ -9056,12 +9058,10 @@ fn generate_try_statement(
         generator.current_completion_register = saved_completion;
 
         if !generator.is_current_block_terminated()
-            && generator.must_propagate_completion
+            && let Some(ref completion) = completion
             && let Some(ref tc) = try_completion
         {
-            let reg = generator.allocate_register();
-            generator.emit_mov(&reg, tc);
-            completion = Some(reg);
+            generator.emit_mov(completion, tc);
         }
     }
 
@@ -9142,9 +9142,6 @@ fn generate_try_statement(
     // saved_block (which is already terminated) so no dead block is emitted.
     generator.switch_to_basic_block(next_block.unwrap_or(saved_block));
 
-    if generator.must_propagate_completion && completion.is_none() {
-        return Some(generator.add_constant_undefined());
-    }
     completion
 }
 
@@ -9317,11 +9314,11 @@ pub fn emit_function_declaration_instantiation(
     // function, not a real arguments-object reference.
     let function_scope_data = body_scope.function_scope_data.as_ref();
     let has_function_named_arguments = function_scope_data.is_some_and(|fsd| fsd.has_function_named_arguments);
-    let arguments_name = ak::Utf16FlyString::from_utf8("arguments");
-    let has_arguments_local = generator
+    let arguments_local_index = body_scope
         .local_variables
         .iter()
-        .any(|lv| lv.name == arguments_name && !lv.is_lexically_declared);
+        .position(|lv| lv.kind == LocalVarKind::ArgumentsObject);
+    let has_arguments_local = arguments_local_index.is_some();
     let mut arguments_object_needed = if is_arrow || parameter_names.iter().any(|p| p.name == utf16!("arguments")) {
         false
     } else {
@@ -9345,12 +9342,7 @@ pub fn emit_function_declaration_instantiation(
         if non_local_parameter_count > 0 {
             // NB: The arguments binding goes here too, and so do the lexical declarations of strict code without a
             //     separate var environment for non-local vars (see Step 5 and Step 7).
-            let arguments_name = ak::Utf16FlyString::from_utf8("arguments");
-            let arguments_binding = arguments_object_needed
-                && !generator
-                    .local_variables
-                    .iter()
-                    .any(|lv| lv.name == arguments_name && !lv.is_lexically_declared);
+            let arguments_binding = arguments_object_needed && !has_arguments_local;
             let has_non_local_vars =
                 function_scope_data.is_some_and(|fsd| fsd.vars_to_initialize.iter().any(|v| v.local.is_none()));
             let lexical_bindings = if strict && !has_non_local_vars {
@@ -9403,12 +9395,6 @@ pub fn emit_function_declaration_instantiation(
     // --- Step 3: Create arguments object ---
 
     if arguments_object_needed {
-        // Find local variable index for ArgumentsObject, if any.
-        let arguments_local_index = generator
-            .local_variables
-            .iter()
-            .position(|lv| lv.name == arguments_name && !lv.is_lexically_declared);
-
         let dst = arguments_local_index.map(|index| Operand::local(u32_from_usize(index)));
 
         let kind = if arguments_object_is_mapped {

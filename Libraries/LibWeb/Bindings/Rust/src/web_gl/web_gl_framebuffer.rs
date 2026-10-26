@@ -6,9 +6,7 @@
 
 //! https://registry.khronos.org/webgl/specs/latest/1.0/#5.5
 
-use core::cell::RefCell;
-
-use libjs_rust::api::{Gc, Realm, Trace, Vm};
+use libjs_rust::api::{Gc, GcRefCell, Realm, Trace, Vm};
 
 use super::state::ContextState;
 use super::web_gl_object::WebGLObject;
@@ -33,7 +31,7 @@ pub(crate) struct Attachment {
 #[gc(crate = libjs_rust)]
 pub(crate) struct WebGLFramebuffer {
     object: WebGLObject,
-    attachments: RefCell<Vec<Attachment>>,
+    attachments: GcRefCell<Vec<Attachment>>,
 }
 
 impl Wrappable for WebGLFramebuffer {
@@ -50,13 +48,10 @@ impl Inherits<WebGLObject> for WebGLFramebuffer {
 
 impl WebGLFramebuffer {
     pub(crate) fn create(vm: &Vm, context: &ContextState, handle: u32) -> Ref<Self> {
-        allocate(
-            vm,
-            Self {
-                object: WebGLObject::new(context, handle),
-                attachments: RefCell::new(Vec::new()),
-            },
-        )
+        allocate(vm, |_| Self {
+            object: WebGLObject::new(context, handle),
+            attachments: GcRefCell::new(Vec::new()),
+        })
     }
 
     pub(crate) fn attachment(&self, attachment: u32) -> Option<Attachment> {
@@ -67,13 +62,18 @@ impl WebGLFramebuffer {
             .copied()
     }
 
-    fn set_attachment(&self, attachment: u32, new_attachment: Option<Attachment>) {
-        let mut attachments = self.attachments.borrow_mut();
+    fn set_attachment(&self, vm: &Vm, attachment: u32, new_attachment: Option<Attachment>) {
+        let mut attachments = self.attachments.borrow_mut(vm);
         attachments.retain(|existing| existing.attachment != attachment);
         attachments.extend(new_attachment);
     }
 
-    pub(crate) fn set_renderbuffer_attachment(&self, attachment: u32, renderbuffer: Option<Ref<WebGLRenderbuffer>>) {
+    pub(crate) fn set_renderbuffer_attachment(
+        &self,
+        vm: &Vm,
+        attachment: u32,
+        renderbuffer: Option<Ref<WebGLRenderbuffer>>,
+    ) {
         let new_attachment = renderbuffer.map(|renderbuffer| Attachment {
             attachment,
             texture: None,
@@ -81,11 +81,12 @@ impl WebGLFramebuffer {
             texture_target: 0,
             texture_level: 0,
         });
-        self.set_attachment(attachment, new_attachment);
+        self.set_attachment(vm, attachment, new_attachment);
     }
 
     pub(crate) fn set_texture_attachment(
         &self,
+        vm: &Vm,
         attachment: u32,
         texture: Option<Ref<WebGLTexture>>,
         texture_target: u32,
@@ -98,6 +99,6 @@ impl WebGLFramebuffer {
             texture_target,
             texture_level,
         });
-        self.set_attachment(attachment, new_attachment);
+        self.set_attachment(vm, attachment, new_attachment);
     }
 }

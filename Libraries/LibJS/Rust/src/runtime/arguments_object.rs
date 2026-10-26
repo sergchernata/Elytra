@@ -35,7 +35,7 @@ pub struct ArgumentsObject {
     base: Object,
     /// OPTIMIZATION: The named properties of arguments objects, "length", "callee" and @@iterator, fit in the inline
     ///               named storage with this slot after it.
-    #[gc(untraced)]
+    #[gc(untraced = "the object traces it as the last slot of its inline named storage")]
     extra_inline_named_storage: Cell<Value>,
     environment: Cell<Gc<Environment>>,
     #[gc(untraced)]
@@ -90,19 +90,16 @@ impl ArgumentsObject {
             },
         );
         base.inline_named_capacity.set(INLINE_NAMED_STORAGE_CAPACITY as u8 + 1);
-        allocate_object(
-            vm,
-            ArgumentsObject {
-                base,
-                extra_inline_named_storage: Cell::new(Value::UNDEFINED),
-                environment: Cell::new(environment),
-                parameter_map: RefCell::new(ParameterMap {
-                    names: Rc::from([]),
-                    mapped_count: 0,
-                    unmapped: Vec::new(),
-                }),
-            },
-        )
+        allocate_object(vm, |_| ArgumentsObject {
+            base,
+            extra_inline_named_storage: Cell::new(Value::UNDEFINED),
+            environment: Cell::new(environment),
+            parameter_map: RefCell::new(ParameterMap {
+                names: Rc::from([]),
+                mapped_count: 0,
+                unmapped: Vec::new(),
+            }),
+        })
     }
 
     /// Maps the indices below `mapped_count` to the parameters `names` gives them, where they have one.

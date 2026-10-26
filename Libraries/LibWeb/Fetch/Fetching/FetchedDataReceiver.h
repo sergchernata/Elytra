@@ -33,7 +33,6 @@ public:
     enum class NetworkState {
         Ongoing,
         Complete,
-        Error,
     };
     void handle_network_data(JS::Realm&, Requests::ResponseData, NetworkState);
     void set_cached_response_body(Core::ImmutableBytes);

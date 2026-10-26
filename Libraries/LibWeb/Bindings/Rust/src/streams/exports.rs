@@ -12,6 +12,7 @@ use core::ptr::NonNull;
 
 use libjs_rust::api::{RawNativeFunctionResult, Realm, ThrowCompletionOr, Value, Vm};
 
+use crate::bindings::conversions::BufferSource;
 use crate::bindings::interface::{Ref, allocate, cell_from_abi, cell_into_abi, realm_arguments};
 use crate::bindings::promise::WebIdlPromise;
 use crate::bindings::{CallContext, MustNotThrow, WebIdlResult};
@@ -67,7 +68,7 @@ fn promise_into_abi(promise: WebIdlPromise) -> *mut c_void {
 pub unsafe extern "C" fn web_rust_readable_stream_create(vm: *mut c_void, realm: *mut c_void) -> *mut c_void {
     // SAFETY: The caller passes the VM and a live realm.
     let (vm, realm) = unsafe { realm_arguments(vm, realm) };
-    cell_into_abi(allocate(vm, ReadableStream::new(realm)))
+    cell_into_abi(allocate(vm, |_| ReadableStream::new(realm)))
 }
 
 /// Sets the stream up with byte reading support, https://streams.spec.whatwg.org/#readablestream-set-up-with-byte-reading-support,
@@ -157,20 +158,41 @@ pub unsafe extern "C" fn web_rust_readable_stream_close_requested(stream: *mut c
     }
 }
 
+/// Whether the stream's controller is a ReadableByteStreamController.
+///
+/// # Safety
+///
+/// `stream` must be a live ReadableStream.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_readable_stream_is_readable_byte_stream(stream: *mut c_void) -> bool {
+    // SAFETY: The caller passes a live ReadableStream.
+    let stream = unsafe { cell_from_abi::<ReadableStream>(stream) };
+    matches!(
+        stream.controller(),
+        Some(ReadableStreamController::ReadableByteStreamController(_))
+    )
+}
+
 /// https://streams.spec.whatwg.org/#readablestream-enqueue
 ///
 /// # Safety
 ///
-/// The pointers must be the VM and a live ReadableStream.
+/// The pointers must be the VM and a live ReadableStream, and `chunk` a live value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_readable_stream_enqueue(
     vm: *mut c_void,
     stream: *mut c_void,
     chunk: u64,
 ) -> RawNativeFunctionResult {
-    // SAFETY: The caller passes the VM and a live ReadableStream.
-    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStream>(stream)) };
-    let result = ReadableStream::enqueue(stream, vm, Value(chunk));
+    // SAFETY: The caller passes the VM, a live ReadableStream and a live value.
+    let (vm, stream, chunk) = unsafe {
+        (
+            vm_argument(vm),
+            cell_from_abi::<ReadableStream>(stream),
+            Value::from_raw(chunk),
+        )
+    };
+    let result = ReadableStream::enqueue(stream, vm, chunk);
     completion(&stream.context(vm), result)
 }
 
@@ -196,6 +218,44 @@ pub unsafe extern "C" fn web_rust_readable_stream_enqueue_native_bytes(
     completion(&cx, result)
 }
 
+/// The byte length of the current BYOB request view of the stream, if it has one,
+/// https://streams.spec.whatwg.org/#readablestream-current-byob-request-view
+///
+/// # Safety
+///
+/// The pointers must be the VM and a live ReadableStream.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_readable_stream_current_byob_request_view_byte_length(
+    vm: *mut c_void,
+    stream: *mut c_void,
+    byte_length: &mut u64,
+) -> bool {
+    // SAFETY: The caller passes the VM and a live ReadableStream.
+    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStream>(stream)) };
+    let Some(view) = ReadableStream::current_byob_request_view(stream, vm) else {
+        return false;
+    };
+    *byte_length = BufferSource::from(view).extent().byte_length as u64;
+    true
+}
+
+/// https://streams.spec.whatwg.org/#readablestream-pull-from-bytes
+///
+/// # Safety
+///
+/// The pointers must be the VM and a live ReadableStream, and the bytes must be lent for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_readable_stream_pull_from_bytes(
+    vm: *mut c_void,
+    stream: *mut c_void,
+    bytes: ak::Span<'_, u8>,
+) -> RawNativeFunctionResult {
+    // SAFETY: The caller passes the VM and a live ReadableStream.
+    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStream>(stream)) };
+    let result = ReadableStream::pull_from_bytes(stream, vm, bytes.as_slice());
+    completion(&stream.context(vm), result)
+}
+
 /// https://streams.spec.whatwg.org/#readablestream-close
 ///
 /// # Safety
@@ -212,28 +272,40 @@ pub unsafe extern "C" fn web_rust_readable_stream_close(vm: *mut c_void, stream:
 ///
 /// # Safety
 ///
-/// The pointers must be the VM and a live ReadableStream.
+/// The pointers must be the VM and a live ReadableStream, and `error` a live value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_readable_stream_error(vm: *mut c_void, stream: *mut c_void, error: u64) {
-    // SAFETY: The caller passes the VM and a live ReadableStream.
-    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStream>(stream)) };
-    ReadableStream::error(stream, vm, Value(error));
+    // SAFETY: The caller passes the VM, a live ReadableStream and a live value.
+    let (vm, stream, error) = unsafe {
+        (
+            vm_argument(vm),
+            cell_from_abi::<ReadableStream>(stream),
+            Value::from_raw(error),
+        )
+    };
+    ReadableStream::error(stream, vm, error);
 }
 
 /// ! ReadableStreamCancel(stream, reason), https://streams.spec.whatwg.org/#readable-stream-cancel
 ///
 /// # Safety
 ///
-/// The pointers must be the VM and a live ReadableStream.
+/// The pointers must be the VM and a live ReadableStream, and `reason` a live value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_readable_stream_cancel(
     vm: *mut c_void,
     stream: *mut c_void,
     reason: u64,
 ) -> *mut c_void {
-    // SAFETY: The caller passes the VM and a live ReadableStream.
-    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStream>(stream)) };
-    promise_into_abi(readable_stream_cancel(&stream.context(vm), stream, Value(reason)))
+    // SAFETY: The caller passes the VM, a live ReadableStream and a live value.
+    let (vm, stream, reason) = unsafe {
+        (
+            vm_argument(vm),
+            cell_from_abi::<ReadableStream>(stream),
+            Value::from_raw(reason),
+        )
+    };
+    promise_into_abi(readable_stream_cancel(&stream.context(vm), stream, reason))
 }
 
 /// To tee a ReadableStream stream, https://streams.spec.whatwg.org/#readablestream-tee, which sets the branches.
@@ -386,19 +458,25 @@ pub unsafe extern "C" fn web_rust_readable_stream_default_reader_read(
 ///
 /// # Safety
 ///
-/// The pointers must be the VM and a live ReadableStreamDefaultReader.
+/// The pointers must be the VM and a live ReadableStreamDefaultReader, and `reason` a live value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_readable_stream_default_reader_cancel(
     vm: *mut c_void,
     reader: *mut c_void,
     reason: u64,
 ) -> *mut c_void {
-    // SAFETY: The caller passes the VM and a live reader.
-    let (vm, reader) = unsafe { (vm_argument(vm), cell_from_abi::<ReadableStreamDefaultReader>(reader)) };
+    // SAFETY: The caller passes the VM, a live reader and a live value.
+    let (vm, reader, reason) = unsafe {
+        (
+            vm_argument(vm),
+            cell_from_abi::<ReadableStreamDefaultReader>(reader),
+            Value::from_raw(reason),
+        )
+    };
     promise_into_abi(ReadableStreamGenericReader::cancel(
         vm,
         default_reader(reader),
-        Some(Value(reason)),
+        Some(reason),
     ))
 }
 
@@ -426,7 +504,7 @@ pub unsafe extern "C" fn web_rust_readable_stream_default_reader_closed_promise_
 pub unsafe extern "C" fn web_rust_transform_stream_create(vm: *mut c_void, realm: *mut c_void) -> *mut c_void {
     // SAFETY: The caller passes the VM and a live realm.
     let (vm, realm) = unsafe { realm_arguments(vm, realm) };
-    cell_into_abi(allocate(vm, TransformStream::new(realm)))
+    cell_into_abi(allocate(vm, |_| TransformStream::new(realm)))
 }
 
 /// Sets the stream up with the algorithms that C++ gives, https://streams.spec.whatwg.org/#transformstream-set-up
@@ -470,20 +548,26 @@ pub unsafe extern "C" fn web_rust_transform_stream_set_up(
 ///
 /// # Safety
 ///
-/// The pointers must be the VM and a live TransformStream.
+/// The pointers must be the VM and a live TransformStream, and `chunk` a live value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_transform_stream_enqueue(
     vm: *mut c_void,
     stream: *mut c_void,
     chunk: u64,
 ) -> RawNativeFunctionResult {
-    // SAFETY: The caller passes the VM and a live TransformStream.
-    let (vm, stream) = unsafe { (vm_argument(vm), cell_from_abi::<TransformStream>(stream)) };
+    // SAFETY: The caller passes the VM, a live TransformStream and a live value.
+    let (vm, stream, chunk) = unsafe {
+        (
+            vm_argument(vm),
+            cell_from_abi::<TransformStream>(stream),
+            Value::from_raw(chunk),
+        )
+    };
     let cx = CallContext::new(vm, stream.backpressure_change_promise_realm());
     let controller = stream
         .controller()
         .expect("a TransformStream that is set up has a controller");
-    let result = transform_stream_default_controller_enqueue(&cx, controller, Value(chunk));
+    let result = transform_stream_default_controller_enqueue(&cx, controller, chunk);
     completion(&cx, result)
 }
 

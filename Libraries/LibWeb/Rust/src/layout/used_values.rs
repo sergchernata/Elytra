@@ -252,6 +252,7 @@ pub(crate) struct UsedValuesRareData {
     pub(crate) grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
     pub(crate) flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
     pub(crate) multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
+    pub(crate) math_paint_data: Option<std::sync::Arc<math_formatting_context::MathPaintData>>,
     pub(crate) used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
     pub(crate) collapsed_table_borders: Option<std::sync::Arc<table_formatting_context::OwnedCollapsedTableBorders>>,
     pub(crate) abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
@@ -269,6 +270,7 @@ impl UsedValuesRareData {
             grid_layout_data,
             flex_layout_data,
             multicol_layout_data,
+            math_paint_data,
             used_grid_tracks,
             collapsed_table_borders,
             abspos_layout_inputs,
@@ -284,6 +286,7 @@ impl UsedValuesRareData {
             && grid_layout_data.is_none()
             && flex_layout_data.is_none()
             && multicol_layout_data.is_none()
+            && math_paint_data.is_none()
             && used_grid_tracks.is_none()
             && collapsed_table_borders.is_none()
             && orthogonal_flow_baselines.is_none()
@@ -306,6 +309,9 @@ impl UsedValuesRareData {
         }
         if let Some(data) = multicol_layout_data {
             rare.multicol_layout_data = Some(data);
+        }
+        if let Some(data) = math_paint_data {
+            rare.math_paint_data = Some(data);
         }
         if let Some(tracks) = used_grid_tracks {
             rare.used_grid_tracks = Some(tracks);
@@ -385,6 +391,7 @@ pub(crate) struct UsedValues {
     pub first_baseline: Cell<CssPixels>,
     pub has_last_baseline: Cell<bool>,
     pub last_baseline: Cell<CssPixels>,
+    pub inline_alignment_baseline: Cell<Option<CssPixels>>,
 
     // Layout outputs, deliberately outside the cell state.
     pub depends_on_percentage_block_size: Cell<bool>,
@@ -441,6 +448,7 @@ impl Default for UsedValues {
             first_baseline: Cell::new(zero),
             has_last_baseline: Cell::new(false),
             last_baseline: Cell::new(zero),
+            inline_alignment_baseline: Cell::new(None),
             depends_on_percentage_block_size: Cell::new(false),
             has_descendant_that_depends_on_percentage_block_size: Cell::new(false),
             line_data: RefCell::new(LineDataState::Empty),
@@ -531,6 +539,7 @@ impl UsedValues {
 
     pub(crate) fn content_baselines_from_cells(&self) -> DerivedBaselines {
         DerivedBaselines {
+            inline_alignment: self.inline_alignment_baseline.get(),
             first: self.has_first_baseline.get().then(|| self.first_baseline.get()),
             last: self.has_last_baseline.get().then(|| self.last_baseline.get()),
         }
@@ -599,6 +608,7 @@ impl UsedValues {
         self.block_size_constraint.set(state.block_size_constraint);
         self.has_first_baseline.set(state.has_first_baseline);
         self.has_last_baseline.set(state.has_last_baseline);
+        self.inline_alignment_baseline.set(state.inline_alignment_baseline);
     }
 
     pub(crate) fn own_metrics_are_sealed(&self) -> bool {
@@ -688,6 +698,7 @@ used_values_cell_state! {
     first_baseline: CssPixels,
     has_last_baseline: bool,
     last_baseline: CssPixels,
+    inline_alignment_baseline: Option<CssPixels>,
 }
 
 impl UsedValuesCellState {
@@ -728,6 +739,7 @@ impl UsedValuesCellState {
             std::mem::swap(&mut self.inline_size_constraint, &mut self.block_size_constraint);
             self.has_first_baseline = false;
             self.has_last_baseline = false;
+            self.inline_alignment_baseline = None;
         }
         self
     }

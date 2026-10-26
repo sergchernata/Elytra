@@ -38,14 +38,17 @@ ALLOWED_REALM_MENTIONS = {
     "Animations": (5, 14, "animation callbacks/events and CSS value materialization still pass spec-selected realms"),
     "CSS": (9, 24, "CSS Typed OM, parser-facing reification, style-value JS materialization, and setlike/maplike glue"),
     "Clipboard": (4, 16, "clipboard item/data callbacks still materialize JS values in caller-selected realms"),
-    "ContentSecurityPolicy": (4, 14, "CSP violation/report objects and callbacks still materialize JS-facing values"),
+    "ContentSecurityPolicy": (4, 10, "CSP violation/report objects and callbacks still materialize JS-facing values"),
     "CookieStore": (2, 19, "cookie-store async callbacks and promise/value materialization still thread realms"),
     "Crypto": (8, 383, "WebCrypto algorithms still use realms for buffer/key/promise materialization"),
     "DOM": (10, 33, "DOM abort plumbing and node helpers still have callback/materialization realm use"),
     "Fetch": (
-        22,
-        62,
-        "Fetch bodies, headers, requests, responses, and controllers still materialize JS values/streams; the body receiver's delivery and close tasks carry the realm its stream is enqueued and closed in",
+        24,
+        67,
+        "Fetch bodies, headers, requests, responses, and controllers still materialize JS values/streams; "
+        "the body receiver's delivery and close tasks carry the realm its stream is enqueued and closed in; "
+        "BodyStreamPullSource materializes stream pulls and errors on the consumer side, in its stream's realm; "
+        "a request clone's body materializes the stream that reads its source",
     ),
     "FileAPI": (4, 11, "File/Blob/FileReader algorithms still create streams, buffers, and events in selected realms"),
     "HTML": (

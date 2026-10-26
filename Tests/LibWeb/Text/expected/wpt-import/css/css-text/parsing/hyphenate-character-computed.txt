@@ -1,0 +1,10 @@
+Harness status: OK
+
+Found 5 tests
+
+5 Pass
+Pass	Property hyphenate-character value 'auto'
+Pass	Property hyphenate-character value '"="'
+Pass	Property hyphenate-character value '"/-/"'
+Pass	Property hyphenate-character value '"\1400"'
+Pass	Property hyphenate-character value '""'

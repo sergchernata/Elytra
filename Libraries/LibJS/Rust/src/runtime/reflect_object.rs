@@ -39,17 +39,14 @@ define_object_class!(ReflectObject, extends: [Object], methods: {
 
 impl ReflectObject {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<ReflectObject> {
-        realm.create_object(
-            vm,
-            ReflectObject {
-                base: Object::new_with_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm.object_prototype(),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            },
-        )
+        realm.create_object(vm, |_| ReflectObject {
+            base: Object::new_with_prototype(
+                vm,
+                Self::CLASS,
+                realm.object_prototype(),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -105,7 +102,7 @@ impl ReflectObject {
 
         // 3. Perform PrepareForTailCall().
         // 4. Return ? Call(target, thisArgument, args).
-        args.with_values(|args| call_function_object(vm, target.as_function(), this_argument, args))
+        call_function_object(vm, target.as_function(), this_argument, &args.values())
     }
 
     // 28.1.2 Reflect.construct ( target, argumentsList [ , newTarget ] ), https://tc39.es/ecma262/#sec-reflect.construct

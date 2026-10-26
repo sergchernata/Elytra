@@ -40,6 +40,8 @@ void IDBObjectStore::visit_edges(GC::Cell::Visitor& visitor)
     visitor.visit(m_store);
     visitor.visit(m_transaction);
     visitor.visit(m_indexes);
+    visitor.visit(m_key_path_arrays);
+    visitor.visit(m_index_handles);
 }
 
 JS::Object& IDBObjectStore::relevant_global_object() const
@@ -104,13 +106,25 @@ Optional<KeyPath> const& IDBObjectStore::key_path() const
     return m_store->key_path();
 }
 
-JS::ThrowCompletionOr<JS::Value> IDBObjectStore::key_path_value(JS::Realm& realm) const
+// https://w3c.github.io/IndexedDB/#dom-idbobjectstore-keypath
+JS::ThrowCompletionOr<JS::Value> IDBObjectStore::key_path_value(JS::Realm& realm)
 {
+    // The keyPath getter steps are to return this’s object store’s key path, or null if none. The key path is
+    // converted as a DOMString (if a string) or a sequence<DOMString> (if a list of strings), per [WEBIDL].
     auto const& key_path = this->key_path();
     if (!key_path.has_value())
         return JS::js_null();
 
-    return convert_a_key_path_to_a_value(realm, key_path.value());
+    // NOTE: The returned value is not the same instance that was used when the object store was created. However, if
+    //       this attribute returns an object (specifically an Array), it returns the same object instance every time
+    //       it is inspected. Changing the properties of the object has no effect on the object store.
+    if (auto array = m_key_path_arrays.get(realm.global_object()); array.has_value())
+        return *array;
+
+    auto value = TRY(convert_a_key_path_to_a_value(realm, key_path.value()));
+    if (value.is_object())
+        m_key_path_arrays.set(realm.global_object(), value.as_object());
+    return value;
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-indexnames
@@ -188,8 +202,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBIndex>> IDBObjectStore::create_index(Utf16String 
     // AD-HOC: Log the creation for potential revert on abort.
     store->mutation_log()->note_index_created(index);
 
+    // AD-HOC: Fill the index with the records of store, as a request after the ones made before.
+    queue_the_creation_of_an_index(*this, index);
+
     // 13. Return a new index handle associated with index and this.
-    return IDBIndex::create(index, *this);
+    return m_index_handles.ensure(index, [&] { return IDBIndex::create(index, *this); });
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-index
@@ -215,7 +232,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBIndex>> IDBObjectStore::index(Utf16String const& 
         return WebIDL::NotFoundError::create("Index not found in object store"_utf16);
 
     // 6. Return an index handle associated with index and this.
-    return IDBIndex::create(*index, *this);
+    // NOTE: Each call to this method on the same IDBObjectStore instance with the same name returns the same IDBIndex
+    //       instance.
+    return m_index_handles.ensure(*index, [&] { return IDBIndex::create(*index, *this); });
 }
 
 // https://w3c.github.io/IndexedDB/#dom-idbobjectstore-deleteindex

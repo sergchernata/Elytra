@@ -280,7 +280,7 @@ void HTMLObjectElement::queue_element_task_to_run_object_representation_steps()
             request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Object);
             request->set_use_url_credentials(true);
 
-            Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+            Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::DeliverStreamToConsumerAgent };
             fetch_algorithms_input.process_response = [this](GC::Ref<Fetch::Infrastructure::Response> response) {
                 auto& realm = HTML::relevant_realm(*this);
                 auto& global = document().relevant_settings_object().realm().global_object();
@@ -550,7 +550,7 @@ void HTMLObjectElement::load_image()
 
     m_document_load_event_delayer_for_resource_load.empend(document());
 
-    m_resource_request = HTML::SharedResourceRequest::get_or_create(document(), *url);
+    m_resource_request = HTML::SharedResourceRequest::get_or_create(document(), *url, HTML::CORSSettingAttribute::NoCORS);
     // An image representation has a box only once the new request has image data.
     CSS::record_element_box_kind(*this);
     CSS::record_element_replaced_content_input(*this);

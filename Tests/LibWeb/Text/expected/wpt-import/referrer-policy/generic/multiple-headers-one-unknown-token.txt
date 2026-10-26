@@ -1,0 +1,6 @@
+Harness status: OK
+
+Found 1 tests
+
+1 Pass
+Pass	Image uses last recognized referrer policy token from Referrer-Policy headers

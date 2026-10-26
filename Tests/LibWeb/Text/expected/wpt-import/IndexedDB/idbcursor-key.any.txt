@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	IDBCursor.key
+Pass	IDBCursor.key 1
+Pass	IDBCursor.key 2

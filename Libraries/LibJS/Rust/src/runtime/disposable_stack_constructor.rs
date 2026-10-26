@@ -11,7 +11,7 @@ use crate::interpreter::vm::Vm;
 use crate::layout::cell::Gc;
 use crate::layout::object::Object;
 use crate::layout::value::Value;
-use crate::runtime::abstract_operations::{new_dispose_capability, ordinary_create_from_constructor_of};
+use crate::runtime::abstract_operations::ordinary_create_from_constructor_of;
 use crate::runtime::completion::ThrowCompletionOr;
 use crate::runtime::disposable_stack::DisposableStack;
 use crate::runtime::error::ErrorKind;
@@ -37,17 +37,14 @@ define_native_function_class!(
 
 impl DisposableStackConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<DisposableStackConstructor> {
-        realm.create_object(
-            vm,
-            DisposableStackConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.DisposableStack.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| DisposableStackConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.DisposableStack.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -90,7 +87,7 @@ impl DisposableStackConstructor {
             realm,
             new_target,
             Intrinsics::disposable_stack_prototype,
-            |prototype| DisposableStack::new(vm, new_dispose_capability(), prototype),
+            |defer_gc, prototype| DisposableStack::new(defer_gc, vm, prototype),
         )?;
         Ok(disposable_stack.upcast())
     }

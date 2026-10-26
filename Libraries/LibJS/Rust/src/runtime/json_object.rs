@@ -37,7 +37,7 @@ use crate::runtime::object::{
 };
 use crate::runtime::primitive_string::PrimitiveString;
 use crate::runtime::property_attributes::{Attribute, DEFAULT_ATTRIBUTES, PropertyAttributes};
-use crate::runtime::property_key::PropertyKey;
+use crate::runtime::property_key::{NonSymbolPropertyKey, PropertyKey};
 use crate::runtime::raw_json_object::RawJSONObject;
 use crate::runtime::realm::Realm;
 use crate::runtime::shape::Shape;
@@ -183,7 +183,7 @@ impl Drop for StringifyObjectStack<'_> {
 }
 
 struct StringifyCachedProperty {
-    property: PropertyKey,
+    property: NonSymbolPropertyKey,
     offset: u32,
     serialized_key: Utf16String,
 }
@@ -198,7 +198,10 @@ impl StringifyShapeInfo {
     fn new(shape: Gc<Shape>) -> Self {
         let mut properties = Vec::with_capacity(shape.property_count() as usize);
         shape.for_each_property_in_insertion_order(|property_key, metadata| {
-            if property_key.is_symbol() || !metadata.attributes.is_enumerable() {
+            let Some(property) = NonSymbolPropertyKey::new(property_key.clone()) else {
+                return ControlFlow::Continue(());
+            };
+            if !metadata.attributes.is_enumerable() {
                 return ControlFlow::Continue(());
             }
             assert!(property_key.is_string());
@@ -208,7 +211,7 @@ impl StringifyShapeInfo {
             key_builder.append_ascii(":");
 
             properties.push(StringifyCachedProperty {
-                property: property_key.clone(),
+                property,
                 offset: metadata.offset,
                 serialized_key: key_builder.to_utf16_string(),
             });
@@ -234,8 +237,12 @@ pub struct JsonStringifyCache {
     last_text_length: Cell<usize>,
 }
 
-impl Default for JsonStringifyCache {
-    fn default() -> Self {
+impl JsonStringifyCache {
+    #[cfg_attr(
+        ladybird_gc_lints,
+        expect(gc_container_on_stack, reason = "the VM makes its caches before its heap")
+    )]
+    pub(crate) fn new() -> Self {
         Self {
             entries: RefCell::new(Box::new([const { None }; JsonStringifyCache::ENTRY_COUNT])),
             objects: RefCell::new(Vec::new()),
@@ -244,14 +251,17 @@ impl Default for JsonStringifyCache {
     }
 }
 
+// SAFETY: The objects being serialized are the only cells the cache keeps alive; its shapes are weak.
+unsafe impl Trace for JsonStringifyCache {
+    fn trace(&self, visitor: &mut Visitor) {
+        self.objects.borrow().trace(visitor);
+    }
+}
+
 impl JsonStringifyCache {
     const ENTRY_COUNT: usize = 64;
     /// The most that the builder of a JSON text starts out with room for.
     const MAXIMUM_INITIAL_TEXT_CAPACITY: usize = 64 * 1024;
-
-    pub fn trace(&self, visitor: &mut Visitor) {
-        self.objects.borrow().trace(visitor);
-    }
 
     fn slot(shape: Gc<Shape>) -> usize {
         let address = address_of(shape) as u64;
@@ -447,7 +457,7 @@ impl JSONTextBytes<'_> {
 /// An entry of the cache of the property keys of a text, by their raw bytes.
 struct JSONPropertyKeyCacheEntry {
     raw_key: Vec<u8>,
-    key: Option<PropertyKey>,
+    key: Option<NonSymbolPropertyKey>,
 }
 
 struct JSONPropertyKeyCache {
@@ -780,21 +790,21 @@ fn json_property_key(
     if let Some(key) = &entry.key
         && entry.raw_key == raw_key
     {
-        return Ok(key.clone());
+        return Ok(PropertyKey::from(key.clone()));
     }
 
     let key = if raw_key.contains(&b'\\') {
         let Some(unescaped_key) = unescape_json_string(raw_key) else {
             return json_malformed(vm);
         };
-        PropertyKey::from(&unescaped_key)
+        NonSymbolPropertyKey::from(&unescaped_key)
     } else {
-        PropertyKey::from(Utf16FlyString::from_utf8(state.text.unescaped_text(raw_key)))
+        NonSymbolPropertyKey::from(Utf16FlyString::from_utf8(state.text.unescaped_text(raw_key)))
     };
     let entry = state.property_keys.entry_for(raw_key);
     entry.raw_key = raw_key.to_vec();
     entry.key = Some(key.clone());
-    Ok(key)
+    Ok(PropertyKey::from(key))
 }
 
 fn parse_simdjson_array<'a, T: SimdjsonValueOrDocument<'a>>(
@@ -996,17 +1006,14 @@ fn parse_simdjson_document(
 
 impl JSONObject {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<JSONObject> {
-        realm.create_object(
-            vm,
-            JSONObject {
-                base: Object::new_with_prototype(
-                    vm,
-                    Self::CLASS,
-                    realm.object_prototype(),
-                    MayInterfereWithIndexedPropertyAccess::No,
-                ),
-            },
-        )
+        realm.create_object(vm, |_| JSONObject {
+            base: Object::new_with_prototype(
+                vm,
+                Self::CLASS,
+                realm.object_prototype(),
+                MayInterfereWithIndexedPropertyAccess::No,
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {

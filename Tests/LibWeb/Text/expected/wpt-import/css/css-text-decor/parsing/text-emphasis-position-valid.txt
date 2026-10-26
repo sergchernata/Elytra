@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 5 tests
+
+3 Pass
+2 Fail
+Fail	e.style['text-emphasis-position'] = "auto" should set the property value
+Pass	e.style['text-emphasis-position'] = "over left" should set the property value
+Fail	e.style['text-emphasis-position'] = "right under" should set the property value
+Pass	e.style['text-emphasis-position'] = "over" should set the property value
+Pass	e.style['text-emphasis-position'] = "under" should set the property value

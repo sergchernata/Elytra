@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+use core::cell::RefCell;
 use core::hash::BuildHasher;
 use core::ops::ControlFlow;
 
 use crate::gc::class::{GcCell, define_cell};
+use crate::gc::defer_gc::DeferGc;
 use crate::gc::gc_ref_cell::GcRefCell;
 use crate::gc::visitor::{Trace, Visitor};
 use crate::interpreter::vm::Vm;
@@ -45,7 +47,7 @@ impl Entry {
 pub struct DescriptorArray {
     header: CellHeader,
     entries: GcRefCell<Vec<Entry>>,
-    entry_indices_by_enum_index: GcRefCell<Vec<u32>>,
+    entry_indices_by_enum_index: RefCell<Vec<u32>>,
 }
 
 define_cell!(DescriptorArray, Other);
@@ -123,40 +125,41 @@ fn set_entry(
 }
 
 impl DescriptorArray {
-    fn from_parts(entries: Vec<Entry>, entry_indices_by_enum_index: Vec<u32>) -> Self {
+    fn from_parts(_: &DeferGc<'_>, entries: Vec<Entry>, entry_indices_by_enum_index: Vec<u32>) -> Self {
         Self {
             header: CellHeader::for_class(Self::CLASS),
             entries: GcRefCell::new(entries),
-            entry_indices_by_enum_index: GcRefCell::new(entry_indices_by_enum_index),
+            entry_indices_by_enum_index: RefCell::new(entry_indices_by_enum_index),
         }
     }
 
     pub fn create(vm: &Vm) -> Gc<DescriptorArray> {
-        vm.heap().allocate(Self::from_parts(Vec::new(), Vec::new()))
+        vm.heap()
+            .allocate(|defer_gc| Self::from_parts(defer_gc, Vec::new(), Vec::new()))
     }
 
     /// The first `descriptor_count` properties of `other`, in its insertion order.
     pub fn create_copy(vm: &Vm, other: &DescriptorArray, descriptor_count: u32) -> Gc<DescriptorArray> {
         assert!(descriptor_count <= MAX_DESCRIPTOR_COUNT);
-        let mut entries = Vec::with_capacity(descriptor_count as usize);
-        let mut entry_indices_by_enum_index = Vec::with_capacity(descriptor_count as usize);
-        other.for_each_in_insertion_order(
-            |property_key, metadata| {
-                let enum_index = entries.len() as u32;
-                set_entry(
-                    &mut entries,
-                    &mut entry_indices_by_enum_index,
-                    property_key,
-                    metadata,
-                    enum_index,
-                );
-                ControlFlow::Continue(())
-            },
-            descriptor_count,
-        );
-        // The keys are clones of the keys `other` holds, which keeps their symbols alive while this allocates.
-        vm.heap()
-            .allocate(Self::from_parts(entries, entry_indices_by_enum_index))
+        vm.heap().allocate(|defer_gc| {
+            let mut entries = Vec::with_capacity(descriptor_count as usize);
+            let mut entry_indices_by_enum_index = Vec::with_capacity(descriptor_count as usize);
+            other.for_each_in_insertion_order(
+                |property_key, metadata| {
+                    let enum_index = entries.len() as u32;
+                    set_entry(
+                        &mut entries,
+                        &mut entry_indices_by_enum_index,
+                        property_key,
+                        metadata,
+                        enum_index,
+                    );
+                    ControlFlow::Continue(())
+                },
+                descriptor_count,
+            );
+            Self::from_parts(defer_gc, entries, entry_indices_by_enum_index)
+        })
     }
 
     pub fn size(&self) -> u32 {
@@ -169,9 +172,9 @@ impl DescriptorArray {
         Some(entries[index].metadata())
     }
 
-    pub fn set(&self, property_key: &PropertyKey, metadata: PropertyMetadata, enum_index: u32) {
+    pub fn set(&self, vm: &Vm, property_key: &PropertyKey, metadata: PropertyMetadata, enum_index: u32) {
         set_entry(
-            &mut self.entries.borrow_mut(),
+            &mut self.entries.borrow_mut(vm),
             &mut self.entry_indices_by_enum_index.borrow_mut(),
             property_key,
             metadata,
@@ -179,14 +182,20 @@ impl DescriptorArray {
         );
     }
 
-    pub fn set_attributes(&self, property_key: &PropertyKey, attributes: PropertyAttributes, descriptor_count: u32) {
-        let mut entries = self.entries.borrow_mut();
+    pub fn set_attributes(
+        &self,
+        vm: &Vm,
+        property_key: &PropertyKey,
+        attributes: PropertyAttributes,
+        descriptor_count: u32,
+    ) {
+        let mut entries = self.entries.borrow_mut(vm);
         let index = find(&entries, property_key, descriptor_count).expect("the property has a descriptor");
         entries[index].attributes = u16::from(attributes.bits());
     }
 
-    pub fn remove(&self, property_key: &PropertyKey, descriptor_count: u32) {
-        let mut entries = self.entries.borrow_mut();
+    pub fn remove(&self, vm: &Vm, property_key: &PropertyKey, descriptor_count: u32) {
+        let mut entries = self.entries.borrow_mut(vm);
         let mut entry_indices_by_enum_index = self.entry_indices_by_enum_index.borrow_mut();
         let index = find(&entries, property_key, descriptor_count).expect("the property has a descriptor");
 

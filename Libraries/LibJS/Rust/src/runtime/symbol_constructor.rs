@@ -36,17 +36,14 @@ define_native_function_class!(
 
 impl SymbolConstructor {
     pub fn create(vm: &Vm, realm: Gc<Realm>) -> Gc<SymbolConstructor> {
-        realm.create_object(
-            vm,
-            SymbolConstructor {
-                base: NativeFunction::new_with_name(
-                    vm,
-                    Self::CLASS,
-                    vm.names.Symbol.as_string().clone(),
-                    realm.function_prototype(),
-                ),
-            },
-        )
+        realm.create_object(vm, |_| SymbolConstructor {
+            base: NativeFunction::new_with_name(
+                vm,
+                Self::CLASS,
+                vm.names.Symbol.as_string().clone(),
+                realm.function_prototype(),
+            ),
+        })
     }
 
     fn initialize(object: &Object, vm: &Vm, realm: Gc<Realm>) {
@@ -152,7 +149,7 @@ impl SymbolConstructor {
         let new_symbol = Symbol::create(vm, Some(string_key.clone()), Kind::Global);
 
         // 5. Append the Record { [[Key]]: stringKey, [[Symbol]]: newSymbol } to the GlobalSymbolRegistry List.
-        global_symbol_registry.set(&string_key, new_symbol);
+        global_symbol_registry.set(vm, &string_key, new_symbol);
 
         // 6. Return newSymbol.
         Ok(Value::from_symbol(new_symbol))

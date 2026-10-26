@@ -365,6 +365,12 @@ Element::Element(Document& document, DOM::QualifiedName qualified_name)
 
 Element::~Element() = default;
 
+void Element::finalize()
+{
+    Base::finalize();
+    CSS::Parser::ValueParserFFI::rust_declaration_block_destroy(exchange(m_inline_declarations, nullptr));
+}
+
 void Element::append_to_attribute_list(QualifiedName name, Utf16String value)
 {
     add_to_subtree_attribute_name_filter(attribute_name_filter_bit(name.local_name()));
@@ -461,6 +467,8 @@ void Element::visit_edges(Cell::Visitor& visitor)
 size_t Element::external_memory_size() const
 {
     auto size = Base::external_memory_size();
+    if (m_inline_declarations)
+        size = JS::saturating_add_external_memory_size(size, CSS::Parser::ValueParserFFI::rust_declaration_block_external_memory_size(m_inline_declarations));
     if (!m_attributes)
         return size;
 
@@ -771,7 +779,7 @@ void Element::download_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTM
     //    3. Let response be the result of fetching request.
     //    4. Handle as a download response with subject's node navigable and null.
     auto controller_holder = Fetch::Infrastructure::FetchControllerHolder::create();
-    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
+    Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::DeliverStreamToConsumerAgent };
     fetch_algorithms_input.process_response = [navigable = GC::Ref { *navigable }, url, proposed_filename = move(proposed_filename), interface_origin = document().origin(), controller_holder](GC::Ref<Fetch::Infrastructure::Response> response) {
         if (response->is_network_error())
             return;
@@ -2915,10 +2923,36 @@ void Element::set_shadow_root(GC::Ptr<ShadowRoot> shadow_root)
     set_needs_layout_tree_update(true, SetNeedsLayoutTreeUpdateReason::ElementSetShadowRoot);
 }
 
+GC::Ptr<CSS::CSSStyleProperties> Element::inline_style()
+{
+    if (!m_inline_style && m_inline_declarations)
+        m_inline_style = CSS::CSSStyleProperties::create_element_inline_style({ *this }, CSS::RustDeclarationBlock { exchange(m_inline_declarations, nullptr) });
+    return m_inline_style;
+}
+
+GC::Ptr<CSS::CSSStyleProperties const> Element::inline_style() const
+{
+    return const_cast<Element&>(*this).inline_style();
+}
+
+CSS::Parser::ValueParserFFI::DeclarationBlock const* Element::inline_style_declarations() const
+{
+    if (m_inline_style)
+        return m_inline_style->declaration_block().handle();
+    return m_inline_declarations;
+}
+
+bool Element::has_inline_style_declarations() const
+{
+    auto const* declarations = inline_style_declarations();
+    return declarations && !CSS::Parser::ValueParserFFI::rust_declaration_block_is_empty(declarations);
+}
+
 GC::Ref<CSS::CSSStyleProperties> Element::style()
 {
-    if (!m_inline_style)
-        m_inline_style = CSS::CSSStyleProperties::create_element_inline_style({ *this });
+    if (auto style = inline_style())
+        return *style;
+    m_inline_style = CSS::CSSStyleProperties::create_element_inline_style({ *this });
     return *m_inline_style;
 }
 
@@ -2934,8 +2968,8 @@ void Element::set_inline_style(GC::Ptr<CSS::CSSStyleProperties> style)
 {
     if (m_inline_style == style)
         return;
-    // NB: Asking the block itself does not build the views of its declarations, which nothing may ever read.
-    auto had_declarations = m_inline_style && !m_inline_style->declaration_block().is_empty();
+    auto had_declarations = has_inline_style_declarations();
+    CSS::Parser::ValueParserFFI::rust_declaration_block_destroy(exchange(m_inline_declarations, nullptr));
     m_inline_style = style;
     if (auto* rare_data = element_rare_data())
         rare_data->attribute_style_map = nullptr;
@@ -3210,7 +3244,8 @@ int Element::client_width() const
 
     // 3. Return the width of the padding edge excluding the width of any rendered scrollbar between the padding edge and the border edge,
     // ignoring any transforms that apply to the element and its ancestors.
-    return Painting::absolute_padding_box_rect(*layout_node).width().to_int();
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
+    return round(Painting::absolute_padding_box_rect(*layout_node).width()).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientheight
@@ -3237,7 +3272,8 @@ int Element::client_height() const
 
     // 3. Return the height of the padding edge excluding the height of any rendered scrollbar between the padding edge and the border edge,
     //    ignoring any transforms that apply to the element and its ancestors.
-    return Painting::absolute_padding_box_rect(*layout_node).height().to_int();
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
+    return round(Painting::absolute_padding_box_rect(*layout_node).height()).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-currentcsszoom
@@ -3258,10 +3294,15 @@ static void prefetch_inline_style_image_resources(CSS::CSSStyleProperties const&
 
 void Element::clone_inline_style_from(Element const& source)
 {
-    // NB: A source whose style attribute still awaits its check leaves the copy to make that check once connected.
-    if (!m_inline_style || !source.m_inline_style || source.m_style_attribute_awaits_content_security_policy_check)
+    // NB: A source whose style attribute still awaits its check leaves the copy to make that check once connected. So
+    //     does a source in another document, whose declarations were checked against another policy.
+    auto const* source_declarations = source.inline_style_declarations();
+    if ((!m_inline_style && !m_inline_declarations) || !source_declarations || source.m_style_attribute_awaits_content_security_policy_check || &source.document() != &document())
         return;
-    m_inline_style->set_declarations_from(*source.m_inline_style);
+    if (m_inline_style)
+        m_inline_style->set_declarations_from(*source.inline_style());
+    else
+        CSS::Parser::ValueParserFFI::rust_declaration_block_replace(m_inline_declarations, source_declarations);
     m_style_attribute_awaits_content_security_policy_check = false;
 }
 
@@ -3271,11 +3312,15 @@ void Element::inserted()
 
     if (m_style_attribute_awaits_content_security_policy_check && is_connected()) {
         m_style_attribute_awaits_content_security_policy_check = false;
-        if (auto value = attribute(HTML::AttributeNames::style); value.has_value() && m_inline_style) {
-            if (style_attribute_is_blocked_by_content_security_policy(*this, value->utf16_view()))
-                m_inline_style->set_declarations_from_text({});
-            else
-                prefetch_inline_style_image_resources(*m_inline_style, document());
+        if (auto value = attribute(HTML::AttributeNames::style); value.has_value() && inline_style_declarations()) {
+            if (style_attribute_is_blocked_by_content_security_policy(*this, value->utf16_view())) {
+                if (m_inline_style)
+                    m_inline_style->set_declarations_from_text({});
+                else
+                    CSS::Parser::ValueParserFFI::rust_declaration_block_destroy(exchange(m_inline_declarations, nullptr));
+            } else if (CSS::Parser::ValueParserFFI::rust_declaration_block_has_abstract_image_values(inline_style_declarations())) {
+                prefetch_inline_style_image_resources(*inline_style(), document());
+            }
         }
     }
 
@@ -3990,7 +4035,8 @@ int Element::scroll_width()
     // 3. Let viewport width be the width of the viewport excluding the width of the scroll bar, if any,
     //    or zero if there is no viewport.
     auto viewport_width = document.viewport_rect().width().to_int();
-    auto viewport_scrolling_area_width = viewport_scrollable_overflow_rect->width().to_int();
+    // INTEROP: The scrolling area width is rounded to the nearest integer rather than truncated, as browsers do.
+    auto viewport_scrolling_area_width = round(viewport_scrollable_overflow_rect->width()).to_int();
 
     // 4. If the element is the root element and document is not in quirks mode
     //    return max(viewport scrolling area width, viewport width).
@@ -4008,8 +4054,9 @@ int Element::scroll_width()
         return 0;
 
     // 7. Return the width of the element’s scrolling area.
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
     if (auto scrollable_overflow_rect = Painting::scrollable_overflow_rect(*layout_node); scrollable_overflow_rect.has_value())
-        return scrollable_overflow_rect->width().to_int();
+        return round(scrollable_overflow_rect->width()).to_int();
 
     return 0;
 }
@@ -4035,7 +4082,8 @@ int Element::scroll_height()
     // 3. Let viewport height be the height of the viewport excluding the height of the scroll bar, if any,
     //    or zero if there is no viewport.
     auto viewport_height = document.viewport_rect().height().to_int();
-    auto viewport_scrolling_area_height = viewport_scrollable_overflow_rect->height().to_int();
+    // INTEROP: The scrolling area height is rounded to the nearest integer rather than truncated, as browsers do.
+    auto viewport_scrolling_area_height = round(viewport_scrollable_overflow_rect->height()).to_int();
 
     // 4. If the element is the root element and document is not in quirks mode
     //    return max(viewport scrolling area height, viewport height).
@@ -4053,8 +4101,9 @@ int Element::scroll_height()
         return 0;
 
     // 7. Return the height of the element’s scrolling area.
+    // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
     if (auto scrollable_overflow_rect = Painting::scrollable_overflow_rect(*layout_node); scrollable_overflow_rect.has_value()) {
-        return scrollable_overflow_rect->height().to_int();
+        return round(scrollable_overflow_rect->height()).to_int();
     }
     return 0;
 }
@@ -6583,8 +6632,16 @@ void Element::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16
         // The new declaration block has not replaced the old one yet, so this is the last point at
         // which a deferred geometry-read boundary can commit its before-change style.
         document().flush_deferred_style_change_event();
-        if (!m_inline_style)
-            m_inline_style = CSS::CSSStyleProperties::create_element_inline_style({ *this });
+        auto set_inline_style_declarations_from_text = [&](Utf16View text) {
+            if (m_inline_style) {
+                m_inline_style->set_declarations_from_text(text);
+                return;
+            }
+            CSS::Parser::ParsingParams parsing_params { document() };
+            parsing_params.rule_context.append(CSS::Parser::RuleContext::Style);
+            auto* declarations = parse_css_property_declaration_block(parsing_params, text).leak_handle();
+            CSS::Parser::ValueParserFFI::rust_declaration_block_destroy(exchange(m_inline_declarations, declarations));
+        };
         // https://html.spec.whatwg.org/multipage/dom.html#the-style-attribute
         // However, if the Should element's inline behavior be blocked by Content Security Policy? algorithm returns
         // "Blocked" when executed upon the attribute's element, "style attribute", and the attribute's value, then
@@ -6594,16 +6651,19 @@ void Element::attribute_changed(Utf16FlyString const& local_name, Optional<Utf16
         //     element that is not connected becomes connected, and the resources its declarations use are fetched then.
         if (value.has_value() && !is_connected()) {
             m_style_attribute_awaits_content_security_policy_check = true;
-            m_inline_style->set_declarations_from_text(*value);
+            set_inline_style_declarations_from_text(*value);
             return;
         }
         m_style_attribute_awaits_content_security_policy_check = false;
         if (!value.has_value()) {
-            m_inline_style->set_declarations_from_text({});
+            set_inline_style_declarations_from_text({});
             return;
         }
-        m_inline_style->set_declarations_from_text(style_attribute_is_blocked_by_content_security_policy(*this, *value) ? Utf16View {} : *value);
-        prefetch_inline_style_image_resources(*m_inline_style, document());
+        set_inline_style_declarations_from_text(style_attribute_is_blocked_by_content_security_policy(*this, *value) ? Utf16View {} : *value);
+        // NB: Asked first, so a block without images does not make views of its values. The CSSOM object of a block
+        //     with images holds the values that load them.
+        if (CSS::Parser::ValueParserFFI::rust_declaration_block_has_abstract_image_values(inline_style_declarations()))
+            prefetch_inline_style_image_resources(*inline_style(), document());
     } else if (local_name == HTML::AttributeNames::dir || local_name == HTML::AttributeNames::lang) {
         bool const is_dir = local_name == HTML::AttributeNames::dir;
         if (is_dir) {

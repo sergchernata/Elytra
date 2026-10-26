@@ -90,9 +90,10 @@
 #include <LibWeb/CSS/TransitionEvent.h>
 #include <LibWeb/CSS/VisualViewport.h>
 #include <LibWeb/ComputedValuesRustFFI.h>
-#include <LibWeb/ContentSecurityPolicy/Directives/Directive.h>
+#include <LibWeb/ContentSecurityPolicy/Directives/HTMLIntegration.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
+#include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/AccessibilityTreeNode.h>
 #include <LibWeb/DOM/AdoptedStyleSheets.h>
@@ -136,6 +137,7 @@
 #include <LibWeb/Editing/EditingHistory.h>
 #include <LibWeb/Editing/SpellCheckController.h>
 #include <LibWeb/Editing/SpellingMarkers.h>
+#include <LibWeb/Editing/WritingSuggestionController.h>
 #include <LibWeb/Fetch/Fetching/Checks.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
@@ -265,6 +267,7 @@
 #include <LibWeb/UIEvents/TextEvent.h>
 #include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/ViewTransition/ViewTransition.h>
+#include <LibWeb/WebDriver/BiDi/BiDi.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -502,6 +505,11 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     document->m_permissions_policy = permissions_policy.release_value();
     document->m_active_sandboxing_flag_set = navigation_params.final_sandboxing_flag_set;
     document->m_navigation_id = navigation_params.id;
+
+    // INTEROP: A document that a reload or a traversal populates has no navigation ID, and other engines give its load
+    //          one for WebDriver BiDi.
+    if (!document->m_navigation_id.has_value() && WebDriver::BiDi::is_active())
+        document->m_navigation_id = Utf16String::from_utf8(Crypto::generate_random_uuid());
     document->set_load_timing_info(load_timing_info);
     document->m_was_created_via_cross_origin_redirects = navigation_params.response->redirect_taint() != Fetch::Infrastructure::RedirectTaint::SameOrigin;
     document->m_about_base_url = navigation_params.about_base_url;
@@ -1044,6 +1052,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
         m_spelling_markers->visit_edges(visitor);
     if (m_spell_check_controller)
         m_spell_check_controller->visit_edges(visitor);
+    if (m_writing_suggestion_controller)
+        m_writing_suggestion_controller->visit_edges(visitor);
 
     for (auto& event : m_pending_animation_event_queue) {
         visitor.visit(event.event);
@@ -1085,7 +1095,6 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_local_storage_holder);
     visitor.visit(m_session_storage_holder);
     visitor.visit(m_render_blocking_elements);
-    visitor.visit(m_policy_container);
     visitor.visit(m_deferred_parser_start);
     visitor.visit(m_custom_element_registry);
     visitor.visit(m_ancestor_origins_list);
@@ -1197,6 +1206,8 @@ void Document::note_selection_changed()
     request_frame_for_pending_repaint();
     if (m_spell_check_controller)
         m_spell_check_controller->did_change_selection();
+    if (m_writing_suggestion_controller)
+        m_writing_suggestion_controller->did_change_selection();
 }
 
 void Document::update_highlight_states_if_needed(Layout::BegunRead const& read)
@@ -1280,6 +1291,13 @@ Editing::SpellCheckController& Document::spell_check_controller()
     if (!m_spell_check_controller)
         m_spell_check_controller = make<Editing::SpellCheckController>(*this);
     return *m_spell_check_controller;
+}
+
+Editing::WritingSuggestionController& Document::writing_suggestion_controller()
+{
+    if (!m_writing_suggestion_controller)
+        m_writing_suggestion_controller = make<Editing::WritingSuggestionController>(*this);
+    return *m_writing_suggestion_controller;
 }
 
 bool Document::has_spelling_markers() const
@@ -1518,6 +1536,11 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<Utf16String> const&, Opti
 
     // 18. Update the current document readiness of document to "loading".
     update_readiness(HTML::DocumentReadyState::Loading);
+
+    // INTEROP: The HTML Standard leaves the during-loading navigation ID for WebDriver BiDi null for the contents that
+    //          document.open() loads. Other engines report the load of the contents as a navigation of its own.
+    if (WebDriver::BiDi::is_active())
+        m_navigation_id = Utf16String::from_utf8(Crypto::generate_random_uuid());
 
     // 19. Return document.
     return this;
@@ -4143,6 +4166,8 @@ void Document::set_focused_area(GC::Ptr<Node> node, InvalidateFocusPseudoClasses
 
     if (navigable() && page().spell_checking_available())
         spell_check_controller().did_focus(m_focused_area);
+    if (m_writing_suggestion_controller)
+        m_writing_suggestion_controller->did_focus(m_focused_area);
 }
 
 Element const* Document::active_element() const
@@ -6267,15 +6292,15 @@ void Document::set_active_sandboxing_flag_set(HTML::SandboxingFlagSet sandboxing
     m_active_sandboxing_flag_set = sandboxing_flag_set;
 }
 
-GC::Ref<HTML::PolicyContainer> Document::policy_container() const
+NonnullRefPtr<HTML::PolicyContainer> Document::policy_container() const
 {
     if (!m_policy_container) {
-        m_policy_container = GC::Heap::the().allocate<HTML::PolicyContainer>(GC::Heap::the());
+        m_policy_container = HTML::PolicyContainer::create();
     }
     return *m_policy_container;
 }
 
-void Document::set_policy_container(GC::Ref<HTML::PolicyContainer> policy_container)
+void Document::set_policy_container(NonnullRefPtr<HTML::PolicyContainer> policy_container)
 {
     m_policy_container = policy_container;
 }
@@ -6451,6 +6476,10 @@ void Document::run_unloading_cleanup_steps()
     FileAPI::run_unloading_cleanup_steps(*this);
     fully_exit_fullscreen();
     PictureInPicture::run_unloading_cleanup_steps(*this);
+
+    // https://w3c.github.io/webdriver-bidi/#event-script-realmDestroyed
+    if (WebDriver::BiDi::is_active())
+        WebDriver::BiDi::unloading_document_cleanup_steps(*this);
 }
 
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document
@@ -6694,9 +6723,13 @@ void Document::abort()
 
     // 3. If document's during-loading navigation ID for WebDriver BiDi is non-null, then:
     if (m_navigation_id.has_value()) {
-        // FIXME: 1. Invoke WebDriver BiDi navigation aborted with document's node navigable and a new WebDriver BiDi
-        //           navigation status whose id is document's during-loading navigation ID for WebDriver BiDi, status
-        //           is "canceled", and url is document's URL.
+        // 1. Invoke WebDriver BiDi navigation aborted with document's node navigable and a new WebDriver BiDi navigation
+        //    status whose id is document's during-loading navigation ID for WebDriver BiDi, status is "canceled", and
+        //    url is document's URL.
+        if (WebDriver::BiDi::is_active()) {
+            if (auto navigable = this->navigable())
+                WebDriver::BiDi::navigation_event(*navigable, "browsingContext.navigationAborted"sv, m_navigation_id, url());
+        }
 
         // 2. Set document's during-loading navigation ID for WebDriver BiDi to null.
         m_navigation_id = {};
@@ -7938,8 +7971,18 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
     // 9. If documentIsNew is true, then:
     if (document_is_new) {
         // FIXME: 1. Assert: document's during-loading navigation ID for WebDriver BiDi is not null.
-        // FIXME: 2. Invoke WebDriver BiDi navigation committed with navigable and a new WebDriver BiDi navigation
-        //           status whose id is document's during-loading navigation ID for WebDriver BiDi, status is "committed", and url is document's URL
+        // 2. Invoke WebDriver BiDi navigation committed with navigable and a new WebDriver BiDi navigation status whose
+        //    id is document's during-loading navigation ID for WebDriver BiDi, status is "committed", and url is
+        //    document's URL
+        if (WebDriver::BiDi::is_active()) {
+            if (auto navigable = this->navigable()) {
+                WebDriver::BiDi::navigation_event(*navigable, "browsingContext.navigationCommitted"sv, m_navigation_id, url());
+
+                // AD-HOC: WebDriver BiDi creates the document's realm, and runs its preload scripts, once the document is
+                //         active in its navigable and before scripts may run for it.
+                WebDriver::BiDi::document_is_ready_for_scripts(*this);
+            }
+        }
 
         // 3. If scrollingBlockedInNewDocument is false, try to scroll to the fragment for document.
         if (!scrolling_blocked_in_new_document)
@@ -7979,12 +8022,12 @@ void Document::set_latest_entry(RefPtr<HTML::SessionHistoryEntry> entry)
     m_latest_entry = move(entry);
 }
 
-HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>>& Document::shared_resource_requests()
+HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>>& Document::shared_resource_requests()
 {
     return m_shared_resource_requests;
 }
 
-HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>> const& Document::shared_resource_requests() const
+HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>> const& Document::shared_resource_requests() const
 {
     return m_shared_resource_requests;
 }
@@ -8041,7 +8084,7 @@ void Document::prune_image_resource_caches()
             auto const& request = *it.value;
             if (!request.can_be_pruned_from_memory_cache())
                 continue;
-            if (is_used_by_css_image_resource(it.key, request))
+            if (is_used_by_css_image_resource(it.key.url, request))
                 continue;
             ++count;
             if (auto image_data = request.image_data())
@@ -8054,25 +8097,25 @@ void Document::prune_image_resource_caches()
 
     auto size = cache_size();
     while (size.decoded_image_size > decoded_image_resource_cache_limit || size.decoded_image_count > decoded_image_resource_cache_count_limit) {
-        Optional<URL::URL> least_recently_used_url;
+        Optional<HTML::SharedResourceRequest::Key> least_recently_used_key;
         u64 least_recently_used_serial = NumericLimits<u64>::max();
 
         for (auto const& it : m_shared_resource_requests) {
             auto const& request = *it.value;
             if (!request.can_be_pruned_from_memory_cache())
                 continue;
-            if (is_used_by_css_image_resource(it.key, request))
+            if (is_used_by_css_image_resource(it.key.url, request))
                 continue;
             if (request.cache_touch_serial() >= least_recently_used_serial)
                 continue;
-            least_recently_used_url = it.key;
+            least_recently_used_key = it.key;
             least_recently_used_serial = request.cache_touch_serial();
         }
 
-        if (!least_recently_used_url.has_value())
+        if (!least_recently_used_key.has_value())
             break;
 
-        m_shared_resource_requests.remove(least_recently_used_url.value());
+        m_shared_resource_requests.remove(least_recently_used_key.value());
 
         auto new_size = cache_size();
         if (new_size.decoded_image_size == size.decoded_image_size && new_size.decoded_image_count == size.decoded_image_count)
@@ -10119,8 +10162,11 @@ void Document::publish_animation_keyframes_for_style_update()
     // NB: Read before the walk, so that a change the walk itself makes walks again next time.
     m_animation_keyframes_published_generation = m_style_sheet_set_generation;
     auto* host = style_computer().style_engine().host();
-    for (auto const& departed : m_departed_animation_keyframes)
+    for (auto const& departed : m_departed_animation_keyframes) {
         CSS::StyleEngineFFI::style_engine_set_tree_scope_animation_keyframes(host, departed.tree_scope.value(), departed.shadow_root_identity, {}, {}, {});
+        if (departed.has_position_try_rules)
+            CSS::StyleEngineFFI::style_engine_set_tree_scope_position_try_rules(host, departed.tree_scope.value(), {}, {}, {});
+    }
     m_departed_animation_keyframes.clear();
     style_scope().build_rule_cache_if_needed();
     for_each_shadow_root([](DOM::ShadowRoot& shadow_root) {
@@ -11471,11 +11517,11 @@ Document::StepsToFireBeforeunloadResult Document::steps_to_fire_beforeunload(boo
 void Document::run_csp_initialization() const
 {
     // 1. For each policy of document’s policy container's CSP list:
-    for (auto policy : policy_container()->csp_list->policies()) {
+    for (auto const& policy : policy_container()->csp_list.policies()) {
         // 1. For each directive of policy:
-        for (auto directive : policy->directives()) {
+        for (auto const& directive : policy->directives()) {
             // 1. Execute directive’s initialization algorithm on document, and assert: its returned value is "Allowed".
-            auto result = directive->initialization(GC::Ref { *this }, policy);
+            auto result = ContentSecurityPolicy::Directives::initialization(directive, GC::Ref { *this }, policy);
             VERIFY(result == ContentSecurityPolicy::Directives::Directive::Result::Allowed);
         }
     }

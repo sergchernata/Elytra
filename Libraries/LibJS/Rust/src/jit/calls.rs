@@ -7,6 +7,7 @@
 //! Calls from JIT code: the call instructions it leaves to the runtime, and the runtime functions its direct calls,
 //! the call stub and its call intrinsics use.
 
+use core::ops::Deref;
 use core::ptr::NonNull;
 
 use libjs_abi::register;
@@ -20,8 +21,9 @@ use crate::bytecode::executable::Executable;
 use crate::bytecode::instruction::OpCode;
 use crate::bytecode::instruction_at;
 use crate::bytecode::op;
-use crate::gc::root::MarkedVec;
+use crate::gc::root::{MarkedValues, MarkedVec};
 use crate::interpreter::runtime_functions::{Runtime, RuntimeFunctions, SlowPathControl, handle_asm_exception};
+use crate::interpreter::slow_paths;
 use crate::interpreter::slow_paths::calls::{
     CallType, execute_asm_call, record_callback, throw_error, throw_if_needed_for_asm_call,
 };
@@ -107,7 +109,7 @@ fn run_callee_frame_from_jit(vm: &Vm, site: &JitCallSite, callee_frame: NonNull<
         let result = enter_jit_code(vm, callee_frame);
         match result.status {
             EntryStatus::Returned => {
-                vm.return_from_running_frame(Value(result.value));
+                vm.return_from_running_frame(Value::from_bits(result.value));
                 return finish_call_from_jit(vm, site.frame, site.pc, site.return_pc);
             }
             EntryStatus::ExitInterpreter => return finish_call_from_jit(vm, site.frame, site.pc, site.return_pc),
@@ -399,7 +401,7 @@ fn call_other_function_from_jit(
                 && array_like.indexed_storage_kind() == IndexedStorageKind::Packed
                 && u64::from(array_like.indexed_packed_elements_span_size()) >= length
             {
-                let mut arguments = ArgumentStorage::filled(vm, length as usize, |slots| {
+                let arguments = ArgumentStorage::filled(vm, length as usize, |slots| {
                     array_like.copy_indexed_packed_elements(slots);
                 });
                 return Some(call_from_jit_or_generic(
@@ -407,7 +409,7 @@ fn call_other_function_from_jit(
                     site,
                     this_value,
                     target_this,
-                    arguments.values(),
+                    &arguments.values(),
                     unwrap_depth + 1,
                 ));
             }
@@ -418,9 +420,14 @@ fn call_other_function_from_jit(
                     Err(throw) => return Some(handle_asm_exception(vm, site.pc, throw.value())),
                 }
             }
-            return Some(argument_list.with_values(|arguments| {
-                call_from_jit_or_generic(vm, site, this_value, target_this, arguments, unwrap_depth + 1)
-            }));
+            return Some(call_from_jit_or_generic(
+                vm,
+                site,
+                this_value,
+                target_this,
+                &argument_list.values(),
+                unwrap_depth + 1,
+            ));
         }
 
         return None;
@@ -451,7 +458,7 @@ fn call_other_function_from_jit(
                 unwrap_depth + 1,
             );
         }
-        let mut argument_list = ArgumentStorage::filled(vm, bound_argument_count + arguments.len(), |slots| {
+        let argument_list = ArgumentStorage::filled(vm, bound_argument_count + arguments.len(), |slots| {
             let (bound_slots, argument_slots) = slots.split_at_mut(bound_argument_count);
             for (index, slot) in bound_slots.iter_mut().enumerate() {
                 *slot = bound_function.bound_argument(index);
@@ -463,7 +470,7 @@ fn call_other_function_from_jit(
             site,
             target,
             bound_function.bound_this(),
-            argument_list.values(),
+            &argument_list.values(),
             unwrap_depth + 1,
         );
     }
@@ -500,15 +507,14 @@ fn call_from_jit_or_generic(
 }
 
 /// The argument values of a call from JIT code, which it keeps alive: few enough on the stack, which the garbage
-/// collector scans, and others in a rooted list as well.
+/// collector scans, and others in a rooted list.
 ///
 /// NB: The argument values cannot stay alive in the slots of the calling frame: frames of inlined calls that compiled
 ///     code pushes for a call are not initialized, and the garbage collector does not visit their registers and locals.
 struct ArgumentStorage<'vm> {
     inline: [Value; ArgumentStorage::INLINE_CAPACITY],
     count: usize,
-    heap: Vec<Value>,
-    _rooted: Option<MarkedVec<'vm, Value>>,
+    rooted: Option<MarkedVec<'vm, Value>>,
 }
 
 impl<'vm> ArgumentStorage<'vm> {
@@ -527,28 +533,40 @@ impl<'vm> ArgumentStorage<'vm> {
         let mut storage = Self {
             inline: [Value::UNDEFINED; Self::INLINE_CAPACITY],
             count,
-            heap: Vec::new(),
-            _rooted: None,
+            rooted: None,
         };
         if count <= Self::INLINE_CAPACITY {
             fill(&mut storage.inline[..count]);
         } else {
-            storage.heap = vec![Value::UNDEFINED; count];
-            fill(&mut storage.heap);
             let rooted = MarkedVec::with_capacity(vm, count);
-            for value in &storage.heap {
-                rooted.push(*value);
-            }
-            storage._rooted = Some(rooted);
+            rooted.resize(count, Value::UNDEFINED);
+            fill(&mut rooted.values_mut());
+            storage.rooted = Some(rooted);
         }
         storage
     }
 
-    fn values(&mut self) -> &mut [Value] {
-        if self.count <= Self::INLINE_CAPACITY {
-            &mut self.inline[..self.count]
-        } else {
-            &mut self.heap
+    fn values(&self) -> ArgumentValues<'_> {
+        match &self.rooted {
+            Some(rooted) => ArgumentValues::Rooted(rooted.values()),
+            None => ArgumentValues::Inline(&self.inline[..self.count]),
+        }
+    }
+}
+
+/// The values of an ArgumentStorage, which it lends.
+enum ArgumentValues<'a> {
+    Inline(&'a [Value]),
+    Rooted(MarkedValues<'a, Value>),
+}
+
+impl Deref for ArgumentValues<'_> {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        match self {
+            Self::Inline(values) => values,
+            Self::Rooted(values) => values,
         }
     }
 }
@@ -607,11 +625,11 @@ pub unsafe extern "C" fn libjs_jit_call(vm: *const Vm, frame: *mut ExecutionCont
             let call = instruction!(Call);
             let site = site(call.dst, call.length());
             let operands = call.arguments();
-            let mut storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
+            let storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
             let arguments = storage.values();
             let callee = load(call.callee);
             let this_value = load(call.this_value);
-            if let Some(control) = call_from_jit(vm, &site, callee, this_value, arguments, 0) {
+            if let Some(control) = call_from_jit(vm, &site, callee, this_value, &arguments, 0) {
                 return control.0;
             }
             let mut values = op::CallValues {
@@ -620,14 +638,14 @@ pub unsafe extern "C" fn libjs_jit_call(vm: *const Vm, frame: *mut ExecutionCont
                 this_value,
                 arguments: [],
             };
-            let control = Runtime::call(vm, pc, call, &mut values, arguments);
+            let control = slow_paths::call_slow_path(vm, pc, call, &mut values, &arguments);
             finish_generic_call(vm, &site, control, values.dst)
         }
         _ if opcode == OpCode::CallConstruct as u8 => {
             let call = instruction!(CallConstruct);
             let site = site(call.dst, call.length());
             let operands = call.arguments();
-            let mut storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
+            let storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
             let arguments = storage.values();
             let callee = load(call.callee);
             if let Some(function) = value_as_ecmascript_function_object(callee)
@@ -635,21 +653,21 @@ pub unsafe extern "C" fn libjs_jit_call(vm: *const Vm, frame: *mut ExecutionCont
                 && function.has_constructor()
                 && function.bytecode_executable().is_some()
             {
-                return construct_ecmascript_function_from_jit(vm, &site, function, arguments).0;
+                return construct_ecmascript_function_from_jit(vm, &site, function, &arguments).0;
             }
             let mut values = op::CallConstructValues {
                 dst: Value::EMPTY,
                 callee,
                 arguments: [],
             };
-            let control = Runtime::call_construct(vm, pc, call, &mut values, arguments);
+            let control = slow_paths::call_construct_slow_path(vm, pc, call, &mut values, &arguments);
             finish_generic_call(vm, &site, control, values.dst)
         }
         _ if opcode == OpCode::CallDirectEval as u8 => {
             let call = instruction!(CallDirectEval);
             let site = site(call.dst, call.length());
             let operands = call.arguments();
-            let mut storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
+            let storage = ArgumentStorage::new(vm, operands.iter().map(|operand| load(*operand)));
             let arguments = storage.values();
             let mut values = op::CallDirectEvalValues {
                 dst: Value::EMPTY,
@@ -657,7 +675,7 @@ pub unsafe extern "C" fn libjs_jit_call(vm: *const Vm, frame: *mut ExecutionCont
                 this_value: load(call.this_value),
                 arguments: [],
             };
-            let control = Runtime::call_direct_eval(vm, pc, call, &mut values, arguments);
+            let control = slow_paths::call_direct_eval_slow_path(vm, pc, call, &mut values, &arguments);
             finish_generic_call(vm, &site, control, values.dst)
         }
         _ if opcode == OpCode::CallWithArgumentArray as u8 => {
@@ -745,7 +763,7 @@ fn call_spreading_arguments_from_jit(
         return handle_asm_exception(vm, pc, throw.value());
     }
     let this_value = slots[call.this_value.0 as usize].get();
-    spread_arguments.with_values(|arguments| call_from_jit_or_generic(vm, &site, callee, this_value, arguments, 0))
+    call_from_jit_or_generic(vm, &site, callee, this_value, &spread_arguments.values(), 0)
 }
 
 /// `i64 libjs_jit_call_forwarding_arguments(VM*, ExecutionContext* frame, u32 pc)`: runs the Call instruction at `pc`
@@ -806,12 +824,13 @@ pub unsafe extern "C" fn libjs_jit_call_forwarding_arguments(
             passed_argument_count,
         );
     }
-    // NB: The passed arguments stay alive in the frame while the call runs.
-    let arguments: Vec<Value> = frame_ref.arguments()[..passed_argument_count]
-        .iter()
-        .map(core::cell::Cell::get)
-        .collect();
-    call_from_jit_or_generic(vm, &site, function, this_argument, &arguments, 1).0
+    let arguments = ArgumentStorage::new(
+        vm,
+        frame_ref.arguments()[..passed_argument_count]
+            .iter()
+            .map(core::cell::Cell::get),
+    );
+    call_from_jit_or_generic(vm, &site, function, this_argument, &arguments.values(), 1).0
 }
 
 /// `i64 libjs_jit_finish_direct_call(VM*, ExecutionContext* frame, u32 pc, u64 status)`: finishes a direct call made
@@ -877,7 +896,7 @@ pub unsafe extern "C" fn libjs_jit_prepare_call_environment(
             Gc::from_non_null(NonNull::new(function.cast_mut()).expect("a function")),
         )
     };
-    let argument = Value(this_argument);
+    let argument = Value::from_bits(this_argument);
     // NB: ToObject would make a wrapper of the caller's realm.
     if function.uses_this()
         && function.this_mode() == ThisMode::Global
@@ -917,7 +936,7 @@ pub extern "C" fn libjs_jit_array_push(array: &Array, value: u64) -> u64 {
         array.indexed_storage_kind(),
         IndexedStorageKind::None | IndexedStorageKind::Packed
     ));
-    array.indexed_append(Value(value), DEFAULT_ATTRIBUTES);
+    array.indexed_append(Value::from_bits(value), DEFAULT_ATTRIBUTES);
     Value::from_f64(f64::from(array.indexed_array_like_size())).0
 }
 
@@ -934,7 +953,7 @@ pub extern "C" fn libjs_jit_store_holey_element(object: &Object, index: u32, val
         IndexedStorageKind::Holey | IndexedStorageKind::Packed
     ));
     assert!(index < object.indexed_array_like_size());
-    object.indexed_put(index, Value(value), DEFAULT_ATTRIBUTES);
+    object.indexed_put(index, Value::from_bits(value), DEFAULT_ATTRIBUTES);
 }
 
 /// `u64 libjs_jit_primitive_to_string(VM*, u64 primitive)`: `String(primitive)`, which is ToString of the primitive,
@@ -942,7 +961,7 @@ pub extern "C" fn libjs_jit_store_holey_element(object: &Object, index: u32, val
 ///
 /// JIT code calls this with its VM and a primitive.
 pub extern "C" fn libjs_jit_primitive_to_string(vm: &Vm, primitive: u64) -> u64 {
-    let primitive = Value(primitive);
+    let primitive = Value::from_bits(primitive);
     assert!(!primitive.is_object());
     // 22.1.1.1 String ( value ), https://tc39.es/ecma262/#sec-string-constructor-string-value
     if primitive.is_symbol() {
@@ -995,7 +1014,7 @@ extern "C" fn libjs_jit_math_pow(base: f64, exponent: f64) -> f64 {
 ///
 /// JIT code calls this with its VM, a function object and such a primitive.
 pub extern "C" fn libjs_jit_to_object(vm: &Vm, primitive: u64, function: u64) -> u64 {
-    let (function, primitive) = (Value(function).as_object(), Value(primitive));
+    let (function, primitive) = (Value::from_bits(function).as_object(), Value::from_bits(primitive));
     assert!(!primitive.is_object() && !primitive.is_nullish());
     if vm.current_realm() != Some(function.shape().realm()) {
         return Value::EMPTY.0;
@@ -1009,7 +1028,7 @@ pub extern "C" fn libjs_jit_to_object(vm: &Vm, primitive: u64, function: u64) ->
 ///
 /// JIT code calls this with its VM, a length below 2^31 and a function object.
 pub extern "C" fn libjs_jit_array_create(vm: &Vm, length: u32, function: u64) -> u64 {
-    let realm = Value(function).as_object().shape().realm();
+    let realm = Value::from_bits(function).as_object().shape().realm();
     if vm.current_realm() != Some(realm) {
         return Value::EMPTY.0;
     }
@@ -1031,14 +1050,14 @@ pub extern "C" fn libjs_jit_slice_arguments(vm: &Vm, frame: &ExecutionContext, s
     } else {
         start.min(length)
     };
-    let mut arguments = ArgumentStorage::new(
+    let arguments = ArgumentStorage::new(
         vm,
         frame.arguments()[first as usize..length as usize]
             .iter()
             .map(core::cell::Cell::get),
     );
     let realm = vm.current_realm().expect("JIT code runs in a realm");
-    Value::from_object(Array::create_from(vm, realm, arguments.values())).0
+    Value::from_object(Array::create_from(vm, realm, &arguments.values())).0
 }
 
 /// The GetById slow path of JIT code, before the full one. Generic GetById nodes have no inline cache check, so this

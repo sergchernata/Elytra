@@ -10,9 +10,9 @@
 //! js_debugger_is_enabled() needs debugging to be enabled, as C++ reaches the debugger through VM::debugger(), which is
 //! null otherwise.
 
+use core::cell::Ref;
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use std::rc::Rc;
 
 use crate::breakpoint::BreakpointID;
 use crate::debugger::{Debugger, PauseInfo, PauseOnExceptions, PauseReason, ResumeMode, UpdateOriginalBindings};
@@ -163,7 +163,7 @@ fn source_range_into_abi(source_range: Option<&SourceRange>) -> JSDebuggerSource
 /// # Safety
 ///
 /// `vm` must point to a live VM.
-unsafe fn debugger_of<'a>(vm: *mut JSVM) -> (&'a Vm, Rc<Debugger>) {
+unsafe fn debugger_of<'a>(vm: *mut JSVM) -> (&'a Vm, Ref<'a, Debugger>) {
     // SAFETY: The caller passes a live VM.
     let vm = unsafe { vm_from_abi(vm) };
     (vm, vm.debugger().expect("debugging is enabled"))
@@ -349,7 +349,7 @@ pub unsafe extern "C" fn js_debugger_set_pause_on_exceptions(vm: *mut JSVM, mode
 pub unsafe extern "C" fn js_debugger_did_finish_exception_propagation(vm: *mut JSVM, exception: JSValue) {
     // SAFETY: The caller passes a live VM.
     let (_, debugger) = unsafe { debugger_of(vm) };
-    debugger.did_finish_exception_propagation(Value(exception));
+    debugger.did_finish_exception_propagation(Value::from_bits(exception));
 }
 
 /// Debugger::add_breakpoint(filename, line, column): a breakpoint in every source code with that filename, at the
@@ -460,8 +460,7 @@ pub unsafe extern "C" fn js_debugger_bindings_for_frame(
     let sink = unsafe { sink.as_ref() }.expect("a sink is not null");
     let append = sink.append.expect("a sink has an append function");
     let bindings = debugger.bindings_for_frame(vm, execution_context);
-    // The copy leaves the marked list unborrowed while the sink runs, and the list keeps the values alive.
-    for binding in bindings.to_vec() {
+    for binding in bindings.values().iter() {
         let binding_for_c = JSDebuggerFrameBinding {
             name: JSUtf16View::of(Utf16View::of_fly_string(&binding.name)),
             value: binding.value.0,

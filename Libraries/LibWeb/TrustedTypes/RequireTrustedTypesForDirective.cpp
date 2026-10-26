@@ -10,10 +10,13 @@
 #include <LibWeb/ContentSecurityPolicy/Directives/Names.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/Window.h>
+#include <LibWeb/HTML/WorkerGlobalScope.h>
 #include <LibWeb/TrustedTypes/TrustedScript.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
 
@@ -40,22 +43,28 @@ static bool sink_group_matches(Utf16String const& directive_value, Utf16View sin
     return value.equals_ignoring_ascii_case(sink_group);
 }
 
-GC_DEFINE_ALLOCATOR(RequireTrustedTypesForDirective);
-
-RequireTrustedTypesForDirective::RequireTrustedTypesForDirective(Utf16FlyString name, Vector<Utf16String> value)
-    : Directive(move(name), move(value))
+static ContentSecurityPolicy::PolicyList const* csp_list_of_global(JS::Object& global)
 {
+    if (auto* window = Bindings::window_from_global_object(global))
+        return &window->associated_document().policy_container()->csp_list;
+
+    if (auto* worker = Bindings::worker_global_scope_from_global_object(global))
+        return &worker->policy_container()->csp_list;
+
+    return nullptr;
 }
 
 // https://www.w3.org/TR/trusted-types/#require-trusted-types-for-pre-navigation-check
-ContentSecurityPolicy::Directives::Directive::Result RequireTrustedTypesForDirective::pre_navigation_check(GC::Ref<Fetch::Infrastructure::Request> request, NavigationType, GC::Ref<ContentSecurityPolicy::Policy const>) const
+ContentSecurityPolicy::Directives::Directive::Result require_trusted_types_for_pre_navigation_check(Fetch::Infrastructure::Request& request)
 {
+    using Result = ContentSecurityPolicy::Directives::Directive::Result;
+
     // 1. If request’s url’s scheme is not "javascript", return "Allowed" and abort further steps.
-    if (request->url().scheme() != "javascript"sv)
+    if (request.url().scheme() != "javascript"sv)
         return Result::Allowed;
 
     // 2. Let urlString be the result of running the URL serializer on request’s url.
-    auto url_string = request->url().serialize();
+    auto url_string = request.url().serialize();
 
     // 3. Let encodedScriptSource be the result of removing the leading "javascript:" from urlString.
     auto const encoded_script_source = MUST(url_string.substring_from_byte_offset("javascript:"sv.length()));
@@ -71,7 +80,7 @@ ContentSecurityPolicy::Directives::Directive::Result RequireTrustedTypesForDirec
     //      "Location href":
     auto converted_script_source = process_value_with_a_default_policy(
         TrustedTypeName::TrustedScript,
-        request->client()->global_object(),
+        request.client()->global_object(),
         Utf16String::from_utf8(encoded_script_source),
         InjectionSink::Location_href);
 
@@ -93,7 +102,7 @@ ContentSecurityPolicy::Directives::Directive::Result RequireTrustedTypesForDirec
         return Result::Blocked;
 
     // 7. Set request’s url to newURL.
-    request->set_url(new_url.value());
+    request.set_url(new_url.value());
 
     // 8. Return "Allowed".
     return Result::Allowed;
@@ -103,10 +112,10 @@ ContentSecurityPolicy::Directives::Directive::Result RequireTrustedTypesForDirec
 bool does_sink_require_trusted_types(JS::Object& global, Utf16View sink_group, IncludeReportOnlyPolicies include_report_only_policies)
 {
     // 1. For each policy in global’s CSP list:
-    auto csp_list = ContentSecurityPolicy::PolicyList::from_object(global);
+    auto const* csp_list = csp_list_of_global(global);
     if (!csp_list)
         return false;
-    for (auto const policy : csp_list->policies()) {
+    for (auto const& policy : csp_list->policies()) {
         // 1. If policy’s directive set does not contain a directive whose name is "require-trusted-types-for", skip to the next policy.
         if (!policy->contains_directive_with_name(ContentSecurityPolicy::Directives::Names::RequireTrustedTypesFor))
             continue;
@@ -172,10 +181,10 @@ ContentSecurityPolicy::Directives::Directive::Result should_sink_type_mismatch_v
     }
 
     // 4. For each policy in global’s CSP list:
-    auto csp_list = ContentSecurityPolicy::PolicyList::from_object(global);
+    auto const* csp_list = csp_list_of_global(global);
     if (!csp_list)
         return result;
-    for (auto const policy : csp_list->policies()) {
+    for (auto const& policy : csp_list->policies()) {
         // 1. If policy’s directive set does not contain a directive whose name is "require-trusted-types-for", skip to the next policy.
         if (!policy->contains_directive_with_name(ContentSecurityPolicy::Directives::Names::RequireTrustedTypesFor))
             continue;

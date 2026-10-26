@@ -57,15 +57,6 @@ unsafe impl Trace for JitState {
     fn trace(&self, _visitor: &mut Visitor) {}
 }
 
-/// Keeps the heap from collecting garbage while it lives, which only matters for frames of inlined calls.
-pub struct DeferGc;
-
-impl DeferGc {
-    pub fn new(_vm: &Vm) -> Self {
-        Self
-    }
-}
-
 pub mod options {
     /// The options of the JIT, which these builds ignore.
     pub struct Options;
@@ -86,6 +77,7 @@ pub mod options {
 
 pub mod code {
     use super::{Executable, Visitor, Vm};
+    use crate::gc::sweep::Sweep;
 
     /// No return pc marks a call site in an inlined callee.
     pub const INLINED_CALL_SITE_BIT: u32 = 0;
@@ -113,7 +105,7 @@ pub mod code {
     impl Executable {
         pub fn allocate_jit_entry_slot(&self, _vm: &Vm) {}
 
-        pub fn free_jit_entry_slot(&self, _vm: &Vm) {}
+        pub fn free_jit_entry_slot(&self, _vm: &Vm, _sweep: &Sweep<'_>) {}
 
         pub fn trace_jit_code(&self, _visitor: &mut Visitor) {}
 
@@ -181,10 +173,13 @@ pub mod translate {
     use crate::layout::function_object::FunctionObject;
     use crate::layout::value::Value;
 
+    #[derive(Clone, libjs_runtime_macros::Trace)]
     pub struct CallSiteFrame {
         pub function: Gc<FunctionObject>,
         pub executable: Gc<Executable>,
+        #[gc(untraced)]
         pub program_counter: u32,
+        #[gc(untraced)]
         pub frame_state: usize,
     }
 
@@ -192,22 +187,23 @@ pub mod translate {
         u64::from(low_half)
     }
 
-    pub fn call_site_frames(
-        _vm: &Vm,
+    pub fn call_site_frames<'vm>(
+        vm: &'vm Vm,
         _frame: &ExecutionContext,
         _index: u32,
         _frame_pointer: u64,
-    ) -> Vec<CallSiteFrame> {
-        Vec::new()
+    ) -> crate::gc::root::MarkedVec<'vm, CallSiteFrame> {
+        crate::gc::root::MarkedVec::new(vm)
     }
 
-    pub fn call_site_frame_arguments(
+    pub fn call_site_frame_arguments<'d>(
         _vm: &Vm,
         _frame: &ExecutionContext,
         _index: u32,
         _frame_pointer: u64,
         _frame_state: usize,
-    ) -> Vec<Value> {
+        _defer_gc: &'d crate::gc::defer_gc::DeferGc<'_>,
+    ) -> crate::gc::defer_gc::Deferred<'d, Vec<Value>> {
         unreachable!("no frame runs JIT code");
     }
 
@@ -256,7 +252,7 @@ pub mod dependencies {
     pub struct Dependents;
 
     impl Dependents {
-        pub fn remove_dead_entries(&self) {}
+        pub fn remove_dead_entries(&self, _: &crate::gc::sweep::Sweep<'_>) {}
     }
 
     pub fn invalidate_dependents(_vm: &Vm, _dependency: Dependency) {}

@@ -288,6 +288,7 @@ IDBRecord
 IDBRequest
 IDBTransaction
 IDBVersionChangeEvent
+IIRFilterNode
 IdleDeadline
 Image
 ImageBitmap
@@ -342,6 +343,7 @@ NavigationActivation
 NavigationCurrentEntryChangeEvent
 NavigationDestination
 NavigationHistoryEntry
+NavigationPrecommitController
 NavigationTransition
 Navigator
 Node
@@ -584,6 +586,7 @@ VideoTrackList
 ViewTimeline
 ViewTransition
 VisualViewport
+WaveShaperNode
 WeakMap
 WeakRef
 WeakSet

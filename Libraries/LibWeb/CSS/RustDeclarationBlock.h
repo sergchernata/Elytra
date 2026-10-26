@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/HashMap.h>
+#include <AK/OwnPtr.h>
 #include <AK/Vector.h>
 #include <LibWeb/CSS/StyleProperty.h>
 #include <LibWeb/ValueParserRustFFI.h>
@@ -48,6 +49,8 @@ public:
     // True while both blocks hold the same immutable data, e.g. after replace() and before either changes.
     bool shares_declarations_with(RustDeclarationBlock const&) const;
     bool is_empty() const;
+    // Whether a declaration holds an image or a gradient, as its value or as an item of its list.
+    bool has_abstract_image_values() const;
     u64 identity() const;
     u64 revision() const;
 
@@ -62,14 +65,23 @@ public:
     bool remove_custom(Utf16FlyString const&);
 
     Parser::ValueParserFFI::DeclarationBlock const* handle() const { return m_block; }
+    // Hands the block to the caller, who destroys it with rust_declaration_block_destroy(). The views are dropped.
+    [[nodiscard]] Parser::ValueParserFFI::DeclarationBlock* leak_handle() &&;
 
 private:
     void update_views() const;
 
+    // NB: Most blocks are never viewed from C++, and an element's inline style is one per element, so the views are
+    //     made on first use rather than carried empty by every block.
+    struct Views {
+        AK_ALLOC_WITH_KMALLOC;
+        Vector<StyleProperty> properties;
+        OrderedHashMap<Utf16FlyString, StyleProperty> custom_properties;
+        Optional<u64> revision;
+    };
+
     Parser::ValueParserFFI::DeclarationBlock* m_block;
-    mutable Vector<StyleProperty> m_properties;
-    mutable OrderedHashMap<Utf16FlyString, StyleProperty> m_custom_properties;
-    mutable Optional<u64> m_view_revision;
+    mutable OwnPtr<Views> m_views;
 };
 
 }
