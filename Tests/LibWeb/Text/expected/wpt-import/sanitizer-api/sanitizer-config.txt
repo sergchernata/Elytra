@@ -1,0 +1,77 @@
+Harness status: OK
+
+Found 72 tests
+
+72 Pass
+Pass	Sanitizer constructor without config.
+Pass	Sanitizer constructor with empty config.
+Pass	Sanitizer constructor with null as config.
+Pass	Sanitizer constructor with undefined as config.
+Pass	Sanitizer constructor with config ignore unknown values.
+Pass	SanitizerConfig comments field.
+Pass	SanitizerConfig dataAttributes field.
+Pass	SanitizerConfig javascriptURLs field.
+Pass	SanitizerConfig, normalization: elements: ["div"]
+Pass	SanitizerConfig, normalization: elements: [{"name":"b"}]
+Pass	SanitizerConfig, normalization: elements: [{"name":"b","namespace":null}]
+Pass	SanitizerConfig, normalization: elements: [{"name":"b","namespace":""}]
+Pass	SanitizerConfig, normalization: elements: [{"name":"p","namespace":"http://www.w3.org/1999/xhtml"}]
+Pass	SanitizerConfig, normalization: elements: [{"name":"bla","namespace":"http://fantasy.org/namespace"}]
+Pass	SanitizerConfig, normalization: removeElements: ["div"]
+Pass	SanitizerConfig, normalization: removeElements: [{"name":"b"}]
+Pass	SanitizerConfig, normalization: removeElements: [{"name":"b","namespace":null}]
+Pass	SanitizerConfig, normalization: removeElements: [{"name":"b","namespace":""}]
+Pass	SanitizerConfig, normalization: removeElements: [{"name":"p","namespace":"http://www.w3.org/1999/xhtml"}]
+Pass	SanitizerConfig, normalization: removeElements: [{"name":"bla","namespace":"http://fantasy.org/namespace"}]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: ["div"]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: [{"name":"b"}]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: [{"name":"b","namespace":null}]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: [{"name":"b","namespace":""}]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: [{"name":"p","namespace":"http://www.w3.org/1999/xhtml"}]
+Pass	SanitizerConfig, normalization: replaceWithChildrenElements: [{"name":"bla","namespace":"http://fantasy.org/namespace"}]
+Pass	SanitizerConfig, normalization: processingInstructions: ["target-1"]
+Pass	SanitizerConfig, normalization: processingInstructions: [{"target":"target-1"}]
+Pass	SanitizerConfig, normalization: removeProcessingInstructions: ["target-1"]
+Pass	SanitizerConfig, normalization: removeProcessingInstructions: [{"target":"target-1"}]
+Pass	SanitizerConfig, normalization: attributes: ["href"]
+Pass	SanitizerConfig, normalization: attributes: [{"name":"href","namespace":null}]
+Pass	SanitizerConfig, normalization: attributes: [{"name":"href","namespace":""}]
+Pass	SanitizerConfig, normalization: attributes: [{"name":"href","namespace":"https://www.w3.org/1999/xlink"}]
+Pass	SanitizerConfig, normalization: removeAttributes: ["href"]
+Pass	SanitizerConfig, normalization: removeAttributes: [{"name":"href","namespace":null}]
+Pass	SanitizerConfig, normalization: removeAttributes: [{"name":"href","namespace":""}]
+Pass	SanitizerConfig, normalization: removeAttributes: [{"name":"href","namespace":"https://www.w3.org/1999/xlink"}]
+Pass	Test elements addition.
+Pass	Test elements removal.
+Pass	Test elements replacewithchildren.
+Pass	Test processingInstructions addition.
+Pass	Test processingInstructions removal.
+Pass	Test attribute addition.
+Pass	Test attribute removal.
+Pass	Test attribute-per-element sets (i.e. overwrites).
+Pass	Test removeAttribute-per-element sets (i.e. overwrites).
+Pass	Both elements and removeElements should not be allowed.
+Pass	Both attributes and removeAttributes should not be allowed.
+Pass	Both processingInstructions and removeProcessingInstructions should not be allowed.
+Pass	config[elements] should not allow duplicates
+Pass	config[removeElements] should not allow duplicates
+Pass	config[replaceWithChildrenElements] should not allow duplicates
+Pass	config[attributes] should not allow duplicates
+Pass	config[removeAttributes] should not allow duplicates
+Pass	config[processingInstructions] should not allow duplicate targets
+Pass	config[removeProcessingInstructions] should not allow duplicate targets
+Pass	config[replaceWithChildrenElements] should not allow non-replaceable elements
+Pass	config[elements] and config[replaceWithChildrenElements] should not intersect
+Pass	config[removeElements] and config[replaceWithChildrenElements] should not intersect
+Pass	Duplicates in element[attributes] with config[attributes] should not be allowed.
+Pass	Duplicates in element[removeAttributes] with config[attributes] should not be allowed.
+Pass	config[attributes] and element[attributes] should not intersect.
+Pass	element[removeAttributes] should be a subset of config[attributes]
+Pass	element[attributes] with a data attribute must not co-exist with config[dataAttributes] set to true.
+Pass	config[attributes] with a data attribute must not co-exist with config[dataAttributes] set to true.
+Pass	element[attributes] and element[removeAttributes] should not both exist with config[removeAttributes].
+Pass	Duplicates in element[attributes] with config[removeAttributes] should not be allowed.
+Pass	Duplicates in element[removeAttributes] with config[removeAttributes] should not be allowed.
+Pass	config[removeAttributes] and element[attributes] should not intersect.
+Pass	config[removeAttributes] and element[removeAttributes] should not intersect.
+Pass	Can not use config[dataAttributes] and config[removeAttributes] together.

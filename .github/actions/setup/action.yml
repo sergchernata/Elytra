@@ -90,7 +90,7 @@ runs:
       if: ${{ inputs.os == 'macOS' || inputs.os == 'Android' }}
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: '26.6'
+        xcode-version: '27'
 
     - name: 'Install Dependencies'
       if: ${{ inputs.os == 'macOS' || inputs.os == 'Android' }}
@@ -167,7 +167,8 @@ runs:
       if: ${{ inputs.type == 'build' && inputs.os != 'Linux' }}
       uses: actions/cache@v6
       with:
-        path: ${{ github.workspace }}/${{ steps.wasm-tools.outputs.name }}
+        # The post-job save evaluates `path` without the steps context, so it must not depend on step outputs.
+        path: ${{ github.workspace }}/wasm-tools
         key: ${{ steps.wasm-tools.outputs.name }}
 
     - name: 'Install wasm-tools'
@@ -195,11 +196,34 @@ runs:
           tar -xzf "${FILENAME}"
         fi
         rm "${FILENAME}"
+        mv "${{ steps.wasm-tools.outputs.name }}" wasm-tools
 
     - name: 'Add wasm-tools to PATH'
       if: ${{ inputs.type == 'build' && inputs.os != 'Linux' }}
       shell: bash
-      run: echo "${GITHUB_WORKSPACE}/${{ steps.wasm-tools.outputs.name }}" >> "$GITHUB_PATH"
+      run: echo "${GITHUB_WORKSPACE}/wasm-tools" >> "$GITHUB_PATH"
+
+    - name: 'Cache cargo registry'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          /opt/cargo/registry
+        key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Libraries/LibJS/Flap/Cargo.lock') }}
+        restore-keys: |
+          cargo-registry-${{ runner.os }}-
+
+    - name: 'Fetch cargo dependencies'
+      shell: bash
+      run: |
+        # Fetch every crate in both lockfiles, so the registry cache saved at the end of the job is complete no matter
+        # which job saves it first, or which crates that job builds. Builds of older commits run this action from
+        # master, so skip any manifest that the checkout doesn't have.
+        for manifest in Cargo.toml Libraries/LibJS/Flap/Cargo.toml; do
+          if [ -f "${manifest}" ]; then
+            cargo fetch --locked --manifest-path "${manifest}"
+          fi
+        done
 
     - name: 'Set required environment variables'
       if: ${{ inputs.os == 'Linux' && inputs.arch == 'arm64' }}

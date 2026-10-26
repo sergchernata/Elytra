@@ -19,7 +19,7 @@ pub(crate) struct LayoutScratch {
     run_record_stack: RunRecordStack,
     /// The intrinsic sizes passes measured, kept for the passes after them.
     pub(crate) intrinsic_size_caches: super::layout_node_arena::IntrinsicSizeCaches,
-    /// The inline items a block container generated, kept for its next run in the same pass. The
+    /// The inline items a block container generated, kept for its later runs in the same pass. The
     /// items borrow fonts for the current pass, so the stashes are cleared when the pass ends.
     inline_item_stashes: RefCell<HashMap<NodeSlotId, super::inline_level_iterator::StashedInlineItems>>,
     measurement_memo: RefCell<MeasurementMemo>,
@@ -28,6 +28,85 @@ pub(crate) struct LayoutScratch {
     /// https://drafts.csswg.org/css-anchor-position-1/#apply-a-position-option
     position_option_styles: RefCell<Vec<(NodeSlotId, super::node_data::StylePayloadsRef)>>,
     has_position_option_styles: Cell<bool>,
+    /// What each run in progress found out for the host so far, the innermost last, and what the pass found out
+    /// outside any run.
+    host_findings_of_runs_in_progress: RefCell<Vec<HostFindings>>,
+    host_findings_outside_runs: RefCell<HostFindings>,
+    /// How many runs whose results are discarded are in progress, which neither read nor keep memoized layout.
+    discarded_runs_in_progress: Cell<u32>,
+}
+
+/// What layout found out that the host hears of once the layout that found it is committed: the nodes whose SVG
+/// lengths it resolved without the container they are relative to, what the container-relative lengths it resolved
+/// depend on, and the natural size it negotiated for the box of an `<svg>` document element. A run hands them to its
+/// parent with its result, so a discarded result tells the host nothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct HostFindings {
+    pub(crate) nodes_with_unresolved_container_lengths: Vec<NodeSlotId>,
+    pub(crate) messages: Vec<super::commit::FfiCommitMessage>,
+    pub(crate) document_svg_root_natural_size: Option<(NodeSlotId, crate::css::style::NaturalSize)>,
+}
+
+impl HostFindings {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.nodes_with_unresolved_container_lengths.is_empty()
+            && self.messages.is_empty()
+            && self.document_svg_root_natural_size.is_none()
+    }
+
+    pub(crate) fn note_unresolved_container_lengths(&mut self, node: NodeSlotId) {
+        if !self.nodes_with_unresolved_container_lengths.contains(&node) {
+            self.nodes_with_unresolved_container_lengths.push(node);
+        }
+    }
+
+    pub(crate) fn note_container_length_dependencies(
+        &mut self,
+        element: crate::css::style::tree::StyleNodeID,
+        bases: &super::svg_formatting_context::FfiContainerLengthBases,
+    ) {
+        use super::commit::{FfiCommitMessage, FfiCommitMessageKind};
+        self.note_message(FfiCommitMessage::new(
+            element.raw(),
+            FfiCommitMessageKind::StyleDependsOnSizeContainerQuery,
+        ));
+        for (container, awaits_layout) in [
+            (bases.width_query_container, bases.width_query_container_awaits_layout),
+            (bases.height_query_container, bases.height_query_container_awaits_layout),
+        ] {
+            if container == 0 {
+                continue;
+            }
+            self.note_message(FfiCommitMessage::new(
+                container,
+                FfiCommitMessageKind::SizeQueryContainerResolvedAgainst,
+            ));
+            if awaits_layout {
+                self.note_message(FfiCommitMessage::new(
+                    container,
+                    FfiCommitMessageKind::ContainerQueryEvaluationNeededAfterLayout,
+                ));
+            }
+        }
+    }
+
+    fn note_message(&mut self, message: super::commit::FfiCommitMessage) {
+        if !self.messages.contains(&message) {
+            self.messages.push(message);
+        }
+    }
+
+    pub(crate) fn receive(&mut self, other: HostFindings) {
+        for node in other.nodes_with_unresolved_container_lengths {
+            self.note_unresolved_container_lengths(node);
+        }
+        for message in other.messages {
+            self.note_message(message);
+        }
+        if other.document_svg_root_natural_size.is_some() {
+            self.document_svg_root_natural_size = other.document_svg_root_natural_size;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -69,6 +148,9 @@ impl Default for LayoutScratch {
             measurement_memo: RefCell::new(MeasurementMemo::default()),
             position_option_styles: RefCell::new(Vec::new()),
             has_position_option_styles: Cell::new(false),
+            host_findings_of_runs_in_progress: RefCell::new(Vec::new()),
+            host_findings_outside_runs: RefCell::new(HostFindings::default()),
+            discarded_runs_in_progress: Cell::new(0),
         }
     }
 }
@@ -106,14 +188,57 @@ impl LayoutScratch {
         block_container: NodeSlotId,
         stash: super::inline_level_iterator::StashedInlineItems,
     ) {
+        if self.reads_no_memoized_layout() {
+            return;
+        }
         self.inline_item_stashes.borrow_mut().insert(block_container, stash);
     }
 
-    pub(crate) fn take_inline_item_stash(
+    pub(crate) fn inline_item_stash(
         &self,
         block_container: NodeSlotId,
     ) -> Option<super::inline_level_iterator::StashedInlineItems> {
-        self.inline_item_stashes.borrow_mut().remove(&block_container)
+        if self.reads_no_memoized_layout() {
+            return None;
+        }
+        self.inline_item_stashes.borrow().get(&block_container).cloned()
+    }
+
+    /// Lays out `run`, whose result is discarded, without reading or keeping memoized layout, so that it computes
+    /// everything afresh and leaves nothing for the runs after it.
+    pub(crate) fn lay_out_discarded_run<R>(&self, run: impl FnOnce() -> R) -> R {
+        let in_progress = &self.discarded_runs_in_progress;
+        in_progress.set(in_progress.get() + 1);
+        let result = self.intrinsic_size_caches.suspended_while(run);
+        in_progress.set(in_progress.get() - 1);
+        result
+    }
+
+    /// Whether a run whose result is discarded is in progress, which reads and keeps no memoized layout: the run
+    /// cache, the in-flow block cache, inline item stashes, intrinsic sizes and memoized measurements.
+    pub(crate) fn reads_no_memoized_layout(&self) -> bool {
+        self.discarded_runs_in_progress.get() > 0
+    }
+
+    /// Notes what the innermost run in progress found out for the host, or the pass outside any run.
+    pub(crate) fn note_host_findings(&self, note: impl FnOnce(&mut HostFindings)) {
+        let mut runs = self.host_findings_of_runs_in_progress.borrow_mut();
+        match runs.last_mut() {
+            Some(findings) => note(findings),
+            None => note(&mut self.host_findings_outside_runs.borrow_mut()),
+        }
+    }
+
+    /// Hands what a finished run found out to the run in progress that used its result.
+    pub(crate) fn receive_host_findings(&self, findings: Option<Box<HostFindings>>) {
+        if let Some(findings) = findings {
+            self.note_host_findings(|into| into.receive(*findings));
+        }
+    }
+
+    /// What the pass found out outside any run, which its driver reports itself.
+    pub(crate) fn take_host_findings_outside_runs(&self) -> HostFindings {
+        std::mem::take(&mut self.host_findings_outside_runs.borrow_mut())
     }
 
     pub(crate) fn begin_measurement_memo(&self) {
@@ -129,7 +254,7 @@ impl LayoutScratch {
     }
 
     pub(crate) fn memoizes_measurements(&self) -> bool {
-        self.measurement_memo.borrow().depth > 0
+        self.measurement_memo.borrow().depth > 0 && !self.reads_no_memoized_layout()
     }
 
     pub(super) fn memoized_measurement(
@@ -179,12 +304,16 @@ impl LayoutScratch {
         self.next_run_nonce
             .set(nonce.checked_add(1).expect("layout run nonce space exhausted"));
         self.live_run_nonces.borrow_mut().push(nonce);
+        self.host_findings_of_runs_in_progress
+            .borrow_mut()
+            .push(HostFindings::default());
         nonce
     }
 
     fn end_run(&self, nonce: u64) {
         let ended = self.live_run_nonces.borrow_mut().pop();
         assert_eq!(ended, Some(nonce), "layout runs ended out of order");
+        self.host_findings_of_runs_in_progress.borrow_mut().pop();
     }
 
     fn innermost_run_nonce(&self) -> Option<u64> {
@@ -239,17 +368,6 @@ pub(crate) struct RunRecords<'arena> {
     omitted_line_layout: Cell<bool>,
 }
 
-struct InnermostRunGuard<'arena> {
-    arena: &'arena LayoutNodeArena,
-    previous: (Node, Node),
-}
-
-impl Drop for InnermostRunGuard<'_> {
-    fn drop(&mut self) {
-        self.arena.innermost_run.set(self.previous);
-    }
-}
-
 enum RunRecordClaim {
     Claimed,
     AlreadyClaimed,
@@ -257,44 +375,38 @@ enum RunRecordClaim {
 }
 
 impl<'arena> RunRecords<'arena> {
+    /// Runs `run` with the records of a run rooted at `root`, and the pass as that run sees it.
     pub(crate) fn with_root<R>(
-        scratch: &'arena LayoutScratch,
-        arena: &'arena LayoutNodeArena,
+        callbacks: LayoutPass<'arena>,
         root: Node,
         root_containing_block: Node,
         root_used: &'arena UsedValues,
-        run: impl FnOnce(&Self) -> R,
+        run: impl FnOnce(&Self, LayoutPass<'arena>) -> R,
     ) -> R {
-        Self::enter(scratch, arena, root, root_containing_block, Some(root_used), run)
+        Self::enter(callbacks, root, root_containing_block, Some(root_used), run)
     }
 
     pub(crate) fn with_unrooted<R>(
-        scratch: &'arena LayoutScratch,
-        arena: &'arena LayoutNodeArena,
+        callbacks: LayoutPass<'arena>,
         root: Node,
         root_containing_block: Node,
-        run: impl FnOnce(&Self) -> R,
+        run: impl FnOnce(&Self, LayoutPass<'arena>) -> R,
     ) -> R {
-        Self::enter(scratch, arena, root, root_containing_block, None, run)
+        Self::enter(callbacks, root, root_containing_block, None, run)
     }
 
     fn enter<R>(
-        scratch: &'arena LayoutScratch,
-        arena: &'arena LayoutNodeArena,
+        callbacks: LayoutPass<'arena>,
         root: Node,
         root_containing_block: Node,
         root_used: Option<&'arena UsedValues>,
-        run: impl FnOnce(&Self) -> R,
+        run: impl FnOnce(&Self, LayoutPass<'arena>) -> R,
     ) -> R {
-        // What the arena let go of since the last run is dropped before this run reads a cache.
-        let drops = arena.take_intrinsic_size_cache_drops();
-        if !drops.is_empty() {
-            scratch.intrinsic_size_caches.drop_slots(drops);
-        }
-        let _innermost_run = InnermostRunGuard {
-            arena,
-            previous: arena.innermost_run.replace((root, root_containing_block)),
-        };
+        debug_assert!(
+            !callbacks.arena().has_intrinsic_size_cache_drops(),
+            "the layout stage drops released intrinsic size cache entries before its runs read a cache"
+        );
+        let scratch = callbacks.scratch();
         let records = Self {
             root,
             root_used,
@@ -305,7 +417,24 @@ impl<'arena> RunRecords<'arena> {
             table_inline_layouts: RefCell::new(HashMap::default()),
             omitted_line_layout: Cell::new(false),
         };
-        run(&records)
+        run(&records, callbacks.for_run(root, root_containing_block))
+    }
+
+    /// What this run found out for the host, which its outputs carry to the run that uses its result.
+    pub(crate) fn take_host_findings(&self) -> Option<Box<HostFindings>> {
+        assert_eq!(
+            self.scratch.innermost_run_nonce(),
+            Some(self.nonce),
+            "only the innermost layout run may hand over what it found out"
+        );
+        let findings = std::mem::take(
+            self.scratch
+                .host_findings_of_runs_in_progress
+                .borrow_mut()
+                .last_mut()
+                .expect("a run in progress has a findings entry"),
+        );
+        (!findings.is_empty()).then(|| Box::new(findings))
     }
 
     pub(crate) fn note_omitted_line_layout(&self) {
@@ -517,24 +646,41 @@ mod tests {
         let child = arena.allocate_for_test().slot;
         let root_used = UsedValues::default();
         let nested_used = UsedValues::default();
-        let parent_nonce = RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |parent| {
-            let child_used: *const UsedValues = parent.register(child, UsedValues::default());
-            RunRecords::with_root(&scratch, &arena, child, root, &nested_used, |nested| {
+        let parent_nonce = RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |parent, _| {
+                let child_used: *const UsedValues = parent.register(child, UsedValues::default());
+                RunRecords::with_root(
+                    LayoutPass::for_test(&arena, &scratch),
+                    child,
+                    root,
+                    &nested_used,
+                    |nested, _| {
+                        assert!(std::ptr::eq(parent.used_values(child), child_used));
+                        assert!(std::ptr::eq(parent.used_values(root), &raw const root_used));
+                        assert!(std::ptr::eq(nested.used_values(child), &raw const nested_used));
+                        assert!(nested.used_values_if_owned(root).is_none());
+                        RunRecords::with_unrooted(
+                            LayoutPass::for_test(&arena, &scratch),
+                            child,
+                            root,
+                            |measurement, _| {
+                                let measured: *const UsedValues = measurement.register(child, UsedValues::default());
+                                assert!(std::ptr::eq(measurement.used_values(child), measured));
+                                assert!(std::ptr::eq(parent.used_values(child), child_used));
+                                assert!(std::ptr::eq(nested.used_values(child), &raw const nested_used));
+                            },
+                        );
+                        assert!(std::ptr::eq(parent.used_values(child), child_used));
+                    },
+                );
                 assert!(std::ptr::eq(parent.used_values(child), child_used));
-                assert!(std::ptr::eq(parent.used_values(root), &raw const root_used));
-                assert!(std::ptr::eq(nested.used_values(child), &raw const nested_used));
-                assert!(nested.used_values_if_owned(root).is_none());
-                RunRecords::with_unrooted(&scratch, &arena, child, root, |measurement| {
-                    let measured: *const UsedValues = measurement.register(child, UsedValues::default());
-                    assert!(std::ptr::eq(measurement.used_values(child), measured));
-                    assert!(std::ptr::eq(parent.used_values(child), child_used));
-                    assert!(std::ptr::eq(nested.used_values(child), &raw const nested_used));
-                });
-                assert!(std::ptr::eq(parent.used_values(child), child_used));
-            });
-            assert!(std::ptr::eq(parent.used_values(child), child_used));
-            parent.nonce
-        });
+                parent.nonce
+            },
+        );
         assert!(scratch.run_record(root.slot_index(), parent_nonce).is_none());
         assert_eq!(scratch.run_record_stack.length(), 0);
     }
@@ -548,25 +694,40 @@ mod tests {
         let lines = std::sync::Arc::new(crate::layout::inline_content::InlineContent::default());
         let weak_lines = std::sync::Arc::downgrade(&lines);
         let root_used = UsedValues::default();
-        let first_record = RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |records| {
-            let used = records.register(child, UsedValues::default());
-            used.set_finished_line_data(lines);
-            std::ptr::from_ref(used)
-        });
+        let first_record = RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |records, _| {
+                let used = records.register(child, UsedValues::default());
+                used.set_finished_line_data(lines);
+                std::ptr::from_ref(used)
+            },
+        );
         assert!(weak_lines.upgrade().is_none());
-        let second_record = RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |records| {
-            std::ptr::from_ref(records.register(child, UsedValues::default()))
-        });
+        let second_record = RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |records, _| std::ptr::from_ref(records.register(child, UsedValues::default())),
+        );
         assert_eq!(first_record, second_record);
 
         let nodes: Vec<_> = (0..RECORDS_PER_STACK_CHUNK * 2 + 1)
             .map(|_| arena.allocate_for_test().slot)
             .collect();
-        RunRecords::with_unrooted(&scratch, &arena, root, NodeSlotId::INVALID, |records| {
-            for node in nodes {
-                records.register(node, UsedValues::default());
-            }
-        });
+        RunRecords::with_unrooted(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            |records, _| {
+                for node in nodes {
+                    records.register(node, UsedValues::default());
+                }
+            },
+        );
         assert_eq!(scratch.run_record_stack.chunks.borrow().len(), 3);
         scratch.end_layout_pass();
         assert_eq!(scratch.run_record_stack.chunks.borrow().len(), 1);
@@ -579,9 +740,15 @@ mod tests {
         let root = arena.allocate_for_test().slot;
         let child = arena.allocate_for_test().slot;
         let root_used = UsedValues::default();
-        RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |records| {
-            records.register(child, UsedValues::default());
-        });
+        RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |records, _| {
+                records.register(child, UsedValues::default());
+            },
+        );
         let _ = arena.free_subtree(child);
     }
 
@@ -592,9 +759,15 @@ mod tests {
         let scratch = LayoutScratch::default();
         let root = arena.allocate_for_test().slot;
         let root_used = UsedValues::default();
-        RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |records| {
-            records.register(root, UsedValues::default());
-        });
+        RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |records, _| {
+                records.register(root, UsedValues::default());
+            },
+        );
     }
 
     #[test]
@@ -605,11 +778,22 @@ mod tests {
         let root = arena.allocate_for_test().slot;
         let child = arena.allocate_for_test().slot;
         let root_used = UsedValues::default();
-        RunRecords::with_unrooted(&scratch, &arena, root, NodeSlotId::INVALID, |parent| {
-            RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |_| {
-                parent.register(child, UsedValues::default());
-            });
-        });
+        RunRecords::with_unrooted(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            |parent, _| {
+                RunRecords::with_root(
+                    LayoutPass::for_test(&arena, &scratch),
+                    root,
+                    NodeSlotId::INVALID,
+                    &root_used,
+                    |_, _| {
+                        parent.register(child, UsedValues::default());
+                    },
+                );
+            },
+        );
     }
 
     #[test]
@@ -620,17 +804,29 @@ mod tests {
         let child = arena.allocate_for_test().slot;
         let root_used = UsedValues::default();
         let nested_used = UsedValues::default();
-        RunRecords::with_root(&scratch, &arena, root, NodeSlotId::INVALID, &root_used, |parent| {
-            let child_used: *const UsedValues = parent.register(child, UsedValues::default());
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                RunRecords::with_root(&scratch, &arena, child, root, &nested_used, |nested| {
-                    nested.register(root, UsedValues::default());
-                    panic!("abort the nested measurement");
-                });
-            }));
-            assert!(result.is_err());
-            assert!(std::ptr::eq(parent.used_values(root), &raw const root_used));
-            assert!(std::ptr::eq(parent.used_values(child), child_used));
-        });
+        RunRecords::with_root(
+            LayoutPass::for_test(&arena, &scratch),
+            root,
+            NodeSlotId::INVALID,
+            &root_used,
+            |parent, _| {
+                let child_used: *const UsedValues = parent.register(child, UsedValues::default());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    RunRecords::with_root(
+                        LayoutPass::for_test(&arena, &scratch),
+                        child,
+                        root,
+                        &nested_used,
+                        |nested, _| {
+                            nested.register(root, UsedValues::default());
+                            panic!("abort the nested measurement");
+                        },
+                    );
+                }));
+                assert!(result.is_err());
+                assert!(std::ptr::eq(parent.used_values(root), &raw const root_used));
+                assert!(std::ptr::eq(parent.used_values(child), child_used));
+            },
+        );
     }
 }

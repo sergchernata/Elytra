@@ -182,10 +182,6 @@ enum InFlowReuse {
         validity: fc_run_cache::FcRunCacheValidity,
         flow_position: CssPixels,
         abspos_containing_block_info_contributions_received: u64,
-        verify: Option<(
-            std::sync::Arc<in_flow_block_cache::InFlowBlockEntry>,
-            std::sync::Arc<fragment_tree::Fragment>,
-        )>,
     },
 }
 
@@ -2551,9 +2547,8 @@ impl<'pass> BlockFormattingContext<'pass> {
     ) -> bool {
         let facts = self.facts(node);
         let container_facts = self.facts(block_container);
-        self.run.purpose == formatting_context::LayoutPurpose::Commit
+        !self.run.callbacks.scratch().reads_no_memoized_layout()
             && self.run.fragmentainer.is_none()
-            && self.run.layout_mode == LayoutMode::Normal
             && self.run.fragments.is_some()
             && !self.run.should_collect_devtools_layout_data
             && containing_line_box_fragment.is_none()
@@ -2590,33 +2585,21 @@ impl<'pass> BlockFormattingContext<'pass> {
             self.margin_state.borrow().clone(),
         );
         let validity = fc_run_cache::run_root_validity(callbacks, node);
+        // NB: The committed subtree is reused only while it is the one the stored layout produced.
         let hit = callbacks
             .arena()
-            .in_flow_block_cache_store()
-            .matching(node.slot_index(), validity, &key)
-            .and_then(|entry| {
-                // NB: The committed subtree is reused only while it is the one the stored layout produced. A layout
-                //     whose fragments were superseded within its pass never committed them.
-                let fragment = callbacks
-                    .arena()
-                    .with_current_committed_fragment(node, |fragment| {
-                        (fragment.identity == entry.fragment_identity).then(|| fragment.clone())
-                    })
-                    .flatten()?;
+            .with_current_committed_fragment(node, |fragment| fragment.clone())
+            .and_then(|fragment| {
+                let entry = callbacks.arena().in_flow_block_cache_store().matching(
+                    node.slot_index(),
+                    validity,
+                    &key,
+                    fragment.identity,
+                )?;
                 Some((entry, fragment))
             });
         if let Some((entry, fragment)) = hit {
-            if !in_flow_block_cache::verification_is_enabled() {
-                return InFlowReuse::Hit { entry, fragment };
-            }
-            return InFlowReuse::Store {
-                key,
-                validity,
-                flow_position: self.flow_position(),
-                abspos_containing_block_info_contributions_received: self
-                    .abspos_containing_block_info_contributions_received(),
-                verify: Some((entry, fragment)),
-            };
+            return InFlowReuse::Hit { entry, fragment };
         }
         InFlowReuse::Store {
             key,
@@ -2624,7 +2607,6 @@ impl<'pass> BlockFormattingContext<'pass> {
             flow_position: self.flow_position(),
             abspos_containing_block_info_contributions_received: self
                 .abspos_containing_block_info_contributions_received(),
-            verify: None,
         }
     }
 
@@ -2700,14 +2682,12 @@ impl<'pass> BlockFormattingContext<'pass> {
             validity,
             flow_position,
             abspos_containing_block_info_contributions_received,
-            verify,
         } = attempt
         else {
             return;
         };
-        let store = self.run.callbacks.arena().in_flow_block_cache_store();
+        let arena = self.run.callbacks.arena();
         let Some(placed) = placed else {
-            store.remove_entry(node.slot_index());
             return;
         };
         let used = self.used(node);
@@ -2718,6 +2698,9 @@ impl<'pass> BlockFormattingContext<'pass> {
             && self.abspos_containing_block_info_contributions_received()
                 == abspos_containing_block_info_contributions_received
             && used.border_box_block_size(false) != CssPixels::default();
+        if !reusable {
+            return;
+        }
         let mut cells = used_values::UsedValuesCellState::capture(used);
         cells.has_content_offset = false;
         cells.content_offset = FfiCssPixelPoint::default();
@@ -2739,24 +2722,10 @@ impl<'pass> BlockFormattingContext<'pass> {
             depends_on_percentage_block_size,
             fragment_identity: placed.fragment.identity,
         };
-        if let Some((stored, committed)) = verify {
-            let fragments = self.run.fragments.as_deref();
-            let was_reused = |slot: u32| fragments.is_some_and(|fragments| fragments.subtree_was_reused(slot));
-            in_flow_block_cache::verify_reuse(
-                node,
-                &stored,
-                &committed,
-                &entry,
-                &placed.fragment,
-                reusable,
-                &was_reused,
-            );
-        }
-        if reusable {
-            store.store(node.slot_index(), entry);
-        } else {
-            store.remove_entry(node.slot_index());
-        }
+        let committed_identity = arena.with_current_committed_fragment(node, |fragment| fragment.identity);
+        arena
+            .in_flow_block_cache_store()
+            .store(node.slot_index(), entry, committed_identity);
     }
 
     fn layout_block_level_children(
@@ -3769,15 +3738,7 @@ impl<'pass> BlockFormattingContext<'pass> {
                 early_break_before,
                 allows_early_break_requests,
             ));
-            let journals_stored_entries = self.run.fragments.is_some();
-            let fc_run_cache_store = self.run.callbacks.arena().fc_run_cache_store();
-            if journals_stored_entries {
-                fc_run_cache_store.begin_store_journal();
-            }
             let outputs = formatting_context::run_fragmentainer(&self.run, purpose, input, fragmentainer.clone());
-            if journals_stored_entries {
-                fc_run_cache_store.end_store_journal(fragmentainer.outcome_mut().needs_early_break_before.is_none());
-            }
             if outputs.result.depends_on_percentage_block_size {
                 self.used(self.run.box_)
                     .has_descendant_that_depends_on_percentage_block_size
@@ -3810,6 +3771,11 @@ impl<'pass> BlockFormattingContext<'pass> {
                     (early_break_before, allows_early_break_requests),
                 );
             }
+            // NB: Only the attempt that is kept tells the host what it found out.
+            self.run
+                .callbacks
+                .scratch()
+                .receive_host_findings(outputs.host_findings);
             return ColumnLayout {
                 outcome,
                 consumed_block_size: outputs.result.automatic_content_block_size,

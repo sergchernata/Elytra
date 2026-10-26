@@ -44,18 +44,18 @@ ALLOWED = {
 IN_ONE_LIBRARY = {
     "libjs_rust": (
         {"libweb_bindings_rust"},
-        "a dependency of libweb_bindings_rust alone, whose archive both LibWeb's library and the JavaScript tools "
-        "link in a build with LibWeb; a build without LibWeb imports the crate itself, as the one Rust archive of "
-        "LibJS's library (Libraries/LibJS/CMakeLists.txt)",
+        "a dependency of libweb_bindings_rust alone, whose archive LibWeb's library links; standalone JavaScript "
+        "tools link the crate independently, and no process uses both (Libraries/LibJS/CMakeLists.txt)",
     ),
     "libweb_rust": (
         {"libweb_bindings_rust"},
         "a dependency of libweb_bindings_rust alone, whose archive LibWeb's library links",
     ),
     "libwasm_engine": (
-        {"libwasm_jit"},
-        "a dev-dependency of libwasm_jit alone, whose tests run compiled code against it; the engine is the one Rust "
-        "archive of LibWasm's library (Libraries/LibWasm/CMakeLists.txt)",
+        {"libwasm_jit", "libweb_bindings_rust"},
+        "a dev-dependency of libwasm_jit, whose tests run compiled code against it, and a dependency of "
+        "libweb_bindings_rust, whose archive LibWeb's library links; LibWasm's library builds the other copy, with the "
+        "C ABI, for the tools, and no process uses both (Libraries/LibWasm/CMakeLists.txt)",
     ),
 }
 
@@ -117,7 +117,7 @@ RENDER_STATE_ALLOWED = {
             "css/style/mod.rs:SELECTOR_TRUTH_DERIVATION",
             "css/style/mod.rs:STYLE_ANSWER_PATCH",
             "css/style/mod.rs:STYLE_PLAN_PROVENANCE",
-            "layout/in_flow_block_cache.rs:ENABLED",
+            "layout/run_repeatability.rs:VERIFICATION",
             "render_state/clock/hover.rs:LOGS",
         ],
     ),

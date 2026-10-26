@@ -1,0 +1,14 @@
+Harness status: OK
+
+Found 9 tests
+
+9 Pass
+Pass	Sorting of attributes
+Pass	Sorting of removeAttributes
+Pass	Sorting of elements
+Pass	Sorting of removeElements
+Pass	Sorting of replaceWithChildrenElements
+Pass	Sorting of element's attributes
+Pass	Sorting of element's removeAttributes
+Pass	Sorting of processingInstructions
+Pass	Sorting of removeProcessingInstructions

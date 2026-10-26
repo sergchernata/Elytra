@@ -14,6 +14,8 @@ use super::*;
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct FcRunCacheKey {
     fc_type: formatting_context::FormattingContextType,
+    purpose: formatting_context::LayoutPurpose,
+    layout_mode: LayoutMode,
     input: LayoutInput,
     root_cells: used_values::UsedValuesCellState,
 }
@@ -62,11 +64,15 @@ impl RunInputsTheStoredRunNeverObserved {
 impl FcRunCacheKey {
     pub(super) fn new(
         fc_type: formatting_context::FormattingContextType,
+        purpose: formatting_context::LayoutPurpose,
+        layout_mode: LayoutMode,
         input: LayoutInput,
         root_cells: used_values::UsedValuesCellState,
     ) -> Self {
         Self {
             fc_type,
+            purpose,
+            layout_mode,
             input,
             root_cells,
         }
@@ -74,6 +80,11 @@ impl FcRunCacheKey {
 
     pub(super) fn fc_type(&self) -> formatting_context::FormattingContextType {
         self.fc_type
+    }
+
+    /// Whether the run lays out fragments, which an entry can then also stand for.
+    fn builds_fragments(&self) -> bool {
+        self.layout_mode == LayoutMode::Normal && !self.purpose.is_measurement()
     }
 
     pub(super) fn has_no_table_cell_intrinsic_block_padding(&self) -> bool {
@@ -99,6 +110,8 @@ impl FcRunCacheKey {
             return false;
         }
         self.fc_type == probe.fc_type
+            && self.purpose == probe.purpose
+            && self.layout_mode == probe.layout_mode
             && self.root_cells == probe.root_cells
             && layout_inputs_match_ignoring_unobserved(&self.input, &probe.input, unobserved)
     }
@@ -220,33 +233,95 @@ pub(crate) struct FcRunCacheValidity {
     pub(crate) fragment_cache_epoch: u32,
 }
 
+/// The outputs of a completed run, which stand for any run with a matching key, whether or not the stored run's own
+/// result was committed. Its fragments are those it produced; where they are what the box committed, a hit keeps the
+/// committed subtree instead of replaying them.
 pub(super) struct FcRunCacheEntry {
     key: FcRunCacheKey,
     validity: FcRunCacheValidity,
     pub(super) outputs: formatting_context::RunOutputs,
-    /// Whether the run ran ahead of the committing run it stands for (see
-    /// run_table_cell_ahead_of_its_intrinsic_block_padding), so that its subtree was never committed and a hit has to
-    /// replay its descendant fragments.
-    uncommitted: bool,
     /// Whether the run is a table cell's that cannot observe the intrinsic block padding its table hands it (see
     /// table_cell_contents_never_observe_intrinsic_block_padding), so that it stands for runs with any such padding.
     table_cell_intrinsic_block_padding_unobserved: bool,
+    /// How many layouts the arena had committed when the run was stored. The subtrees the run took from the cache as
+    /// they were committed are only known to be so while no layout was committed since.
+    layout_commits_when_stored: u64,
+    /// The committed subtree token of the box when its committed fragments were found to be the stored ones, after
+    /// which the entry keeps no descendant fragments: they stay the stored ones while the token does.
+    committed_subtree_token_when_descendants_dropped: Option<u32>,
+}
+
+/// A stored run a probe may take in place of running, and whether it keeps the box's committed subtree.
+pub(super) struct FcRunCacheHit {
+    pub(super) entry: std::sync::Arc<FcRunCacheEntry>,
+    pub(super) reuses_committed_subtree: bool,
 }
 
 impl FcRunCacheEntry {
-    pub(super) fn can_reuse_committed_subtree(&self) -> bool {
-        !self.uncommitted && outputs_allow_committed_subtree_reuse(&self.outputs)
+    /// Whether the committed fragment of `box_` and every fragment committed in its subtree are the ones the stored run
+    /// produced: the root's fragment shows the stored line data at the stored content size, and each fragment the run
+    /// placed in its own scope is the box's committed fragment, placed as the run placed it. A fragment that was
+    /// committed holds the fragments committed below it.
+    pub(super) fn describes_committed_subtree(&self, arena: &LayoutNodeArena, box_: Node) -> bool {
+        let Some(root) = self.outputs.root.as_ref() else {
+            return false;
+        };
+        if !root.propagated_pending_abspos.is_empty() {
+            return false;
+        }
+        if !arena.paintable_row_is_populated(box_) {
+            return false;
+        }
+        let cells = &self.outputs.root_outcome.cells;
+        let root_fragment_is_the_stored_one = arena
+            .with_current_committed_fragment(box_, |fragment| {
+                same_allocation(
+                    fragment.line_data.as_ref(),
+                    self.outputs.root_outcome.line_data.as_ref(),
+                ) && fragment.content_inline_size == cells.content_inline_size
+                    && fragment.content_block_size == cells.content_block_size
+            })
+            .unwrap_or(false);
+        root_fragment_is_the_stored_one
+            && match self.committed_subtree_token_when_descendants_dropped {
+                Some(token) => arena.committed_subtree_token(box_) == token,
+                None => links_are_committed(arena, &root.scoped_descendants),
+            }
     }
 
-    pub(super) fn is_uncommitted(&self) -> bool {
-        self.uncommitted
+    /// Whether the stored fragments can be replayed. Those of the subtrees the stored run took from the cache are the
+    /// committed ones, so such a run is replayed only before anything else is committed.
+    fn can_be_replayed(&self, callbacks: &LayoutPass<'_>) -> bool {
+        self.committed_subtree_token_when_descendants_dropped.is_none()
+            && self.outputs.root.as_ref().is_none_or(|root| {
+                root.reused_subtree_roots.is_empty()
+                    || callbacks.arena().layout_commit_count() == self.layout_commits_when_stored
+            })
     }
 
-    /// The outputs a hit for `probe` replays: the stored ones, with the root's block paddings moved by however much
-    /// the intrinsic block padding `probe` carries differs from the stored run's.
-    pub(super) fn outputs_to_replay(&self, probe: &FcRunCacheKey) -> formatting_context::RunOutputs {
-        let mut outputs = if self.can_reuse_committed_subtree() {
-            self.outputs_for_reused_subtree()
+    /// This entry without its descendant fragments, which are the box's committed ones while its committed subtree
+    /// token is `token`.
+    fn without_descendant_fragments(&self, token: u32) -> Self {
+        Self {
+            key: self.key,
+            validity: self.validity,
+            outputs: outputs_without_descendant_fragments(&self.outputs),
+            table_cell_intrinsic_block_padding_unobserved: self.table_cell_intrinsic_block_padding_unobserved,
+            layout_commits_when_stored: self.layout_commits_when_stored,
+            committed_subtree_token_when_descendants_dropped: Some(token),
+        }
+    }
+
+    /// The outputs a hit for `probe` absorbs: the stored ones, or only what escapes the stored run where the hit keeps
+    /// the committed subtree, with the root's block paddings moved by however much the intrinsic block padding `probe`
+    /// carries differs from the stored run's.
+    pub(super) fn outputs_to_replay(
+        &self,
+        probe: &FcRunCacheKey,
+        reuses_committed_subtree: bool,
+    ) -> formatting_context::RunOutputs {
+        let mut outputs = if reuses_committed_subtree {
+            outputs_without_descendant_fragments(&self.outputs)
         } else {
             self.outputs.clone()
         };
@@ -259,19 +334,35 @@ impl FcRunCacheEntry {
         cells.padding_top += probe.root_cells.padding_top - self.key.root_cells.padding_top;
         cells.padding_bottom += probe.root_cells.padding_bottom - self.key.root_cells.padding_bottom;
     }
+}
 
-    pub(super) fn outputs_for_reused_subtree(&self) -> formatting_context::RunOutputs {
-        debug_assert!(self.can_reuse_committed_subtree());
-        // conclude() already stored this entry without its descendant fragments.
-        self.outputs.clone()
+fn same_allocation<T>(left: Option<&std::sync::Arc<T>>, right: Option<&std::sync::Arc<T>>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+        _ => false,
     }
 }
 
-fn outputs_allow_committed_subtree_reuse(outputs: &formatting_context::RunOutputs) -> bool {
-    outputs
-        .root
-        .as_ref()
-        .is_none_or(|root| root.propagated_pending_abspos.is_empty())
+/// Whether each of `links` is the committed fragment of its box, or the later committed fragment of a box with
+/// several, placed as the link places it.
+fn links_are_committed(arena: &LayoutNodeArena, links: &[fragment_tree::FragmentLink]) -> bool {
+    let mut earlier_fragments_of_box: HashMap<Node, usize> = HashMap::default();
+    links.iter().all(|link| {
+        let node = link.fragment.node;
+        let fragment_index = earlier_fragments_of_box.entry(node).or_default();
+        let index = *fragment_index;
+        *fragment_index += 1;
+        if index == 0 {
+            return arena.holds_current_committed_fragment_link(node, link);
+        }
+        arena.paintable_row_is_populated(node)
+            && arena
+                .committed_side_data(node)
+                .box_fragments()
+                .get(index - 1)
+                .is_some_and(|committed| link.places_same_fragment_identically_to(&committed.link))
+    })
 }
 
 fn outputs_without_descendant_fragments(outputs: &formatting_context::RunOutputs) -> formatting_context::RunOutputs {
@@ -292,6 +383,7 @@ fn outputs_without_descendant_fragments(outputs: &formatting_context::RunOutputs
         root_outcome: outputs.root_outcome.clone(),
         atomic_root_sizing_repeats_for_available_inline_sizes_at_or_above: outputs
             .atomic_root_sizing_repeats_for_available_inline_sizes_at_or_above,
+        host_findings: outputs.host_findings.clone(),
     }
 }
 
@@ -301,48 +393,22 @@ struct InlineLayoutDamage {
     structural_epoch_bumps: u32,
 }
 
-/// Per-document store of completed run results, one entry per slot,
-/// surviving across layout passes on the node arena.
+/// How many results of runs that build no fragments a box keeps, the latest first.
+const RESULT_ONLY_ENTRIES_PER_BOX: usize = 4;
+
+/// Per-document store of completed run results, surviving across layout passes on the node arena: one entry per slot
+/// for the runs that lay out fragments, and a few for the runs that only measure.
 #[derive(Clone, Default)]
 pub(crate) struct FcRunCacheArenaStore {
     entries: RefCell<Vec<Option<std::sync::Arc<FcRunCacheEntry>>>>,
+    result_only_entries: RefCell<HashMap<u32, Vec<std::sync::Arc<FcRunCacheEntry>>>>,
     inline_layout_damage: RefCell<Vec<InlineLayoutDamage>>,
     pending_sweep_slots: RefCell<Vec<u32>>,
     enrolled_for_sweep: RefCell<Vec<bool>>,
-    store_journals: RefCell<Vec<Vec<u32>>>,
 }
 
 impl FcRunCacheArenaStore {
-    pub(crate) fn begin_store_journal(&self) {
-        self.store_journals.borrow_mut().push(Vec::new());
-    }
-
-    pub(crate) fn end_store_journal(&self, keeps_stored_entries: bool) {
-        let slots = self.store_journals.borrow_mut().pop().expect("a store journal is open");
-        if keeps_stored_entries {
-            if let Some(enclosing) = self.store_journals.borrow_mut().last_mut() {
-                enclosing.extend(slots);
-            }
-            return;
-        }
-        for slot in slots {
-            self.remove_entry(slot);
-        }
-    }
-
-    pub(crate) fn remove_entries_stored_in_open_journal(&self, slots: impl IntoIterator<Item = u32>) {
-        let stored: HashSet<u32> = match self.store_journals.borrow().last() {
-            Some(journal) if !journal.is_empty() => journal.iter().copied().collect(),
-            _ => return,
-        };
-        for slot in slots {
-            if stored.contains(&slot) {
-                self.remove_entry(slot);
-            }
-        }
-    }
-
-    fn enqueue_for_sweep(&self, slot: u32) {
+    pub(super) fn enqueue_for_sweep(&self, slot: u32) {
         let mut enrolled = self.enrolled_for_sweep.borrow_mut();
         if enrolled.len() <= slot as usize {
             enrolled.resize(slot as usize + 1, false);
@@ -359,18 +425,43 @@ impl FcRunCacheArenaStore {
             .borrow()
             .get(node.slot_index() as usize)
             .is_some_and(Option::is_some)
+            || self.result_only_entries.borrow().contains_key(&node.slot_index())
         {
             self.enqueue_for_sweep(node.slot_index());
         }
+    }
+
+    /// The stored result of a run that builds no fragments, for exactly `key`.
+    fn matching_result_only(
+        &self,
+        slot: u32,
+        validity: FcRunCacheValidity,
+        key: &FcRunCacheKey,
+    ) -> Option<std::sync::Arc<FcRunCacheEntry>> {
+        self.result_only_entries
+            .borrow()
+            .get(&slot)?
+            .iter()
+            .find(|entry| entry.validity == validity && entry.key == *key)
+            .cloned()
+    }
+
+    fn store_result_only(&self, slot: u32, entry: FcRunCacheEntry) {
+        let mut entries = self.result_only_entries.borrow_mut();
+        let stored = entries.entry(slot).or_default();
+        stored.retain(|stored| stored.key != entry.key);
+        stored.insert(0, std::sync::Arc::new(entry));
+        stored.truncate(RESULT_ONLY_ENTRIES_PER_BOX);
+        drop(entries);
+        self.enqueue_for_sweep(slot);
     }
 
     pub(crate) fn remove_entry(&self, slot: u32) {
         if let Some(entry) = self.entries.borrow_mut().get_mut(slot as usize) {
             *entry = None;
         }
-        if let Some(damage) = self.inline_layout_damage.borrow_mut().get_mut(slot as usize) {
-            *damage = InlineLayoutDamage::default();
-        }
+        self.result_only_entries.borrow_mut().remove(&slot);
+        self.forget_inline_layout_damage(slot);
     }
 
     pub(crate) fn note_inline_layout_damage(&self, box_: Node) {
@@ -400,18 +491,19 @@ impl FcRunCacheArenaStore {
         }
     }
 
-    fn take_inline_layout_damage(&self, box_: Node) -> u32 {
-        let mut damage = self.inline_layout_damage.borrow_mut();
-        let Some(entry) = damage.get_mut(box_.slot_index() as usize) else {
-            return 0;
-        };
-        let result = if entry.generation == box_.generation() {
-            entry.structural_epoch_bumps
-        } else {
-            0
-        };
-        *entry = InlineLayoutDamage::default();
-        result
+    /// How many structural changes the inline content of `box_` saw since its entry was stored.
+    fn inline_layout_damage_since_stored(&self, box_: Node) -> u32 {
+        self.inline_layout_damage
+            .borrow()
+            .get(box_.slot_index() as usize)
+            .filter(|damage| damage.generation == box_.generation())
+            .map_or(0, |damage| damage.structural_epoch_bumps)
+    }
+
+    fn forget_inline_layout_damage(&self, slot: u32) {
+        if let Some(damage) = self.inline_layout_damage.borrow_mut().get_mut(slot as usize) {
+            *damage = InlineLayoutDamage::default();
+        }
     }
 
     /// A matching entry stays stored and hands out a shared handle. A stale
@@ -485,24 +577,47 @@ impl FcRunCacheArenaStore {
             None => entries[slot as usize] = Some(std::sync::Arc::new(entry)),
         }
         drop(entries);
-        if let Some(journal) = self.store_journals.borrow_mut().last_mut() {
-            journal.push(slot);
-        }
+        // The damage counts the structural changes since the stored entry's run.
+        self.forget_inline_layout_damage(slot);
         // NB: Invalidation can occur between probing a run and storing its result.
         self.enqueue_for_sweep(slot);
     }
 
-    /// Release stale entries after their last chance to supply reusable inline line data.
-    pub(crate) fn sweep_pending_entries(&self, mut keep: impl FnMut(u32, FcRunCacheValidity) -> bool) {
+    /// Releases stale entries after their last chance to supply reusable inline line data, and drops the descendant
+    /// fragments of entries whose fragments the box committed, for which `committed_subtree_token` gives the token.
+    pub(super) fn sweep_pending_entries(
+        &self,
+        mut keep: impl FnMut(u32, FcRunCacheValidity) -> bool,
+        mut committed_subtree_token: impl FnMut(Node, &FcRunCacheEntry) -> Option<u32>,
+    ) {
         let mut entries = self.entries.borrow_mut();
+        let mut result_only_entries = self.result_only_entries.borrow_mut();
         let mut enrolled = self.enrolled_for_sweep.borrow_mut();
         for slot in self.pending_sweep_slots.borrow_mut().drain(..) {
             enrolled[slot as usize] = false;
-            if let Some(stored) = entries.get_mut(slot as usize)
-                && let Some(entry) = stored
-                && !keep(slot, entry.validity)
-            {
+            if let Some(stored) = result_only_entries.get_mut(&slot) {
+                stored.retain(|entry| keep(slot, entry.validity));
+                if stored.is_empty() {
+                    result_only_entries.remove(&slot);
+                }
+            }
+            let Some(stored) = entries.get_mut(slot as usize) else {
+                continue;
+            };
+            let Some(entry) = stored else {
+                continue;
+            };
+            if !keep(slot, entry.validity) {
                 *stored = None;
+                self.forget_inline_layout_damage(slot);
+                continue;
+            }
+            if entry.committed_subtree_token_when_descendants_dropped.is_some() {
+                continue;
+            }
+            let box_ = Node::new(slot, entry.validity.slot_generation);
+            if let Some(token) = committed_subtree_token(box_, entry) {
+                *entry = std::sync::Arc::new(entry.without_descendant_fragments(token));
             }
         }
     }
@@ -534,49 +649,78 @@ pub(super) enum FcRunCacheAttempt {
         validity: FcRunCacheValidity,
         structurally_damaged_entry: Option<std::sync::Arc<FcRunCacheEntry>>,
     },
+    /// A run that builds no fragments, whose result is kept for its exact key.
+    StoreResultOnly {
+        validity: FcRunCacheValidity,
+    },
 }
 
 impl FcRunCacheAttempt {
     pub(super) fn trace_action(&self) -> &'static str {
         match self {
             Self::Bypass => "RUN (cache=bypass)",
-            Self::Store { .. } => "RUN (cache=miss)",
+            Self::Store { .. } | Self::StoreResultOnly { .. } => "RUN (cache=miss)",
         }
     }
 
     /// Err carries the entry the caller must replay instead of running.
     pub(super) fn probe(
-        purpose: formatting_context::LayoutPurpose,
         box_: Node,
         parent_grid_is_present: bool,
         layout_mode: LayoutMode,
         should_collect_devtools_layout_data: bool,
         callbacks: &LayoutPass<'_>,
         key: &FcRunCacheKey,
-    ) -> Result<Self, std::sync::Arc<FcRunCacheEntry>> {
-        // A run this cache cannot describe still commits its subtree, so a stored entry would go on
-        // describing paintables that run has replaced. Measurement runs commit nothing and leave it alone.
-        let run_supersedes_stored_entry = layout_mode == LayoutMode::Normal && !purpose.is_measurement();
-        if purpose.is_measurement()
-            || !can_describe_run(
+    ) -> Result<Self, FcRunCacheHit> {
+        if !key.builds_fragments() {
+            if !can_describe_run_in_any_layout_mode(
                 box_,
                 parent_grid_is_present,
-                layout_mode,
                 should_collect_devtools_layout_data,
                 callbacks,
                 key,
-            )
-        {
-            if run_supersedes_stored_entry {
-                callbacks.arena().fc_run_cache_store().remove_entry(box_.slot_index());
+            ) {
+                return Ok(Self::Bypass);
             }
+            let validity = run_root_validity(callbacks, box_);
+            if let Some(entry) =
+                callbacks
+                    .arena()
+                    .fc_run_cache_store()
+                    .matching_result_only(box_.slot_index(), validity, key)
+            {
+                return Err(FcRunCacheHit {
+                    entry,
+                    reuses_committed_subtree: false,
+                });
+            }
+            return Ok(Self::StoreResultOnly { validity });
+        }
+        if !can_describe_run(
+            box_,
+            parent_grid_is_present,
+            layout_mode,
+            should_collect_devtools_layout_data,
+            callbacks,
+            key,
+        ) {
             return Ok(Self::Bypass);
         }
         let store = callbacks.arena().fc_run_cache_store();
         let validity = run_root_validity(callbacks, box_);
-        let structural_epoch_bumps = store.take_inline_layout_damage(box_);
+        let structural_epoch_bumps = store.inline_layout_damage_since_stored(box_);
         if let Some(entry) = store.matching(box_.slot_index(), validity, key) {
-            return Err(entry);
+            let reuses_committed_subtree = entry.describes_committed_subtree(callbacks.arena(), box_);
+            if !reuses_committed_subtree && entry.can_be_replayed(callbacks) {
+                // NB: Once the replayed fragments are committed, the entry can drop them.
+                store.enqueue_for_sweep(box_.slot_index());
+            }
+            if reuses_committed_subtree || entry.can_be_replayed(callbacks) {
+                return Err(FcRunCacheHit {
+                    entry,
+                    reuses_committed_subtree,
+                });
+            }
         }
         let structurally_damaged_entry =
             store.structurally_damaged_entry(box_.slot_index(), validity, key, structural_epoch_bumps);
@@ -604,67 +748,52 @@ impl FcRunCacheAttempt {
         key: FcRunCacheKey,
         outputs: &formatting_context::RunOutputs,
     ) {
-        self.conclude_run(callbacks, box_, key, outputs, false);
-    }
-
-    /// Concludes a run that ran ahead of the committing run it stands for, which replays its outputs, descendant
-    /// fragments included, as a hit (see run_table_cell_ahead_of_its_intrinsic_block_padding).
-    pub(super) fn conclude_uncommitted(
-        self,
-        callbacks: &LayoutPass<'_>,
-        box_: Node,
-        key: FcRunCacheKey,
-        outputs: &formatting_context::RunOutputs,
-    ) {
-        self.conclude_run(callbacks, box_, key, outputs, true);
-    }
-
-    fn conclude_run(
-        self,
-        callbacks: &LayoutPass<'_>,
-        box_: Node,
-        key: FcRunCacheKey,
-        outputs: &formatting_context::RunOutputs,
-        uncommitted: bool,
-    ) {
-        let Self::Store {
-            validity,
-            structurally_damaged_entry,
-        } = self
-        else {
-            return;
+        let store = callbacks.arena().fc_run_cache_store();
+        let (validity, structurally_damaged_entry) = match self {
+            Self::Bypass => return,
+            Self::StoreResultOnly { validity } => {
+                debug_assert!(outputs.root.is_none(), "a run that builds no fragments returned a root");
+                store.store_result_only(
+                    box_.slot_index(),
+                    FcRunCacheEntry {
+                        key,
+                        validity,
+                        outputs: outputs.clone(),
+                        table_cell_intrinsic_block_padding_unobserved: false,
+                        layout_commits_when_stored: callbacks.arena().layout_commit_count(),
+                        committed_subtree_token_when_descendants_dropped: None,
+                    },
+                );
+                return;
+            }
+            Self::Store {
+                validity,
+                structurally_damaged_entry,
+            } => (validity, structurally_damaged_entry),
         };
         // Release the probed entry so that store() can replace it in place.
         drop(structurally_damaged_entry);
-        // Every path out of here belongs to a run that has committed its subtree, so an entry left
-        // behind without being replaced would describe paintables that no longer exist.
-        let store = callbacks.arena().fc_run_cache_store();
         let Some(root) = &outputs.root else {
-            store.remove_entry(box_.slot_index());
             return;
         };
         // A committed-subtree hit omits that subtree's descendant fragments. Do not embed such a
         // skeletal result in an entry that exports an out-of-flow descendant: replaying the parent
         // has to rebuild its paintable subtree so the freshly laid-out descendant can commit.
         if !root.propagated_pending_abspos.is_empty() && !root.reused_subtree_roots.is_empty() {
-            store.remove_entry(box_.slot_index());
             return;
         }
         let entry = FcRunCacheEntry {
             key,
             validity,
-            outputs: if uncommitted || !outputs_allow_committed_subtree_reuse(outputs) {
-                outputs.clone()
-            } else {
-                outputs_without_descendant_fragments(outputs)
-            },
-            uncommitted,
+            outputs: outputs.clone(),
             table_cell_intrinsic_block_padding_unobserved: key
                 .input
                 .sizing
                 .table_cell_intrinsic_block_padding
                 .is_some()
                 && table_cell_contents_never_observe_intrinsic_block_padding(callbacks, box_),
+            layout_commits_when_stored: callbacks.arena().layout_commit_count(),
+            committed_subtree_token_when_descendants_dropped: None,
         };
         store.store(box_.slot_index(), entry);
     }
@@ -722,38 +851,13 @@ pub(super) fn can_describe_run_in_any_layout_mode(
     // box is the root of its own spawned run, so the flag on the run root covers every
     // anchor consumer; anchor eligibility is resolved from used values of the same
     // pass under the anchor lookup's containing-block guard, never from a previous
-    // pass; scroll compensation compares chains that converge at the run root and
-    // registers scroll-shift side effects a replay would skip; and anchor-size()
-    // resolves to None today, so inset properties are the only anchor dependency a
-    // run can have.
+    // pass; scroll compensation compares chains that converge at the run root; and
+    // anchor-size() resolves to None today, so inset properties are the only anchor
+    // dependency a run can have.
     !node_facts::has_flag(
         NodeFacts::new(callbacks, box_).data(),
         NodeFlag::InsetsUseAnchorFunctions,
     )
-}
-
-/// Stores the entry a committing run replayed from an uncommitted one as an ordinary entry for the key it was probed
-/// with, now that the replayed subtree is committed with the run's parent.
-pub(super) fn store_replayed_uncommitted_entry(
-    callbacks: &LayoutPass<'_>,
-    box_: Node,
-    key: FcRunCacheKey,
-    replayed: &FcRunCacheEntry,
-    outputs: &formatting_context::RunOutputs,
-) {
-    debug_assert!(replayed.uncommitted);
-    let entry = FcRunCacheEntry {
-        key,
-        validity: replayed.validity,
-        outputs: if !outputs_allow_committed_subtree_reuse(outputs) {
-            outputs.clone()
-        } else {
-            outputs_without_descendant_fragments(outputs)
-        },
-        uncommitted: false,
-        table_cell_intrinsic_block_padding_unobserved: replayed.table_cell_intrinsic_block_padding_unobserved,
-    };
-    callbacks.arena().fc_run_cache_store().store(box_.slot_index(), entry);
 }
 
 /// Whether a table cell's run cannot observe the intrinsic block padding its table hands it (the vertical-alignment
@@ -783,6 +887,8 @@ mod tests {
     fn key(available_inline: AvailableSize, percentage_basis_inline_size: Option<CssPixels>) -> FcRunCacheKey {
         FcRunCacheKey {
             fc_type: formatting_context::FormattingContextType::Block,
+            purpose: formatting_context::LayoutPurpose::Commit,
+            layout_mode: LayoutMode::Normal,
             input: LayoutInput::new(
                 AvailableSpace {
                     inline_size: available_inline,
@@ -829,36 +935,41 @@ mod tests {
                     rare: None,
                 },
                 atomic_root_sizing_repeats_for_available_inline_sizes_at_or_above: None,
+                host_findings: None,
             },
-            uncommitted: false,
             table_cell_intrinsic_block_padding_unobserved: false,
+            layout_commits_when_stored: 0,
+            committed_subtree_token_when_descendants_dropped: None,
         };
         store.store(0, entry(1));
         store.store(1, entry(1));
-        store.sweep_pending_entries(|_, _| true);
-        store.sweep_pending_entries(|_, _| panic!("unchanged entries must not be swept"));
+        store.sweep_pending_entries(|_, _| true, |_, _| None);
+        store.sweep_pending_entries(|_, _| panic!("unchanged entries must not be swept"), |_, _| None);
 
         store.note_invalidated_entry(Node::new(0, 1));
         store.note_invalidated_entry(Node::new(0, 1));
         assert!(store.entries.borrow()[0].is_some());
         let mut checked = 0;
-        store.sweep_pending_entries(|slot, _| {
-            assert_eq!(slot, 0);
-            checked += 1;
-            false
-        });
+        store.sweep_pending_entries(
+            |slot, _| {
+                assert_eq!(slot, 0);
+                checked += 1;
+                false
+            },
+            |_, _| None,
+        );
         assert_eq!(checked, 1);
         assert!(store.entries.borrow()[0].is_none());
         assert!(store.entries.borrow()[1].is_some());
 
         store.note_invalidated_entry(Node::new(1, 1));
         store.store(1, entry(2));
-        store.sweep_pending_entries(|_, validity| validity.fragment_cache_epoch == 2);
+        store.sweep_pending_entries(|_, validity| validity.fragment_cache_epoch == 2, |_, _| None);
         assert!(store.entries.borrow()[1].is_some());
 
         // A result stored after a mid-run invalidation still needs its validity checked.
         store.store(0, entry(1));
-        store.sweep_pending_entries(|_, validity| validity.fragment_cache_epoch == 2);
+        store.sweep_pending_entries(|_, validity| validity.fragment_cache_epoch == 2, |_, _| None);
         assert!(store.entries.borrow()[0].is_none());
     }
 

@@ -243,25 +243,8 @@ pub(crate) enum IntrinsicSizeCacheKind {
 pub(crate) struct IntrinsicInlineSizeMeasurement {
     pub(crate) automatic_content_inline_size: CssPixels,
     pub(crate) min_content_inline_size_from_max_content_layout: Option<CssPixels>,
-    // A dedicated inline-size query does not produce block sizes or baselines.
-    pub(crate) layout: Option<IntrinsicInlineMeasurementLayout>,
     pub(crate) depends_on_percentage_block_size: bool,
     pub(crate) depends_on_percentage_inline_basis: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IntrinsicInlineMeasurementLayout {
-    pub(crate) available_block_size: AvailableSize,
-    pub(crate) content_inline_size: CssPixels,
-    pub(crate) content_block_size: CssPixels,
-    pub(crate) automatic_content_block_size: CssPixels,
-    pub(crate) uses_collapsing_borders_model: bool,
-    pub(crate) is_collapsed_borders_table_box: bool,
-    pub(crate) has_first_baseline: bool,
-    pub(crate) first_baseline: CssPixels,
-    pub(crate) has_last_baseline: bool,
-    pub(crate) last_baseline: CssPixels,
-    pub(crate) inline_alignment_baseline: Option<CssPixels>,
 }
 
 impl IntrinsicMeasurement for IntrinsicInlineSizeMeasurement {
@@ -368,9 +351,18 @@ pub(crate) struct IntrinsicSizeCacheStamp {
 #[derive(Default)]
 pub(crate) struct IntrinsicSizeCaches {
     slots: RefCell<Vec<IntrinsicSizeCacheSlot>>,
+    suspended: Cell<bool>,
 }
 
 impl IntrinsicSizeCaches {
+    /// Runs `measure` with the caches answering nothing and keeping nothing.
+    pub(crate) fn suspended_while<R>(&self, measure: impl FnOnce() -> R) -> R {
+        let was_suspended = self.suspended.replace(true);
+        let result = measure();
+        self.suspended.set(was_suspended);
+        result
+    }
+
     /// Drops the entries of `slots`, which were freed or whose rows' cache epoch wrapped.
     pub(crate) fn drop_slots(&self, slots: Vec<u32>) {
         let mut caches = self.slots.borrow_mut();
@@ -387,6 +379,9 @@ impl IntrinsicSizeCaches {
         stamp: IntrinsicSizeCacheStamp,
         answer: impl FnOnce(&IntrinsicSizeMaps) -> Option<R>,
     ) -> Option<R> {
+        if self.suspended.get() {
+            return None;
+        }
         let caches = self.slots.borrow();
         let slot = caches.get(stamp.index as usize)?;
         if slot.generation != stamp.generation || slot.epoch != stamp.epoch {
@@ -410,6 +405,9 @@ impl IntrinsicSizeCaches {
     }
 
     fn with_maps_mut(&self, stamp: IntrinsicSizeCacheStamp, callback: impl FnOnce(&mut IntrinsicSizeMaps)) {
+        if self.suspended.get() {
+            return;
+        }
         let IntrinsicSizeCacheStamp {
             index,
             generation,
@@ -1284,6 +1282,9 @@ pub(crate) struct LayoutNodeArena {
     unresolved_container_lengths: RefCell<Vec<NodeSlotId>>,
     partial_layout_count: Cell<u64>,
     full_layout_count: Cell<u64>,
+    /// How many layouts were committed, full and partial.
+    layout_commit_count: u64,
+    committed_subtree_tokens: RefCell<Vec<u32>>,
     layout_tree_build_stats: Cell<FfiLayoutTreeBuildStats>,
     pre_order_labels: Vec<Cell<u64>>,
     pre_order_relabel_count: Cell<u64>,
@@ -1309,7 +1310,6 @@ pub(crate) struct LayoutNodeArena {
     fc_run_cache_store: super::fc_run_cache::FcRunCacheArenaStore,
     in_flow_block_cache_store: super::in_flow_block_cache::InFlowBlockCacheStore,
     pub(super) layout_trace: super::trace::LayoutTrace,
-    pub(super) innermost_run: Cell<(NodeSlotId, NodeSlotId)>,
     pub(crate) paintable_rows: crate::painting::paintable_rows::PaintableRowStore,
     paint_state: RefCell<crate::painting::paint_state::PaintState>,
     // Hit testing can measure overflow and invalidate painting state while querying this list.
@@ -1406,6 +1406,8 @@ impl LayoutNodeArena {
             unresolved_container_lengths: RefCell::new(Vec::new()),
             partial_layout_count: Cell::new(0),
             full_layout_count: Cell::new(0),
+            layout_commit_count: 0,
+            committed_subtree_tokens: RefCell::new(Vec::new()),
             layout_tree_build_stats: Cell::new(FfiLayoutTreeBuildStats::default()),
             pre_order_labels: Vec::new(),
             pre_order_relabel_count: Cell::new(0),
@@ -1426,7 +1428,6 @@ impl LayoutNodeArena {
             fc_run_cache_store: super::fc_run_cache::FcRunCacheArenaStore::default(),
             in_flow_block_cache_store: super::in_flow_block_cache::InFlowBlockCacheStore::default(),
             layout_trace: super::trace::LayoutTrace::default(),
-            innermost_run: Cell::new((NodeSlotId::INVALID, NodeSlotId::INVALID)),
             paintable_rows: crate::painting::paintable_rows::PaintableRowStore::default(),
             paint_state: RefCell::new(crate::painting::paint_state::PaintState::default()),
             scrollable_overflow: Default::default(),
@@ -1474,6 +1475,18 @@ impl LayoutNodeArena {
         self.intrinsic_size_cache_drops.take()
     }
 
+    pub(crate) fn layout_commit_count(&self) -> u64 {
+        self.layout_commit_count
+    }
+
+    pub(crate) fn note_layout_commit(&mut self) {
+        self.layout_commit_count += 1;
+    }
+
+    pub(crate) fn has_intrinsic_size_cache_drops(&self) -> bool {
+        !self.intrinsic_size_cache_drops.borrow().is_empty()
+    }
+
     /// What an intrinsic size cache entry measured for the row `id` now is valid for.
     pub(crate) fn intrinsic_size_cache_stamp(&self, id: NodeSlotId) -> IntrinsicSizeCacheStamp {
         IntrinsicSizeCacheStamp {
@@ -1508,16 +1521,51 @@ impl LayoutNodeArena {
     /// Checks only entries invalidated or stored since the previous sweep. Stale entries
     /// survive until commit so inline layout can reuse their undamaged line prefixes.
     fn sweep_stale_fc_run_cache_entries(&self) {
-        self.fc_run_cache_store.sweep_pending_entries(|slot, validity| {
-            let Some(metadata) = self.slot_metadata.get(slot as usize) else {
-                return false;
-            };
-            if !metadata.occupied || metadata.generation != validity.slot_generation {
-                return false;
-            }
-            let id = NodeSlotId::new(slot, metadata.generation);
-            self.data(id).fragment_cache_epoch.get() == validity.fragment_cache_epoch
-        });
+        self.fc_run_cache_store.sweep_pending_entries(
+            |slot, validity| {
+                let Some(metadata) = self.slot_metadata.get(slot as usize) else {
+                    return false;
+                };
+                if !metadata.occupied || metadata.generation != validity.slot_generation {
+                    return false;
+                }
+                let id = NodeSlotId::new(slot, metadata.generation);
+                self.data(id).fragment_cache_epoch.get() == validity.fragment_cache_epoch
+            },
+            |box_, entry| {
+                entry
+                    .describes_committed_subtree(self, box_)
+                    .then(|| self.committed_subtree_token(box_))
+            },
+        );
+    }
+
+    /// Moves on whenever a commit lays the subtree of `id` out anew or clears it, which tells a layout run cache
+    /// entry that found its fragments committed whether they still are.
+    pub(crate) fn committed_subtree_token(&self, id: NodeSlotId) -> u32 {
+        self.committed_subtree_tokens
+            .borrow()
+            .get(id.slot_index() as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn note_subtree_committed_anew(&self, id: NodeSlotId) {
+        let mut tokens = self.committed_subtree_tokens.borrow_mut();
+        let index = id.slot_index() as usize;
+        if tokens.len() <= index {
+            tokens.resize(index + 1, 0);
+        }
+        tokens[index] = tokens[index].wrapping_add(1);
+    }
+
+    /// Notes that the subtrees of `id` and its ancestors were committed anew.
+    pub(crate) fn note_subtrees_of_self_and_ancestors_committed_anew(&self, id: NodeSlotId) {
+        let mut node = id;
+        while !node.is_invalid() && self.slot_is_live(node) {
+            self.note_subtree_committed_anew(node);
+            node = self.data(node).parent.get();
+        }
     }
 
     /// Checks that the calling thread may reach the arena: the StyleLayout thread, which the arena's render state lives
@@ -3104,7 +3152,7 @@ impl LayoutNodeArena {
 
     /// Note the natural size layout negotiated for the box of an `<svg>` document element.
     pub(crate) fn note_document_svg_root_natural_size(
-        &self,
+        &mut self,
         root_box: NodeSlotId,
         natural_size: crate::css::style::NaturalSize,
     ) {
@@ -4033,6 +4081,23 @@ impl LayoutNodeArena {
         }
     }
 
+    /// Marks the flex and grid items among the nodes marked for layout and their children, ahead of the layout that
+    /// lays them out: a style change can make a box, or the children of a box, items without rebuilding them.
+    pub(crate) fn mark_flex_and_grid_items_of_nodes_marked_for_layout(&self) {
+        let nodes = self.nodes_with_layout_update_flags.borrow().clone();
+        for node in nodes {
+            if !self.slot_is_live(node) {
+                continue;
+            }
+            self.mark_flex_or_grid_item(node);
+            let mut child = self.data(node).first_child.get();
+            while !child.is_invalid() {
+                self.mark_flex_or_grid_item(child);
+                child = self.data(child).next_sibling.get();
+            }
+        }
+    }
+
     pub(crate) fn enroll_text_node_for_content_sync(&self, node: NodeSlotId) {
         self.text_nodes_enrolled_for_content_sync.borrow_mut().insert(node);
     }
@@ -4762,6 +4827,11 @@ impl LayoutNodeArena {
             }
             if ancestor.is_invalid() {
                 self.derive_facts_in_subtree(root);
+                // NB: Whether an anonymous box is a flex or grid item depends on its children.
+                let parent = self.data(root).parent.get();
+                if !parent.is_invalid() {
+                    self.mark_flex_or_grid_item(parent);
+                }
             }
         }
         roots
@@ -4775,7 +4845,65 @@ impl LayoutNodeArena {
             self.derive_containing_block_establishment_flags(node);
             self.mark_nodes_escaped_by_attached_out_of_flow_box(node);
             self.derive_ancestor_facts_for_node(node);
+            self.mark_flex_or_grid_item(node);
         });
+    }
+
+    /// Marks `node` as a flex or grid item once its parent lays it out as one, as its parent's run would: an in-flow
+    /// box that is not an anonymous run of collapsible whitespace. The mark is never taken back.
+    pub(crate) fn mark_flex_or_grid_item(&self, node: NodeSlotId) {
+        let data = self.data(node);
+        let parent = data.parent.get();
+        if parent.is_invalid() || !super::node_facts::kind_is_box(data.kind.get()) {
+            return;
+        }
+        let parent_data = self.data(parent);
+        let parents_formatting_context = super::formatting_context::formatting_context_type_created_by_node_data(
+            parent_data,
+            super::node_facts::node_style_view(parent_data),
+            super::node_facts::has_ancestor_fact(parent_data, AncestorFact::ParentIsFlexOrGridContainer),
+            || {
+                let grandparent = parent_data.parent.get();
+                (!grandparent.is_invalid())
+                    .then(|| super::node_facts::node_style_view(self.data(grandparent)))
+                    .flatten()
+                    .map(|style| style.writing_mode())
+            },
+        );
+        let flag = match parents_formatting_context {
+            Some(super::formatting_context::FormattingContextType::Flex) => NodeFlag::IsFlexItem,
+            Some(super::formatting_context::FormattingContextType::Grid) => NodeFlag::IsGridItem,
+            _ => return,
+        };
+        if super::node_facts::has_flag(data, flag)
+            || super::node_facts::node_style_view(data).is_some_and(|style| style.is_absolutely_positioned())
+            || self.may_be_anonymous_run_of_collapsible_whitespace(node)
+        {
+            return;
+        }
+        self.set_node_flag(node, flag, true);
+    }
+
+    /// Whether `node` is an anonymous box holding only text that is ASCII whitespace, which flex and grid containers
+    /// do not lay out as an item. A child whose text is not synced yet counts too: the sync marks its parent again.
+    fn may_be_anonymous_run_of_collapsible_whitespace(&self, node: NodeSlotId) -> bool {
+        let data = self.data(node);
+        if !super::node_facts::has_flag(data, NodeFlag::Anonymous) || data.generated_for.get() != 0 {
+            return false;
+        }
+        let mut child = data.first_child.get();
+        while !child.is_invalid() {
+            let child_data = self.data(child);
+            if !super::node_facts::kind_is_text(child_data.kind.get())
+                || self
+                    .text_content(child)
+                    .is_some_and(|content| !content.untransformed_text_is_ascii_whitespace)
+            {
+                return false;
+            }
+            child = child_data.next_sibling.get();
+        }
+        true
     }
 
     fn slot_for_data(&self, data: &NodeData) -> (u32, SlotMetadata) {
@@ -4962,20 +5090,21 @@ impl LayoutNodeArena {
         self.node_pre_order_label(node) < self.node_pre_order_label(other)
     }
 
-    /// Notes that the box `node` was laid out with the position option `choice`.
-    pub(crate) fn note_position_option_in_use(
-        &self,
+    /// Notes the position option the committed layout of the box `node` uses, or that it uses none.
+    pub(crate) fn set_position_option_in_use(
+        &mut self,
         node: NodeSlotId,
-        choice: super::abspos_inputs::PositionOptionChoice,
+        choice: Option<super::abspos_inputs::PositionOptionChoice>,
     ) {
-        self.position_options_in_use.borrow_mut().insert(node, choice);
-    }
-
-    /// Notes that the box `node` was laid out with no position option.
-    pub(crate) fn forget_position_option_in_use(&self, node: NodeSlotId) {
-        let mut in_use = self.position_options_in_use.borrow_mut();
-        if !in_use.is_empty() {
-            in_use.remove(&node);
+        let in_use = self.position_options_in_use.get_mut();
+        match choice {
+            Some(choice) => {
+                in_use.insert(node, choice);
+            }
+            None if !in_use.is_empty() => {
+                in_use.remove(&node);
+            }
+            None => {}
         }
     }
 
@@ -5016,7 +5145,7 @@ impl LayoutNodeArena {
     }
 
     pub(crate) fn set_default_scroll_shift(
-        &self,
+        &mut self,
         id: NodeSlotId,
         anchor: NodeSlotId,
         compensates_for_horizontal_scroll: bool,
@@ -5180,6 +5309,7 @@ impl LayoutNodeArena {
         // Cached runs may reuse the committed paintable subtree without replaying its fragments.
         // Once that subtree is cleared, a later layout must rebuild it instead.
         self.fc_run_cache_store.remove_entry(id.slot_index());
+        self.note_subtrees_of_self_and_ancestors_committed_anew(id);
         drop(self.take_committed_fragment_link(self.data(id)));
     }
 
@@ -5637,6 +5767,7 @@ impl LayoutNodeArena {
         self.note_overflow_contained_boxes_may_move_with_subtree(child);
         self.unlink_child(parent, child);
         self.note_structural_change_at_and_above(parent);
+        self.reset_cached_intrinsic_sizes_of_self_and_ancestors(parent);
     }
 
     fn unlink_child(&self, parent: NodeSlotId, child: NodeSlotId) {
@@ -6209,6 +6340,8 @@ pub(crate) fn sync_enrolled_content_for_layout(arena: &mut LayoutNodeArena) {
             continue;
         }
         super::rendered_text::ensure_text_content(arena, node);
+        // NB: Whether an anonymous box is a flex or grid item depends on whether its text is all whitespace.
+        arena.mark_flex_or_grid_item(arena.data(node).parent.get());
     }
     arena.sync_enrolled_replaced_content_facts();
 }
@@ -7277,7 +7410,7 @@ mod tests {
         let allocation = arena.allocate_for_test();
         let inputs = test_abspos_layout_inputs();
         let mut link = fragment_tree::FragmentLink::for_test(allocation.slot);
-        link.abspos_layout_inputs = Some(Box::new(inputs));
+        link.abspos_layout_inputs = Some(std::sync::Arc::new(inputs));
         arena.set_committed_fragment_link(allocation.slot, link, None);
         assert!(arena.committed_fragment_link(arena.data(allocation.slot)).is_some());
         assert_eq!(
@@ -7306,7 +7439,7 @@ mod tests {
         let new = arena.allocate_for_test();
         let inputs = test_abspos_layout_inputs();
         let mut link = fragment_tree::FragmentLink::for_test(old.slot);
-        link.abspos_layout_inputs = Some(Box::new(inputs));
+        link.abspos_layout_inputs = Some(std::sync::Arc::new(inputs));
         let retained_fragment = link.fragment.clone();
         arena.set_committed_fragment_link(old.slot, link, None);
 
@@ -7350,19 +7483,6 @@ mod tests {
         let inline_measurement = IntrinsicInlineSizeMeasurement {
             automatic_content_inline_size: CssPixels::from_raw(192),
             min_content_inline_size_from_max_content_layout: Some(CssPixels::from_raw(96)),
-            layout: Some(super::IntrinsicInlineMeasurementLayout {
-                available_block_size: crate::layout::layout_node_arena::AvailableSize::MaxContent,
-                content_inline_size: CssPixels::from_raw(192),
-                content_block_size: CssPixels::from_raw(256),
-                automatic_content_block_size: CssPixels::from_raw(320),
-                uses_collapsing_borders_model: true,
-                is_collapsed_borders_table_box: true,
-                has_first_baseline: true,
-                first_baseline: CssPixels::from_raw(64),
-                has_last_baseline: true,
-                last_baseline: CssPixels::from_raw(128),
-                inline_alignment_baseline: None,
-            }),
             depends_on_percentage_block_size: false,
             depends_on_percentage_inline_basis: false,
         };

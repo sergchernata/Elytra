@@ -3402,6 +3402,28 @@ fn emit_resolve_binding_for_identifier_assignment(
     })
 }
 
+fn generate_identifier_with_resolved_binding(
+    generator: &mut Generator,
+    id: crate::ast::IdentifierId,
+    resolved_binding: Option<&ResolvedBinding>,
+) -> ScopedOperand {
+    if let Some(ResolvedBinding::Environment {
+        environment,
+        identifier,
+    }) = resolved_binding
+    {
+        let value = generator.allocate_register();
+        generator.emit(Instruction::GetResolvedBinding {
+            dst: value.operand(),
+            environment: environment.operand(),
+            identifier: *identifier,
+        });
+        value
+    } else {
+        generate_identifier(id, generator, None)
+    }
+}
+
 fn emit_set_resolved_binding(generator: &mut Generator, resolved_binding: &ResolvedBinding, value: &ScopedOperand) {
     match resolved_binding {
         ResolvedBinding::Environment {
@@ -4215,6 +4237,25 @@ fn emit_update_op(generator: &mut Generator, op: UpdateOp, prefixed: bool, value
     }
 }
 
+/// Preserve the primitive key produced by GetValue so PutValue does not convert it again.
+fn emit_read_modify_write_property_key(
+    generator: &mut Generator,
+    property: &ScopedOperand,
+    base: &ScopedOperand,
+) -> ScopedOperand {
+    if property.operand().is_constant() {
+        return property.clone();
+    }
+    // GetValue converts the base to an object before converting the property key.
+    generator.emit(Instruction::ThrowIfNullish { src: base.operand() });
+    let key = generator.allocate_register();
+    generator.emit(Instruction::ToPrimitiveWithStringHint {
+        dst: key.operand(),
+        value: property.operand(),
+    });
+    key
+}
+
 fn generate_update_expression(
     generator: &mut Generator,
     op: UpdateOp,
@@ -4225,9 +4266,10 @@ fn generate_update_expression(
     // so we can store back without re-evaluating.
     match &argument.inner {
         ExpressionKind::Identifier(ident) => {
-            let value = generate_identifier(*ident, generator, None);
+            let resolved_binding = emit_resolve_binding_for_identifier_assignment(generator, *ident);
+            let value = generate_identifier_with_resolved_binding(generator, *ident, resolved_binding.as_ref());
             let result = emit_update_op(generator, op, prefixed, &value);
-            emit_set_variable(generator, *ident, &value);
+            emit_set_variable_or_resolved_binding(generator, *ident, &value, resolved_binding.as_ref());
             Some(result)
         }
         ExpressionKind::Member(data) => {
@@ -4247,6 +4289,7 @@ fn generate_update_expression(
                 };
                 let base = generator.allocate_register();
                 generator.emit(Instruction::ResolveSuperBase { dst: base.operand() });
+                let computed_key = computed_key.map(|key| emit_read_modify_write_property_key(generator, &key, &base));
                 let value = generator.allocate_register();
                 if let Some(ref key) = computed_key {
                     emit_get_by_value_with_this(generator, &value, &base, key, &this_value);
@@ -4268,9 +4311,11 @@ fn generate_update_expression(
             } else {
                 // Non-super member update expression.
                 let base = generate_expression(&data.object, generator, None)?;
+                let base = generator.copy_if_needed_to_preserve_evaluation_order(&base);
                 let base_id = intern_base_identifier(generator, &data.object);
                 if data.computed {
                     let property = generate_expression(&data.property, generator, None)?;
+                    let property = emit_read_modify_write_property_key(generator, &property, &base);
                     let value = generator.allocate_register();
                     emit_get_by_value(generator, &value, &base, &property, base_id);
                     let result = emit_update_op(generator, op, prefixed, &value);
@@ -4376,7 +4421,8 @@ fn generate_assignment_expression(
                 }
 
                 // Load LHS value first (needed for both compound and logical assignments).
-                let lhs_val = generate_identifier(id, generator, None);
+                let resolved_binding = emit_resolve_binding_for_identifier_assignment(generator, id);
+                let lhs_val = generate_identifier_with_resolved_binding(generator, id, resolved_binding.as_ref());
                 let lhs_val = generator.copy_if_needed_to_preserve_evaluation_order(&lhs_val);
 
                 let is_logical = matches!(
@@ -4420,7 +4466,7 @@ fn generate_assignment_expression(
                         choose_dst(generator, preferred_dst)
                     };
                     generator.emit_mov(&dst, &rhs_val);
-                    emit_set_variable(generator, id, &dst);
+                    emit_set_variable_or_resolved_binding(generator, id, &dst, resolved_binding.as_ref());
                     generator.emit(Instruction::Jump { target: end_block });
                     // LHS block: keep original value.
                     generator.switch_to_basic_block(lhs_block);
@@ -4439,7 +4485,7 @@ fn generate_assignment_expression(
                     choose_dst(generator, preferred_dst)
                 };
                 emit_compound_assignment(generator, op, &dst, &lhs_val, &rhs_val);
-                emit_set_variable(generator, id, &dst);
+                emit_set_variable_or_resolved_binding(generator, id, &dst, resolved_binding.as_ref());
                 return Some(dst);
             }
             // Member expression LHS (e.g., obj.foo = x, obj[key] = x)
@@ -4483,6 +4529,8 @@ fn generate_assignment_expression(
                     };
                     let base = generator.allocate_register();
                     generator.emit(Instruction::ResolveSuperBase { dst: base.operand() });
+                    let computed_key =
+                        computed_key.map(|key| emit_read_modify_write_property_key(generator, &key, &base));
                     let old_val = generator.allocate_register();
                     if let Some(ref key) = computed_key {
                         emit_get_by_value_with_this(generator, &old_val, &base, key, &super_this);
@@ -4563,7 +4611,7 @@ fn generate_assignment_expression(
                 }
 
                 // Compound/logical member assignment.
-                let base = base_raw;
+                let base = generator.copy_if_needed_to_preserve_evaluation_order(&base_raw);
                 let base_id = intern_base_identifier(generator, &member_data.object);
                 let is_logical = matches!(
                     op,
@@ -4572,13 +4620,9 @@ fn generate_assignment_expression(
 
                 if member_data.computed {
                     let property = generate_expression(&member_data.property, generator, None)?;
+                    let property = emit_read_modify_write_property_key(generator, &property, &base);
                     let old_val = generator.allocate_register();
                     emit_get_by_value(generator, &old_val, &base, &property, base_id);
-                    // Copy property to a fresh register so RHS evaluation
-                    // (which may mutate the variable backing property) doesn't
-                    // affect the store-back index.
-                    let saved_property = generator.allocate_register();
-                    generator.emit_mov(&saved_property, &property);
                     if is_logical {
                         let rhs_block = generator.make_block();
                         let lhs_block = generator.make_block();
@@ -4588,7 +4632,7 @@ fn generate_assignment_expression(
                         let rhs_val = generate_expression(rhs, generator, None)?;
                         let dst = choose_dst(generator, preferred_dst);
                         generator.emit_mov(&dst, &rhs_val);
-                        emit_put_normal_by_value(generator, &base, &saved_property, &dst, None);
+                        emit_put_normal_by_value(generator, &base, &property, &dst, None);
                         generator.emit(Instruction::Jump { target: end_block });
                         generator.switch_to_basic_block(lhs_block);
                         generator.emit_mov(&dst, &old_val);
@@ -4599,7 +4643,7 @@ fn generate_assignment_expression(
                     let rhs_val = generate_expression(rhs, generator, None)?;
                     let dst = choose_dst(generator, preferred_dst);
                     emit_compound_assignment(generator, op, &dst, &old_val, &rhs_val);
-                    emit_put_normal_by_value(generator, &base, &saved_property, &dst, None);
+                    emit_put_normal_by_value(generator, &base, &property, &dst, None);
                     return Some(dst);
                 } else if let ExpressionKind::Identifier(ident) = &member_data.property.inner {
                     let old_val = generator.allocate_register();
@@ -5263,6 +5307,7 @@ fn emit_delete_reference(generator: &mut Generator, operand: &Expression) -> Sco
 /// Used when the spec requires evaluating the assignment target reference
 /// before performing some other operation (like iterating a spread element).
 enum EvaluatedReference {
+    Binding(ResolvedBinding),
     Member {
         base: ScopedOperand,
         property: ScopedOperand,
@@ -5385,6 +5430,7 @@ fn emit_evaluate_member_reference(generator: &mut Generator, target: &Expression
 /// Store a value to a pre-evaluated reference.
 fn emit_store_to_evaluated_reference(generator: &mut Generator, reference: &EvaluatedReference, value: &ScopedOperand) {
     match reference {
+        EvaluatedReference::Binding(binding) => emit_set_resolved_binding(generator, binding, value),
         EvaluatedReference::Member {
             base,
             property,
@@ -8291,6 +8337,25 @@ fn emit_set_variable_with_mode(
     }
 }
 
+fn emit_evaluate_binding_reference(
+    generator: &mut Generator,
+    entry: &BindingEntry,
+    mode: BindingMode,
+) -> Option<EvaluatedReference> {
+    if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
+        return Some(emit_evaluate_member_reference(generator, expression));
+    }
+    if !matches!(mode, BindingMode::Set) {
+        return None;
+    }
+    let identifier = match (&entry.alias, &entry.name) {
+        (Some(BindingEntryAlias::Identifier(identifier)), _)
+        | (None, Some(BindingEntryName::Identifier(identifier))) => *identifier,
+        _ => return None,
+    };
+    emit_resolve_binding_for_identifier_assignment(generator, identifier).map(EvaluatedReference::Binding)
+}
+
 fn assign_binding_entry_alias(
     generator: &mut Generator,
     entry: &BindingEntry,
@@ -8389,11 +8454,7 @@ fn generate_array_binding_pattern(
         if entry.is_rest {
             // 13.15.5.3 AssignmentRestElement: ... DestructuringAssignmentTarget
             // Step 1: Evaluate the reference BEFORE iterating remaining elements.
-            let evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
-                Some(emit_evaluate_member_reference(generator, expression))
-            } else {
-                None
-            };
+            let evaluated_ref = emit_evaluate_binding_reference(generator, entry, mode);
 
             // Rest element: collect remaining into array.
             // NB: Allocate register unconditionally, then re-allocate in the
@@ -8453,11 +8514,7 @@ fn generate_array_binding_pattern(
 
         // 13.15.5.5 AssignmentElement: DestructuringAssignmentTarget Initializer(opt)
         // Step 1: Evaluate the reference BEFORE calling IteratorStepValue.
-        let evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
-            Some(emit_evaluate_member_reference(generator, expression))
-        } else {
-            None
-        };
+        let evaluated_ref = emit_evaluate_binding_reference(generator, entry, mode);
 
         // For elisions (name is None), we still advance the iterator
         // but don't bind anything.
@@ -8709,11 +8766,7 @@ fn generate_object_binding_pattern(
         if entry.is_rest {
             // AssignmentRestProperty : `...` DestructuringAssignmentTarget
             // 1. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
-            let evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
-                Some(emit_evaluate_member_reference(generator, expression))
-            } else {
-                None
-            };
+            let evaluated_ref = emit_evaluate_binding_reference(generator, entry, mode);
 
             // Rest element: copy object excluding already-destructured properties.
             let copy = generator.allocate_register();
@@ -8742,11 +8795,7 @@ fn generate_object_binding_pattern(
                 // 1. If |DestructuringAssignmentTarget| is neither an |ObjectLiteral| nor an |ArrayLiteral|, then
                 //    a. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
                 // 2. Let _v_ be ? GetV(_value_, _propertyName_).
-                evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
-                    Some(emit_evaluate_member_reference(generator, expression))
-                } else {
-                    None
-                };
+                evaluated_ref = emit_evaluate_binding_reference(generator, entry, mode);
                 emit_get_by_id(generator, &value, object, name, None);
                 if has_rest {
                     let name_val = generator.add_constant_string(arena.name_of(*ident).clone());
@@ -8767,11 +8816,7 @@ fn generate_object_binding_pattern(
                 // 1. If |DestructuringAssignmentTarget| is neither an |ObjectLiteral| nor an |ArrayLiteral|, then
                 //    a. Let _lRef_ be ? Evaluation of |DestructuringAssignmentTarget|.
                 // 2. Let _v_ be ? GetV(_value_, _propertyName_).
-                evaluated_ref = if let Some(BindingEntryAlias::MemberExpression(expression)) = &entry.alias {
-                    Some(emit_evaluate_member_reference(generator, expression))
-                } else {
-                    None
-                };
+                evaluated_ref = emit_evaluate_binding_reference(generator, entry, mode);
                 emit_get_by_value(generator, &value, object, &property_name, None);
             }
             None => {

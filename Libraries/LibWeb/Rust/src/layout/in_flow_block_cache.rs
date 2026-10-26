@@ -74,89 +74,68 @@ pub(super) struct InFlowBlockEntry {
     pub(super) fragment_identity: u64,
 }
 
-/// Per-document store of in-flow block layouts, one entry per slot, surviving across layout passes on the node arena.
+/// The in-flow block layouts kept for one slot: the latest one, and the one whose fragment the box committed, which a
+/// later layout whose result is not committed must not displace.
+#[derive(Clone, Default)]
+struct InFlowBlockSlot {
+    latest: Option<std::sync::Arc<InFlowBlockEntry>>,
+    committed: Option<std::sync::Arc<InFlowBlockEntry>>,
+}
+
+/// Per-document store of in-flow block layouts, surviving across layout passes on the node arena.
 #[derive(Clone, Default)]
 pub(crate) struct InFlowBlockCacheStore {
-    entries: RefCell<Vec<Option<std::sync::Arc<InFlowBlockEntry>>>>,
+    entries: RefCell<Vec<InFlowBlockSlot>>,
 }
 
 impl InFlowBlockCacheStore {
+    /// The stored layout of the box in `slot` for `key` that placed the fragment the box committed, `committed_identity`.
     pub(super) fn matching(
         &self,
         slot: u32,
         validity: fc_run_cache::FcRunCacheValidity,
         key: &InFlowBlockKey,
+        committed_identity: u64,
     ) -> Option<std::sync::Arc<InFlowBlockEntry>> {
         let entries = self.entries.borrow();
-        let entry = entries.get(slot as usize)?.as_ref()?;
-        (entry.validity == validity && entry.key == *key).then(|| entry.clone())
+        let slot = entries.get(slot as usize)?;
+        [&slot.committed, &slot.latest]
+            .into_iter()
+            .flatten()
+            .find(|entry| {
+                entry.validity == validity && entry.key == *key && entry.fragment_identity == committed_identity
+            })
+            .cloned()
     }
 
-    pub(super) fn store(&self, slot: u32, entry: InFlowBlockEntry) {
+    /// Stores `entry`, keeping the entry that placed the box's committed fragment, `committed_identity`.
+    pub(super) fn store(&self, slot: u32, entry: InFlowBlockEntry, committed_identity: Option<u64>) {
         let mut entries = self.entries.borrow_mut();
         if entries.len() <= slot as usize {
-            entries.resize_with(slot as usize + 1, || None);
+            entries.resize_with(slot as usize + 1, InFlowBlockSlot::default);
+        }
+        let slot = &mut entries[slot as usize];
+        let places_committed_fragment = |entry: &Option<std::sync::Arc<InFlowBlockEntry>>| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| Some(entry.fragment_identity) == committed_identity)
+        };
+        if places_committed_fragment(&slot.latest) {
+            slot.committed = slot.latest.take();
+        } else if !places_committed_fragment(&slot.committed) {
+            slot.committed = None;
         }
         // An entry nothing else holds is written in place rather than allocated again.
-        if let Some(existing) = entries[slot as usize].as_mut().and_then(std::sync::Arc::get_mut) {
+        if let Some(existing) = slot.latest.as_mut().and_then(std::sync::Arc::get_mut) {
             *existing = entry;
             return;
         }
-        entries[slot as usize] = Some(std::sync::Arc::new(entry));
+        slot.latest = Some(std::sync::Arc::new(entry));
     }
 
     pub(crate) fn remove_entry(&self, slot: u32) {
-        if let Some(entry) = self.entries.borrow_mut().get_mut(slot as usize) {
-            *entry = None;
+        if let Some(slot) = self.entries.borrow_mut().get_mut(slot as usize) {
+            *slot = InFlowBlockSlot::default();
         }
     }
-}
-
-/// Whether every in-flow reuse also lays the child out and checks that both agree.
-pub(super) fn verification_is_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("LIBWEB_VERIFY_IN_FLOW_REUSE").is_some())
-}
-
-pub(super) fn verify_reuse(
-    node: Node,
-    stored: &InFlowBlockEntry,
-    committed: &fragment_tree::Fragment,
-    fresh: &InFlowBlockEntry,
-    fresh_fragment: &fragment_tree::Fragment,
-    fresh_is_reusable: bool,
-    was_reused: &impl Fn(u32) -> bool,
-) {
-    assert!(
-        fresh_is_reusable,
-        "a reused in-flow layout of {node:?} is no longer reusable when laid out"
-    );
-    assert_eq!(
-        stored.cells, fresh.cells,
-        "the reused record of {node:?} differs from its layout"
-    );
-    assert_eq!(
-        stored.offset_from_flow_position, fresh.offset_from_flow_position,
-        "the reused offset of {node:?} differs from its layout"
-    );
-    assert_eq!(
-        stored.flow_position_advance, fresh.flow_position_advance,
-        "the reused flow advance of {node:?} differs from its layout"
-    );
-    assert!(
-        stored.outgoing_margins == fresh.outgoing_margins,
-        "the reused outgoing margins of {node:?} differ from its layout"
-    );
-    assert_eq!(
-        stored.margin_box_bottom_from_flow_position, fresh.margin_box_bottom_from_flow_position,
-        "the reused margin box bottom of {node:?} differs from its layout"
-    );
-    assert_eq!(
-        stored.depends_on_percentage_block_size, fresh.depends_on_percentage_block_size,
-        "the reused percentage block size dependency of {node:?} differs from its layout"
-    );
-    assert!(
-        fresh_fragment.lays_out_like(committed, was_reused),
-        "the reused subtree of {node:?} differs from its layout"
-    );
 }

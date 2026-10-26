@@ -17,6 +17,7 @@
 
 #include <unicode/localebuilder.h>
 #include <unicode/locid.h>
+#include <unicode/uscript.h>
 
 namespace Unicode {
 
@@ -571,17 +572,21 @@ Optional<Utf16String> canonicalize_unicode_locale_id(Utf16View locale)
 Utf16String canonicalize_unicode_extension_values(StringView key, Utf16View value)
 {
     VERIFY(value.has_ascii_storage());
+    auto lowercase_value = value.to_ascii_lowercase();
 
     UErrorCode status = U_ZERO_ERROR;
 
     icu::LocaleBuilder builder;
-    builder.setUnicodeLocaleKeyword(icu_string_piece(key), icu_string_piece(value.bytes()));
+    builder.setUnicodeLocaleKeyword(icu_string_piece(key), icu_string_piece(lowercase_value.ascii_view()));
 
     auto locale = builder.build(status);
     verify_icu_success(status);
 
     auto result = locale.getUnicodeKeywordValue<StringBuilder>(icu_string_piece(key), status);
     verify_icu_success(status);
+
+    if (result.string_view() == "true"sv)
+        return {};
 
     return Utf16String::from_ascii_without_validation(result.string_view().bytes());
 }
@@ -748,13 +753,22 @@ Optional<Utf16String> remove_likely_subtags(Utf16View locale)
     return Utf16String::from_ascii_without_validation(result.string_view().bytes());
 }
 
-bool is_locale_character_ordering_right_to_left(Utf16View locale)
+Optional<bool> is_script_right_to_left(Utf16View script)
 {
-    auto locale_data = LocaleData::for_locale(locale.bytes());
-    if (!locale_data.has_value())
-        return false; // Default to left-to-right
+    UErrorCode status = U_ZERO_ERROR;
 
-    return static_cast<bool>(locale_data->locale().isRightToLeft());
+    UScriptCode script_code = USCRIPT_INVALID_CODE;
+    auto script_name = MUST(script.to_byte_string());
+    auto count = uscript_getCode(script_name.characters(), &script_code, 1, &status);
+    if (icu_failure(status) || count != 1)
+        return {};
+
+    // ICU's direction predicate returns false for scripts with no direction data. Common and Inherited also do
+    // not have a writing direction.
+    if (script_code == USCRIPT_COMMON || script_code == USCRIPT_INHERITED || uscript_getUsage(script_code) <= USCRIPT_USAGE_UNKNOWN)
+        return {};
+
+    return static_cast<bool>(uscript_isRightToLeft(script_code));
 }
 
 static void append_to_builder(StringBuilder& builder, StringView string)

@@ -8,7 +8,7 @@ use super::*;
 use crate::css::style::tree::StyleNodeID;
 
 /// What a commit message tells the document.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FfiCommitMessageKind {
     /// The node is a size query container whose content size changed.
@@ -32,11 +32,20 @@ pub enum FfiCommitMessageKind {
     /// settled. The tree build built no box for it: the document styles it and builds its box
     /// again.
     UnstyledElementReached,
+    /// The node is an element whose layout resolved a container-relative length, so that its
+    /// style depends on size container queries.
+    StyleDependsOnSizeContainerQuery,
+    /// The node is a size query container a container-relative length resolved against.
+    SizeQueryContainerResolvedAgainst,
+    /// The node is a size query container a container-relative length resolved against before
+    /// the container had a committed box, so the document evaluates container queries after
+    /// layout.
+    ContainerQueryEvaluationNeededAfterLayout,
 }
 
 /// One thing layout has to tell the document. The node it is about is named by the style node the
 /// style tree gave it, with 0 for the document; no pointer crosses the boundary.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct FfiCommitMessage {
     pub style_node: u32,
@@ -63,6 +72,14 @@ pub(crate) struct CommitNotifications {
 }
 
 impl CommitNotifications {
+    /// Adds what the committed layout found out for the document ahead of what the commit itself found, which reads
+    /// it: a commit message about a resized container asks whether lengths resolved against it.
+    pub(crate) fn prepend_layout_messages(&mut self, messages: Vec<FfiCommitMessage>) {
+        if !messages.is_empty() {
+            self.messages.splice(0..0, messages);
+        }
+    }
+
     /// The size query containers whose content size the commit changed.
     pub(crate) fn resized_size_containers(&self) -> impl Iterator<Item = StyleNodeID> + '_ {
         self.messages
@@ -148,11 +165,23 @@ fn commit_subtree(
     {
         return;
     }
+    if let Some(shift) = entry.and_then(|link| link.default_scroll_shift) {
+        paintables.arena_mut().set_default_scroll_shift(
+            node,
+            shift.anchor,
+            shift.compensates_for_horizontal_scroll,
+            shift.compensates_for_vertical_scroll,
+        );
+    }
     if !reuses_committed_subtree {
+        paintables.arena().note_subtree_committed_anew(node);
         paintables.arena().forget_committed_out_of_flow_facts(node);
     }
     if let Some(inputs) = entry.and_then(|link| link.abspos_layout_inputs.as_ref()) {
         paintables.arena().note_committed_out_of_flow_box(node, inputs);
+        paintables
+            .arena_mut()
+            .set_position_option_in_use(node, inputs.position_option);
     }
     let previous_fragmented_content = (paintables.arena().paintable_row_is_populated(node)
         && (has_more_fragments || !paintables.arena().committed_side_data(node).box_fragments().is_empty()))
@@ -278,6 +307,9 @@ pub(crate) fn commit_replacing(
     arena: &mut LayoutNodeArena,
     pass_fragments: &fragment_tree::CompletedPassFragments,
 ) -> CommitNotifications {
+    arena.note_layout_commit();
+    // NB: A partial relayout commits a subtree its ancestors' committed subtrees hold.
+    arena.note_subtrees_of_self_and_ancestors_committed_anew(root);
     let links_by_slot = pass_fragments.links_by_slot();
     let mut paintables = crate::painting::paintable_build::PaintableCommit::new(arena, root);
     paintables.begin_commit();

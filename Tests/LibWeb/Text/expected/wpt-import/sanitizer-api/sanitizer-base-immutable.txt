@@ -1,0 +1,32 @@
+Harness status: OK
+
+Found 27 tests
+
+27 Pass
+Pass	Modifying a Sanitizer instance does not change subsequent new Sanitizer() instances
+Pass	allowElement() on new Sanitizer() does not affect subsequent instances
+Pass	removeElement() on new Sanitizer() does not affect subsequent instances
+Pass	replaceElementWithChildren() on new Sanitizer() does not affect subsequent instances
+Pass	allowAttribute() on new Sanitizer() does not affect subsequent instances
+Pass	removeAttribute() on new Sanitizer() does not affect subsequent instances
+Pass	allowProcessingInstruction() on new Sanitizer() does not affect subsequent instances
+Pass	removeProcessingInstruction() on new Sanitizer() does not affect subsequent instances
+Pass	setComments() on new Sanitizer() does not affect subsequent instances
+Pass	setDataAttributes() on new Sanitizer() does not affect subsequent instances
+Pass	removeUnsafe() on new Sanitizer() does not affect subsequent instances
+Pass	Mutating the object returned by sanitizer.get() does not affect the Sanitizer or default configuration
+Pass	Repeated calls to sanitizer.get() return distinct object copies
+Pass	Modifying a Sanitizer after removeUnsafe() does not change the built-in safe baseline configuration
+Pass	Mutating config returned from baseline sanitizer does not affect subsequent removeUnsafe() calls
+Pass	Modifying input configuration dictionary after new Sanitizer(config) does not affect the Sanitizer
+Pass	Sanitization with Element.prototype.setHTML() does not change default base configuration
+Pass	Sanitization with Document.parseHTML() does not change default base configuration
+Pass	A modified Sanitizer used in setHTML() does not affect default configuration or other Sanitizers
+Pass	s.get() is unchanged after Element.prototype.setHTML() when Sanitizer has unsafe allowlist entries
+Pass	s.get() is unchanged after Element.prototype.setHTML() when Sanitizer has unsafe remove-list configuration
+Pass	s.get() is unchanged after Document.parseHTML() when Sanitizer has unsafe entries
+Pass	Sanitization with appendHTML() does not change default base configuration or mutate passed Sanitizer
+Pass	Sanitization with prependHTML() does not change default base configuration or mutate passed Sanitizer
+Pass	Sanitization with beforeHTML() does not change default base configuration or mutate passed Sanitizer
+Pass	Sanitization with afterHTML() does not change default base configuration or mutate passed Sanitizer
+Pass	Sanitization with replaceWithHTML() does not change default base configuration or mutate passed Sanitizer

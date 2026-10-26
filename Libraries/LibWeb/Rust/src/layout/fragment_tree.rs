@@ -58,8 +58,11 @@ pub(crate) struct FragmentLink {
     pub(crate) inset_top: CssPixels,
     pub(crate) inset_bottom: CssPixels,
     pub(crate) containing_line_box_index: Option<usize>,
-    /// Boxed, as few links place an absolutely positioned box and the inputs are larger than the rest of the link.
-    pub(crate) abspos_layout_inputs: Option<Box<abspos_inputs::AbsposLayoutInputs>>,
+    /// Shared, as few links place an absolutely positioned box, the inputs are larger than the rest of the link, and
+    /// layout run cache entries keep copies of links.
+    pub(crate) abspos_layout_inputs: Option<std::sync::Arc<abspos_inputs::AbsposLayoutInputs>>,
+    /// The default scroll shift of a box whose anchor insets its layout resolved, which commit records for the box.
+    pub(crate) default_scroll_shift: Option<abspos_inputs::DefaultScrollShift>,
     pub(crate) containing_block: crate::layout::node_data::NodeSlotId,
     /// The frame the box was laid out in, in which the link and the fragment hold its geometry.
     pub(crate) frame: geometry::Frame,
@@ -70,6 +73,23 @@ fn same_allocation<T>(left: Option<&std::sync::Arc<T>>, right: Option<&std::sync
         (None, None) => true,
         (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
         _ => false,
+    }
+}
+
+/// How two fragments' shared payloads compare: as the same allocations, as painting needs, or as equal values, as
+/// two layouts of one box do.
+#[derive(Clone, Copy)]
+enum PayloadComparison {
+    SameAllocation,
+    SameValue,
+}
+
+impl PayloadComparison {
+    fn matches<T: PartialEq>(self, left: Option<&std::sync::Arc<T>>, right: Option<&std::sync::Arc<T>>) -> bool {
+        match self {
+            Self::SameAllocation => same_allocation(left, right),
+            Self::SameValue => left.map(|left| &**left) == right.map(|right| &**right),
+        }
     }
 }
 
@@ -111,6 +131,15 @@ impl Fragment {
     /// Box properties excluding inline content and child fragments. Painting compares those
     /// separately: a new descendant fragment does not necessarily change this box's commands.
     pub(crate) fn has_same_box_properties(&self, previous: &Fragment) -> bool {
+        self.has_same_box_properties_comparing_payloads(previous, PayloadComparison::SameAllocation)
+    }
+
+    /// Box properties excluding inline content and child fragments, with payloads compared by value.
+    pub(crate) fn has_same_box_properties_comparing_payloads_by_value(&self, previous: &Fragment) -> bool {
+        self.has_same_box_properties_comparing_payloads(previous, PayloadComparison::SameValue)
+    }
+
+    fn has_same_box_properties_comparing_payloads(&self, previous: &Fragment, payloads: PayloadComparison) -> bool {
         self.node == previous.node
             && self.content_inline_size == previous.content_inline_size
             && self.content_block_size == previous.content_block_size
@@ -131,18 +160,18 @@ impl Fragment {
             && self.table_column_index == previous.table_column_index
             && self.table_column_span == previous.table_column_span
             && self.hidden_by_collapsed_columns == previous.hidden_by_collapsed_columns
-            && same_allocation(
+            && payloads.matches(
                 self.collapsed_table_borders.as_ref(),
                 previous.collapsed_table_borders.as_ref(),
             )
-            && same_allocation(self.grid_layout_data.as_ref(), previous.grid_layout_data.as_ref())
-            && same_allocation(self.flex_layout_data.as_ref(), previous.flex_layout_data.as_ref())
+            && payloads.matches(self.grid_layout_data.as_ref(), previous.grid_layout_data.as_ref())
+            && payloads.matches(self.flex_layout_data.as_ref(), previous.flex_layout_data.as_ref())
             && self.multicol_layout_data == previous.multicol_layout_data
             && self.math_paint_data == previous.math_paint_data
-            && same_allocation(self.used_grid_tracks.as_ref(), previous.used_grid_tracks.as_ref())
+            && payloads.matches(self.used_grid_tracks.as_ref(), previous.used_grid_tracks.as_ref())
             && self.svg == previous.svg
-            && same_allocation(self.computed_svg_path.as_ref(), previous.computed_svg_path.as_ref())
-            && same_allocation(
+            && payloads.matches(self.computed_svg_path.as_ref(), previous.computed_svg_path.as_ref())
+            && payloads.matches(
                 self.svg_text_character_cells.as_ref(),
                 previous.svg_text_character_cells.as_ref(),
             )
@@ -151,47 +180,6 @@ impl Fragment {
             && self.clamped_content_is_scrollable_overflow == previous.clamped_content_is_scrollable_overflow
             && self.continues_from_previous_fragment == previous.continues_from_previous_fragment
             && self.continues_in_next_fragment == previous.continues_in_next_fragment
-    }
-
-    /// Whether this fragment's subtree came out of layout like `previous`, ignoring which allocations hold the pieces.
-    /// A subtree this layout reused as a whole, as `was_reused` says by slot, carries no descendants, and compares
-    /// equal down to its root.
-    pub(crate) fn lays_out_like(&self, previous: &Fragment, was_reused: &impl Fn(u32) -> bool) -> bool {
-        let same_line_data = match (&self.line_data, &previous.line_data) {
-            (None, None) => true,
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        };
-        self.node == previous.node
-            && self.content_inline_size == previous.content_inline_size
-            && self.content_block_size == previous.content_block_size
-            && self.margin_left == previous.margin_left
-            && self.margin_right == previous.margin_right
-            && self.margin_top == previous.margin_top
-            && self.margin_bottom == previous.margin_bottom
-            && self.border_left == previous.border_left
-            && self.border_right == previous.border_right
-            && self.border_top == previous.border_top
-            && self.border_bottom == previous.border_bottom
-            && self.padding_left == previous.padding_left
-            && self.padding_right == previous.padding_right
-            && self.padding_top == previous.padding_top
-            && self.padding_bottom == previous.padding_bottom
-            && self.uses_collapsing_borders_model == previous.uses_collapsing_borders_model
-            && self.svg == previous.svg
-            && self.has_line_clamp_point == previous.has_line_clamp_point
-            && self.is_invisible_for_line_clamp == previous.is_invisible_for_line_clamp
-            && same_line_data
-            && ((self.children.is_empty() && was_reused(self.node.slot_index()))
-                || (self.children.len() == previous.children.len()
-                    && self
-                        .children
-                        .iter()
-                        .zip(&previous.children)
-                        .all(|(link, previous_link)| {
-                            link.has_same_placement(previous_link)
-                                && link.fragment.lays_out_like(&previous_link.fragment, was_reused)
-                        })))
     }
 
     pub(crate) fn has_same_child_placements(&self, previous: &Fragment) -> bool {
@@ -264,6 +252,7 @@ impl FragmentLink {
             inset_bottom: CssPixels::default(),
             containing_line_box_index: None,
             abspos_layout_inputs: None,
+            default_scroll_shift: None,
             containing_block: crate::layout::node_data::NodeSlotId::INVALID,
             frame: geometry::Frame::PHYSICAL,
         }
@@ -282,6 +271,7 @@ impl FragmentLink {
             && self.inset_bottom == previous.inset_bottom
             && self.containing_line_box_index == previous.containing_line_box_index
             && self.abspos_layout_inputs == previous.abspos_layout_inputs
+            && self.default_scroll_shift == previous.default_scroll_shift
             && self.containing_block == previous.containing_block
             && self.frame == previous.frame
     }
@@ -549,6 +539,7 @@ pub(crate) struct PlacementData {
     pub(crate) inset_bottom: CssPixels,
     pub(crate) containing_line_box_index: Option<usize>,
     pub(crate) abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
+    pub(crate) default_scroll_shift: Option<abspos_inputs::DefaultScrollShift>,
     pub(crate) containing_block: crate::layout::node_data::NodeSlotId,
     pub(crate) frame: geometry::Frame,
 }
@@ -560,6 +551,7 @@ impl PlacementData {
         committed_offset: FfiCssPixelPoint,
         frame: geometry::Frame,
     ) -> Self {
+        let rare = used.rare_data.get().map(|cell| cell.borrow());
         Self {
             frame,
             committed_offset,
@@ -568,7 +560,8 @@ impl PlacementData {
             inset_top: used.inset_top.get(),
             inset_bottom: used.inset_bottom.get(),
             containing_line_box_index,
-            abspos_layout_inputs: used.rare_data.get().and_then(|cell| cell.borrow().abspos_layout_inputs),
+            abspos_layout_inputs: rare.as_ref().and_then(|rare| rare.abspos_layout_inputs),
+            default_scroll_shift: rare.as_ref().and_then(|rare| rare.default_scroll_shift),
             containing_block: used.placed_in.get(),
         }
     }
@@ -583,7 +576,8 @@ fn link_fragment(fragment: std::sync::Arc<Fragment>, placement: PlacementData) -
         inset_top: placement.inset_top,
         inset_bottom: placement.inset_bottom,
         containing_line_box_index: placement.containing_line_box_index,
-        abspos_layout_inputs: placement.abspos_layout_inputs.map(Box::new),
+        abspos_layout_inputs: placement.abspos_layout_inputs.map(std::sync::Arc::new),
+        default_scroll_shift: placement.default_scroll_shift,
         containing_block: placement.containing_block,
         frame: placement.frame,
     }
@@ -601,11 +595,9 @@ pub(crate) struct UnplacedRootFragment {
 }
 
 impl UnplacedRootFragment {
-    /// Whether the root holds nothing past its box: no descendant fragment, reuse marker or payload for an ancestor.
-    pub(crate) fn carries_nothing(&self) -> bool {
-        self.scoped_descendants.is_empty()
-            && self.reused_subtree_roots.is_empty()
-            && self.propagated_pending_abspos.is_empty()
+    /// Whether the root hands its ancestors no payload.
+    pub(crate) fn propagates_nothing(&self) -> bool {
+        self.propagated_pending_abspos.is_empty()
             && self.propagated_anchor_candidates.is_empty()
             && self.propagated_inline_containing_block_rects.is_empty()
             && self.propagated_abspos_containing_block_info.is_empty()
@@ -1376,10 +1368,6 @@ impl RunFragmentBuilder {
     /// How many abspos containing block info contributions the run has received so far, which only grows.
     pub(crate) fn abspos_containing_block_info_contributions_received(&self) -> u64 {
         self.inner.borrow().abspos_containing_block_info_contributions_received
-    }
-
-    pub(crate) fn subtree_was_reused(&self, slot: u32) -> bool {
-        self.inner.borrow().reused_subtree_roots.contains(&slot)
     }
 
     fn attach(
