@@ -64,6 +64,10 @@ public:
     // for the hide/show animations, so nothing pops when the panel changes hands.
     void set_card(bool);
 
+    // Flat, a picture of the panel shown in its place: the panel leaves for the docked sidebar a frame or two before
+    // the host goes, so the screen never shows neither.
+    void set_snapshot(QPixmap);
+
 signals:
     void left();
 
@@ -73,6 +77,7 @@ protected:
 
 private:
     bool m_card { true };
+    QPixmap m_snapshot;
 };
 
 }

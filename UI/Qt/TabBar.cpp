@@ -3325,6 +3325,8 @@ void TabWidget::rebuild_page_column()
 
 int TabWidget::current_vertical_tabs_width() const
 {
+    if (m_vertical_sidebar_widget && m_vertical_sidebar_reserved_width.has_value()) // Fork hook (Arc): mid-animation
+        return *m_vertical_sidebar_reserved_width;
     if (m_vertical_tabs_hover_expanded)
         return collapsed_vertical_tabs_width() + qRound((m_vertical_tabs_expanded_width - collapsed_vertical_tabs_width()) * m_vertical_tabs_hover_expand_progress);
 

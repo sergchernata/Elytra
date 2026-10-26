@@ -219,6 +219,10 @@ private:
     void update_mode();
     void dock_panel();
     void place_edge_lines();
+    void inset_toolbar(QWidget& toolbar);
+    QRect window_toggle_rect() const;
+    bool window_toggle_shown() const;
+    void update_window_toggle();
     void apply_toolbar_inset(bool new_tabs_only = false);
     void install_address_bar(QWidget& toolbar);
     void prepare_card_panel();
@@ -227,7 +231,6 @@ private:
     void start_transition();
     void step_transition(qreal progress);
     void finish_transition();
-    qreal fade_opacity(qreal progress) const;
     void set_transition_opacity(qreal);
     void set_panel_card(bool);
     void place_window_controls(QPoint panel_origin, bool match_native);
@@ -324,6 +327,7 @@ private:
     int m_transition_width_from { 0 };
     int m_transition_width_to { 0 };
     class SymbolButton* m_sidebar_toggle { nullptr };
+    class SymbolButton* m_window_toggle { nullptr }; // The toggle while the sidebar is hidden: see window_toggle_rect().
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };
     QPointer<QWidget> m_watched_column;

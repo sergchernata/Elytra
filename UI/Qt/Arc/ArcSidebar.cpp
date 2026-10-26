@@ -126,8 +126,10 @@ static constexpr int REVEAL_DELAY_MS = 60;
 static constexpr int TRANSITION_MS = 300;
 static constexpr int SHOW_SETTLE_MS = 34;
 static constexpr int HANDOFF_MS = 34; // Two frames, for the window server to show one before the other goes.
-static constexpr qreal FADE_SPEEDUP = 1.6;
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = ArcSidebar::TOOLBAR_LEFT_MARGIN;
+// The sidebar toggle's symbol, fitted to this box: its glyph then stands as tall as the toolbar's back and forward arrows.
+static constexpr int SIDEBAR_TOGGLE_SYMBOL_SIZE = 22;
+static constexpr int WINDOW_TOGGLE_GAP = 6; // Between the window's sidebar toggle and the toolbar's first button.
 static constexpr int RETRACT_DELAY_MS = 280;
 static constexpr int REVEAL_ANIMATION_MS = 260;
 static constexpr int RETRACT_ANIMATION_MS = 220;
@@ -213,6 +215,13 @@ void ArcSidebar::attach(BrowserWindow& window)
         return;
     auto* sidebar = new ArcSidebar(window, *tabs);
     tabs->set_vertical_sidebar_widget(sidebar);
+    // Upstream's column paints the darker tab strip color; the Arc sidebar shows the window's (tinted) chrome color
+    // through it instead, the toolbar's, as in Arc. Nothing dark shows either while the sidebar slides in.
+    if (auto* column = sidebar->parentWidget(); column && column->objectName() == "LadybirdVerticalTabBar") {
+        column->setStyleSheet("QWidget#LadybirdVerticalTabBar, QWidget#LadybirdVerticalTabBar[windowInactive=\"true\"],"
+                              " QWidget#LadybirdVerticalTabBar[hovered=\"true\"], QWidget#LadybirdVerticalTabBar[active=\"true\"]"
+                              " { background: transparent; border: 0; }");
+    }
     window.setProperty("arc_sidebar", QVariant::fromValue(static_cast<QObject*>(sidebar)));
 }
 
@@ -251,10 +260,19 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     // Sidebar toggle, right of the window controls as in Arc.
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
-    m_sidebar_toggle->set_symbol_point_size(18); // Same size as the toolbar's sidebar button.
+    m_sidebar_toggle->set_symbol_point_size(SIDEBAR_TOGGLE_SYMBOL_SIZE); // As big as the toolbar's icons.
     m_sidebar_toggle->setFixedSize(28, 28);
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
+    // The same toggle, on the window, for while the sidebar is hidden (see window_toggle_rect()).
+    m_window_toggle = new SymbolButton(&window);
+    m_window_toggle->setObjectName("ArcWindowSidebarToggle");
+    m_window_toggle->set_symbol("sidebar.left");
+    m_window_toggle->set_symbol_point_size(SIDEBAR_TOGGLE_SYMBOL_SIZE);
+    m_window_toggle->setFixedSize(m_sidebar_toggle->size());
+    m_window_toggle->setToolTip("Toggle Sidebar");
+    m_window_toggle->hide();
+    connect(m_window_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     // Extensions' buttons, at the strip's right.
     layout->addWidget(m_top_strip);
 
@@ -2976,6 +2994,7 @@ void ArcSidebar::update_mode()
     m_mode_set = true;
     m_mode = mode;
     apply_toolbar_inset();
+    update_window_toggle();
 
     if (m_active_transition != Transition::None)
         return; // The animation finishes the switch (dock_panel / prepare_card_panel).
@@ -3005,15 +3024,58 @@ void ArcSidebar::update_mode()
 // Upstream sets each tab's toolbar margins itself (e.g. on tab switches). Correcting them afterwards let a new tab's
 // toolbar show at upstream's margin for a frame, then jump. So each toolbar is watched and corrected as it asks for
 // a layout, before it's laid out and painted.
-static void inset_toolbar(QWidget& toolbar)
+// While the sidebar is hidden (or on its way), the toolbar's buttons start past the window's sidebar toggle, which
+// stays in the window's corner.
+void ArcSidebar::inset_toolbar(QWidget& toolbar)
 {
     auto* layout = toolbar.layout();
     if (!layout)
         return;
+    auto left = HIDDEN_TOOLBAR_LEFT_MARGIN;
+    if (m_window && window_toggle_shown()) {
+        auto clearance = window_toggle_rect().right() + 1 + WINDOW_TOGGLE_GAP;
+        left = qMax(left, clearance - toolbar.mapTo(m_window, QPoint(0, 0)).x());
+    }
     auto margins = layout->contentsMargins();
-    if (margins.left() != HIDDEN_TOOLBAR_LEFT_MARGIN) {
-        margins.setLeft(HIDDEN_TOOLBAR_LEFT_MARGIN);
+    if (margins.left() != left) {
+        margins.setLeft(left);
         layout->setContentsMargins(margins);
+    }
+}
+
+// The sidebar toggle's place in the window, docked: beside the real window controls (see place_window_controls()).
+// The window's own toggle takes it while the sidebar is hidden, so the toggle never moves.
+QRect ArcSidebar::window_toggle_rect() const
+{
+    auto size = m_sidebar_toggle->size();
+    auto rects = m_window ? native_window_control_rects(*m_window) : QList<QRectF> {};
+    if (rects.size() != 3)
+        return QRect(QPoint(m_traffic_lights->width() + FLOATING_LIGHTS_INSET + 12, (TOP_STRIP_HEIGHT - size.height()) / 2 + 2), size);
+    auto diameter = m_traffic_lights->diameter();
+    auto lights_left = qRound(rects[0].center().x() - 1 - diameter / 2.0);
+    return QRect(QPoint(lights_left + m_traffic_lights->width() + 11, qRound(rects[0].center().y() - size.height() / 2.0)), size);
+}
+
+// Hidden, or on the way there or back: the sidebar's own toggle is in the panel, which is out of sight or moving.
+bool ArcSidebar::window_toggle_shown() const
+{
+    return m_mode_set && (m_mode == Mode::Hidden || m_active_transition != Transition::None || m_pending_transition != Transition::None);
+}
+
+void ArcSidebar::update_window_toggle()
+{
+    if (!m_window_toggle)
+        return;
+    auto shown = window_toggle_shown();
+    if (shown) {
+        m_window_toggle->setGeometry(window_toggle_rect());
+        m_window_toggle->raise();
+    }
+    m_window_toggle->setVisible(shown);
+    // The toolbar makes room for it, or takes the room back.
+    if (auto* tab = m_window ? m_window->current_tab() : nullptr; tab && tab->toolbar_container()) {
+        if (auto* toolbar = tab->toolbar_container()->findChild<QWidget*>("LadybirdNavigationToolbar"))
+            inset_toolbar(*toolbar);
     }
 }
 
@@ -3110,16 +3172,35 @@ void ArcSidebar::dock_panel()
     m_reveal_timer->stop();
     if (m_host_animation)
         m_host_animation->stop();
-    // Real controls back first, then drop the panel copy, in the same turn: no frame without controls.
+    // Real controls back first. The host keeps a picture of the panel while the panel paints in its docked place
+    // underneath, and goes a couple of frames later: there's never a frame with no sidebar, or no controls.
     set_window_controls_hidden(*window(), false);
-    if (m_host)
+    if (m_host && m_host->isVisible() && m_panel->parentWidget() == m_host) {
+        // Drawn over the host's own chrome color: a plain grab would put the panel on the palette's default background.
+        auto dpr = m_panel->devicePixelRatioF();
+        QPixmap snapshot(m_panel->size() * dpr);
+        snapshot.setDevicePixelRatio(dpr);
+        snapshot.fill(Qt::transparent);
+        m_panel->render(&snapshot, {}, {}, QWidget::DrawChildren);
+        m_host->set_snapshot(snapshot);
+        QTimer::singleShot(HANDOFF_MS, m_host, [host = m_host, this] {
+            if (!host)
+                return;
+            host->set_snapshot({});
+            if (m_mode == Mode::Docked && m_panel->parentWidget() == this && m_active_transition == Transition::None)
+                host->hide();
+        });
+    } else if (m_host) {
         m_host->hide();
+    }
     m_panel->setParent(this);
     m_panel->layout()->setContentsMargins(0, 0, 0, 0);
     m_panel->setGeometry(rect());
     m_panel->show();
     place_edge_lines();
+    update_window_toggle();
     m_traffic_lights->set_drawn(false);
+    m_panel->repaint();
     // Beside the real window controls.
     place_window_controls(mapTo(window(), QPoint(0, 0)), true);
     m_sidebar_toggle->show();
@@ -3276,6 +3357,7 @@ void ArcSidebar::start_transition()
 
     m_active_transition = m_pending_transition;
     m_pending_transition = Transition::None;
+    update_window_toggle();
     step_transition(0);
     m_host->show();
     m_host->raise();
@@ -3306,15 +3388,11 @@ void ArcSidebar::step_transition(qreal progress)
     // The page's own layout would only follow on the next event-loop pass, a frame behind the panel; apply
     // it now so both land in the same frame.
     QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+    // The toolbar's buttons glide with the page, and come to rest past the toggle rather than under it: their room,
+    // from where the toolbar now is, laid out in this same frame.
+    update_window_toggle();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
     m_host->move(qRound(lerp(m_transition_from.x(), m_transition_to.x())), qRound(lerp(m_transition_from.y(), m_transition_to.y())));
-    set_transition_opacity(fade_opacity(progress));
-}
-
-// The sidebar fades a little faster than it slides: fully there before it lands, gone before it leaves.
-qreal ArcSidebar::fade_opacity(qreal progress) const
-{
-    auto faded = qBound(0.0, progress * FADE_SPEEDUP, 1.0);
-    return m_active_transition == Transition::Show ? faded : 1.0 - qBound(0.0, progress * FADE_SPEEDUP - (FADE_SPEEDUP - 1.0), 1.0);
 }
 
 void ArcSidebar::set_transition_opacity(qreal opacity)
@@ -3330,6 +3408,9 @@ void ArcSidebar::finish_transition()
     m_active_transition = Transition::None;
     set_transition_opacity(1.0); // Back to fully opaque for the hover slide-out and the docked sidebar.
     m_tabs.set_vertical_sidebar_reserved_width({});
+    // Docked, the panel's own toggle takes over from the window's once the panel is back (dock_panel()).
+    if (finished == Transition::Hide)
+        update_window_toggle();
     if (finished == Transition::Hide) {
         m_host_lifting_off = false;
         if (m_mode == Mode::Hidden)

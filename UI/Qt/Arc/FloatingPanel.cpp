@@ -206,6 +206,12 @@ void FloatingSidebarHost::set_card(bool card)
     update();
 }
 
+void FloatingSidebarHost::set_snapshot(QPixmap snapshot)
+{
+    m_snapshot = std::move(snapshot);
+    repaint();
+}
+
 void FloatingSidebarHost::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
@@ -214,6 +220,8 @@ void FloatingSidebarHost::paintEvent(QPaintEvent*)
 
     if (!m_card) {
         painter.fillRect(card, ChromeStyle::chrome_background(palette()));
+        if (!m_snapshot.isNull())
+            painter.drawPixmap(card.topLeft(), m_snapshot);
         return;
     }
 

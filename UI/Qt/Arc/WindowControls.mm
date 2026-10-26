@@ -8,6 +8,7 @@
 
 #include <QWidget>
 
+#include <UI/Qt/MacWindow.h>
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -156,6 +157,8 @@ void set_window_controls_hidden(QWidget& window, bool hidden)
     }
     // Only visibility changes; upstream's offset observer (MacWindow.mm) still owns their position.
     [hider setControlsHidden:hidden window:ns_window];
+    // The faint dots drawn over the buttons (MacWindow.mm) go and come back with them.
+    refresh_appkit_window_buttons_grey(window);
 }
 
 }

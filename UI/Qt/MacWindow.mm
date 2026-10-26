@@ -108,6 +108,7 @@
 - (void)apply;
 - (void)findButtons;
 - (bool)looksInactive;
+- (bool)dotsVisible;
 @end
 
 @implementation LadybirdGreyWindowButtons
@@ -199,7 +200,9 @@
             continue;
         m_buttons[i].contentFilters = m_hovered ? @[] : @[ m_hide ];
         [m_looks[i] setDark:m_dark];
-        m_looks[i].hidden = m_hovered || m_buttons[i].hidden;
+        // A dot only over a button that's there: hidden, or made transparent (as the Arc sidebar does when it hides),
+        // takes its dot with it.
+        m_looks[i].hidden = m_hovered || m_buttons[i].hidden || m_buttons[i].alphaValue == 0;
     }
 }
 
@@ -216,6 +219,16 @@
             return false;
     }
     return m_buttons[0] != nil;
+}
+
+- (bool)dotsVisible
+{
+    [self findButtons];
+    for (int i = 0; i < 3; ++i) {
+        if (m_looks[i] && !m_looks[i].hidden && m_looks[i].superview)
+            return true;
+    }
+    return false;
 }
 
 - (bool)pointerIsOverAButton
@@ -701,6 +714,25 @@ void set_appkit_window_buttons_grey(QWidget& widget, Gfx::Color tint)
     [buttons setDark:tint.red() > 127];
 }
 
+// Fork hook (Arc): after the buttons are hidden or shown again, their dots follow.
+void refresh_appkit_window_buttons_grey(QWidget& widget)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (!view || !view.window)
+        return;
+    auto* buttons = static_cast<LadybirdGreyWindowButtons*>(objc_getAssociatedObject(view.window, &s_grey_window_buttons_key));
+    [buttons apply];
+}
+
+bool appkit_window_button_dots_visible(QWidget& widget)
+{
+    auto* view = reinterpret_cast<NSView*>(widget.winId());
+    if (!view || !view.window)
+        return false;
+    auto* buttons = static_cast<LadybirdGreyWindowButtons*>(objc_getAssociatedObject(view.window, &s_grey_window_buttons_key));
+    return buttons && [buttons dotsVisible];
+}
+
 bool appkit_window_buttons_look_inactive(QWidget& widget)
 {
     auto* view = reinterpret_cast<NSView*>(widget.winId());
@@ -790,3 +822,4 @@ void show_appkit_dictionary_lookup(QWidget& widget, WebView::DictionaryLookup co
 }
 
 }
+

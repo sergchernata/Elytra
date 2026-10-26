@@ -54,6 +54,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QScreen>
 #include <QScrollBar>
 #include <QSet>
 #include <QThread>
@@ -206,6 +207,7 @@ private:
     void window_buttons_look_inactive_everywhere();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     void the_lists_edge_lines_run_from_the_window_edge_to_the_page();
+    void the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
     void profiles_get_their_own_session();
     void tabs_come_back_in_their_own_profile();
@@ -1228,6 +1230,140 @@ void SelfTest::window_buttons_look_inactive_everywhere()
         guarded->close();
     settle(300);
 #endif
+}
+
+// The painted part of a widget: its pixels that differ from its corner's, in its own logical coordinates.
+static QRectF painted_bounds_of(QWidget& widget)
+{
+    auto image = widget.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    auto background = QColor(image.pixel(0, 0));
+    int left = image.width(), top = image.height(), right = -1, bottom = -1;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            auto color = QColor(image.pixel(x, y));
+            if (qAbs(color.red() - background.red()) + qAbs(color.green() - background.green()) + qAbs(color.blue() - background.blue()) < 90)
+                continue;
+            left = qMin(left, x);
+            top = qMin(top, y);
+            right = qMax(right, x);
+            bottom = qMax(bottom, y);
+        }
+    }
+    if (right < 0)
+        return {};
+    auto scale = image.devicePixelRatio();
+    return QRectF(left / scale, top / scale, (right - left + 1) / scale, (bottom - top + 1) / scale);
+}
+
+// As in Arc: the sidebar is the toolbar's color; its toggle is as big as the toolbar's buttons and never moves, docked
+// or hidden; and hidden, the window buttons go with the sidebar.
+void SelfTest::the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar()
+{
+    auto set_expanded = [&](bool expanded) {
+        auto& settings = WebView::Application::settings();
+        auto tab_settings = settings.tab_settings();
+        tab_settings.vertical_tabs_expanded = expanded;
+        settings.set_tab_settings(tab_settings);
+        settle(900);
+    };
+    set_expanded(true);
+    auto* tab = window().current_tab();
+    auto* toolbar = tab ? tab->toolbar_container()->findChild<QWidget*>("LadybirdNavigationToolbar") : nullptr;
+    if (!toolbar) {
+        check(false, "the tab has a toolbar");
+        return;
+    }
+    auto leftmost_toolbar_button = [&]() -> QToolButton* {
+        QToolButton* found = nullptr;
+        for (auto* button : toolbar->findChildren<QToolButton*>()) {
+            if (button->isVisible() && (!found || button->mapTo(&window(), QPoint(0, 0)).x() < found->mapTo(&window(), QPoint(0, 0)).x()))
+                found = button;
+        }
+        return found;
+    };
+
+    // Docked: one color, sidebar and toolbar (sampled where nothing is drawn), as on screen: a grab of the widgets
+    // would draw them itself, not show what the window shows.
+    auto* screen = window().screen();
+    auto image = screen ? screen->grabWindow(window().winId()).toImage() : window().grab().toImage();
+    auto scale = image.devicePixelRatio();
+    auto sample = [&](QWidget* widget, QPoint point) {
+        auto in_window = widget->mapTo(&window(), point);
+        return QColor(image.pixel(qRound(in_window.x() * scale), qRound(in_window.y() * scale)));
+    };
+    auto strip = s().m_top_strip;
+    auto sidebar_color = sample(strip, QPoint(strip->width() - 30, 3));
+    auto reload_like = leftmost_toolbar_button();
+    auto toolbar_color = sample(toolbar, QPoint(toolbar->width() / 2 + 200, 3));
+    auto difference = qAbs(sidebar_color.red() - toolbar_color.red()) + qAbs(sidebar_color.green() - toolbar_color.green()) + qAbs(sidebar_color.blue() - toolbar_color.blue());
+    check(difference <= 6, "the docked sidebar is the toolbar's color", QString("%1 vs %2").arg(sidebar_color.name(), toolbar_color.name()));
+
+    // Its toggle's icon is as tall as the toolbar's (the back button's).
+    auto toggle_icon = painted_bounds_of(*s().m_sidebar_toggle);
+    auto back_icon = reload_like ? painted_bounds_of(*reload_like) : QRectF();
+    check(!toggle_icon.isEmpty() && !back_icon.isEmpty() && qAbs(toggle_icon.height() - back_icon.height()) <= 1.5,
+        "the sidebar toggle's icon is as big as the toolbar's", QString("toggle %1x%2, back %3x%4").arg(toggle_icon.width()).arg(toggle_icon.height()).arg(back_icon.width()).arg(back_icon.height()));
+    check(appkit_window_button_dots_visible(window()), "docked, the window buttons show (as faint dots)");
+    auto docked_toggle = QRect(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)), s().m_sidebar_toggle->size());
+
+    // Hidden: the toggle stays exactly where it was, the window buttons go, and the toolbar's buttons start past it.
+    set_expanded(false);
+    auto* hidden_toggle = s().m_window_toggle;
+    auto hidden_rect = hidden_toggle ? QRect(hidden_toggle->mapTo(&window(), QPoint(0, 0)), hidden_toggle->size()) : QRect();
+    check(hidden_toggle && hidden_toggle->isVisible() && hidden_rect == docked_toggle, "hidden, the sidebar toggle stays where it was",
+        QString("%1,%2 vs %3,%4").arg(hidden_rect.x()).arg(hidden_rect.y()).arg(docked_toggle.x()).arg(docked_toggle.y()));
+    check(!appkit_window_button_dots_visible(window()), "and the window buttons hide with the sidebar, dots and all");
+    auto* first_button = leftmost_toolbar_button();
+    auto first_left = first_button ? first_button->mapTo(&window(), QPoint(0, 0)).x() : -1;
+    check(first_button && first_left > hidden_rect.right(), "the toolbar's buttons start past the toggle",
+        QString("first button at %1, toggle ends at %2").arg(first_left).arg(hidden_rect.right()));
+
+    // Docked again: back as it was. On the way, the sidebar's column widens with the page's edge, not ahead of it
+    // (it once jumped to its full width at once, leaving an empty strip for the sidebar to slide into).
+    {
+        auto& settings = WebView::Application::settings();
+        auto tab_settings = settings.tab_settings();
+        tab_settings.vertical_tabs_expanded = true;
+        settings.set_tab_settings(tab_settings);
+    }
+    settle(140);
+    auto* column = s().parentWidget();
+    auto full_width = s().m_tabs.vertical_sidebar_expanded_width();
+    check(column && column->width() < full_width - 20, "opening, the sidebar's column widens with the page rather than at once",
+        QString("%1 of %2").arg(column ? column->width() : -1).arg(full_width));
+    settle(900);
+    check(appkit_window_button_dots_visible(window()), "docked again, the window buttons are back");
+    check(!s().m_window_toggle || !s().m_window_toggle->isVisible(), "and the sidebar's own toggle is the one showing");
+    auto again = QRect(s().m_sidebar_toggle->mapTo(&window(), QPoint(0, 0)), s().m_sidebar_toggle->size());
+    check(again == docked_toggle, "in the same place");
+
+    // A new window's sidebar is the toolbar's color from the start (upstream's column paints the tab strip's darker
+    // color, until the sidebar's first toggle used to repaint it).
+    QPointer<BrowserWindow> fresh = &Application::the().new_window({ URL::about_blank() }, Application::the().configuration_for_new_window());
+    settle(1200);
+    if (fresh) {
+        auto* fresh_sidebar = ArcSidebar::for_window(*fresh);
+        auto* fresh_tab = fresh->current_tab();
+        auto* fresh_toolbar = fresh_tab ? fresh_tab->toolbar_container()->findChild<QWidget*>("LadybirdNavigationToolbar") : nullptr;
+        auto* fresh_screen = fresh->screen();
+        if (fresh_sidebar && fresh_toolbar && fresh_screen) {
+            auto fresh_image = fresh_screen->grabWindow(fresh->winId()).toImage();
+            auto fresh_scale = fresh_image.devicePixelRatio();
+            auto fresh_sample = [&](QWidget* widget, QPoint point) {
+                auto in_window = widget->mapTo(fresh.data(), point);
+                return QColor(fresh_image.pixel(qRound(in_window.x() * fresh_scale), qRound(in_window.y() * fresh_scale)));
+            };
+            auto* fresh_strip = fresh_sidebar->m_top_strip;
+            auto side = fresh_sample(fresh_strip, QPoint(fresh_strip->width() - 30, 3));
+            auto top = fresh_sample(fresh_toolbar, QPoint(fresh_toolbar->width() / 2 + 200, 3));
+            auto apart = qAbs(side.red() - top.red()) + qAbs(side.green() - top.green()) + qAbs(side.blue() - top.blue());
+            check(apart <= 6, "a new window's sidebar is the toolbar's color from the start", QString("%1 vs %2").arg(side.name(), top.name()));
+        } else {
+            check(false, "a new window has a sidebar and a toolbar");
+        }
+        fresh->close();
+        settle(400);
+    }
 }
 
 // As in Arc: once the list is longer than the sidebar, a hairline fades in where rows go out of sight, and it runs the
@@ -2743,6 +2879,7 @@ int SelfTest::run()
     window_buttons_look_inactive_everywhere();
     the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
     the_lists_edge_lines_run_from_the_window_edge_to_the_page();
+    the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar();
     little_arc_opens_a_page_and_moves_it_into_a_space();
     profiles_get_their_own_session();
     tabs_come_back_in_their_own_profile();
