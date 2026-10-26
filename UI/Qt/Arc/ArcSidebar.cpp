@@ -256,7 +256,6 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     // Extensions' buttons, at the strip's right.
-    create_extension_buttons(window, m_top_strip);
     layout->addWidget(m_top_strip);
 
     m_favorites = new QWidget(this);
@@ -3033,6 +3032,7 @@ void ArcSidebar::install_address_bar(QWidget& toolbar)
     }
     if (!edit || !tab)
         return;
+    add_extension_buttons_to_toolbar(*m_window, toolbar);
     auto* bar = AddressBar::replace(*edit);
     if (!bar)
         return;

@@ -12,6 +12,7 @@
 #include <LibWebView/ExtensionAPI/TabsDelegate.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
+#include <UI/Qt/ContentBlockingButton.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ExtensionServices.h>
 #include <UI/Qt/Arc/Extensions.h>
@@ -524,17 +525,19 @@ static QList<QPointer<ExtensionButtons>>& all_button_rows()
     return *rows;
 }
 
-// A window's extension buttons, right-aligned in its parent.
+// A window's extension buttons, in one of its tabs' toolbars.
 class ExtensionButtons final : public QWidget {
 public:
-    ExtensionButtons(BrowserWindow& window, QWidget* parent)
+    ExtensionButtons(BrowserWindow& window, QWidget* parent, QSize button_size)
         : QWidget(parent)
         , m_window(&window)
+        , m_button_size(button_size)
     {
         m_layout = new QHBoxLayout(this);
         m_layout->setContentsMargins(0, 0, 0, 0);
         m_layout->setSpacing(2);
-        parent->installEventFilter(this);
+        // Its own size, so the toolbar centers it as it does its other buttons.
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         all_button_rows().append(this);
         rebuild();
     }
@@ -569,6 +572,7 @@ public:
             if (is_private || !extension.manifest().action.has_value())
                 return;
             auto* button = new ExtensionButton(this, extension.id());
+            button->setFixedSize(m_button_size);
             connect(button, &QToolButton::clicked, this, [this, id = extension.id()] {
                 runtime().action().clicked(id, current_tab_id(m_window), m_window ? Optional<i64> { tabs_delegate().id_of(*m_window) } : Optional<i64> {});
             });
@@ -591,8 +595,7 @@ public:
             button->show();
         });
         setVisible(!m_buttons.isEmpty());
-        adjustSize();
-        place();
+        updateGeometry();
     }
 
     void update_button(ExtensionButton& button)
@@ -619,33 +622,30 @@ public:
         }
     }
 
-protected:
-    virtual bool eventFilter(QObject* watched, QEvent* event) override
-    {
-        if (watched == parent() && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
-            place();
-        return QWidget::eventFilter(watched, event);
-    }
-
 private:
-    void place()
-    {
-        auto* parent_widget = parentWidget();
-        if (!parent_widget)
-            return;
-        adjustSize();
-        move(parent_widget->width() - width() - 8, (parent_widget->height() - height()) / 2 + 2);
-        raise();
-    }
-
     QPointer<BrowserWindow> m_window;
+    QSize m_button_size;
     QHBoxLayout* m_layout { nullptr };
     QList<QPointer<ExtensionButton>> m_buttons;
 };
 
-QWidget* create_extension_buttons(BrowserWindow& window, QWidget* parent)
+void add_extension_buttons_to_toolbar(BrowserWindow& window, QWidget& toolbar)
 {
-    return new ExtensionButtons(window, parent);
+    if (toolbar.property("arc_extension_buttons").toBool())
+        return;
+    ContentBlockingButton* blocker = nullptr;
+    for (auto* button : toolbar.findChildren<QToolButton*>()) {
+        if (auto* found = dynamic_cast<ContentBlockingButton*>(button))
+            blocker = found;
+    }
+    auto* layout = blocker && blocker->parentWidget() ? qobject_cast<QBoxLayout*>(blocker->parentWidget()->layout()) : nullptr;
+    auto index = layout ? layout->indexOf(blocker) : -1;
+    if (index < 0)
+        return;
+    toolbar.setProperty("arc_extension_buttons", true);
+    // Its buttons the size of the toolbar's (the ad blocker's), so they line up with it.
+    auto* row = new ExtensionButtons(window, blocker->parentWidget(), static_cast<QWidget*>(blocker)->sizeHint().expandedTo(QSize(26, 26)));
+    layout->insertWidget(index, row, 0, Qt::AlignVCenter);
 }
 
 // chrome.action: buttons change, and popups open below them.
@@ -665,8 +665,9 @@ public:
         if (!window || window->is_private() == WebView::IsPrivate::Yes)
             return "No window to open the popup in"_string;
         QWidget* anchor = nullptr;
+        // Each tab's toolbar has a row: the one showing.
         for (auto const& row : all_button_rows()) {
-            if (row && row->window() == window && row->button_for(extension_id))
+            if (row && row->window() == window && row->button_for(extension_id) && (!anchor || row->isVisible()))
                 anchor = row->button_for(extension_id);
         }
         if (!anchor)

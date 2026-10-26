@@ -33,7 +33,7 @@ the few changes it needs in Ladybird itself are small, marked `Fork hook (Arc)`,
 
 Elytra is learning to run Chrome (Manifest V3) extensions unmodified, with 1Password's as the first goal. Add one
 from **File › Extensions…** by pasting its Chrome Web Store link, or load an unpacked folder. Extensions get a button
-in the sidebar's top strip, with their badge and popup, and their keyboard commands.
+in the toolbar, next to the ad blocker's, with their badge and popup, and their keyboard commands.
 
 What works: installing, updating and removing extensions; `chrome-extension://` pages in processes of their own,
 under the extension's CSP; background service workers; content scripts in isolated worlds; and the `runtime`
