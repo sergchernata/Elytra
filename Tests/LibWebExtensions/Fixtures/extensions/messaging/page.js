@@ -20,6 +20,7 @@
     await attempt("echo", () => chrome.runtime.sendMessage({ kind: "echo", value: 7 }));
     await attempt("later", () => chrome.runtime.sendMessage({ kind: "later" }));
     await attempt("promise", () => chrome.runtime.sendMessage({ kind: "promise" }));
+    await attempt("clients", () => chrome.runtime.sendMessage({ kind: "clients" }));
     await attempt("unanswered", async () => String(await chrome.runtime.sendMessage({ kind: "nothing" })));
     await attempt("callback", () => new Promise(resolve => chrome.runtime.sendMessage({ kind: "echo", value: "cb" }, response => resolve(response.echo))));
     await attempt("port", () => new Promise(resolve => {

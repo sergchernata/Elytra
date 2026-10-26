@@ -309,7 +309,7 @@ Optional<ActionAPI::State> ActionAPI::state_for(StringView extension_id, Optiona
     auto const& defaults = *extension->manifest().action;
 
     State state;
-    state.title = defaults.default_title.value_or(extension->manifest().name);
+    state.title = defaults.default_title.has_value() ? extension->messages().substitute_manifest_messages(*defaults.default_title) : extension->display_name();
     Optional<String> popup = defaults.default_popup;
     for (auto const& [size, path] : defaults.default_icon)
         state.icon_paths.set(size, path);

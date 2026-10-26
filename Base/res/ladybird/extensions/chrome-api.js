@@ -592,6 +592,47 @@
 
     Object.defineProperty(globalThis, "chrome", { value: chrome, writable: true, configurable: true, enumerable: false });
 
+    // The background is a page here, not a service worker, but MV3 extensions take it for one (1Password asks
+    // clients.matchAll() whether its popup is open). Its clients are the extension's open pages: tabs and popups.
+    if (contextType === "background" && !("clients" in globalThis)) {
+        const toClient = context => ({
+            id: String(context.contextId),
+            url: context.documentUrl,
+            type: "window",
+            frameType: "top-level",
+            visibilityState: "visible",
+            focused: false,
+            focus: async () => {
+                if (context.tabId >= 0)
+                    await chrome.tabs.update(context.tabId, { active: true });
+                return toClient(context);
+            },
+            navigate: async url => {
+                if (context.tabId >= 0)
+                    await chrome.tabs.update(context.tabId, { url: new URL(url, location.href).href });
+                return toClient({ ...context, documentUrl: url });
+            },
+            postMessage: () => {},
+        });
+        const windowClients = async () => (await chrome.runtime.getContexts({ contextTypes: ["TAB", "POPUP"] }))
+            .filter(context => context.documentUrl)
+            .map(toClient);
+        Object.defineProperty(globalThis, "clients", {
+            value: Object.freeze({
+                matchAll: async (options = {}) => (options.type && options.type !== "window" && options.type !== "all") ? [] : windowClients(),
+                get: async id => (await windowClients()).find(client => client.id === String(id)),
+                claim: async () => {},
+                openWindow: async url => {
+                    const tab = await chrome.tabs.create({ url: new URL(url, location.href).href });
+                    return toClient({ contextId: `tab-${tab.id}`, documentUrl: tab.url || url, tabId: tab.id });
+                },
+            }),
+            writable: true,
+            configurable: true,
+            enumerable: false,
+        });
+    }
+
     // An extension page tells the browser how big its document is, so a popup can fit it.
     if (contextType === "page" && globalThis.top === globalThis) {
         let reported = "";

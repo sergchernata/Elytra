@@ -127,6 +127,14 @@ void extension_contexts_message_each_other(WebView::HeadlessWebView& view, WebVi
 
     CHECK(report.get_object("later"sv).value_or({}).get_bool("later"sv).value_or(false));
     CHECK(report.get_object("promise"sv).value_or({}).get_bool("promised"sv).value_or(false));
+    // The background is a service worker to the extension: its clients are the extension's open pages.
+    auto clients = report.get_object("clients"sv).value_or({});
+    auto urls = clients.get_array("urls"sv).value_or({});
+    CHECK_EQ(urls.size(), 1u);
+    if (urls.size() == 1)
+        CHECK_EQ(urls.at(0).as_string(), "chrome-extension://cdolobjgkcakigekdnhmfeehpdacglmm/page.html"sv);
+    CHECK(clients.get_bool("visible"sv).value_or(false));
+    CHECK_EQ(string_in(clients, "missing"sv), "undefined"sv);
     CHECK_EQ(string_in(report, "unanswered"sv), "undefined"sv);
     CHECK_EQ(string_in(report, "callback"sv), "cb"sv);
     CHECK_EQ(string_in(report, "port"sv), R"([{"name":"lane","got":1},{"name":"lane","got":"two"}])"sv);

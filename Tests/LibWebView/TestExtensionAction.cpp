@@ -67,6 +67,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         // The manifest's button, before anything changes it.
         auto initial = action.state_for(extension_id);
         CHECK(initial.has_value());
+        // The manifest's name and title are messages (as 1Password's are): shown translated, never as __MSG_…__.
+        if (auto const* extension = harness.registry.find(extension_id))
+            CHECK_EQ(extension->display_name(), "Action test extension"sv);
         if (initial.has_value()) {
             CHECK_EQ(initial->title, "Default title"sv);
             CHECK_EQ(initial->popup.has_value() ? initial->popup->serialize() : String {}, MUST(String::formatted("chrome-extension://{}/popup.html", extension_id)));

@@ -191,7 +191,7 @@ public:
             text->addWidget(label);
         };
         if (auto const* extension = registry().find(notification.extension_id))
-            add_label(qstring_from_ak_string(extension->messages().substitute_manifest_messages(extension->manifest().name)), "source");
+            add_label(qstring_from_ak_string(extension->display_name()), "source");
         add_label(qstring_from_ak_string(notification.title), "title");
         add_label(qstring_from_ak_string(notification.message), "message");
         for (auto const& item : notification.items)

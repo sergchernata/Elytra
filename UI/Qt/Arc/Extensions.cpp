@@ -580,7 +580,7 @@ public:
                 QMenu menu;
                 auto const* extension = registry().find(id);
                 if (extension) {
-                    auto* name = menu.addAction(qstring_from_ak_string(extension->manifest().name));
+                    auto* name = menu.addAction(qstring_from_ak_string(extension->display_name()));
                     name->setEnabled(false);
                     menu.addSeparator();
                 }
@@ -1045,7 +1045,7 @@ private:
                 return;
             }
             self->m_store_input->clear();
-            self->set_status(result.value() ? QString("Added %1.").arg(qstring_from_ak_string(result.value()->manifest().name)) : QString("Added."));
+            self->set_status(result.value() ? QString("Added %1.").arg(qstring_from_ak_string(result.value()->display_name())) : QString("Added."));
         },
             AK::move(confirm));
     }
@@ -1117,7 +1117,7 @@ void install_extensions_ui()
         if (wanted.isEmpty())
             return on_answer(false);
 
-        auto name = qstring_from_ak_string(extension.manifest().name).simplified().left(80);
+        auto name = qstring_from_ak_string(extension.display_name()).simplified().left(80);
         auto* box = new QMessageBox(QMessageBox::Question, "Extension Permissions",
             QString("\u201C%1\u201D asks to:\n\n\u2022 %2").arg(name, wanted.join("\n\u2022 ")),
             QMessageBox::Yes | QMessageBox::No, Application::the().non_private_window_if_any());
@@ -1138,10 +1138,10 @@ void install_extensions_ui()
         box->open();
     };
     runtime().confirm_uninstall = [](WebView::Extension const& extension, WebView::Extension const* requester, Function<void(bool)> on_answer) {
-        auto name = qstring_from_ak_string(extension.manifest().name).simplified().left(80);
+        auto name = qstring_from_ak_string(extension.display_name()).simplified().left(80);
         // When another extension asks, the question says so.
         auto question = requester
-            ? QString("\u201C%1\u201D wants to remove \u201C%2\u201D. Remove it?").arg(qstring_from_ak_string(requester->manifest().name).simplified().left(80), name)
+            ? QString("\u201C%1\u201D wants to remove \u201C%2\u201D. Remove it?").arg(qstring_from_ak_string(requester->display_name()).simplified().left(80), name)
             : QString("Remove \u201C%1\u201D?").arg(name);
         auto* box = new QMessageBox(QMessageBox::Question, "Remove Extension", question, QMessageBox::Yes | QMessageBox::No, Application::the().non_private_window_if_any());
         box->setTextFormat(Qt::PlainText);

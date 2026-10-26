@@ -1,6 +1,7 @@
 {
     "manifest_version": 3,
-    "name": "Action test extension",
+    "name": "__MSG_extName__",
+    "default_locale": "en",
     "version": "1.0",
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvQpMWuf6ZfzkVmEOp6XqgCMhURL4RHbngdsu6q6eCsyZ9KAZBz5VaDo/Y5JfhqtD0ix3oMEFYt7cRxQKJA+bfxaX3N+C8AjoooRd3lJBEOr4MkBC0jNsEJeBytiTP3q5mgNZIEXKK0cG69CpGoS8jKDZpatGplUsPa+zxTgNmmUYIHqYo5kR+TO3FwoHV6WnxlmB70z5pa7biM3mufk/+F+pQi/8Y7sIB29CnFwBwuWEEyU4zD2acnl4X9Xz9VMI8EwwUD0vG0TSW/Y3u34k5xXQsNtyyvFjfRXDcfIVmWLzFtzQbjv8WmWr75mwoDAehajX8bb3mD9WaiOeg1SyQwIDAQAB",
     "permissions": ["storage"],
@@ -8,7 +9,7 @@
         "service_worker": "background.js"
     },
     "action": {
-        "default_title": "Default title",
+        "default_title": "__MSG_title__",
         "default_popup": "popup.html",
         "default_icon": {
             "16": "icons/16.png",

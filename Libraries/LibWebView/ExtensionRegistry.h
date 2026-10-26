@@ -33,6 +33,8 @@ public:
     ByteString const& root() const { return m_root; }
     WebExtensions::Manifest const& manifest() const { return m_manifest; }
     WebExtensions::MessageCatalog const& messages() const { return m_messages; }
+    // The name to show: the manifest's, its __MSG_…__ messages translated.
+    String display_name() const { return m_messages.substitute_manifest_messages(m_manifest.name); }
 
     // The extension's file, read whole, or nothing when it isn't one of its files.
     Optional<String> read_file(StringView path) const;

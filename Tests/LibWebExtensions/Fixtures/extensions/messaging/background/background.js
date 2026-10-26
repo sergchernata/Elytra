@@ -16,6 +16,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.kind === "promise")
         return Promise.resolve({ promised: true });
+    // A service worker's clients (1Password asks which of its pages are open).
+    if (message.kind === "clients") {
+        (async () => {
+            const windows = await clients.matchAll({ type: "window" });
+            await clients.claim();
+            sendResponse({
+                urls: windows.map(client => client.url),
+                visible: windows.every(client => client.visibilityState === "visible" && client.type === "window"),
+                missing: String(await clients.get("no-such-client")),
+            });
+        })();
+        return true;
+    }
     // Anything else goes unanswered.
 });
 
