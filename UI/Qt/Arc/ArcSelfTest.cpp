@@ -1297,6 +1297,13 @@ void SelfTest::the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the
     auto toolbar_color = sample(toolbar, QPoint(toolbar->width() / 2 + 200, 3));
     auto difference = qAbs(sidebar_color.red() - toolbar_color.red()) + qAbs(sidebar_color.green() - toolbar_color.green()) + qAbs(sidebar_color.blue() - toolbar_color.blue());
     check(difference <= 6, "the docked sidebar is the toolbar's color", QString("%1 vs %2").arg(sidebar_color.name(), toolbar_color.name()));
+    // Nor is the corner where the page's frame meets the sidebar at the bottom of the window (upstream paints it the
+    // darker tab strip color its own sidebar has).
+    if (tab) {
+        auto corner_color = sample(tab, QPoint(1, tab->height() - 2));
+        auto corner_difference = qAbs(corner_color.red() - sidebar_color.red()) + qAbs(corner_color.green() - sidebar_color.green()) + qAbs(corner_color.blue() - sidebar_color.blue());
+        check(corner_difference <= 6, "and the page's bottom corner beside the sidebar is too", QString("%1 vs %2").arg(corner_color.name(), sidebar_color.name()));
+    }
 
     // Its toggle's icon is as tall as the toolbar's (the back button's).
     auto toggle_icon = painted_bounds_of(*s().m_sidebar_toggle);

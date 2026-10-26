@@ -3053,13 +3053,22 @@ void ArcSidebar::inset_toolbar(QWidget& toolbar)
 // The sidebar toggle's place in the window, docked: beside the real window controls (see place_window_controls()).
 QRect ArcSidebar::docked_toggle_rect() const
 {
+    // Mid-animation, where it was as the animation began: the window buttons it's measured from can shift as the
+    // window lays itself out, and the toggle would jitter with them.
+    if ((m_active_transition != Transition::None || m_pending_transition != Transition::None) && m_docked_toggle_rect_cache.has_value())
+        return *m_docked_toggle_rect_cache;
     auto size = m_sidebar_toggle->size();
     auto rects = m_window ? native_window_control_rects(*m_window) : QList<QRectF> {};
-    if (rects.size() != 3)
-        return QRect(QPoint(m_traffic_lights->width() + FLOATING_LIGHTS_INSET + 12, (TOP_STRIP_HEIGHT - size.height()) / 2 + 2), size);
-    auto diameter = m_traffic_lights->diameter();
-    auto lights_left = qRound(rects[0].center().x() - 1 - diameter / 2.0);
-    return QRect(QPoint(lights_left + m_traffic_lights->width() + 11, qRound(rects[0].center().y() - size.height() / 2.0)), size);
+    QRect rect;
+    if (rects.size() != 3) {
+        rect = QRect(QPoint(m_traffic_lights->width() + FLOATING_LIGHTS_INSET + 12, (TOP_STRIP_HEIGHT - size.height()) / 2 + 2), size);
+    } else {
+        auto diameter = m_traffic_lights->diameter();
+        auto lights_left = qRound(rects[0].center().x() - 1 - diameter / 2.0);
+        rect = QRect(QPoint(lights_left + m_traffic_lights->width() + 11, qRound(rects[0].center().y() - size.height() / 2.0)), size);
+    }
+    m_docked_toggle_rect_cache = rect;
+    return rect;
 }
 
 // Hidden, at the window's left edge, level with its docked place (the window buttons are hidden then).

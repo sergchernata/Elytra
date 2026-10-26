@@ -393,6 +393,7 @@ void install()
     route_links_from_other_apps_to_little_arc();
     install_extensions_ui();
     Tab::animates_loading_spinner = false;
+    Tab::sidebar_is_chrome_colored = true;
     // The sidebar's windows line the toolbar's buttons up with the page from the start, rather than correcting
     // upstream's margin once it's laid out (a frame could show at upstream's, making the buttons jump).
     Tab::toolbar_left_margin = [](BrowserWindow& window) -> Optional<int> {

@@ -330,6 +330,7 @@ private:
     int m_transition_width_to { 0 };
     class SymbolButton* m_sidebar_toggle { nullptr };
     qreal m_transition_progress { 0 };
+    mutable Optional<QRect> m_docked_toggle_rect_cache;
     class SymbolButton* m_window_toggle { nullptr }; // The toggle while the sidebar is hidden: see current_toggle_rect().
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };

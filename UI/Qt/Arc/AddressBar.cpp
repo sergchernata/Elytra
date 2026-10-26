@@ -133,19 +133,18 @@ void AddressBar::relayout()
     m_shown_rest.clear();
     m_icon_rect = {};
     m_text_rect = {};
-    if (m_parts.host.isEmpty())
-        return;
 
     QFontMetricsF host_metrics(host_font());
     QFontMetricsF rest_metrics(rest_font());
-    // The icon's hover pill is wider than the icon: leave room for it at either edge.
+    // The icon's hover pill is wider than the icon: leave room for it at either edge. The placeholder has none:
+    // there's nothing to copy.
     auto edge = (height() - 4.0 - ICON_SIZE) / 2;
-    auto icon_width = m_link_icon_shown ? ICON_SIZE + ICON_GAP : 0;
+    auto icon_width = m_link_icon_shown && !shows_placeholder() ? ICON_SIZE + ICON_GAP : 0;
     auto available = width() - edge * 2 - icon_width - PILL_PADDING * 2.0;
     if (available <= 0)
         return;
 
-    m_shown_host = m_parts.host;
+    m_shown_host = shows_placeholder() ? QString::fromUtf8(PLACEHOLDER) : m_parts.host;
     m_shown_rest = m_parts.rest;
     auto host_width = host_metrics.horizontalAdvance(m_shown_host);
     if (host_width + rest_metrics.horizontalAdvance(m_shown_rest) > available) {
@@ -173,7 +172,7 @@ void AddressBar::relayout()
     auto left = qBound(edge, center - content_width / 2.0, qMax(edge, width() - content_width));
 
     auto middle = height() / 2.0;
-    if (m_link_icon_shown)
+    if (icon_width > 0)
         m_icon_rect = QRectF(left, middle - ICON_SIZE / 2.0, ICON_SIZE, ICON_SIZE);
     auto text_height = qMax(host_metrics.height(), rest_metrics.height());
     m_text_rect = QRectF(left + icon_width + PILL_PADDING, middle - text_height / 2.0, text_width, text_height);
@@ -330,7 +329,7 @@ void AddressBar::paintEvent(QPaintEvent*)
     }
 
     painter.setFont(host_font());
-    painter.setPen(host_color);
+    painter.setPen(shows_placeholder() ? rest_color : host_color);
     QFontMetricsF host_metrics(host_font());
     painter.drawText(m_text_rect, Qt::AlignLeft | Qt::AlignVCenter, m_shown_host);
     if (!m_shown_rest.isEmpty()) {

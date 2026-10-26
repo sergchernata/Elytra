@@ -172,6 +172,9 @@ public:
     static inline Function<bool(Tab&)> on_focus_location_editor;
     // Fork hook (Arc): the sidebar shows no loading spinner, so the tab doesn't animate one (it ticked every 80 ms).
     static inline bool animates_loading_spinner = true;
+    // Fork hook (Arc): the sidebar beside the page is the chrome's color (as the frame around the page is), not the
+    // darker tab strip's: the frame's bottom corner needn't reach around the page's.
+    static inline bool sidebar_is_chrome_colored = false;
     // Fork hook (Arc): the toolbar's left margin, if not upstream's (the Arc sidebar lines its buttons up with the page).
     static inline Function<Optional<int>(BrowserWindow&)> toolbar_left_margin;
     // Fork hook (Arc profiles): creates the view of a tab coming back (restored from the last session, or a closed tab

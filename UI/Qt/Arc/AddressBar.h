@@ -40,8 +40,10 @@ public:
     // Takes the place of `edit` in its layout, showing the URL it holds. Returns the one already there, if any.
     static AddressBar* replace(LocationEdit& edit);
 
-    // Empty for none (the new tab page): nothing shows.
+    // Empty for none (the new tab page): the placeholder shows, as in Arc, and clicking it edits.
     void set_url(QUrl const&);
+    static constexpr auto PLACEHOLDER = "Search or Enter URL…";
+    bool shows_placeholder() const { return m_parts.host.isEmpty(); }
     QUrl url() const { return m_url; }
 
     // Little Arc shows the link icon as a button of its own (see copy_url()); the URL is then alone, centered.

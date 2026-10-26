@@ -397,20 +397,36 @@ TEST_CASE(address_bar_drops_the_path_before_the_host_when_narrow)
     EXPECT(!bar.shown_rest().endsWith(QChar(0x2026)) && bar.shown_rest().startsWith("/a/very"));
 }
 
-TEST_CASE(address_bar_shows_nothing_without_a_url)
+// As in Arc, a tab with no page (the new tab page) shows a placeholder to click, which opens the command bar.
+TEST_CASE(address_bar_shows_a_placeholder_without_a_url)
 {
     AddressBar bar;
     bar.resize(600, AddressBar::HEIGHT);
     bar.set_url(QUrl("https://example.com/x"));
     EXPECT(!bar.text_rect().isEmpty());
+    EXPECT(!bar.shows_placeholder());
     bar.set_url(QUrl());
-    EXPECT(bar.text_rect().isEmpty() && bar.icon_rect().isEmpty() && bar.pill_rect().isEmpty());
+    EXPECT(bar.shows_placeholder());
+    EXPECT(bar.shown_host() == AddressBar::PLACEHOLDER);
+    EXPECT(bar.shown_rest().isEmpty());
+    // Centered, with no link icon (there's nothing to copy).
+    EXPECT(bar.icon_rect().isEmpty() && bar.icon_pill_rect().isEmpty());
+    EXPECT(!bar.text_rect().isEmpty() && qAbs(bar.pill_rect().center().x() - 300) < 2);
 
-    // Clicking where the URL was does nothing.
+    // Clicking it edits, as clicking a URL does.
     int edits = 0;
+    int copies = 0;
     QObject::connect(&bar, &AddressBar::edit_requested, [&] { ++edits; });
-    click(bar, QPointF(300, AddressBar::HEIGHT / 2.0));
-    EXPECT(edits == 0);
+    QObject::connect(&bar, &AddressBar::url_copied, [&] { ++copies; });
+    click(bar, bar.text_rect().center());
+    EXPECT(edits == 1);
+    // And there's nothing to copy.
+    bar.copy_url();
+    EXPECT(copies == 0 && !bar.shows_copied());
+
+    // A page again: its URL, no placeholder.
+    bar.set_url(QUrl("https://example.com/y"));
+    EXPECT(!bar.shows_placeholder() && bar.shown_host() == "example.com");
 }
 
 TEST_CASE(address_bar_hover_pills_follow_the_mouse)

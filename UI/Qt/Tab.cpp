@@ -1880,6 +1880,8 @@ void Tab::paintEvent(QPaintEvent*)
 
     if (!m_web_view_chrome_visible || !m_web_view_sidebar_position.has_value() || !is_loaded())
         return;
+    if (sidebar_is_chrome_colored) // Fork hook (Arc): nothing for the corner to reach around.
+        return;
 
     // At the bottom of the window, the sidebar's color reaches around the web view's rounded corner beside it, so the
     // inset bends around that corner rather than meeting the sidebar in a square corner. At the top, the inset joins
