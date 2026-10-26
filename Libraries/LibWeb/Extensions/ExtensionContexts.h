@@ -12,6 +12,7 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/DocumentReadyState.h>
+#include <LibURL/Forward.h>
 #include <LibWebCommon/HTML/CrossProcessId.h>
 
 // The extension contexts of this process: the chrome.* API in installed extensions' own pages, and their content
@@ -24,6 +25,10 @@ WEB_API void set_installed_extensions(StringView json);
 // The content security policies an installed extension's pages and workers run under: the manifest's (or Chrome's
 // default), and Chrome's minimum, which applies whatever the manifest says. Nothing for an extension that isn't installed.
 WEB_API Vector<String> content_security_policies_for(StringView extension_id);
+
+// As in Chrome, an extension's own pages and background read what its host permissions cover without CORS: whether a
+// request from `requester` to `url` does (only in the process of that extension's pages, which the browser tells).
+bool reads_without_cors(URL::Origin const& requester, URL::URL const& url);
 
 // A message from the browser to a context.
 WEB_API void deliver_message(u64 context_id, String const& message);

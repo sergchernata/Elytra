@@ -437,6 +437,8 @@ void ManagementAPI::register_permissions_functions()
                 append_unique(state.granted_origins, origin);
             save_state(id);
             runtime().dispatch_event(id, "permissions.onAdded"sv, JsonArray { Vector<JsonValue> { permission_set_json(new_permissions, new_origins) } });
+            if (!new_origins.is_empty())
+                runtime().host_access_changed(id);
             reply(JsonValue { true });
         });
     });
@@ -487,6 +489,8 @@ void ManagementAPI::register_permissions_functions()
         if (!removed_permissions.is_empty() || !removed_origins.is_empty()) {
             save_state(extension->id());
             runtime().dispatch_event(extension->id(), "permissions.onRemoved"sv, JsonArray { Vector<JsonValue> { permission_set_json(removed_permissions, removed_origins) } });
+            if (!removed_origins.is_empty())
+                runtime().host_access_changed(extension->id());
         }
         reply(JsonValue { true });
     });

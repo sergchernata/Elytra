@@ -830,8 +830,14 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host(C
         page->client().set_has_hosted_local_file_content();
     if (auto const& web_ui_host = document.web_ui_host(); web_ui_host.has_value())
         page->client().set_hosted_web_ui(*web_ui_host);
-    if (auto const& extension_host = document.extension_host(); extension_host.has_value())
+    if (auto const& extension_host = document.extension_host(); extension_host.has_value()) {
+        auto newly_hosted = page->client().hosted_extension() != *extension_host;
         page->client().set_hosted_extension(*extension_host);
+        // The page was told of the installed extensions as it was made; now it hosts one, again with what the
+        // extension may reach (ExtensionRuntime::installed_extensions_for()).
+        if (newly_hosted)
+            page->async_set_installed_extensions(Application::extension_runtime().installed_extensions_for(*page));
+    }
     return page;
 }
 

@@ -520,6 +520,15 @@ void forged_reports_are_refused(Core::AnonymousBuffer const& theme, WebView::Hea
 }
 
 // The other extension has webRequest without webRequestAuthProvider, and host access to 127.0.0.1 only.
+// As in Chrome, an extension's own pages read what its host permissions cover without CORS (1Password's servers send
+// no CORS headers); anywhere else CORS still holds.
+void extension_pages_read_their_hosts_without_cors(WebView::HeadlessWebView& view, TestServer& server)
+{
+    auto report = report_of(view, url(ByteString::formatted("chrome-extension://{}/page.html?server={}&alt={}", other_id, server.origin(), server.alt_origin())));
+    CHECK_EQ(string_in(report, "permitted"sv), "read"sv);
+    CHECK_EQ(string_in(report, "not_permitted"sv), "blocked"sv);
+}
+
 void other_extensions_see_only_their_share(WebView::HeadlessWebView& view, TestServer const& server)
 {
     auto report = report_of(view, url(ByteString::formatted("chrome-extension://{}/page.html", other_id)));
@@ -583,5 +592,6 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         private_windows_have_no_extensions(theme, harness.view, server);
         forged_reports_are_refused(theme, harness.view, server);
         other_extensions_see_only_their_share(harness.view, server);
+        extension_pages_read_their_hosts_without_cors(harness.view, server);
     });
 }

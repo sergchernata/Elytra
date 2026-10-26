@@ -22,6 +22,7 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibTextCodec/Encoder.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/Extensions/ExtensionContexts.h>
 #include <LibWeb/Extensions/WebRequests.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/Document.h>
@@ -606,8 +607,14 @@ GC::Ptr<PendingResponse> main_fetch(JS::Realm& realm, Infrastructure::FetchParam
             && request->current_url().scheme() == "file"sv
             && request->destination() == Infrastructure::Request::Destination::Font;
 
+        // Fork hook (extensions): as in Chrome, an extension's own pages and background read what its host permissions
+        //     cover as if it were their own origin, without CORS (1Password's servers send no CORS headers).
+        auto is_extension_host_access = origin && request->response_tainting() == Infrastructure::Request::ResponseTainting::Basic
+            && Extensions::reads_without_cors(*origin, request->current_url());
+
         if (
             (origin && request->current_url().origin().is_same_origin(*origin) && request->response_tainting() == Infrastructure::Request::ResponseTainting::Basic)
+            || is_extension_host_access
             || is_file_to_file_font_load
             || request->current_url().scheme() == "data"sv
             || (request->mode() == Infrastructure::Request::Mode::Navigate || request->mode() == Infrastructure::Request::Mode::WebSocket)) {

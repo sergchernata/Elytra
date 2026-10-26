@@ -59,6 +59,7 @@ Chrome extensions (Documentation/Elytra/WebExtensions.md) live in `Libraries/Lib
 | `LibURL/Rust/src/origin.rs` | `chrome-extension://<id>` URLs have a tuple origin (only for extension IDs), and so do blob URLs they make |
 | `LibWebCommon/Fetch/Infrastructure/URL.h`, `SecureContexts/AbstractOperations.cpp` | `chrome-extension` is a fetch scheme, and potentially trustworthy |
 | `LibWeb/Fetch/Fetching/Fetching.cpp` | CORS requests to `chrome-extension` go on to scheme fetch, which hands them to `ResourceLoader`; `LoadRequest` gets the requester's origin |
+| `LibWeb/Fetch/Fetching/Fetching.cpp` (host access) | `is_extension_host_access` in main fetch's same-origin branch: an extension's own pages read what its host permissions cover without CORS (`Extensions::reads_without_cors()`) |
 | `LibWeb/ContentSecurityPolicy/FetchIntegration.cpp` | `bypasses_content_security_policy()` at the top of the request and response checks: `chrome-extension` files aren't held to a document's CSP, as in Chrome (1Password's connect-src lists only its servers) |
 | `LibWeb/Loader/{FileRequest.h,LoadRequest.h,ResourceLoader.cpp}` | `chrome-extension` loads are file requests naming an `ExtensionFile`; responses carry the extension's CSP |
 | `LibWeb/DOM/Document.cpp` | `Extensions::document_is_ready_to_run_scripts()` in `set_ready_to_run_scripts()`, `document_readiness_changed()` in `update_readiness()`, `document_is_going_away()` in `destroy()` and `did_stop_being_active_document_in_navigable()` |

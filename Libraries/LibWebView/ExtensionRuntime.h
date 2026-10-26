@@ -159,6 +159,8 @@ public:
     static bool is_private_page(WebContentPage const&);
     // The installed extensions, as a page is told of them (ExtensionRegistry::serialize_for_renderers()).
     String installed_extensions_for(WebContentPage const&) const;
+    // The extension's host access changed (permissions granted or removed): its pages' processes hear of it.
+    void host_access_changed(StringView extension_id);
 
     // Uses up the user's transient activation of the context's page, as the browser saw it (not as the renderer claims
     // it): for what Chrome allows only during a user gesture. Only an extension page or popup the user is using has it.

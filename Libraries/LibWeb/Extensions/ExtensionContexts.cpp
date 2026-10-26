@@ -92,6 +92,9 @@ struct Context {
 // Never destroyed: contexts hold GC roots, which must not outlive the heap.
 static Vector<InstalledExtension>& s_extensions = *new Vector<InstalledExtension>;
 static HashMap<u64, Context>& s_contexts = *new HashMap<u64, Context>;
+// In the process of an extension's own pages: that extension, and the hosts it may reach.
+static Optional<String>& s_host_access_extension = *new Optional<String>;
+static WebExtensions::MatchPatternSet& s_host_access_patterns = *new WebExtensions::MatchPatternSet;
 static u64 s_next_context_id = 1;
 
 static Vector<String> strings_in(JsonObject const& object, StringView key)
@@ -130,6 +133,11 @@ static WebExtensions::MatchPatternSet patterns_in(JsonObject const& object, Stri
             set.add(pattern.release_value());
     }
     return set;
+}
+
+static bool find_extension_in(Vector<InstalledExtension> const& extensions, StringView id)
+{
+    return any_of(extensions, [&](auto const& extension) { return extension.id == id; });
 }
 
 void set_installed_extensions(StringView json)
@@ -183,6 +191,27 @@ void set_installed_extensions(StringView json)
         });
     }
     s_extensions = move(extensions);
+
+    s_host_access_extension = {};
+    s_host_access_patterns = {};
+    if (auto host_access = parsed.value().as_object().get_object("hostAccess"sv); host_access.has_value()) {
+        if (auto extension = host_access->get_string("extension"sv); extension.has_value() && find_extension_in(s_extensions, *extension)) {
+            s_host_access_extension = *extension;
+            s_host_access_patterns = patterns_in(*host_access, "patterns"sv);
+        }
+    }
+}
+
+bool reads_without_cors(URL::Origin const& requester, URL::URL const& url)
+{
+    // Only the extension this process hosts, and only from its own origin: a content script's requests are the page's.
+    if (!s_host_access_extension.has_value() || requester.is_opaque() || requester.scheme() != "chrome-extension"sv)
+        return false;
+    if (requester.host().serialize() != *s_host_access_extension)
+        return false;
+    if (!url.scheme().is_one_of("http"sv, "https"sv, "ws"sv, "wss"sv))
+        return false;
+    return s_host_access_patterns.matches_ignoring_path(url);
 }
 
 static InstalledExtension const* find_extension(StringView id)

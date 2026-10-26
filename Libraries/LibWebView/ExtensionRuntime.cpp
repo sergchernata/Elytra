@@ -78,7 +78,37 @@ String ExtensionRuntime::installed_extensions_for(WebContentPage const& page) co
 {
     if (is_private_page(page))
         return R"({"extensions":[]})"_string;
-    return m_registry.serialize_for_renderers();
+    auto installed = m_registry.serialize_for_renderers();
+    // The process of an extension's own pages also learns the hosts the extension may reach: its pages and background
+    // read them without CORS, as in Chrome. No other process does.
+    auto const& hosted = page.is_open() ? page.client().hosted_extension() : Optional<String> {};
+    if (!hosted.has_value() || !m_management || !m_registry.find(*hosted))
+        return installed;
+    auto parsed = JsonParser::parse(installed);
+    if (parsed.is_error() || !parsed.value().is_object())
+        return installed;
+    JsonArray patterns;
+    for (auto const& pattern : m_management->host_permission_patterns(*hosted))
+        patterns.must_append(pattern);
+    JsonObject host_access;
+    host_access.set("extension"sv, *hosted);
+    host_access.set("patterns"sv, move(patterns));
+    auto object = parsed.release_value().as_object();
+    object.set("hostAccess"sv, move(host_access));
+    return object.serialized();
+}
+
+void ExtensionRuntime::host_access_changed(StringView extension_id)
+{
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        if (client.hosted_extension() != extension_id)
+            return IterationDecision::Continue;
+        client.for_each_page([&](WebContentPage& page) {
+            page.async_set_installed_extensions(installed_extensions_for(page));
+            return IterationDecision::Continue;
+        });
+        return IterationDecision::Continue;
+    });
 }
 
 void ExtensionRuntime::context_created(WebContentPage& page, u64 page_context_id, String extension_id, String type, URL::URL url, bool is_top_level)
