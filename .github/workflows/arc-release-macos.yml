@@ -2,7 +2,7 @@
 #
 # Runs when a tag named arc-v* is pushed (the release takes the tag's name), or by hand from the Actions tab
 # (the release is tagged arc-<date>-<commit>). Uses upstream's setup, cache and packaging steps (see
-# lagom-template.yml), so it keeps working as those change.
+# build-and-test.yml), so it keeps working as those change.
 
 name: Arc release (macOS, Apple Silicon)
 
