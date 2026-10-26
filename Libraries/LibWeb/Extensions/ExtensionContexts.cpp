@@ -444,8 +444,17 @@ static void run_content_scripts(DOM::Document& document, RunAt run_at)
     }
 }
 
+// An SVG image's document (an <img> of an .svg, a CSS background) lives in a page of its own, out of sight. Like
+// Chrome, extensions don't see it: no content scripts, no navigation events.
+static bool is_image_document(DOM::Document const& document)
+{
+    return document.page().client().is_svg_page_client();
+}
+
 void document_is_ready_to_run_scripts(DOM::Document& document)
 {
+    if (is_image_document(document))
+        return;
     report_navigation(document, "committed"sv);
     auto const& url = document.url();
     // A sandboxed page of the extension's (sandbox.pages) has an opaque origin, and no extension API, as in Chrome.
@@ -464,6 +473,8 @@ void document_is_ready_to_run_scripts(DOM::Document& document)
 
 void document_readiness_changed(DOM::Document& document, HTML::DocumentReadyState readiness)
 {
+    if (is_image_document(document))
+        return;
     if (readiness == HTML::DocumentReadyState::Interactive) {
         report_navigation(document, "dom_content_loaded"sv);
         run_content_scripts(document, RunAt::DocumentEnd);

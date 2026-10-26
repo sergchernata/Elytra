@@ -400,6 +400,21 @@ void worlds_dont_reach_each_other_through_what_the_engine_makes(WebView::Headles
 }
 
 // Without the user's say-so, an extension doesn't run in local files.
+// An SVG image has a document of its own, in a hidden page. As in Chrome, content scripts don't run in it, even ones
+// for all frames and every URL; starting one there used to crash the page's process.
+void content_scripts_stay_out_of_svg_images(WebView::HeadlessWebView& view, WebView::ExtensionRegistry& registry, ByteString const& directory)
+{
+    registry.set_allows_file_access("iddkbbabicabfpdhkbacpbomdcghloaj"sv, true);
+    write_temporary_file(directory, "picture.svg"sv, R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="green"/></svg>)"sv);
+    // Named so the fixture's end.js, which would report in the title, leaves it alone.
+    auto page = write_temporary_file(directory, "excluded.html"sv, R"html(<!doctype html><body>
+        <img src="picture.svg" onload="setTimeout(() => document.title = JSON.stringify({ width: this.naturalWidth, isolated: typeof window.isolatedValue }), 200)">
+    )html"sv);
+    auto report = report_of(view, url(ByteString::formatted("file://{}", page)));
+    CHECK_EQ(report.get_integer<i64>("width"sv).value_or(-1), 40);
+    CHECK_EQ(string_in(report, "isolated"sv), "undefined"sv);
+}
+
 void content_scripts_stay_out_of_local_files_unless_allowed(WebView::HeadlessWebView& view, WebView::ExtensionRegistry& registry, ByteString const& directory)
 {
     registry.set_allows_file_access("iddkbbabicabfpdhkbacpbomdcghloaj"sv, false);
@@ -898,6 +913,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         extension_pages_get_the_chrome_api(harness.view, harness.registry);
         extension_contexts_message_each_other(harness.view, harness.registry);
         content_scripts_run_in_their_own_world(harness.view, harness.registry, harness.directory);
+        content_scripts_stay_out_of_svg_images(harness.view, harness.registry, harness.directory);
         content_scripts_stay_out_of_local_files_unless_allowed(harness.view, harness.registry, harness.directory);
         worlds_dont_reach_each_other_through_the_dom(harness.view, harness.registry, harness.directory);
         worlds_dont_reach_each_other_through_what_the_engine_makes(harness.view, harness.registry, harness.directory);
