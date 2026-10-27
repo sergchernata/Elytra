@@ -20,6 +20,7 @@ namespace Ladybird::Arc {
 
 static constexpr qreal TILE_RADIUS = 12;
 static constexpr int ICON_SIZE = 16;
+static constexpr qreal INNER_INSET = 2;
 static constexpr int EMPHASIS_MS = 140;
 static constexpr int LIFT_MS = 160;
 
@@ -201,41 +202,47 @@ void FavoriteTile::paintEvent(QPaintEvent*)
     shape.addRoundedRect(bounds, TILE_RADIUS, TILE_RADIUS);
     painter.setClipPath(shape);
 
-    auto emphasis = qMin<qreal>(1, m_emphasis + m_lift * 0.35);
+    // Hovered is the first half of the emphasis, active (the tile of the tab shown) the second.
+    auto hovered = qMin<qreal>(1, qMin<qreal>(m_emphasis, 0.5) * 2 + m_lift * 0.6);
+    auto active = qBound<qreal>(0, (m_emphasis - 0.5) * 2, 1);
 
-    // The favicon's wash of color.
+    // Every tile: a see-through white fill, a little lighter while hovered (or lifted).
+    auto rest = m_dark ? 0.09 : 0.45;
+    auto hover = m_dark ? 0.14 : 0.62;
+    painter.fillRect(bounds, QColor::fromRgbF(1, 1, 1, rest + (hover - rest) * hovered));
+
+    // Only the active tile: its favicon's wash of color, with a softer fill set in from its edge over it, so the
+    // color shows as a rim.
     auto dpr = devicePixelRatioF();
-    auto device_size = (bounds.size() * dpr).toSize();
-    if (icon().cacheKey() != m_backdrop_key || device_size != m_backdrop_size) {
-        m_backdrop_key = icon().cacheKey();
-        m_backdrop_size = device_size;
-        m_backdrop = backdrop_for(icon(), device_size);
-    }
-    if (!m_backdrop.isNull()) {
-        painter.setOpacity(m_dark ? 0.2 + 0.6 * emphasis : 0.25 + 0.6 * emphasis);
-        painter.drawImage(bounds, m_backdrop);
+    if (active > 0) {
+        auto device_size = (bounds.size() * dpr).toSize();
+        if (icon().cacheKey() != m_backdrop_key || device_size != m_backdrop_size) {
+            m_backdrop_key = icon().cacheKey();
+            m_backdrop_size = device_size;
+            m_backdrop = backdrop_for(icon(), device_size);
+        }
+        painter.setOpacity(active);
+        if (!m_backdrop.isNull()) {
+            painter.drawImage(bounds, m_backdrop);
+            // Pastel, as Arc's is.
+            painter.fillRect(bounds, QColor::fromRgbF(1, 1, 1, m_dark ? 0.15 : 0.25));
+        }
+
+        auto inner = bounds.adjusted(INNER_INSET, INNER_INSET, -INNER_INSET, -INNER_INSET);
+        QPainterPath inner_shape;
+        inner_shape.addRoundedRect(inner, TILE_RADIUS - INNER_INSET, TILE_RADIUS - INNER_INSET);
+        // Calmed toward the sidebar's own color, then lit.
+        auto calm = palette().color(QPalette::Window);
+        calm.setAlphaF(m_backdrop.isNull() ? 0 : 0.75);
+        painter.fillPath(inner_shape, calm);
+        painter.fillPath(inner_shape, QColor::fromRgbF(1, 1, 1, m_dark ? 0.44 : 0.6));
         painter.setOpacity(1);
     }
-
-    // The white veil over it, lighter at the middle: the color shows most at the rim. Its strength goes from rest to
-    // hovered to checked as Arc's tiles do.
-    auto veil = [&] {
-        qreal rest = m_dark ? 0.09 : 0.45;
-        qreal hovered = m_dark ? 0.14 : 0.62;
-        qreal checked = m_dark ? 0.26 : 0.9;
-        if (emphasis <= 0.5)
-            return rest + (hovered - rest) * emphasis * 2;
-        return hovered + (checked - hovered) * (emphasis - 0.5) * 2;
-    }();
-    QRadialGradient gradient(bounds.center(), qMax(bounds.width(), bounds.height()) * 0.72);
-    gradient.setColorAt(0, QColor::fromRgbF(1, 1, 1, qMin<qreal>(1, veil * 1.3)));
-    gradient.setColorAt(1, QColor::fromRgbF(1, 1, 1, veil * 0.55));
-    painter.fillRect(bounds, gradient);
 
     // A faint rim of light.
     painter.setClipping(false);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor::fromRgbF(1, 1, 1, m_dark ? 0.06 + 0.06 * emphasis : 0.25 + 0.2 * emphasis), 1));
+    painter.setPen(QPen(QColor::fromRgbF(1, 1, 1, m_dark ? 0.06 * (1 - active) : 0.25 * (1 - active)), 1));
     painter.drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), TILE_RADIUS - 0.5, TILE_RADIUS - 0.5);
 
     // The favicon itself, sunk a touch while pressed.

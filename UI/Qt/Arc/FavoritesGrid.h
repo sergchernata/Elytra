@@ -1,8 +1,8 @@
 /*
  * Arc's favorites: a grid of four tiles to a row above the space's list.
  *
- * Each tile is backed, as in Arc, by its own favicon blown up and blurred into a wash of color, under a see-through
- * white veil that is lighter at the middle, so the color shows most at the rim.
+ * As in Arc, the active tile (the tab shown) is backed by its favicon blown up and blurred into a wash of color, with a
+ * softer fill set in from its edge over it, so the color shows as a rim. The others are a plain see-through white.
  *
  * A tile dragged along the grid lifts and follows the pointer while the others slide out of its way; let go, it
  * settles into the gap. A tab or link dragged over the grid from elsewhere opens a gap where it would land.
@@ -49,7 +49,7 @@ private:
 
     bool m_dark { false };
     bool m_hovered { false };
-    qreal m_emphasis { 0 }; // 0 at rest, 0.5 hovered, 1 checked: how much color and light the tile shows.
+    qreal m_emphasis { 0 }; // 0 at rest, 0.5 hovered, 1 checked (active).
     qreal m_lift { 0 };
     QVariantAnimation* m_emphasis_animation { nullptr };
     QVariantAnimation* m_lift_animation { nullptr };

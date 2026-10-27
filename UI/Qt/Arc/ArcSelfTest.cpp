@@ -776,24 +776,36 @@ void SelfTest::a_link_dropped_on_favorites_goes_where_the_gap_opens()
     rebuild_now();
 }
 
-// As in Arc: a tile is backed by its favicon blown up and blurred, under a white veil, so its color shows at the rim.
+// As in Arc: the active favorite's tile is backed by its favicon blown up and blurred, with a softer fill set in from
+// its edge, so the color shows as a rim. The others stay plain.
 void SelfTest::favorite_tiles_wear_their_favicons_color()
 {
-    auto rim_of = [](QIcon const& icon) {
+    struct Samples {
+        QColor rim;
+        QColor inside;
+    };
+    auto samples_of = [](QIcon const& icon, bool active) {
         FavoriteTile tile(nullptr);
         tile.resize(60, 54);
         tile.setIcon(icon);
         tile.set_dark(true);
-        tile.setChecked(true);
+        tile.setChecked(active);
         auto image = tile.grab().toImage();
-        return image.pixelColor(qRound(4 * image.devicePixelRatio()), image.height() / 2);
+        auto dpr = image.devicePixelRatio();
+        return Samples { image.pixelColor(qRound(1.2 * dpr), image.height() / 2), image.pixelColor(image.width() / 2, qRound(7 * dpr)) };
     };
+    auto redness = [](QColor const& color) { return color.red() - color.green(); };
     QPixmap red(32, 32);
     red.fill(QColor(230, 30, 30));
-    auto tinted = rim_of(QIcon(red));
-    check(tinted.red() > tinted.green() + 40, "a favorite's tile takes its favicon's color at the rim", tinted.name(QColor::HexArgb));
-    auto plain = rim_of(QIcon());
-    check(qAbs(plain.red() - plain.green()) < 8, "one without a favicon stays plain", plain.name(QColor::HexArgb));
+
+    auto active = samples_of(QIcon(red), true);
+    check(redness(active.rim) > 60, "the active favorite's tile takes its favicon's color at the rim", active.rim.name(QColor::HexArgb));
+    check(redness(active.inside) < redness(active.rim) / 2, "with a softer fill set in from the edge",
+        QString("%1 inside, %2 at the rim").arg(active.inside.name(QColor::HexArgb), active.rim.name(QColor::HexArgb)));
+    auto resting = samples_of(QIcon(red), false);
+    check(qAbs(redness(resting.rim)) < 8 && qAbs(redness(resting.inside)) < 8, "the others stay plain", resting.rim.name(QColor::HexArgb));
+    auto plain = samples_of(QIcon(), true);
+    check(qAbs(redness(plain.rim)) < 8, "as does an active one without a favicon", plain.rim.name(QColor::HexArgb));
 }
 
 // As in Arc: closing the current tab shows the tab shown before it (if it's still open), not its neighbor.
