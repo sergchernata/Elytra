@@ -2801,6 +2801,35 @@ void SelfTest::every_chrome_surface_takes_the_space_color()
     check(unpainted_in_fade.isEmpty() && untinted_in_fade.isEmpty(), "each step of the fade between spaces recolors all of it too",
         describe(unpainted_in_fade) + " " + describe(untinted_in_fade));
 
+    // On screen, too (a grab of the widgets draws them afresh): the strip between the sidebar and the page, and the
+    // page's rounded corners, are the sidebar's color, under a space color as under none.
+    if (auto* tab = window().current_tab(); tab && window().screen()) {
+        auto check_on_screen = [&](char const* what) {
+            settle(300);
+            auto image = window().screen()->grabWindow(window().winId()).toImage();
+            auto scale = image.devicePixelRatio();
+            auto sample = [&](QPoint in_window) {
+                return QColor(image.pixel(qRound(in_window.x() * scale), qRound(in_window.y() * scale)));
+            };
+            auto view = QRect(tab->view().mapTo(&window(), QPoint(0, 0)), tab->view().size());
+            auto sidebar = sample(QPoint(view.left() - 8, view.center().y()));
+            QStringList wrong;
+            auto expect_sidebar = [&](char const* where, QPoint point) {
+                auto color = sample(point);
+                if (qAbs(color.red() - sidebar.red()) + qAbs(color.green() - sidebar.green()) + qAbs(color.blue() - sidebar.blue()) > 6)
+                    wrong.append(QString("%1 %2").arg(where, color.name()));
+            };
+            expect_sidebar("strip", QPoint(view.left() - 2, view.center().y()));
+            expect_sidebar("top corner", QPoint(view.left() + 1, view.top() + 1));
+            expect_sidebar("bottom corner", QPoint(view.left() + 1, view.bottom() - 1));
+            check(wrong.isEmpty(), what, QString("sidebar %1; %2").arg(sidebar.name(), wrong.join(", ")));
+        };
+        s().apply_tint(QColor(200, 40, 160), 0.6);
+        check_on_screen("on screen, the page's edge and corners are the space's sidebar color");
+        s().apply_tint(s().space_color(), s().space_tint_amount());
+        check_on_screen("and back to the space's own color, they follow");
+    }
+
     // Only the tab shown restyles when the color changes; another takes the color as it's shown.
     QPointer<Tab> first = s().open_tab(page("Tint first"));
     QPointer<Tab> second = s().open_tab(page("Tint second"));

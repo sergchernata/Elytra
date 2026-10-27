@@ -3658,6 +3658,8 @@ static void restyle_tab(Tab& tab)
     notify_palette_change(&tab);
     for (auto* edit : tab.findChildren<LocationEdit*>())
         notify_palette_change(edit);
+    // The page view paints the chrome's color behind its rounded corners.
+    tab.view().update();
     tab.setProperty(TINT_GENERATION_PROPERTY, s_tint_generation);
 }
 
