@@ -17,11 +17,11 @@
 #include <QPointer>
 #include <QWidget>
 #include <UI/Qt/Arc/ArcShortcuts.h>
+#include <UI/Qt/Arc/FavoritesGrid.h>
 #include <UI/Qt/Arc/SidebarTree.h>
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Arc/SpaceStore.h>
 
-class QGridLayout;
 class QHBoxLayout;
 class QKeyEvent;
 class QLineEdit;
@@ -210,6 +210,7 @@ private:
     void schedule_rebuild();
     void rebuild();
     void rebuild_favorites();
+    void move_favorite_tile(int from, int to);
     void rebuild_tree();
     void fill_tree();
     void rebuild_switcher();
@@ -286,9 +287,8 @@ private:
     QWidget* m_bottom_edge_line { nullptr };
     QString m_tree_space_id;                // The space the list shows.
     QHash<QString, int> m_scroll_positions; // Each space's list scroll position.
-    QStringList m_favorite_ids;                       // What the favorite tiles show, in order.
-    QString m_favorite_style;
-    QList<QPointer<QToolButton>> m_favorite_buttons;
+    QStringList m_favorite_ids;             // What the favorite tiles show, in order.
+    QList<QPointer<FavoriteTile>> m_favorite_buttons;
     TabWidget& m_tabs;
     QString m_space_id;
     QHash<QString, QPointer<Tab>> m_last_tab_in_space;
@@ -302,8 +302,7 @@ private:
     bool m_player_waits_for_window_close { false };
 
     QWidget* m_top_strip { nullptr };
-    QWidget* m_favorites { nullptr };
-    QGridLayout* m_favorites_layout { nullptr };
+    FavoritesGrid* m_favorites { nullptr };
     QWidget* m_panel { nullptr };
     enum class Mode {
         Docked,

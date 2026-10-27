@@ -120,6 +120,7 @@ public:
     bool move_node(QString const& id, QString const& space_id, QString const& parent_id, int index);
 
     // Favorites
+    // `index` (and `new_index` below) count among the profile's own favorites; -1 is the end.
     QString add_favorite(QString url, QString title, int index = -1, QString profile = {});
     QList<Favorite> favorites_for_profile(QString const& profile) const;
     void remove_favorite(QString const& id);
@@ -165,6 +166,8 @@ private:
 
     QString m_path;
     QList<Space> m_spaces;
+    int favorite_position(QString const& profile, int index) const;
+
     QList<Favorite> m_favorites;
     QList<SessionEntry> m_session;
     QString m_last_active_space_id;

@@ -47,12 +47,14 @@
 #include <QImage>
 #include <QLabel>
 #include <QMessageBox>
+#include <QDragEnterEvent>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QKeyEvent>
 #include <QLayout>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QScrollBar>
@@ -196,6 +198,9 @@ private:
     void a_pinned_tab_that_redirects_isnt_away();
     void opening_a_folder_leaves_the_list_alone_while_it_slides();
     void favorites_never_overlap_when_they_change();
+    void favorites_reorder_by_dragging();
+    void a_link_dropped_on_favorites_goes_where_the_gap_opens();
+    void favorite_tiles_wear_their_favicons_color();
     void closing_a_tab_returns_to_the_one_before();
     void downloads_shelf_rows_rise_in();
     void leaving_a_playing_video_shows_it_in_picture_in_picture();
@@ -671,6 +676,124 @@ void SelfTest::favorites_never_overlap_when_they_change()
     s().rebuild_favorites();
     check(!tiles_overlap() && tiles_shown() == before, "removing one leaves the rest side by side", QString("%1 shown").arg(tiles_shown()));
     rebuild_now();
+}
+
+static QStringList favorite_ids(QString const& profile)
+{
+    QStringList ids;
+    for (auto const& favorite : SpaceStore::the().favorites_for_profile(profile))
+        ids.append(favorite.id);
+    return ids;
+}
+
+// As in Arc: a favorite dragged along the grid lifts and follows the pointer while the others slide out of its way; let
+// go, it settles there, and that's the new order. Dragging it doesn't open it.
+void SelfTest::favorites_reorder_by_dragging()
+{
+    s().switch_to_space(m_alpha);
+    auto profile = s().current_profile();
+    auto extra = SpaceStore::the().add_favorite(page("Fav D"), "Fav D", -1, profile);
+    rebuild_now();
+    auto ids = favorite_ids(profile);
+    auto tiles = s().m_favorite_buttons;
+    auto* grid = s().m_favorites;
+    if (tiles.size() < 3 || !tiles[0]) {
+        check(false, "there are favorites to drag", QString::number(tiles.size()));
+        SpaceStore::the().remove_favorite(extra);
+        return;
+    }
+    auto* current = window().current_tab();
+    auto* dragged = tiles[0].data();
+
+    auto send = [&](QEvent::Type type, QPoint grid_position) {
+        auto local = QPointF(dragged->mapFrom(grid, grid_position));
+        auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+        auto buttons = type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton;
+        QMouseEvent event(type, local, dragged->mapToGlobal(local), button, buttons, Qt::NoModifier);
+        QApplication::sendEvent(dragged, &event);
+    };
+    auto from = grid->slot_rect(0).center();
+    auto to = grid->slot_rect(2).center();
+    send(QEvent::MouseButtonPress, from);
+    for (int step = 1; step <= 10; ++step)
+        send(QEvent::MouseMove, from + (to - from) * step / 10);
+    settle(FavoritesGrid::MOVE_MS + 150);
+    check(dragged->lift() > 0.9 && grid->is_dragging_tile(), "a dragged favorite lifts", QString::number(dragged->lift()));
+    check(tiles[1]->geometry() == grid->slot_rect(0) && tiles[2]->geometry() == grid->slot_rect(1),
+        "the others slide over to make room for it");
+
+    send(QEvent::MouseButtonRelease, to);
+    settle(FavoritesGrid::MOVE_MS + 150);
+    rebuild_now();
+    auto expected = ids;
+    expected.move(0, 2);
+    check(favorite_ids(profile) == expected, "let go, it moves there", favorite_ids(profile).join(","));
+    check(s().m_favorite_ids == expected && dragged->geometry() == grid->slot_rect(2) && dragged->lift() == 0,
+        "and settles into that place");
+    check(s().m_favorite_buttons.size() == tiles.size() && s().m_favorite_buttons.value(2) == tiles[0], "keeping the same tiles");
+    check(window().current_tab() == current && !dragged->isChecked(), "dragging it doesn't open it");
+
+    SpaceStore::the().move_favorite(ids[0], 0);
+    SpaceStore::the().remove_favorite(extra);
+    rebuild_now();
+}
+
+// A link dragged over the favorites opens a gap where it would go, and dropped there it becomes a favorite in that place.
+void SelfTest::a_link_dropped_on_favorites_goes_where_the_gap_opens()
+{
+    s().switch_to_space(m_alpha);
+    rebuild_now();
+    auto profile = s().current_profile();
+    auto tiles = s().m_favorite_buttons;
+    auto* grid = s().m_favorites;
+    if (tiles.size() < 2) {
+        check(false, "there are favorites to drop among", QString::number(tiles.size()));
+        return;
+    }
+    QMimeData mime;
+    mime.setUrls({ QUrl("http://localhost:1/dropped-favorite") });
+    auto at = QPointF(grid->slot_rect(1).center());
+    QDragEnterEvent enter(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(grid, &enter);
+    QDragMoveEvent move(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(grid, &move);
+    settle(FavoritesGrid::MOVE_MS + 150);
+    check(tiles[0]->geometry() == grid->slot_rect(0) && tiles[1]->geometry() == grid->slot_rect(2),
+        "a link dragged over the favorites opens a gap where it would go");
+
+    QDropEvent drop(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(grid, &drop);
+    auto favorites = SpaceStore::the().favorites_for_profile(profile);
+    auto dropped = favorites.size() == tiles.size() + 1 && favorites[1].url.endsWith("/dropped-favorite");
+    check(dropped, "dropped, it becomes a favorite in that place", favorites.value(1).url);
+    settle(FavoritesGrid::MOVE_MS + 150);
+    auto now = s().m_favorite_buttons;
+    check(now.size() == tiles.size() + 1 && now[1] && now[1]->geometry() == grid->slot_rect(1) && tiles[1]->geometry() == grid->slot_rect(2),
+        "its tile fills the gap");
+
+    if (dropped)
+        SpaceStore::the().remove_favorite(favorites[1].id);
+    rebuild_now();
+}
+
+// As in Arc: a tile is backed by its favicon blown up and blurred, under a white veil, so its color shows at the rim.
+void SelfTest::favorite_tiles_wear_their_favicons_color()
+{
+    auto rim_of = [](QIcon const& icon) {
+        FavoriteTile tile(nullptr);
+        tile.resize(60, 54);
+        tile.setIcon(icon);
+        tile.set_dark(true);
+        tile.setChecked(true);
+        auto image = tile.grab().toImage();
+        return image.pixelColor(qRound(4 * image.devicePixelRatio()), image.height() / 2);
+    };
+    QPixmap red(32, 32);
+    red.fill(QColor(230, 30, 30));
+    auto tinted = rim_of(QIcon(red));
+    check(tinted.red() > tinted.green() + 40, "a favorite's tile takes its favicon's color at the rim", tinted.name(QColor::HexArgb));
+    auto plain = rim_of(QIcon());
+    check(qAbs(plain.red() - plain.green()) < 8, "one without a favicon stays plain", plain.name(QColor::HexArgb));
 }
 
 // As in Arc: closing the current tab shows the tab shown before it (if it's still open), not its neighbor.
@@ -2980,6 +3103,9 @@ int SelfTest::run()
     a_pinned_tab_that_redirects_isnt_away();
     opening_a_folder_leaves_the_list_alone_while_it_slides();
     favorites_never_overlap_when_they_change();
+    favorites_reorder_by_dragging();
+    a_link_dropped_on_favorites_goes_where_the_gap_opens();
+    favorite_tiles_wear_their_favicons_color();
     closing_a_tab_returns_to_the_one_before();
     downloads_shelf_rows_rise_in();
     leaving_a_playing_video_shows_it_in_picture_in_picture();

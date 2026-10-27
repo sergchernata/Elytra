@@ -505,11 +505,27 @@ QString SpaceStore::add_favorite(QString url, QString title, int index, QString 
             return favorite.id;
     }
     auto id = new_id();
-    if (index < 0 || index > m_favorites.size())
-        index = m_favorites.size();
-    m_favorites.insert(index, { id, std::move(url), std::move(title), std::move(profile) });
+    auto at = favorite_position(profile, index);
+    m_favorites.insert(at, { id, std::move(url), std::move(title), std::move(profile) });
     commit();
     return id;
+}
+
+// Where in the list of every profile's favorites the profile's `index`th would go: before the one there now, or after
+// the profile's last (at the end, if it has none). Out of range is the end.
+int SpaceStore::favorite_position(QString const& profile, int index) const
+{
+    int seen = 0;
+    int after_last = m_favorites.size();
+    for (int i = 0; i < m_favorites.size(); ++i) {
+        if (m_favorites[i].profile != profile)
+            continue;
+        if (index >= 0 && seen == index)
+            return i;
+        ++seen;
+        after_last = i + 1;
+    }
+    return after_last;
 }
 
 QList<Favorite> SpaceStore::favorites_for_profile(QString const& profile) const
@@ -531,11 +547,14 @@ void SpaceStore::remove_favorite(QString const& id)
 void SpaceStore::move_favorite(QString const& id, int new_index)
 {
     for (int i = 0; i < m_favorites.size(); ++i) {
-        if (m_favorites[i].id == id) {
-            m_favorites.move(i, qBound(0, new_index, static_cast<int>(m_favorites.size()) - 1));
+        if (m_favorites[i].id != id)
+            continue;
+        auto favorite = m_favorites.takeAt(i);
+        auto at = favorite_position(favorite.profile, new_index);
+        m_favorites.insert(at, std::move(favorite));
+        if (at != i)
             commit();
-            return;
-        }
+        return;
     }
 }
 

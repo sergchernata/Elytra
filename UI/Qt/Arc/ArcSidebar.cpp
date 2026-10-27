@@ -283,10 +283,8 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     // Extensions' buttons, at the strip's right.
     layout->addWidget(m_top_strip);
 
-    m_favorites = new QWidget(this);
-    m_favorites_layout = new QGridLayout(m_favorites);
-    m_favorites_layout->setContentsMargins(0, 0, 0, 6);
-    m_favorites_layout->setSpacing(8);
+    m_favorites = new FavoritesGrid(FAVORITE_TILE_HEIGHT, this);
+    connect(m_favorites, &FavoritesGrid::tile_moved, this, &ArcSidebar::move_favorite_tile);
     m_favorites->setAcceptDrops(true);
     m_favorites->installEventFilter(this);
     layout->addWidget(m_favorites);
@@ -2613,74 +2611,55 @@ void ArcSidebar::rebuild_favorites()
     auto favorites = SpaceStore::the().favorites_for_profile(current_profile());
     m_favorites->setVisible(!favorites.isEmpty());
 
-    auto dark = ChromeStyle::is_dark(palette());
-    auto tile = dark ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.45)";
-    auto tile_hover = dark ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.65)";
-    auto tile_checked = dark ? "rgba(255,255,255,0.24)" : "rgba(255,255,255,0.95)";
-    auto style = QString("QToolButton { background: %1; border: none; border-radius: 12px; }"
-                         "QToolButton:hover { background: %2; }"
-                         "QToolButton:checked { background: %3; }")
-                     .arg(tile, tile_hover, tile_checked);
-
     QStringList ids;
     for (auto const& favorite : favorites)
         ids.append(favorite.id);
 
-    // Rebuilding the tiles empties the grid for a moment, which resizes the list below it and can move its scroll
-    // position. Only rebuild when the tiles themselves change; otherwise update them in place.
-    if (ids != m_favorite_ids || style != m_favorite_style || m_favorite_buttons.size() != ids.size()) {
-        // Hidden now, not when they're deleted: until then they'd show under the new tiles.
-        while (auto* item = m_favorites_layout->takeAt(0)) {
-            if (auto* widget = item->widget()) {
-                widget->hide();
-                widget->deleteLater();
+    // Tiles are kept by favorite, and only those that come or go are made or dropped: a rebuild that emptied the grid
+    // would resize the list below it (moving its scroll position), and the tiles that stay glide to their new places.
+    if (ids != m_favorite_ids || m_favorite_buttons.size() != ids.size()) {
+        QHash<QString, FavoriteTile*> kept;
+        for (int i = 0; i < m_favorite_buttons.size() && i < m_favorite_ids.size(); ++i) {
+            if (auto* tile = m_favorite_buttons[i].data())
+                kept.insert(m_favorite_ids[i], tile);
+        }
+        QList<FavoriteTile*> tiles;
+        for (auto const& id : ids) {
+            if (auto* tile = kept.take(id)) {
+                tiles.append(tile);
+                continue;
             }
-            delete item;
+            auto* tile = new FavoriteTile(m_favorites);
+            tile->setFixedHeight(FAVORITE_TILE_HEIGHT);
+            tile->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(tile, &QToolButton::clicked, this, [this, id] { open_or_activate_favorite(id); });
+            connect(tile, &QToolButton::customContextMenuRequested, this, [this, id, tile](QPoint const& position) {
+                show_favorite_menu(id, tile->mapToGlobal(position));
+            });
+            tiles.append(tile);
+        }
+        // Hidden now, not when they're deleted: until then they'd show among the new tiles.
+        for (auto* tile : kept) {
+            tile->hide();
+            tile->deleteLater();
         }
         m_favorite_buttons.clear();
+        for (auto* tile : tiles)
+            m_favorite_buttons.append(tile);
         m_favorite_ids = ids;
-        m_favorite_style = style;
-
-        // Always four equal columns, like Arc, so one favorite is a tile rather than a full-width bar.
-        constexpr int columns = 4;
-        for (int column = 0; column < columns; ++column)
-            m_favorites_layout->setColumnStretch(column, 1);
-
-        for (int i = 0; i < favorites.size(); ++i) {
-            auto* button = new QToolButton(m_favorites);
-            button->setIconSize(QSize(16, 16));
-            button->setCheckable(true);
-            button->setFixedHeight(FAVORITE_TILE_HEIGHT);
-            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            button->setFocusPolicy(Qt::NoFocus);
-            button->setStyleSheet(style);
-            button->setContextMenuPolicy(Qt::CustomContextMenu);
-
-            auto id = favorites[i].id;
-            connect(button, &QToolButton::clicked, this, [this, id] { open_or_activate_favorite(id); });
-            connect(button, &QToolButton::customContextMenuRequested, this, [this, id, button](QPoint const& position) {
-                show_favorite_menu(id, button->mapToGlobal(position));
-            });
-
-            m_favorites_layout->addWidget(button, i / columns, i % columns);
-            m_favorite_buttons.append(button);
-        }
-        // Shown and placed now, rather than on a later turn of the event loop at a default position.
-        if (m_favorites->isVisible()) {
-            for (auto const& button : m_favorite_buttons)
-                button->show();
-            m_favorites_layout->activate();
-        }
+        m_favorites->set_tiles(tiles);
     }
 
+    auto dark = ChromeStyle::is_dark(palette());
     auto* current = m_window ? m_window->current_tab() : nullptr;
     for (int i = 0; i < favorites.size(); ++i) {
         auto const& favorite = favorites[i];
         auto* button = m_favorite_buttons[i].data();
         if (!button)
             continue;
+        button->set_dark(dark);
         auto* tab = tab_for_node(favorite_node(favorite.id));
-        // Only what changed: this runs on every tab switch, and a new icon relays out the tiles.
+        // Only what changed: this runs on every tab switch.
         auto icon = icon_for(favorite.url, tab && tab_shows_a_page(url_of(*tab)) ? tab : nullptr);
         if (button->icon().cacheKey() != icon.cacheKey())
             button->setIcon(icon);
@@ -2691,6 +2670,17 @@ void ArcSidebar::rebuild_favorites()
         if (button->isChecked() != checked)
             button->setChecked(checked);
     }
+}
+
+// A tile dragged to another place in the grid. The grid has moved it already; the tiles follow the store's order.
+void ArcSidebar::move_favorite_tile(int from, int to)
+{
+    if (from < 0 || from >= m_favorite_ids.size() || to < 0 || to >= m_favorite_ids.size())
+        return;
+    auto id = m_favorite_ids[from];
+    m_favorite_ids.move(from, to);
+    m_favorite_buttons.move(from, to);
+    SpaceStore::the().move_favorite(id, to);
 }
 
 void ArcSidebar::append_nodes(QStandardItem& parent, QList<PinnedNode> const& nodes)
@@ -4027,7 +4017,7 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
     if (watched != m_favorites)
         return QWidget::eventFilter(watched, event);
 
-    // Drop a tab (or a link) on the favorites grid to make it a favorite.
+    // Drop a tab (or a link) on the favorites grid to make it a favorite, where the gap opened for it.
     switch (event->type()) {
     case QEvent::DragEnter:
     case QEvent::DragMove: {
@@ -4035,25 +4025,32 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
         if (drag->source() == m_tree || drag->mimeData()->hasUrls()) {
             drag->setDropAction(Qt::CopyAction);
             drag->accept();
+            m_favorites->show_insertion_gap(drag->position().toPoint());
             return true;
         }
         return false;
     }
+    case QEvent::DragLeave:
+        m_favorites->hide_insertion_gap(FavoritesGrid::Animate::Yes);
+        return false;
     case QEvent::Drop: {
         auto* drop = static_cast<QDropEvent*>(event);
+        auto index = m_favorites->insertion_index_at(drop->position().toPoint());
+        // The tiles stay put around the gap, for the new tile to fill it.
+        m_favorites->hide_insertion_gap(FavoritesGrid::Animate::No);
         if (drop->source() == m_tree) {
-            auto index = m_tree->currentIndex();
-            auto kind = row_kind(index);
+            auto tree_index = m_tree->currentIndex();
+            auto kind = row_kind(tree_index);
             if (kind == RowKind::TodayTab) {
                 // The row can outlive its tab while a drag runs (rebuilds wait for the drop).
-                if (auto* tab = tab_in_row(index); tab && m_tabs.index_of(tab) >= 0)
-                    add_favorite(*tab);
+                if (auto* tab = tab_in_row(tree_index); tab && m_tabs.index_of(tab) >= 0)
+                    add_favorite(*tab, index);
             } else if (kind == RowKind::PinnedTab) {
                 // Arc moves a pinned tab into favorites.
-                auto id = index.data(IdRole).toString();
+                auto id = tree_index.data(IdRole).toString();
                 if (auto const* node = SpaceStore::the().node(id)) {
                     auto title = node->title.isEmpty() ? node->saved_title : node->title;
-                    auto favorite_id = SpaceStore::the().add_favorite(node->url, title, -1, current_profile());
+                    auto favorite_id = SpaceStore::the().add_favorite(node->url, title, index, current_profile());
                     if (auto* tab = tab_for_node(id)) {
                         set_tab_node(*tab, favorite_node(favorite_id));
                         set_tab_space(*tab, {});
@@ -4064,11 +4061,14 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
             }
         } else if (drop->mimeData()->hasUrls()) {
             for (auto const& url : drop->mimeData()->urls())
-                SpaceStore::the().add_favorite(url.toString(), url.host(), -1, current_profile());
+                SpaceStore::the().add_favorite(url.toString(), url.host(), index++, current_profile());
         }
         drop->setDropAction(Qt::CopyAction);
         drop->accept();
         m_tree->reset_drag_state();
+        // The new tile shows in the gap now; if nothing was added (already a favorite), the others close it up.
+        rebuild_favorites();
+        m_favorites->settle();
         return true;
     }
     default:
