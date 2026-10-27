@@ -5,6 +5,7 @@
  */
 
 #include <UI/Qt/Arc/FavoritesGrid.h>
+#include <UI/Qt/ChromeStyle.h>
 
 #include <QApplication>
 #include <QEasingCurve>
@@ -170,11 +171,62 @@ static void blur(QImage& image, int radius, int passes)
     }
 }
 
+// How much a pixel's color counts: its black, white and gray (a dark square behind a logo, say) would only darken or
+// wash out the tile.
+static qreal color_weight(QColor const& color)
+{
+    return color.alphaF() * qBound<qreal>(0, (color.hsvSaturationF() * color.valueF() - 0.15) / 0.35, 1);
+}
+
 QImage FavoriteTile::backdrop_for(QIcon const& icon, QSize size)
 {
     if (icon.isNull() || size.isEmpty())
         return {};
-    // Worked on small, where blurring is cheap; scaling it up smooth softens it further.
+    auto source = icon.pixmap(QSize(32, 32), 1.0).toImage().convertToFormat(QImage::Format_ARGB32);
+    if (source.isNull())
+        return {};
+
+    // Each pixel weighed by its color, and where the colored part of the icon is. An icon with no color at all (black
+    // on white, say) counts as it is, and gives a gray.
+    QImage weighted(source.size(), QImage::Format_ARGB32_Premultiplied);
+    QRect colored;
+    qreal sums[4] {};
+    for (int y = 0; y < source.height(); ++y) {
+        auto const* in = reinterpret_cast<QRgb const*>(source.constScanLine(y));
+        auto* out = reinterpret_cast<QRgb*>(weighted.scanLine(y));
+        for (int x = 0; x < source.width(); ++x) {
+            auto color = QColor::fromRgba(in[x]);
+            auto weight = color_weight(color);
+            if (weight > 0.25)
+                colored |= QRect(x, y, 1, 1);
+            sums[0] += weight;
+            sums[1] += color.redF() * weight;
+            sums[2] += color.greenF() * weight;
+            sums[3] += color.blueF() * weight;
+            color.setAlphaF(weight);
+            out[x] = qPremultiply(color.rgba());
+        }
+    }
+    if (sums[0] < 0.5) {
+        weighted = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        colored = {};
+        sums[0] = sums[1] = sums[2] = sums[3] = 0;
+        for (int y = 0; y < source.height(); ++y) {
+            for (int x = 0; x < source.width(); ++x) {
+                auto color = source.pixelColor(x, y);
+                sums[0] += color.alphaF();
+                sums[1] += color.redF() * color.alphaF();
+                sums[2] += color.greenF() * color.alphaF();
+                sums[3] += color.blueF() * color.alphaF();
+            }
+        }
+    }
+    if (colored.isEmpty())
+        colored = weighted.rect();
+    auto average = sums[0] > 0 ? QColor::fromRgbF(sums[1] / sums[0], sums[2] / sums[0], sums[3] / sums[0]) : QColor(Qt::gray);
+
+    // The colored part, scaled to cover the tile, as Arc does: a logo's top color is the rim's top, and so on. Worked
+    // on small, where blurring is cheap; scaling it up smooth softens it further.
     constexpr int small_width = 20;
     auto small_height = qMax(4, qRound(small_width * qreal(size.height()) / size.width()));
     QImage small(small_width, small_height, QImage::Format_ARGB32_Premultiplied);
@@ -182,12 +234,27 @@ QImage FavoriteTile::backdrop_for(QIcon const& icon, QSize size)
     {
         QPainter painter(&small);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        // Blown up past the tile's edges, as Arc does: what shows is the icon's color, not its shape.
-        auto side = qMax(small_width, small_height) * 1.15;
-        auto pixmap = icon.pixmap(QSize(32, 32), 1.0);
-        painter.drawPixmap(QRectF((small_width - side) / 2, (small_height - side) / 2, side, side), pixmap, pixmap.rect());
+        auto scale = qMax(small_width / qreal(colored.width()), small_height / qreal(colored.height()));
+        QSizeF covered(colored.width() * scale, colored.height() * scale);
+        painter.drawImage(QRectF(QPointF((small_width - covered.width()) / 2, (small_height - covered.height()) / 2), covered), weighted, colored);
     }
     blur(small, 2, 3);
+
+    // Filling the whole tile (the average where the icon has no color nearby), and kept light: never darker than a
+    // pastel.
+    for (int y = 0; y < small.height(); ++y) {
+        auto* row = reinterpret_cast<QRgb*>(small.scanLine(y));
+        for (int x = 0; x < small.width(); ++x) {
+            auto here = QColor::fromRgba(qUnpremultiply(row[x]));
+            auto mix = qMin<qreal>(1, here.alphaF() * 3);
+            auto color = QColor::fromRgbF(average.redF() + (here.redF() - average.redF()) * mix,
+                average.greenF() + (here.greenF() - average.greenF()) * mix,
+                average.blueF() + (here.blueF() - average.blueF()) * mix)
+                             .toHsl();
+            color.setHslF(color.hslHueF(), color.hslSaturationF(), qMax<qreal>(color.lightnessF(), 0.6));
+            row[x] = color.rgb();
+        }
+    }
     return small.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
@@ -231,8 +298,8 @@ void FavoriteTile::paintEvent(QPaintEvent*)
         auto inner = bounds.adjusted(INNER_INSET, INNER_INSET, -INNER_INSET, -INNER_INSET);
         QPainterPath inner_shape;
         inner_shape.addRoundedRect(inner, TILE_RADIUS - INNER_INSET, TILE_RADIUS - INNER_INSET);
-        // Calmed toward the sidebar's own color, then lit.
-        auto calm = palette().color(QPalette::Window);
+        // Calmed toward the sidebar's own color (the space's), then lit.
+        auto calm = ChromeStyle::chrome_background(palette());
         calm.setAlphaF(m_backdrop.isNull() ? 0 : 0.75);
         painter.fillPath(inner_shape, calm);
         painter.fillPath(inner_shape, QColor::fromRgbF(1, 1, 1, m_dark ? 0.44 : 0.6));

@@ -55,6 +55,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMimeData>
+#include <QPainter>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QScrollBar>
@@ -790,8 +791,12 @@ void SelfTest::favorite_tiles_wear_their_favicons_color()
         tile.setIcon(icon);
         tile.set_dark(true);
         tile.setChecked(active);
-        auto image = tile.grab().toImage();
-        auto dpr = image.devicePixelRatio();
+        // Over the sidebar's color, as on screen.
+        auto dpr = tile.devicePixelRatioF();
+        QImage image((QSizeF(tile.size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
+        image.setDevicePixelRatio(dpr);
+        image.fill(QColor(67, 75, 84));
+        tile.render(&image, {}, {}, QWidget::DrawChildren);
         return Samples { image.pixelColor(qRound(1.2 * dpr), image.height() / 2), image.pixelColor(image.width() / 2, qRound(7 * dpr)) };
     };
     auto redness = [](QColor const& color) { return color.red() - color.green(); };
@@ -806,6 +811,41 @@ void SelfTest::favorite_tiles_wear_their_favicons_color()
     check(qAbs(redness(resting.rim)) < 8 && qAbs(redness(resting.inside)) < 8, "the others stay plain", resting.rim.name(QColor::HexArgb));
     auto plain = samples_of(QIcon(), true);
     check(qAbs(redness(plain.rim)) < 8, "as does an active one without a favicon", plain.rim.name(QColor::HexArgb));
+
+    // Regression: a logo on a dark square (Figma's) washed the rim dark. Only its colors count, kept light.
+    QPixmap dark_square(32, 32);
+    dark_square.fill(QColor(30, 30, 30));
+    {
+        QPainter painter(&dark_square);
+        painter.fillRect(QRect(12, 10, 8, 12), QColor(240, 80, 40));
+    }
+    auto dark_logo = samples_of(QIcon(dark_square), true);
+    check(redness(dark_logo.rim) > 20, "its color covers the whole tile, out to the rim", dark_logo.rim.name(QColor::HexArgb));
+    check(dark_logo.rim.lightness() >= plain.rim.lightness(), "a logo on a dark square doesn't darken the rim",
+        QString("%1 vs %2 plain").arg(dark_logo.rim.name(QColor::HexArgb), plain.rim.name(QColor::HexArgb)));
+
+    // As in Arc: the logo's colored part is what covers the tile, each color toward its own side.
+    QPixmap two_tone(32, 32);
+    two_tone.fill(QColor(30, 30, 30));
+    {
+        QPainter painter(&two_tone);
+        painter.fillRect(QRect(12, 8, 8, 8), QColor(240, 60, 40));
+        painter.fillRect(QRect(12, 16, 8, 8), QColor(40, 200, 90));
+    }
+    FavoriteTile tile(nullptr);
+    tile.resize(60, 54);
+    tile.setIcon(QIcon(two_tone));
+    tile.set_dark(true);
+    tile.setChecked(true);
+    auto dpr = tile.devicePixelRatioF();
+    QImage image((QSizeF(tile.size()) * dpr).toSize(), QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(dpr);
+    image.fill(QColor(67, 75, 84));
+    tile.render(&image, {}, {}, QWidget::DrawChildren);
+    auto top = image.pixelColor(image.width() / 2, qRound(1.2 * dpr));
+    auto bottom = image.pixelColor(image.width() / 2, image.height() - 1 - qRound(1.2 * dpr));
+    check(top.red() > top.green() + 30 && bottom.green() > bottom.red() + 30, "its top color tints the top of the rim, its bottom color the bottom",
+        QString("top %1, bottom %2").arg(top.name(), bottom.name()));
 }
 
 // As in Arc: closing the current tab shows the tab shown before it (if it's still open), not its neighbor.
