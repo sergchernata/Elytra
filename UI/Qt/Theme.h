@@ -68,6 +68,7 @@ ChromeColors const& chrome();
 // strip, sidebar and toolbar all one color, as Arc's chrome is.
 void set_chrome_tint(QColor const&, double amount);
 void set_chrome_is_uniform(bool);
+bool chrome_is_uniform();
 
 // A private window's chrome is violet-dark in either appearance, so it never looks like a normal window. The chrome
 // inside a window marked as private takes its colors from a palette marked as private.

@@ -215,6 +215,11 @@ void set_chrome_is_uniform(bool uniform)
     ++s_chrome_adjustment_generation;
 }
 
+bool chrome_is_uniform()
+{
+    return s_chrome_is_uniform;
+}
+
 // Fork hook (Arc): the chrome's colors with the space's tint and Arc's single surface color. Each base set is adjusted
 // once per change, and handed out by reference like the base sets are.
 static ChromeColors const& adjusted(ChromeColors const& base)

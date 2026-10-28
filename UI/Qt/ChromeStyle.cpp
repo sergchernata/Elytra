@@ -136,6 +136,9 @@ QColor chrome_separator(QPalette const& palette)
 
 static QColor chrome_content_separator(QPalette const& palette)
 {
+    // Fork hook (Arc): the page is inset in one surface of chrome, with no line between the two.
+    if (Theme::chrome_is_uniform())
+        return Theme::chrome(palette).toolbar;
     return Theme::chrome(palette).divider;
 }
 
