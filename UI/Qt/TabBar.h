@@ -335,6 +335,8 @@ public:
     // Fork hook (Arc): Little Arc shows only this bar above the page (no tabs, toolbar or bookmarks).
     void set_minimal_chrome_bar(QWidget*);
     void set_vertical_sidebar_widget(QWidget*);
+    // Fork hook (Arc): an Arc window's pages are set into the chrome (see Tab::set_page_inset()).
+    void update_page_inset(Tab&);
     int vertical_sidebar_expanded_width() const { return m_vertical_tabs_expanded_width; } // Fork hook (Arc)
     // Fork hook (Arc): called just before the sidebar docks or hides, so it can animate the change; and a
     // temporary width for the space reserved beside the page, which that animation drives.

@@ -1170,6 +1170,9 @@ void Tab::initialize(Optional<WebView::CanonicalTraversable&> traversable)
 
     toolbar_container_layout->addWidget(m_toolbar);
     tab_layout->addWidget(m_view);
+#ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
+    m_view->set_has_rounded_corners(!m_page_inset.isNull()); // Fork hook (Arc)
+#endif
     update_bookmarks_bar_visibility();
 
     m_navigate_back_action = create_application_action(*this, view().navigate_back_action());
@@ -2257,6 +2260,29 @@ void Tab::set_screen_wake_lock_state(Web::ScreenWakeLockState wake_lock_state)
             m_screen_display_sleep_inhibitor = inhibitor.release_value();
         break;
     }
+}
+
+// Fork hook (Arc)
+void Tab::set_page_inset(QMargins inset)
+{
+    if (m_page_inset == inset)
+        return;
+    m_page_inset = inset;
+    layout()->setContentsMargins(inset);
+#ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
+    if (m_view)
+        m_view->set_has_rounded_corners(!inset.isNull());
+#endif
+    update();
+}
+
+// Fork hook (Arc): the chrome's color around an inset page.
+void Tab::paintEvent(QPaintEvent*)
+{
+    if (m_page_inset.isNull())
+        return;
+    QPainter painter(this);
+    painter.fillRect(rect(), ChromeStyle::chrome_background(window()->palette()));
 }
 
 void Tab::resizeEvent(QResizeEvent* event)

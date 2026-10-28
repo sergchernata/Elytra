@@ -2020,6 +2020,9 @@ void WebContentView::update_palette(PaletteMode mode)
     //     Their prefers-color-scheme and system colors resolve against it.
     update_system_theme(make_system_theme_from_qt_palette(*this, mode));
     update_interface_color_scheme();
+#ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
+    update_iosurface_layer_border(); // Fork hook (Arc)
+#endif
 }
 
 Core::AnonymousBuffer WebContentView::system_theme()

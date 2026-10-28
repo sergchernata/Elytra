@@ -128,7 +128,7 @@ static constexpr int SHOW_SETTLE_MS = 34;
 static constexpr int HANDOFF_MS = 34; // Two frames, for the window server to show one before the other goes.
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = ArcSidebar::TOOLBAR_LEFT_MARGIN;
 // The sidebar toggle's symbol, fitted to this box: its glyph then stands as tall as the toolbar's back and forward arrows.
-static constexpr int SIDEBAR_TOGGLE_SYMBOL_SIZE = 22;
+static constexpr int SIDEBAR_TOGGLE_SYMBOL_SIZE = 18;
 static constexpr int COLLAPSED_TOGGLE_LEFT = 8; // The hidden sidebar's toggle, from the window's left edge.
 static constexpr int WINDOW_TOGGLE_GAP = 6; // Between the window's sidebar toggle and the toolbar's first button.
 static constexpr int RETRACT_DELAY_MS = 280;
@@ -1158,9 +1158,19 @@ static bool title_is_placeholder(QString const& title, QString const& url)
     return title == url || (title.contains("://") && pinned_urls_match(title, url));
 }
 
-QString ArcSidebar::live_title(Tab const& tab)
+// The tab's title, but none for a blank page: upstream calls one "New Tab", which a row would show in place of the title
+// it keeps while its page loads.
+static QString page_title(Tab const& tab)
 {
     auto title = tab.title();
+    if (tab.is_loaded() && tab.view().url() == URL::about_blank() && title == QStringLiteral("New Tab"))
+        return {};
+    return title;
+}
+
+QString ArcSidebar::live_title(Tab const& tab)
+{
+    auto title = page_title(tab);
     if (tab.is_loading() && title_is_placeholder(title, url_of(tab)))
         return tab.property(LAST_TITLE_PROPERTY).toString();
     return title;
@@ -1168,7 +1178,7 @@ QString ArcSidebar::live_title(Tab const& tab)
 
 void ArcSidebar::remember_title(Tab& tab)
 {
-    if (auto title = tab.title(); !title_is_placeholder(title, url_of(tab)))
+    if (auto title = page_title(tab); !title_is_placeholder(title, url_of(tab)))
         tab.setProperty(LAST_TITLE_PROPERTY, title);
 }
 
@@ -1237,10 +1247,13 @@ void ArcSidebar::watch_tab(Tab& tab)
             schedule_rebuild();
         }
         refresh(); // Navigations: a pinned tab may have left its URL.
+        if (guarded && m_window && guarded == m_window->current_tab() && !m_switching_space)
+            remember_shown_tab(*guarded);
     });
-    connect(&tab, &Tab::loading_finished, this, [this, guarded, refresh] {
-        if (guarded)
-            settle_pinned_landing(*guarded, true);
+    connect(&tab, &Tab::loading_changed, this, [this, guarded, refresh] {
+        if (!guarded || guarded->is_loading())
+            return;
+        settle_pinned_landing(*guarded, true);
         refresh();
         save_session();
     });
@@ -1510,7 +1523,12 @@ bool ArcSidebar::is_blank(Tab const& tab)
     if (tab.property(BLANK_PROPERTY).toBool())
         return true;
     auto url = url_of(tab);
-    return url == "about:newtab" || url == qstring_from_ak_string(WebView::Application::settings().new_tab_page_url().serialize());
+    if (url == "about:newtab")
+        return true;
+    if (url != qstring_from_ak_string(WebView::Application::settings().new_tab_page_url().serialize()))
+        return false;
+    // The new tab page can be about:blank, which a tab also shows while its first page loads.
+    return url != "about:blank" || !tab.is_loading();
 }
 
 // Every close (sidebar, Cmd+W, Clear) comes through here. Like Arc: the next tab comes from the same space,
@@ -2273,6 +2291,19 @@ Tab* ArcSidebar::most_recent_tab_in_space(QString const& space, Tab const* excep
     return nullptr;
 }
 
+// What a space shows, to show again on coming back to it: a favorite counts for the space it's shown in. A tab is
+// remembered once it has an address: one shown before its page starts loading is again when it does.
+void ArcSidebar::remember_shown_tab(Tab& tab)
+{
+    auto space = space_of(tab);
+    if (auto shown_space = space.isEmpty() ? m_space_id : space; !shown_space.isEmpty() && !is_blank(tab)
+        && (!space.isEmpty() || profile_of_tab(tab) == profile_of_space(shown_space))) {
+        m_last_tab_in_space[shown_space] = &tab;
+        auto node = node_of(tab);
+        SpaceStore::the().set_last_item_in_space(shown_space, node.isEmpty() ? "url:" + url_of(tab) : node);
+    }
+}
+
 void ArcSidebar::on_current_tab_changed(int index)
 {
     auto* tab = m_tabs.tab(index);
@@ -2315,13 +2346,7 @@ void ArcSidebar::on_current_tab_changed(int index)
             }
         }
     }
-    // What this space shows, to show again on coming back to it: a favorite counts for the space it's shown in.
-    if (auto shown_space = space.isEmpty() ? m_space_id : space; !shown_space.isEmpty() && !is_blank(*tab)
-        && (!space.isEmpty() || profile_of_tab(*tab) == profile_of_space(shown_space))) {
-        m_last_tab_in_space[shown_space] = tab;
-        auto node = node_of(*tab);
-        SpaceStore::the().set_last_item_in_space(shown_space, node.isEmpty() ? "url:" + url_of(*tab) : node);
-    }
+    remember_shown_tab(*tab);
     QTimer::singleShot(0, this, [guarded = QPointer(this)] {
         if (guarded)
             guarded->close_stale_blank_tabs();
@@ -2933,9 +2958,11 @@ void ArcSidebar::update_tab_rows(Tab& tab)
         if (item.icon().cacheKey() != icon.cacheKey())
             item.setIcon(icon);
     };
+    bool has_row = false;
     for_each_item(*m_model->invisibleRootItem(), [&](QStandardItem& item) {
         if (tab_in_row(item.index()) != &tab)
             return;
+        has_row = true;
         if (row_kind(item.index()) == RowKind::PinnedTab) {
             auto const* pinned = SpaceStore::the().node(node);
             if (pinned) {
@@ -2955,6 +2982,9 @@ void ArcSidebar::update_tab_rows(Tab& tab)
         }
         set_icon(item, icon);
     });
+    // A tab first listed once it has an address (a new tab's is blank until its page starts loading) gets its row.
+    if (!has_row && node.isEmpty() && space_of(tab) == m_space_id && !is_blank(tab))
+        schedule_rebuild();
 
     // Not the address shown while it loads: that isn't the page's title.
     if (!node.isEmpty() && !title_is_placeholder(tab.title(), url_of(tab)) && tab_shows_a_page(url_of(tab)) && !is_private())
@@ -3593,12 +3623,18 @@ double ArcSidebar::space_tint_amount() const
     return ChromeStyle::is_dark(palette()) ? 0.26 : 0.38;
 }
 
+static int s_tint_generation = 0;
+static constexpr char const* TINT_GENERATION_PROPERTY = "arc_tint_generation";
+static void restyle_window(BrowserWindow&);
+
 void ArcSidebar::apply_space_tint()
 {
     // A slide between spaces fades the tint as it goes (see fade_to_space_tint()).
     if (m_holding_tint || (m_tint_fade && m_tint_fade->state() == QAbstractAnimation::Running))
         return;
     apply_tint(space_color(), space_tint_amount());
+    if (m_window && m_window->property(TINT_GENERATION_PROPERTY).toInt() != s_tint_generation)
+        restyle_window(*m_window);
 }
 
 // The tint partway from one color to another: a space without a color has none to fade from or to. The color is mixed
@@ -3659,8 +3695,6 @@ void ArcSidebar::fade_to_space_tint()
 // restyling every tab takes too long for that. A full apply ends the fade.
 // Tabs not shown when the tint changed restyle as they're shown (see restyle_if_tint_changed()): restyling every tab of
 // every window took long enough to hitch the end of each switch between spaces.
-static int s_tint_generation = 0;
-static constexpr char const* TINT_GENERATION_PROPERTY = "arc_tint_generation";
 
 static void notify_palette_change(QWidget* widget)
 {
@@ -3677,6 +3711,19 @@ static void restyle_tab(Tab& tab)
     // The page view paints the chrome's color behind its rounded corners.
     tab.view().update();
     tab.setProperty(TINT_GENERATION_PROPERTY, s_tint_generation);
+}
+
+// A window restyles its chrome for the tint once per change. One opened after the tint was set (the first, at startup,
+// is made before its sidebar applies the space's color) restyles as its sidebar applies it.
+static void restyle_window(BrowserWindow& browser_window)
+{
+    notify_palette_change(&browser_window);
+    for (auto* tabs : browser_window.findChildren<TabWidget*>())
+        notify_palette_change(tabs);
+    if (auto* tab = browser_window.current_tab())
+        restyle_tab(*tab);
+    browser_window.setProperty(TINT_GENERATION_PROPERTY, s_tint_generation);
+    browser_window.update();
 }
 
 void ArcSidebar::restyle_if_tint_changed(Tab& tab)
@@ -3700,21 +3747,21 @@ void ArcSidebar::apply_tint(QColor const& color, double amount, bool visible_onl
     // Notify only those; Qt's own widgets would reset their style sheets on a synthetic event. Only what's shown: each
     // window, its tab strip and its current tab; other tabs restyle as they're shown.
     for (auto* top_level : QApplication::topLevelWidgets()) {
-        auto* browser_window = qobject_cast<BrowserWindow*>(top_level);
-        if (!browser_window)
-            continue;
-        notify_palette_change(browser_window);
-        for (auto* tabs : browser_window->findChildren<TabWidget*>())
-            notify_palette_change(tabs);
-        if (auto* tab = browser_window->current_tab())
-            restyle_tab(*tab);
-        browser_window->update();
+        if (auto* browser_window = qobject_cast<BrowserWindow*>(top_level))
+            restyle_window(*browser_window);
     }
 
     // Arc has no line between the sidebar and the page; upstream's column style draws one.
     static auto const column_style = QStringLiteral("QWidget#LadybirdVerticalTabBar { border: none; background: transparent; }");
-    if (auto* column = parentWidget(); column && column->styleSheet() != column_style)
-        column->setStyleSheet(column_style);
+    // NB: Only on the column itself: a style sheet on a widget around it (the tab widget) would override the colors
+    //     upstream gives the widgets in it.
+    for (auto* column = parentWidget(); column; column = column->parentWidget()) {
+        if (column->objectName() != QStringLiteral("LadybirdVerticalTabBar"))
+            continue;
+        if (column->styleSheet() != column_style)
+            column->setStyleSheet(column_style);
+        break;
+    }
 }
 
 // --- Interaction --------------------------------------------------------------------------------

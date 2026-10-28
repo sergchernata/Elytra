@@ -33,7 +33,6 @@
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/Arc/UpdatePill.h>
 #include <UI/Qt/BrowserWindow.h>
-#include <UI/Qt/ContentBlockingButton.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
 #include <UI/Qt/MacWindow.h>
@@ -92,7 +91,7 @@ protected:
                 ++m_misaligned_toolbar_paints;
             // Where the back button paints, in the window: it should never move while the sidebar stays put.
             for (auto* button : static_cast<QWidget*>(watched)->findChildren<QToolButton*>()) {
-                if (button->isVisible() && button->defaultAction() && button->defaultAction()->text() == "Go Back")
+                if (button->isVisible() && button->defaultAction() && (button->defaultAction()->text() == "Back" || button->defaultAction()->text() == "Go Back"))
                 {
                     auto x = button->mapTo(button->window(), QPoint(0, 0)).x();
                     m_back_button_positions.insert(x);
@@ -2027,7 +2026,7 @@ void SelfTest::profiles_get_their_own_session()
     settle(300);
 }
 
-// An extension's button sits in the toolbar, before the ad blocker's; clicking it opens the extension's popup, which fits its page,
+// An extension's button sits at the toolbar's right end; clicking it opens the extension's popup, which fits its page,
 // and removing the extension takes the button away.
 void SelfTest::extension_buttons_open_their_popups()
 {
@@ -2056,35 +2055,24 @@ void SelfTest::extension_buttons_open_their_popups()
     auto* button = find_button();
     if (!button)
         return;
-    // In the page's toolbar, just before the ad blocker's button, as in Chrome.
+    // In the page's toolbar, at its right end (before the downloads button, while there are downloads to show), level
+    // with the toolbar's other buttons.
     {
         auto* toolbar = window().current_tab() ? window().current_tab()->toolbar_container() : nullptr;
-        ContentBlockingButton* blocker = nullptr;
+        auto* row = button->parentWidget();
+        QToolButton* back = nullptr;
         for (auto* candidate : toolbar ? toolbar->findChildren<QToolButton*>() : QList<QToolButton*>()) {
-            if (auto* found = dynamic_cast<ContentBlockingButton*>(candidate))
-                blocker = found;
+            if (candidate->isVisible() && !row->isAncestorOf(candidate) && (!back || candidate->mapTo(&window(), QPoint(0, 0)).x() < back->mapTo(&window(), QPoint(0, 0)).x()))
+                back = candidate;
         }
         auto in_toolbar = toolbar && toolbar->isAncestorOf(button);
-        // The row of buttons (this extension's is one of them) ends where the ad blocker's starts.
-        auto* row = button->parentWidget();
-        auto button_rect = QRect(row->mapTo(&window(), QPoint(0, 0)), row->size());
-        auto blocker_rect = blocker ? QRect(blocker->mapTo(&window(), QPoint(0, 0)), blocker->size()) : QRect();
+        auto row_rect = QRect(row->mapTo(&window(), QPoint(0, 0)), row->size());
+        auto toolbar_right = toolbar ? toolbar->mapTo(&window(), QPoint(toolbar->width(), 0)).x() : 0;
         auto button_center = button->mapTo(&window(), QPoint(0, 0)).y() + button->height() / 2;
-        check(in_toolbar && blocker && button_rect.right() < blocker_rect.left() && blocker_rect.left() - button_rect.right() <= 12
-                && qAbs(button_center - blocker_rect.center().y()) <= 1,
-            "in the toolbar, just left of the ad blocker's button",
-            [&] {
-                QStringList parts;
-                parts << QString("button center %1, blocker center %2").arg(button_center).arg(blocker_rect.center().y());
-                parts << QString("in toolbar %1, row %2,%3 %4x%5, blocker %6,%7 %8x%9").arg(in_toolbar).arg(button_rect.x()).arg(button_rect.y()).arg(button_rect.width()).arg(button_rect.height()).arg(blocker_rect.x()).arg(blocker_rect.y()).arg(blocker_rect.width()).arg(blocker_rect.height());
-                if (blocker && blocker->parentWidget()) {
-                    for (auto* child : blocker->parentWidget()->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
-                        if (child->isVisible())
-                            parts << QString("%1 %2 x%3 w%4").arg(child->metaObject()->className(), child->objectName()).arg(child->mapTo(&window(), QPoint(0, 0)).x()).arg(child->width());
-                    }
-                }
-                return parts.join(" | ");
-            }());
+        auto back_center = back ? back->mapTo(&window(), QPoint(0, 0)).y() + back->height() / 2 : -100;
+        check(in_toolbar && back && toolbar_right - row_rect.right() <= 16 && qAbs(button_center - back_center) <= 1,
+            "in the toolbar, at its right end, level with its other buttons",
+            QString("in toolbar %1, row right %2 of %3, center %4 vs %5").arg(in_toolbar).arg(row_rect.right()).arg(toolbar_right).arg(button_center).arg(back_center));
     }
     check(!button->icon().isNull(), "with the extension's icon");
 
@@ -2484,7 +2472,9 @@ void SelfTest::tabs_of_removed_pinned_tabs_and_favorites_move_to_today()
 void SelfTest::a_malformed_pinned_url_doesnt_crash()
 {
     auto node = SpaceStore::the().add_pinned_tab(m_alpha, {}, -1, "http://[::1", "Broken");
-    settle(100);
+    // The spare tab is made in the background after a tab is used; counted after it's there.
+    wait_until([&] { return !s().m_spare_tab.isNull(); }, 3000);
+    settle(300);
     auto tabs_before = tab_count();
     s().open_or_activate_node(node); // Used to abort the browser.
     settle(300);

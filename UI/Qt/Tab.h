@@ -186,6 +186,9 @@ public:
 
     // Fork hook (Arc): edits the address somewhere else (the command bar) instead of the location field; true if so.
     static inline Function<bool(Tab&)> on_focus_location_editor;
+    // Fork hook (Arc): the page set into the chrome by these margins, its corners rounded and the chrome's color around
+    // it, as in Arc. None, it fills the tab as upstream's does.
+    void set_page_inset(QMargins);
     // Fork hook (Arc): the toolbar's left margin, if not upstream's (the Arc sidebar lines its buttons up with the page).
     static inline Function<Optional<int>(BrowserWindow&)> toolbar_left_margin;
     // Fork hook (Arc profiles): creates the view of a tab coming back (restored from the last session, or a closed tab
@@ -229,6 +232,7 @@ private:
     void location_edit_return_pressed(String, Optional<URL::URL>, WebView::OmniboxDestinationKind);
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void hideEvent(QHideEvent*) override;
+    virtual void paintEvent(QPaintEvent*) override; // Fork hook (Arc)
     virtual bool event(QEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
 
@@ -296,6 +300,7 @@ private:
     bool m_has_loaded_report_review_page { false };
     HyperlinkLabel* m_hover_label { nullptr };
     QIcon m_favicon;
+    QMargins m_page_inset; // Fork hook (Arc)
     bool m_is_loading { false };
     bool m_needs_attention { false };
     bool m_is_waiting_for_response { false };

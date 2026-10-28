@@ -5,6 +5,7 @@
  */
 
 #include <LibGfx/SharedImageBuffer.h>
+#include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/WebContentView.h>
 
 #include <QWindow>
@@ -19,6 +20,50 @@ namespace Ladybird {
 static CALayer* as_layer(void* layer)
 {
     return static_cast<CALayer*>(layer);
+}
+
+// Fork hook (Arc)
+static constexpr CGFloat WEB_VIEW_CORNER_RADIUS = 10;
+
+// Fork hook (Arc): the page layer's corners, and the dim over it, rounded; the chrome painted behind shows past them.
+static void apply_corner_radius(CALayer* layer, CGFloat radius)
+{
+    layer.opaque = radius <= 0;
+    layer.masksToBounds = radius > 0;
+    layer.cornerRadius = radius;
+    layer.cornerCurve = kCACornerCurveCircular;
+}
+
+void WebContentView::set_has_rounded_corners(bool has_rounded_corners)
+{
+    auto radius = has_rounded_corners ? WEB_VIEW_CORNER_RADIUS : 0;
+    if (m_corner_radius == radius)
+        return;
+    m_corner_radius = radius;
+    if (m_iosurface_layer)
+        apply_corner_radius(as_layer(m_iosurface_layer), m_corner_radius);
+    if (m_page_dim_layer)
+        apply_corner_radius(as_layer(m_page_dim_layer), m_corner_radius);
+    update_iosurface_layer_border();
+    update();
+}
+
+// Fork hook (Arc): the rounded page is outlined like the location field, so that it stands apart from chrome of a
+// similar color. In dark mode, the page stands apart from the chrome around it without one.
+void WebContentView::update_iosurface_layer_border()
+{
+    if (!m_iosurface_layer)
+        return;
+    auto* layer = as_layer(m_iosurface_layer);
+    if (m_corner_radius <= 0 || ChromeStyle::is_dark(window()->palette())) {
+        layer.borderWidth = 0;
+        return;
+    }
+    auto color = ChromeStyle::location_edit_border(window()->palette());
+    auto* border_color = CGColorCreateSRGB(color.redF(), color.greenF(), color.blueF(), color.alphaF());
+    layer.borderColor = border_color;
+    CGColorRelease(border_color);
+    layer.borderWidth = 1;
 }
 
 bool WebContentView::ensure_iosurface_layer_attached_to_native_view()
@@ -36,7 +81,7 @@ bool WebContentView::ensure_iosurface_layer_attached_to_native_view()
 
     if (!m_iosurface_layer) {
         auto* layer = [[CALayer alloc] init];
-        layer.opaque = YES;
+        apply_corner_radius(layer, m_corner_radius); // Fork hook (Arc)
         // Without this every new frame would cross-fade in and geometry changes would slide.
         layer.actions = @ {
             @"contents" : NSNull.null,
@@ -47,8 +92,12 @@ bool WebContentView::ensure_iosurface_layer_attached_to_native_view()
             @"position" : NSNull.null,
             @"hidden" : NSNull.null,
             @"backgroundColor" : NSNull.null,
+            @"cornerRadius" : NSNull.null,
+            @"borderWidth" : NSNull.null,
+            @"borderColor" : NSNull.null,
         };
         m_iosurface_layer = layer;
+        update_iosurface_layer_border(); // Fork hook (Arc)
     }
 
     auto* layer = as_layer(m_iosurface_layer);
@@ -136,6 +185,8 @@ void WebContentView::set_page_dim(qreal dim)
         auto* black = CGColorCreateSRGB(0, 0, 0, 0.22);
         layer.backgroundColor = black;
         CGColorRelease(black);
+        apply_corner_radius(layer, m_corner_radius); // Fork hook (Arc)
+        layer.opaque = NO;
         m_page_dim_layer = layer;
     }
     auto* layer = as_layer(m_page_dim_layer);

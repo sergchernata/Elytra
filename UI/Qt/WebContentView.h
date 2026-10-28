@@ -181,7 +181,9 @@ public:
     Optional<QPixmap> tab_preview_pixmap(QSize const& maximum_size) const;
 
 #ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
+    // Fork hook (Arc): the page's corners rounded, as Arc's page set in the chrome is.
     void set_has_rounded_corners(bool);
+    double corner_radius() const { return m_corner_radius; }
     // Fork hook (Arc): whether the chrome's color shows outside the rounded corners (not in a window that's itself round).
     void set_paints_chrome_behind_corners(bool paints) { m_paints_chrome_behind_corners = paints; }
     bool paints_chrome_behind_corners() const { return m_paints_chrome_behind_corners; }
@@ -341,11 +343,13 @@ private:
     void present_current_paintable_as_layer_contents();
     void update_iosurface_layer_frame();
     void update_iosurface_layer_background_color();
+    void update_iosurface_layer_border(); // Fork hook (Arc)
     void detach_iosurface_layer_from_native_view();
     void destroy_iosurface_layer();
 
     void* m_iosurface_layer { nullptr };
     void* m_page_dim_layer { nullptr };
+    double m_corner_radius { 0 }; // Fork hook (Arc)
 #endif
 
 #ifdef LADYBIRD_QT_USE_RHI_WIDGET

@@ -69,27 +69,15 @@ QColor chrome_sidebar_background(QPalette const& palette)
     return Theme::chrome(palette).sidebar;
 }
 
-// Fork hook (Arc)
-static QColor s_chrome_background_tint;
-static double s_chrome_background_tint_amount = 0;
-
+// Fork hook (Arc): the tint is the theme's, so everything that paints the chrome's surfaces takes it.
 void set_chrome_background_tint(QColor const& color, double amount)
 {
-    s_chrome_background_tint = color;
-    s_chrome_background_tint_amount = amount;
-}
-
-static QColor untinted_chrome_background(QPalette const& palette)
-{
-    return Theme::chrome(palette).toolbar;
+    Theme::set_chrome_tint(color, amount);
 }
 
 QColor chrome_background(QPalette const& palette)
 {
-    auto background = untinted_chrome_background(palette);
-    if (s_chrome_background_tint.isValid()) // Fork hook (Arc)
-        return mix(background, s_chrome_background_tint, s_chrome_background_tint_amount);
-    return background;
+    return Theme::chrome(palette).toolbar;
 }
 
 QColor chrome_surface(QPalette const&)

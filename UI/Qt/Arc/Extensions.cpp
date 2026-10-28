@@ -12,7 +12,6 @@
 #include <LibWebView/ExtensionAPI/TabsDelegate.h>
 #include <LibWebView/ExtensionRegistry.h>
 #include <LibWebView/ExtensionRuntime.h>
-#include <UI/Qt/ContentBlockingButton.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ExtensionServices.h>
 #include <UI/Qt/Arc/Extensions.h>
@@ -633,18 +632,18 @@ void add_extension_buttons_to_toolbar(BrowserWindow& window, QWidget& toolbar)
 {
     if (toolbar.property("arc_extension_buttons").toBool())
         return;
-    ContentBlockingButton* blocker = nullptr;
+    QToolButton* downloads = nullptr;
     for (auto* button : toolbar.findChildren<QToolButton*>()) {
-        if (auto* found = dynamic_cast<ContentBlockingButton*>(button))
-            blocker = found;
+        if (button->objectName() == QStringLiteral("LadybirdDownloadsButton"))
+            downloads = button;
     }
-    auto* layout = blocker && blocker->parentWidget() ? qobject_cast<QBoxLayout*>(blocker->parentWidget()->layout()) : nullptr;
-    auto index = layout ? layout->indexOf(blocker) : -1;
+    auto* layout = downloads && downloads->parentWidget() ? qobject_cast<QBoxLayout*>(downloads->parentWidget()->layout()) : nullptr;
+    auto index = layout ? layout->indexOf(downloads) : -1;
     if (index < 0)
         return;
     toolbar.setProperty("arc_extension_buttons", true);
-    // Its buttons the size of the toolbar's (the ad blocker's), so they line up with it.
-    auto* row = new ExtensionButtons(window, blocker->parentWidget(), static_cast<QWidget*>(blocker)->sizeHint().expandedTo(QSize(26, 26)));
+    // Its buttons the size of the toolbar's (the downloads button's), so they line up with it.
+    auto* row = new ExtensionButtons(window, downloads->parentWidget(), static_cast<QWidget*>(downloads)->sizeHint().expandedTo(QSize(26, 26)));
     layout->insertWidget(index, row, 0, Qt::AlignVCenter);
 }
 

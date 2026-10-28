@@ -3294,6 +3294,7 @@ void TabWidget::insert_tab(int index, Tab* widget, QString const& label)
 
     // A tab moved here from another window can already be loading.
     m_tab_bar->update_loading_ring_animation();
+    update_page_inset(*widget); // Fork hook (Arc)
     emit tabs_changed(); // Fork hook (Arc)
 }
 
@@ -3381,11 +3382,25 @@ void TabWidget::set_minimal_chrome_bar(QWidget* bar)
     if (bar)
         bar->setParent(this);
     rebuild_layout();
-#ifdef AK_OS_MACOS
-    // Tabs opened before the bar framed their pages for the tab sidebar.
-    for (int index = 0; index < m_stacked_widget->count(); ++index)
-        update_web_view_frame(*tab(index));
-#endif
+}
+
+// Fork hook (Arc): beside the sidebar, the page is inset a little less than at its other edges (the sidebar's own
+// margin makes up the rest); Little Arc's page has no sidebar, so the same inset all round. Without the chrome (as in
+// full screen), the page fills the window.
+void TabWidget::update_page_inset(Tab& tab)
+{
+    static constexpr int PAGE_INSET = 5;
+    static constexpr int PAGE_SIDEBAR_INSET = 4;
+    if (m_minimal_chrome_bar) {
+        tab.set_page_inset({ PAGE_INSET, 0, PAGE_INSET, PAGE_INSET });
+        return;
+    }
+    if (!m_vertical_sidebar_widget || !m_tab_bar_visible || m_tab_bar->tab_layout() == TabLayout::Horizontal) {
+        tab.set_page_inset({});
+        return;
+    }
+    auto on_right = vertical_tabs_are_on_right();
+    tab.set_page_inset({ on_right ? PAGE_INSET : PAGE_SIDEBAR_INSET, 0, on_right ? PAGE_SIDEBAR_INSET : PAGE_INSET, PAGE_INSET });
 }
 
 void TabWidget::set_vertical_sidebar_widget(QWidget* widget)
@@ -4013,6 +4028,10 @@ void TabWidget::rebuild_layout()
     QPointer<QWidget> focus_widget = QApplication::focusWidget();
     if (focus_widget && !isAncestorOf(focus_widget))
         focus_widget = nullptr;
+    ScopeGuard update_page_insets = [&] { // Fork hook (Arc)
+        for (int index = 0; index < m_stacked_widget->count(); ++index)
+            update_page_inset(*tab(index));
+    };
     ScopeGuard restore_focus = [&] {
         if (!focus_widget)
             return;
@@ -4287,7 +4306,8 @@ void TabWidget::show_all_tabs()
 
 void TabWidget::place_collapsed_sidebar_buttons()
 {
-    auto collapsed = m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal && !m_vertical_tabs_expanded;
+    // Fork hook (Arc): the hidden Arc sidebar leaves its own toggle at the window's edge; upstream's buttons stay out.
+    auto collapsed = m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal && !m_vertical_tabs_expanded && !m_vertical_sidebar_widget;
     auto* current = as_if<Tab>(m_stacked_widget->currentWidget());
     for (int index = 0; index < m_stacked_widget->count(); ++index) {
         if (auto* tab = this->tab(index); tab && (tab != current || !collapsed))
@@ -4389,6 +4409,8 @@ void TabWidget::paint_vertical_tabs_column()
     QStyleOption option;
     option.initFrom(m_vertical_tab_bar_column);
     m_vertical_tab_bar_column->style()->drawPrimitive(QStyle::PE_Widget, &option, &painter, m_vertical_tab_bar_column);
+    if (m_vertical_sidebar_widget) // Fork hook (Arc): no line between the sidebar and the page, as in Arc.
+        return;
 
     auto const& chrome = Theme::chrome(*this);
     auto column_rect = m_vertical_tab_bar_column->rect();
@@ -4698,7 +4720,8 @@ void TabWidget::update_chrome_style()
     m_is_updating_chrome_style = true;
     auto style_sheet = ChromeStyle::tab_widget_style_sheet(Theme::chrome_palette(*this));
     m_tab_bar_row->setStyleSheet(style_sheet);
-    m_vertical_tab_bar_column->setStyleSheet(style_sheet);
+    if (!m_vertical_sidebar_widget) // Fork hook (Arc): the Arc sidebar styles its column (no edge, the window's color).
+        m_vertical_tab_bar_column->setStyleSheet(style_sheet);
     m_vertical_tabs_content_separator->setStyleSheet(style_sheet);
     m_vertical_tabs_resize_handle->setStyleSheet(style_sheet);
     auto reserved_space_palette = m_vertical_tabs_reserved_space->palette();

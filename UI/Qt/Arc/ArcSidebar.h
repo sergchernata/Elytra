@@ -263,6 +263,7 @@ private:
     QIcon icon_for(QString const& url, Tab const* tab) const;
 
     void on_current_tab_changed(int index);
+    void remember_shown_tab(Tab&);
     void on_row_clicked(QModelIndex const&);
     void on_close_clicked(QModelIndex const&);
     void on_row_dropped(QModelIndex const& source, QModelIndex const& target, SidebarTree::DropPlace);

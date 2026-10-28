@@ -10,6 +10,7 @@
 #include <LibWebView/Settings.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/Arc/ArcChrome.h>
+#include <UI/Qt/Theme.h>
 #include <UI/Qt/Arc/Extensions.h>
 #include <UI/Qt/Arc/ArcImporter.h>
 #include <UI/Qt/Arc/ArcShortcuts.h>
@@ -392,8 +393,8 @@ void install()
     route_location_editing_to_command_bar();
     route_links_from_other_apps_to_little_arc();
     install_extensions_ui();
-    Tab::animates_loading_spinner = false;
-    Tab::sidebar_is_chrome_colored = true;
+    // Arc's chrome is one surface: the sidebar, tab strip and toolbar share the (space-tinted) color.
+    Theme::set_chrome_is_uniform(true);
     // The sidebar's windows line the toolbar's buttons up with the page from the start, rather than correcting
     // upstream's margin once it's laid out (a frame could show at upstream's, making the buttons jump).
     Tab::toolbar_left_margin = [](BrowserWindow& window) -> Optional<int> {

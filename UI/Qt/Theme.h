@@ -64,6 +64,11 @@ bool has_increased_contrast();
 
 ChromeColors const& chrome();
 
+// Fork hook (Arc): a space's color blended into the chrome's surfaces (an invalid color turns it off), and the tab
+// strip, sidebar and toolbar all one color, as Arc's chrome is.
+void set_chrome_tint(QColor const&, double amount);
+void set_chrome_is_uniform(bool);
+
 // A private window's chrome is violet-dark in either appearance, so it never looks like a normal window. The chrome
 // inside a window marked as private takes its colors from a palette marked as private.
 void mark_private_window(QWidget& window);
