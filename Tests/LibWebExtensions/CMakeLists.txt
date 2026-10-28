@@ -11,6 +11,6 @@ set(TEST_SOURCES
 )
 
 foreach(source IN LISTS TEST_SOURCES)
-    ladybird_test("${source}" LibWebExtensions LIBS LibCore LibCrypto LibCompress LibFileSystem LibURL LibWebExtensions OpenSSL::Crypto)
+    ladybird_test("${source}" LibWebExtensions LIBS LibCore LibCrypto LibCompress LibFileSystem LibURL LibWebExtensions OpenSSL::Crypto ZLIB::ZLIB)
 endforeach()
 

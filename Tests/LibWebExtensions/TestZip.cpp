@@ -7,13 +7,29 @@
 #include <AK/ByteString.h>
 #include <AK/Endian.h>
 #include <AK/ScopeGuard.h>
-#include <LibCompress/Deflate.h>
 #include <LibCore/Directory.h>
 #include <LibCore/File.h>
 #include <LibFileSystem/FileSystem.h>
 #include <LibTest/TestCase.h>
 #include <LibWebExtensions/Zip.h>
 #include <stdlib.h>
+#include <zlib.h>
+
+// A ZIP entry's deflated data: a raw deflate stream, without zlib's header.
+static ByteBuffer raw_deflate(ReadonlyBytes data)
+{
+    z_stream stream {};
+    VERIFY(deflateInit2(&stream, Z_BEST_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) == Z_OK);
+    auto output = MUST(ByteBuffer::create_uninitialized(deflateBound(&stream, data.size())));
+    stream.next_in = const_cast<Bytef*>(data.data());
+    stream.avail_in = data.size();
+    stream.next_out = output.data();
+    stream.avail_out = output.size();
+    VERIFY(deflate(&stream, Z_FINISH) == Z_STREAM_END);
+    output.resize(stream.total_out);
+    deflateEnd(&stream);
+    return output;
+}
 
 using WebExtensions::ZipArchive;
 
@@ -82,7 +98,7 @@ ByteBuffer build_zip(Vector<TestEntry> const& entries, BuildOptions options = {}
     Vector<Written> written;
 
     for (auto const& entry : entries) {
-        auto payload = entry.deflate ? MUST(Compress::DeflateCompressor::compress_all(entry.data)) : entry.data;
+        auto payload = entry.deflate ? raw_deflate(entry.data) : entry.data;
         Written info;
         info.crc = entry.crc_override.value_or(WebExtensions::crc32(entry.data));
         info.compressed_size = payload.size();

@@ -9,7 +9,7 @@
 #include <AK/MemoryStream.h>
 #include <AK/ScopeGuard.h>
 #include <AK/Utf8View.h>
-#include <LibCompress/Deflate.h>
+#include <LibCompress/GenericZlib.h>
 #include <LibCore/File.h>
 #include <LibCore/System.h>
 #include <LibFileSystem/FileSystem.h>
@@ -309,10 +309,28 @@ Optional<ZipArchive::Entry const&> ZipArchive::find(StringView name) const
     return {};
 }
 
+// A ZIP entry's data is a raw deflate stream, with no zlib header around it.
+class RawDeflateDecompressor final : public Compress::GenericZlibDecompressor {
+public:
+    static ErrorOr<NonnullOwnPtr<RawDeflateDecompressor>> create(MaybeOwned<Stream> stream)
+    {
+        auto buffer = TRY(AK::FixedArray<u8>::create(16 * 1024));
+        // Negative window bits: raw deflate.
+        auto zstream = TRY(GenericZlibDecompressor::new_z_stream(-15));
+        return adopt_nonnull_own_or_enomem(new (nothrow) RawDeflateDecompressor(move(buffer), move(stream), zstream));
+    }
+
+private:
+    RawDeflateDecompressor(AK::FixedArray<u8> buffer, MaybeOwned<Stream> stream, z_stream* zstream)
+        : GenericZlibDecompressor(move(buffer), move(stream), zstream)
+    {
+    }
+};
+
 static ErrorOr<ByteBuffer> inflate_with_limit(ReadonlyBytes compressed, u64 expected_size)
 {
     auto input = make<FixedMemoryStream>(compressed);
-    auto decompressor = TRY(Compress::DeflateDecompressor::create(MaybeOwned<Stream>(move(input))));
+    auto decompressor = TRY(RawDeflateDecompressor::create(MaybeOwned<Stream>(move(input))));
 
     auto output = TRY(ByteBuffer::create_uninitialized(expected_size));
     size_t filled = 0;

@@ -2686,7 +2686,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     // of it. A redirect is a 307 of the browser's own, as in Chrome.
     auto extension_verdict = Extensions::will_send_request(page, *request, load_request_headers);
     if (extension_verdict.kind == Extensions::RequestVerdict::Kind::Block) {
-        auto blocked_response = PendingResponse::create(request);
+        auto blocked_response = PendingResponse::create(fetch_params);
         blocked_response->resolve(Infrastructure::Response::network_error("Blocked by an extension"_string));
         return blocked_response;
     }
@@ -2700,7 +2700,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
         redirect->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Origin"sv, has_origin ? origin->serialize() : "*"_string));
         if (has_origin)
             redirect->header_list()->append(HTTP::Header::isomorphic_encode("Access-Control-Allow-Credentials"sv, "true"sv));
-        auto redirect_response = PendingResponse::create(request);
+        auto redirect_response = PendingResponse::create(fetch_params);
         redirect_response->resolve(redirect);
         return redirect_response;
     }
@@ -2718,7 +2718,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     load_request.set_referrer_policy(request->referrer_policy());
     load_request.set_is_navigation_request(request->is_navigation_request());
     // A navigation the browser starts has no requester of its own.
-    bool browser_initiated_navigation = request->client() == nullptr && request->mode() == Infrastructure::Request::Mode::Navigate;
+    bool browser_initiated_navigation = !request->client().has_value() && request->mode() == Infrastructure::Request::Mode::Navigate;
     if (auto const* origin = request->origin().get_pointer<URL::Origin>(); origin && !browser_initiated_navigation)
         load_request.set_origin(*origin);
     load_request.set_priority(request->priority());

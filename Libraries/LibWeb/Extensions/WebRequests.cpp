@@ -18,6 +18,7 @@
 #include <LibURL/Site.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Extensions/WebRequests.h>
+#include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/BrowsingContext.h>
@@ -271,7 +272,7 @@ static Optional<RequestInfo> info_of(Page& page, Request& request)
         return {};
 
     GC::Ptr<DOM::Document> document;
-    if (auto client = request.client())
+    if (auto client = Fetch::Fetching::resolve_client(request))
         document = client->responsible_document();
     if (document) {
         auto const& document_url = document->url();
@@ -287,16 +288,18 @@ static Optional<RequestInfo> info_of(Page& page, Request& request)
     info.type = resource_type_of(request);
 
     bool is_frame = info.type == DNR::ResourceType::MainFrame || info.type == DNR::ResourceType::SubFrame;
-    if (is_frame && request.reserved_client() && request.reserved_client()->target_browsing_context) {
-        if (auto* active = request.reserved_client()->target_browsing_context->active_document())
-            info.navigable = active->navigable();
+    // A request names the frame it navigates only as top-level or nested; a nested one is placed by its requester.
+    if (is_frame && request.reserved_client_snapshot()) {
+        if (auto const* environment = request.reserved_client_snapshot()->kind.get_pointer<Fetch::Infrastructure::ReservedClientContext::Environment>();
+            environment && environment->target_browsing_context == Fetch::Infrastructure::ReservedClientContext::TargetBrowsingContext::TopLevel)
+            info.navigable = page.top_level_traversable();
     }
     if (!info.navigable && document)
         info.navigable = document->navigable();
     if (!info.navigable && is_frame)
         info.navigable = page.top_level_traversable();
 
-    bool browser_initiated_navigation = !request.client() && request.mode() == Request::Mode::Navigate;
+    bool browser_initiated_navigation = !request.client().has_value() && request.mode() == Request::Mode::Navigate;
     if (auto const* origin = request.origin().get_pointer<URL::Origin>(); origin && !browser_initiated_navigation)
         info.initiator = *origin;
 
@@ -709,9 +712,9 @@ static Optional<String> authentication_key(Request const& request)
     Optional<URL::Origin> top_level_origin;
     if (request.destination() == Request::Destination::Document)
         top_level_origin = request.current_url().origin();
-    else if (auto const& reserved = request.reserved_client(); reserved && reserved->top_level_origin.has_value())
+    else if (auto const& reserved = request.reserved_client_snapshot(); reserved && reserved->top_level_origin.has_value())
         top_level_origin = reserved->top_level_origin;
-    else if (auto client = request.client(); client && client->top_level_origin.has_value())
+    else if (auto const& client = request.client_snapshot(); client && client->top_level_origin.has_value())
         top_level_origin = client->top_level_origin;
     if (!top_level_origin.has_value())
         return {};
