@@ -72,6 +72,14 @@ QRect SidebarDelegate::title_edit_rect(QRect const& row)
     return QRect(row.left() + TITLE_LEFT - FIELD_INSET, row.top() + 5, row.width() - TITLE_LEFT + FIELD_INSET - 8, row.height() - 10);
 }
 
+qreal SidebarDelegate::caret_turn(QModelIndex const& index) const
+{
+    if (index.isValid() && index == turning_folder)
+        return caret_progress;
+    auto const* view = qobject_cast<QTreeView const*>(parent());
+    return view && view->isExpanded(index) ? 1 : 0;
+}
+
 QRect SidebarDelegate::chevron_rect(QRect const& row)
 {
     return close_button_rect(row);
@@ -196,24 +204,39 @@ QSize SidebarDelegate::sizeHint(QStyleOptionViewItem const& option, QModelIndex 
     return QSize(option.rect.width(), height);
 }
 
-static void draw_chevron(QPainter& painter, QRectF rect, bool expanded, QColor color)
+// Pointing right when `turn` is 0 (closed), down when it's 1 (open), and turning between.
+static void draw_chevron(QPainter& painter, QRectF rect, qreal turn, QColor color)
 {
     painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(QPen(color, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.setBrush(Qt::NoBrush);
-    auto center = rect.center();
+    painter.translate(rect.center());
+    painter.rotate(90 * turn);
     QPainterPath path;
-    if (expanded) {
-        path.moveTo(center + QPointF(-4, -2));
-        path.lineTo(center + QPointF(0, 2));
-        path.lineTo(center + QPointF(4, -2));
-    } else {
-        path.moveTo(center + QPointF(-2, -4));
-        path.lineTo(center + QPointF(2, 0));
-        path.lineTo(center + QPointF(-2, 4));
-    }
+    path.moveTo(-2, -4);
+    path.lineTo(2, 0);
+    path.lineTo(-2, 4);
     painter.drawPath(path);
     painter.restore();
+}
+
+void SidebarDelegate::paint_caret(QPainter& painter, QRect const& row, QWidget const* view, QPalette const& palette, qreal turn) const
+{
+    auto muted = ChromeStyle::chrome_muted_text(palette);
+    auto button = chevron_rect(row);
+    auto const* item_view = qobject_cast<QAbstractItemView const*>(view);
+    if (item_view && button.contains(item_view->viewport()->mapFromGlobal(QCursor::pos()))) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        auto background = muted;
+        background.setAlpha(40);
+        painter.setBrush(background);
+        painter.drawRoundedRect(button, 5, 5);
+        painter.restore();
+    }
+    draw_chevron(painter, QRectF(button).adjusted(3, 3, -3, -3), turn, muted);
 }
 
 static void draw_folder_glyph(QPainter& painter, QRectF rect, QColor color, bool open)
@@ -371,18 +394,8 @@ void SidebarDelegate::paint(QPainter* painter, QStyleOptionViewItem const& optio
             auto folder_rect = QRectF(icon_rect.center().x() - FOLDER_ICON_SIZE / 2.0, icon_rect.center().y() - FOLDER_ICON_SIZE / 2.0, FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
             draw_folder_glyph(*painter, folder_rect, text_color, expanded);
         }
-        if (!compact && hovered) {
-            auto button = chevron_rect(option.rect);
-            auto* view = qobject_cast<QAbstractItemView const*>(option.widget);
-            if (view && button.contains(view->viewport()->mapFromGlobal(QCursor::pos()))) {
-                painter->setPen(Qt::NoPen);
-                auto background = muted;
-                background.setAlpha(40);
-                painter->setBrush(background);
-                painter->drawRoundedRect(button, 5, 5);
-            }
-            draw_chevron(*painter, QRectF(button).adjusted(3, 3, -3, -3), expanded, muted);
-        }
+        if (!compact && hovered && !(caret_painted_elsewhere && index == turning_folder))
+            paint_caret(*painter, option.rect, option.widget, palette, caret_turn(index));
     } else {
         // An away pinned tab's favicon is a button (back to the pinned URL): a rounded backdrop while hovered.
         auto icon_hover = index == pinned_hover_index ? pinned_hover_progress : 0.0;
@@ -517,6 +530,22 @@ SidebarTree::SidebarTree(QWidget* parent)
     viewport()->setAutoFillBackground(false);
 
 
+    m_caret_animation = new QVariantAnimation(this);
+    m_caret_animation->setDuration(FOLDER_ANIMATION_MS);
+    m_caret_animation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_caret_animation, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) {
+        m_delegate->caret_progress = value.toReal();
+        if (m_delegate->turning_folder.isValid())
+            viewport()->update(visualRect(m_delegate->turning_folder));
+        for (auto* reveal : viewport()->findChildren<QWidget*>("ArcFolderReveal", Qt::FindDirectChildrenOnly))
+            reveal->update();
+    });
+    connect(m_caret_animation, &QAbstractAnimation::finished, this, [this] {
+        if (m_delegate->turning_folder.isValid())
+            viewport()->update(visualRect(m_delegate->turning_folder));
+        m_delegate->turning_folder = QPersistentModelIndex();
+    });
+
     m_pinned_hover_animation = new QVariantAnimation(this);
     m_pinned_hover_animation->setDuration(180);
     m_pinned_hover_animation->setEasingCurve(QEasingCurve::InOutCubic);
@@ -529,15 +558,26 @@ SidebarTree::SidebarTree(QWidget* parent)
 
 // Over the list while a folder opens or closes: the list above the folder stays, its contents show in place as far as
 // the rows below have moved, and the rows below follow. Painted from two pictures, of the list open and closed.
+//
+// Only what's in view slides: contents running past the bottom of the list are uncovered (or covered) over the whole
+// slide, not in its first moment. A folder closed at the end of the list also scrolls it back: the rows above it come
+// down as its contents fold away, so the list ends where it should.
 class FolderReveal final : public QWidget {
 public:
-    FolderReveal(QWidget& viewport, QPixmap open, QPixmap closed, int top, int height, bool opening)
+    struct Slide {
+        QPixmap open;
+        QPixmap closed;
+        int open_top { 0 };   // Below the folder's row, in the open picture.
+        int closed_top { 0 }; // The same, in the closed picture: lower, when closing scrolls the list back.
+        int height { 0 };     // Of its contents, as far as they show in the open picture.
+        bool opening { true };
+    };
+
+    FolderReveal(QWidget& viewport, Slide slide, Function<void(QPainter&, int offset)> paint_over, Function<void()> on_finish)
         : QWidget(&viewport)
-        , m_open(AK::move(open))
-        , m_closed(AK::move(closed))
-        , m_top(top)
-        , m_height(height)
-        , m_opening(opening)
+        , m_slide(AK::move(slide))
+        , m_paint_over(AK::move(paint_over))
+        , m_on_finish(AK::move(on_finish))
     {
         setObjectName("ArcFolderReveal");
         setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -551,6 +591,9 @@ public:
         m_animation->setEasingCurve(QEasingCurve::OutCubic);
         connect(m_animation, &QVariantAnimation::valueChanged, this, [this](QVariant const& value) {
             m_progress = value.toReal();
+            // For the self-test: how much of the contents' room in view is uncovered.
+            auto room = qMax(1, height() - m_slide.open_top);
+            setProperty("uncovered", qMin(1.0, qreal(shown()) / room));
             update();
         });
         connect(m_animation, &QAbstractAnimation::finished, this, &FolderReveal::finish);
@@ -567,36 +610,46 @@ public:
         m_animation->stop();
         hide();
         deleteLater();
+        if (m_on_finish)
+            m_on_finish();
     }
-
-    bool is_finished() const { return m_finished; }
 
 protected:
     virtual void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        auto shown = qRound(m_height * (m_opening ? m_progress : 1 - m_progress));
         auto w = width();
         auto h = height();
-        // The list down to the folder's row, and its contents as far as they're uncovered: from the open list.
-        painter.drawPixmap(QRectF(0, 0, w, m_top + shown), m_open, source(m_open, QRectF(0, 0, w, m_top + shown)));
-        // The rows below, right after: from the closed list, which has them all from the folder's row down.
-        auto below = qMax(0, h - m_top - shown);
-        painter.drawPixmap(QRectF(0, m_top + shown, w, below), m_closed, source(m_closed, QRectF(0, m_top, w, below)));
+        auto offset = qRound((m_slide.closed_top - m_slide.open_top) * closedness());
+        auto top = m_slide.open_top + offset;
+        auto shown = this->shown();
+        // Rows coming down from above the list, as closing scrolls it back: from the closed picture.
+        if (offset > 0) {
+            auto from = m_slide.closed_top - m_slide.open_top - offset;
+            painter.drawPixmap(QRectF(0, 0, w, offset), m_slide.closed, source(m_slide.closed, QRectF(0, from, w, offset)));
+        }
+        // The list down to the folder's row, and its contents as far as they're uncovered: from the open picture.
+        painter.drawPixmap(QRectF(0, offset, w, top - offset + shown), m_slide.open, source(m_slide.open, QRectF(0, 0, w, top - offset + shown)));
+        // The rows below, right after: from the closed picture, which has them all from the folder's row down.
+        auto below = qMax(0, h - top - shown);
+        painter.drawPixmap(QRectF(0, top + shown, w, below), m_slide.closed, source(m_slide.closed, QRectF(0, m_slide.closed_top, w, below)));
+        if (m_paint_over)
+            m_paint_over(painter, offset);
     }
 
 private:
+    qreal closedness() const { return m_slide.opening ? 1 - m_progress : m_progress; }
+    int shown() const { return qRound(m_slide.height * (1 - closedness())); }
+
     static QRectF source(QPixmap const& pixmap, QRectF rect)
     {
         auto dpr = pixmap.devicePixelRatio();
         return QRectF(rect.topLeft() * dpr, rect.size() * dpr);
     }
 
-    QPixmap m_open;
-    QPixmap m_closed;
-    int m_top { 0 };
-    int m_height { 0 };
-    bool m_opening { true };
+    Slide m_slide;
+    Function<void(QPainter&, int)> m_paint_over;
+    Function<void()> m_on_finish;
     qreal m_progress { 0 };
     bool m_finished { false };
     QVariantAnimation* m_animation { nullptr };
@@ -681,17 +734,28 @@ void SidebarTree::toggle_folder(QModelIndex const& index)
         static_cast<FolderReveal*>(widget)->finish();
 
     auto opening = !isExpanded(index);
+    // The caret turns from wherever it is, should it still be turning.
+    auto turn = m_delegate->caret_turn(index);
+    m_caret_animation->stop();
+    m_delegate->turning_folder = index;
+    m_delegate->caret_progress = turn;
+    m_caret_animation->setStartValue(turn);
+    m_caret_animation->setEndValue(opening ? 1.0 : 0.0);
+
     auto animate = isVisible() && model() && model()->hasChildren(index);
     QPixmap before;
-    int scroll = verticalScrollBar()->value();
+    auto row_before = visualRect(index);
     int height = 0;
     if (animate) {
+        // The pictures leave the caret out; it's drawn over the slide, turning.
+        m_delegate->caret_painted_elsewhere = true;
         before = SpaceSlide::picture(*viewport(), viewport()->rect());
         if (!opening)
             height = height_of_contents(index);
     }
 
     setExpanded(index, opening);
+    m_caret_animation->start();
     if (!animate)
         return;
 
@@ -700,12 +764,37 @@ void SidebarTree::toggle_folder(QModelIndex const& index)
     updateGeometries();
     if (opening)
         height = height_of_contents(index);
-    // Closing at the end of a long list scrolls it; then it just closes.
-    if (verticalScrollBar()->value() != scroll || height <= 0)
+    auto row_after = visualRect(index);
+    auto open_row = opening ? row_after : row_before;
+    auto closed_row = opening ? row_before : row_after;
+    // Only what shows: contents past the list's bottom are out of sight.
+    height = qMin(height, viewport()->height() - open_row.bottom() - 1);
+    auto shift = closed_row.top() - open_row.top();
+    if (height <= 0 || shift < 0 || shift > height || open_row.isEmpty()) {
+        m_delegate->caret_painted_elsewhere = false;
+        viewport()->update();
         return;
-    auto top = visualRect(index).bottom() + 1;
+    }
     auto after = SpaceSlide::picture(*viewport(), viewport()->rect());
-    new FolderReveal(*viewport(), opening ? after : before, opening ? before : after, top, height, opening);
+    FolderReveal::Slide slide {
+        .open = opening ? after : before,
+        .closed = opening ? before : after,
+        .open_top = open_row.bottom() + 1,
+        .closed_top = closed_row.bottom() + 1,
+        .height = height,
+        .opening = opening,
+    };
+    QPersistentModelIndex folder = index;
+    auto paint_caret = [this, folder, open_row](QPainter& painter, int offset) {
+        if (!folder.isValid() || folder != m_hovered_index)
+            return;
+        m_delegate->paint_caret(painter, open_row.translated(0, offset), this, palette(), m_delegate->caret_turn(folder));
+    };
+    auto done = [this] {
+        m_delegate->caret_painted_elsewhere = false;
+        viewport()->update();
+    };
+    new FolderReveal(*viewport(), AK::move(slide), AK::move(paint_caret), AK::move(done));
 }
 
 void SidebarTree::rebuild_keeping_scroll_position(Function<void()> const& rebuild)

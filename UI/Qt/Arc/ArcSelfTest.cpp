@@ -198,6 +198,7 @@ private:
     void pinned_tab_away_back_and_separate();
     void a_pinned_tab_that_redirects_isnt_away();
     void opening_a_folder_leaves_the_list_alone_while_it_slides();
+    void folders_always_slide_open_and_closed();
     void favorites_never_overlap_when_they_change();
     void favorites_reorder_by_dragging();
     void a_link_dropped_on_favorites_goes_where_the_gap_opens();
@@ -633,6 +634,137 @@ void SelfTest::opening_a_folder_leaves_the_list_alone_while_it_slides()
     rebuild_now();
 }
 
+// Every way a folder opens or closes slides: clicked anywhere on its row (nested too), with the list scrolled to its end,
+// or while another folder is still sliding. Its caret turns as it does.
+void SelfTest::folders_always_slide_open_and_closed()
+{
+    s().switch_to_space(m_alpha);
+    settle(300);
+    auto* tree = m_sidebar.m_tree;
+    auto folder = SpaceStore::the().add_folder(m_alpha, {}, 0, "Slide Always");
+    for (int i = 0; i < 3; ++i)
+        SpaceStore::the().add_pinned_tab(m_alpha, folder, -1, page(QString("Slide %1").arg(i)), QString("Slide %1").arg(i));
+    auto nested = SpaceStore::the().add_folder(m_alpha, folder, -1, "Slide Nested");
+    for (int i = 0; i < 3; ++i)
+        SpaceStore::the().add_pinned_tab(m_alpha, nested, -1, page(QString("Nested %1").arg(i)), QString("Nested %1").arg(i));
+    // Enough rows after it that the list scrolls.
+    QStringList fillers;
+    for (int i = 0; i < 30; ++i)
+        fillers.append(SpaceStore::the().add_pinned_tab(m_alpha, {}, -1, page(QString("Filler %1").arg(i)), QString("Filler %1").arg(i)));
+    // And a folder at the end of the list, taller than the list, to close while it's scrolled to its end.
+    auto last = SpaceStore::the().add_folder(m_alpha, {}, -1, "Slide Last");
+    for (int i = 0; i < 30; ++i)
+        SpaceStore::the().add_pinned_tab(m_alpha, last, -1, page(QString("Last %1").arg(i)), QString("Last %1").arg(i));
+    rebuild_now();
+    settle(300);
+
+    auto sliding = [&] {
+        for (auto* widget : tree->viewport()->findChildren<QWidget*>("ArcFolderReveal", Qt::FindDirectChildrenOnly)) {
+            if (widget->isVisible())
+                return true;
+        }
+        return false;
+    };
+    auto expanded = [&](QString const& id) { return tree->isExpanded(row_for_node(id)); };
+    auto click_at = [&](QString const& id, int x) {
+        auto row = tree->visualRect(row_for_node(id));
+        auto point = QPointF(x < 0 ? row.right() + x : row.left() + x, row.center().y());
+        auto global = tree->viewport()->mapToGlobal(point);
+        QMouseEvent press(QEvent::MouseButtonPress, point, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(tree->viewport(), &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, point, global, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(tree->viewport(), &release);
+    };
+    // Toggles a folder by `how`, then checks that it changed and slid.
+    auto toggles_and_slides = [&](QString const& id, QString const& what, std::function<void()> const& how) {
+        auto was = expanded(id);
+        how();
+        QApplication::processEvents();
+        auto slid = sliding();
+        check(expanded(id) != was && slid, qPrintable(what),
+            QString("%1, %2").arg(expanded(id) != was ? "toggled" : "not toggled", slid ? "slid" : "didn't slide"));
+        settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+    };
+    auto set_open = [&](QString const& id, bool open) {
+        if (expanded(id) != open)
+            tree->toggle_folder(row_for_node(id));
+        settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+    };
+
+    set_open(folder, false);
+    list_scroll().setValue(0);
+    settle(100);
+    toggles_and_slides(folder, "a folder clicked on its name slides open", [&] { click_at(folder, 60); });
+    toggles_and_slides(folder, "and slides closed", [&] { click_at(folder, 60); });
+    toggles_and_slides(folder, "clicked at its left edge, it slides open", [&] { click_at(folder, 2); });
+    toggles_and_slides(folder, "clicked on its caret, it slides closed", [&] { click_at(folder, -14); });
+
+    set_open(folder, true);
+    set_open(nested, false);
+    toggles_and_slides(nested, "a folder in a folder clicked on its name slides open", [&] { click_at(nested, 60); });
+    toggles_and_slides(nested, "and slides closed", [&] { click_at(nested, 60); });
+    toggles_and_slides(nested, "clicked at its left edge (its indent), it slides open", [&] { click_at(nested, -tree->visualRect(row_for_node(nested)).left() + 2); });
+    toggles_and_slides(nested, "and slides closed", [&] { click_at(nested, -tree->visualRect(row_for_node(nested)).left() + 2); });
+
+    // Scrolled to the end of the list, with the folder's row in view: closing it scrolls the list back.
+    auto scroll_to_row_at = [&](QString const& id, int y) {
+        list_scroll().setValue(list_scroll().value() + tree->visualRect(row_for_node(id)).top() - y);
+        settle(100);
+    };
+    set_open(last, true);
+    scroll_to_row_at(last, 40);
+    auto scrolled = list_scroll().value();
+    toggles_and_slides(last, "scrolled to the end, a folder slides closed", [&] { click_at(last, 60); });
+    check(list_scroll().value() < scrolled, "(and the list scrolled back as it closed)", QString("%1 to %2").arg(scrolled).arg(list_scroll().value()));
+    toggles_and_slides(last, "and slides open", [&] { click_at(last, 60); });
+
+    // A folder near the list's bottom, with more in it than there's room for below: what shows is uncovered over the
+    // whole slide, not in its first moment.
+    set_open(last, false);
+    scroll_to_row_at(last, tree->viewport()->height() - 120);
+    click_at(last, 60);
+    settle(SidebarTree::FOLDER_ANIMATION_MS / 4);
+    QWidget* reveal = tree->viewport()->findChild<QWidget*>("ArcFolderReveal", Qt::FindDirectChildrenOnly);
+    auto uncovered = reveal && reveal->isVisible() ? reveal->property("uncovered").toReal() : -1;
+    check(uncovered > 0 && uncovered < 0.85, "a folder with more than fits below it slides open over the whole slide", QString::number(uncovered));
+    settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+    click_at(last, 60);
+    settle(SidebarTree::FOLDER_ANIMATION_MS / 4);
+    reveal = tree->viewport()->findChild<QWidget*>("ArcFolderReveal", Qt::FindDirectChildrenOnly);
+    uncovered = reveal && reveal->isVisible() ? reveal->property("uncovered").toReal() : -1;
+    check(uncovered > 0.15 && uncovered < 1, "and closed", QString::number(uncovered));
+    settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+
+    // Clicked again while it's still sliding: it turns around, sliding back.
+    list_scroll().setValue(0);
+    settle(100);
+    click_at(folder, 60);
+    settle(60);
+    toggles_and_slides(folder, "clicked again mid-slide, it slides back", [&] { click_at(folder, 60); });
+
+    // The caret turns over the slide, not at once.
+    set_open(folder, false);
+    auto& delegate = tree->delegate();
+    click_at(folder, 60);
+    settle(SidebarTree::FOLDER_ANIMATION_MS / 3);
+    auto midway = delegate.caret_turn(row_for_node(folder));
+    settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+    auto done = delegate.caret_turn(row_for_node(folder));
+    check(midway > 0.1 && midway < 0.95 && done == 1, "its caret turns as it opens", QString("%1 then %2").arg(midway).arg(done));
+    click_at(folder, 60);
+    settle(SidebarTree::FOLDER_ANIMATION_MS / 3);
+    midway = delegate.caret_turn(row_for_node(folder));
+    settle(SidebarTree::FOLDER_ANIMATION_MS + 150);
+    done = delegate.caret_turn(row_for_node(folder));
+    check(midway > 0.05 && midway < 0.9 && done == 0, "and back as it closes", QString("%1 then %2").arg(midway).arg(done));
+
+    for (auto const& id : fillers)
+        SpaceStore::the().remove_node(id);
+    SpaceStore::the().remove_node(last);
+    SpaceStore::the().remove_node(folder);
+    rebuild_now();
+}
+
 // Favorites that change are rebuilt: the old tiles go at once and the new ones show in their places straight away,
 // never on top of each other.
 void SelfTest::favorites_never_overlap_when_they_change()
@@ -910,7 +1042,16 @@ void SelfTest::downloads_shelf_rows_rise_in()
     check(wait_until([&] { return shelf->m_rows_elapsed_ms >= shelf_rows_duration_ms(static_cast<int>(shelf->m_items.size())) && shelf->opacity() == 1.0; }, 2000),
         "and rise into them");
     s().hide_shelf();
+    // As in Arc, they go the way they came: one after another, the top one first, while the shelf still shows.
+    auto rows = static_cast<int>(shelf->m_items.size());
+    auto full = shelf_rows_duration_ms(rows);
+    auto folding = wait_until([&] { return shelf->m_rows_elapsed_ms < full * 0.6 && shelf->isVisible() && shelf->opacity() > 0.4; }, 1000);
+    auto top = shelf_row_motion(rows - 1, shelf->m_rows_elapsed_ms).opacity;
+    auto bottom = shelf_row_motion(0, shelf->m_rows_elapsed_ms).opacity;
+    check(folding && (rows == 1 || top < bottom), "closing, its rows sink away one after another, the top one first",
+        QString("%1 ms of %2, top %3, bottom %4").arg(shelf->m_rows_elapsed_ms).arg(full).arg(top).arg(bottom));
     check(wait_until([&] { return !shelf->isVisible(); }, 2000), "it closes");
+    check(shelf->m_rows_elapsed_ms == 0, "with its rows gone");
 }
 
 // As in Arc: leaving a tab while its video plays (for another tab or space) shows the video in a floating player that
@@ -2702,7 +2843,7 @@ void SelfTest::switching_spaces_slides()
     auto* slide = running();
     check(slide, "switching spaces slides the sidebar across");
     check(slide && slide->direction() == (index_of(m_beta) > index_of(m_alpha) ? 1 : -1), "in from the side the new space is on");
-    check(ChromeStyle::chrome_background(window().palette()) == alpha_background, "the window keeps the old space's color while it slides");
+    check(ChromeStyle::chrome_background(window().palette()) == alpha_background, "the window has the old space's color as the slide starts");
     check(m_sidebar.m_scrollbar_opacity == 0, "and the list's scroll bar hides");
     auto area = s().space_slide_area();
     auto picture = SpaceSlide::picture(*panel, area).toImage();
@@ -2710,8 +2851,7 @@ void SelfTest::switching_spaces_slides()
         "its pictures are opaque, with the window's background in them");
 
     check(wait_until([&] { return !running(); }, 2000), "the slide ends");
-    check(wait_until(settled, 2000), "then the window's color fades");
-    check(ChromeStyle::chrome_background(window().palette()) != alpha_background, "to the new space's");
+    check(wait_until(settled, 2000) && ChromeStyle::chrome_background(window().palette()) != alpha_background, "on the new space's color");
     check(wait_until([&] { return m_sidebar.m_scrollbar_opacity > 0; }, 1000), "and the scroll bar flashes in");
 
     // Quick switches: one slide at a time, ending where the last one went.
@@ -2727,8 +2867,8 @@ void SelfTest::switching_spaces_slides()
     wait_until(settled, 2000);
 }
 
-// The core of switching spaces, step by step: the slide covers the favorites and list and moves steadily one way;
-// the window holds the old color until it ends, then fades through the colors between the two, never darker.
+// The core of switching spaces, step by step: the slide covers the favorites and list and moves steadily one way, and
+// as it does the window fades through the colors between the two spaces', never darker; the slide fades with it.
 void SelfTest::the_slide_and_color_fade_run_smoothly()
 {
     auto* panel = m_sidebar.m_panel;
@@ -2748,13 +2888,37 @@ void SelfTest::the_slide_and_color_fade_run_smoothly()
     check(slide->geometry() == s().space_slide_area(), "the slide covers the favorites and the list, edge to edge");
     auto direction = slide->direction();
 
+    // Rows don't paint there: the slide shows the window's background.
+    auto slide_background = [&] {
+        auto image = slide->grab().toImage();
+        return image.pixelColor(qRound(2 * image.devicePixelRatio()), image.height() - qRound(3 * image.devicePixelRatio()));
+    };
+    auto distance = [](QColor const& a, QColor const& b) {
+        return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
+    };
+
     QList<qreal> progress;
-    bool color_held = true;
+    QList<QColor> steps;
+    bool faded_while_sliding = false;
+    int worst_mismatch = -1;
+    qint64 last_move = 0;
+    qint64 longest_pause = 0;
     QElapsedTimer timer;
     timer.start();
     while (slide && slide->is_running() && timer.elapsed() < 2000) {
+        if (progress.isEmpty() || slide->progress() != progress.last()) {
+            if (!progress.isEmpty() && progress.last() > 0)
+                longest_pause = qMax(longest_pause, timer.elapsed() - last_move);
+            last_move = timer.elapsed();
+        }
         progress.append(slide->progress());
-        color_held = color_held && ChromeStyle::chrome_background(window().palette()) == from;
+        auto color = ChromeStyle::chrome_background(window().palette());
+        if (steps.isEmpty() || steps.last() != color)
+            steps.append(color);
+        if (slide->progress() > 0.05 && slide->progress() < 0.95 && color != from)
+            faded_while_sliding = true;
+        if (slide->color_progress() > 0.1 && slide->color_progress() < 0.9 && worst_mismatch < 0)
+            worst_mismatch = distance(slide_background(), color);
         QApplication::processEvents(QEventLoop::AllEvents, 5);
         QThread::msleep(4);
     }
@@ -2766,12 +2930,13 @@ void SelfTest::the_slide_and_color_fade_run_smoothly()
         QString("%1 samples, %2 distinct").arg(progress.size()).arg(distinct.size()));
     check(timer.elapsed() >= SpaceSlide::DURATION_MS / 2 && timer.elapsed() < SpaceSlide::DURATION_MS + 1000, "and takes about as long as it should",
         QString("%1 ms").arg(timer.elapsed()));
-    check(color_held, "the old color holds while it slides");
+    check(longest_pause < 60, "without stalling while the color fades", QString("longest pause %1 ms").arg(longest_pause));
+    check(faded_while_sliding, "the window's color fades as it slides");
+    check(worst_mismatch >= 0 && worst_mismatch <= 6, "and the slide's background fades with it, the same color",
+        QString("off by %1").arg(worst_mismatch));
     Q_UNUSED(direction);
 
-    // The fade.
-    wait_until([&] { return fading() || settled(); }, 500);
-    QList<QColor> steps;
+    // The rest of the fade.
     timer.restart();
     while (fading() && timer.elapsed() < 2000) {
         auto color = ChromeStyle::chrome_background(window().palette());
@@ -2783,10 +2948,6 @@ void SelfTest::the_slide_and_color_fade_run_smoothly()
     auto to = ChromeStyle::chrome_background(window().palette());
     check(from != to, "the two spaces have different colors to fade between");
     check(steps.size() >= 4, "the window fades through the colors in between", QString("%1 steps").arg(steps.size()));
-
-    auto distance = [](QColor const& a, QColor const& b) {
-        return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green()) + std::abs(a.blue() - b.blue());
-    };
     bool toward = true;
     bool between = true;
     for (int i = 0; i < steps.size(); ++i) {
@@ -3148,58 +3309,77 @@ void SelfTest::fills_from_one_password()
 
 int SelfTest::run()
 {
+    // ARC_SELF_TEST_ONLY=name,name runs only the tests whose names contain one of those (after seeding).
+    auto only = qEnvironmentVariable("ARC_SELF_TEST_ONLY").split(',', Qt::SkipEmptyParts);
+    auto wanted = [&](char const* name) {
+        if (only.isEmpty())
+            return true;
+        for (auto const& part : only) {
+            if (QString::fromLatin1(name).contains(part))
+                return true;
+        }
+        return false;
+    };
+#define RUN(name)          \
+    do {                   \
+        if (wanted(#name)) \
+            name();        \
+    } while (false)
     seed();
-    toolbar_stays_aligned();
-    unloaded_pinned_tab_opens_in_the_spare();
-    loading_pinned_row_keeps_its_saved_title();
-    closing_a_spaces_last_tab_keeps_the_window();
-    clear_closes_only_this_spaces_today_tabs();
-    list_keeps_its_scroll_position();
-    each_space_keeps_its_scroll_position();
-    favorites_update_in_place();
-    pinned_tab_away_back_and_separate();
-    a_pinned_tab_that_redirects_isnt_away();
-    opening_a_folder_leaves_the_list_alone_while_it_slides();
-    favorites_never_overlap_when_they_change();
-    favorites_reorder_by_dragging();
-    a_link_dropped_on_favorites_goes_where_the_gap_opens();
-    favorite_tiles_wear_their_favicons_color();
-    closing_a_tab_returns_to_the_one_before();
-    downloads_shelf_rows_rise_in();
-    leaving_a_playing_video_shows_it_in_picture_in_picture();
-    minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player();
-    back_to_tab_returns_to_the_tabs_space_and_profile();
-    minimizing_in_another_space_shows_the_player_there();
-    switching_back_to_a_space_shows_what_it_showed_last();
-    picture_in_picture_is_round_and_its_buttons_hold_steady();
-    window_buttons_look_inactive_everywhere();
-    the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
-    the_lists_edge_lines_run_from_the_window_edge_to_the_page();
-    the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar();
-    little_arc_opens_a_page_and_moves_it_into_a_space();
-    profiles_get_their_own_session();
-    tabs_come_back_in_their_own_profile();
-    extension_buttons_open_their_popups();
-    extension_menu_items_reach_their_extension();
-    extension_cards_and_menus_stay_in_their_place();
-    list_ends_with_room_to_double_click();
-    update_pill_hidden_without_a_release();
-    background_tabs_show_while_loading_and_stay_open();
-    the_empty_page_becomes_a_tab_once_navigated();
-    tabs_of_removed_pinned_tabs_and_favorites_move_to_today();
-    a_malformed_pinned_url_doesnt_crash();
-    popups_close_themselves();
-    private_windows_write_nothing();
-    address_bar_edits_the_current_tab();
-    arc_shortcuts_step_through_the_sidebar();
-    swiping_the_sidebar_switches_spaces();
-    pinned_tabs_rename_in_place();
-    duplicate_and_close_tabs_below();
-    switching_spaces_slides();
-    the_slide_and_color_fade_run_smoothly();
-    switching_spaces_keeps_the_switcher_in_place();
-    every_chrome_surface_takes_the_space_color();
-    fills_from_one_password();
+    RUN(toolbar_stays_aligned);
+    RUN(unloaded_pinned_tab_opens_in_the_spare);
+    RUN(loading_pinned_row_keeps_its_saved_title);
+    RUN(closing_a_spaces_last_tab_keeps_the_window);
+    RUN(clear_closes_only_this_spaces_today_tabs);
+    RUN(list_keeps_its_scroll_position);
+    RUN(each_space_keeps_its_scroll_position);
+    RUN(favorites_update_in_place);
+    RUN(pinned_tab_away_back_and_separate);
+    RUN(a_pinned_tab_that_redirects_isnt_away);
+    RUN(opening_a_folder_leaves_the_list_alone_while_it_slides);
+    RUN(folders_always_slide_open_and_closed);
+    RUN(favorites_never_overlap_when_they_change);
+    RUN(favorites_reorder_by_dragging);
+    RUN(a_link_dropped_on_favorites_goes_where_the_gap_opens);
+    RUN(favorite_tiles_wear_their_favicons_color);
+    RUN(closing_a_tab_returns_to_the_one_before);
+    RUN(downloads_shelf_rows_rise_in);
+    RUN(leaving_a_playing_video_shows_it_in_picture_in_picture);
+    RUN(minimizing_picture_in_picture_moves_the_video_to_the_sidebar_player);
+    RUN(back_to_tab_returns_to_the_tabs_space_and_profile);
+    RUN(minimizing_in_another_space_shows_the_player_there);
+    RUN(switching_back_to_a_space_shows_what_it_showed_last);
+    RUN(picture_in_picture_is_round_and_its_buttons_hold_steady);
+    RUN(window_buttons_look_inactive_everywhere);
+    RUN(the_docked_sidebar_has_its_toggle_beside_the_window_buttons);
+    RUN(the_lists_edge_lines_run_from_the_window_edge_to_the_page);
+    RUN(the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar);
+    RUN(little_arc_opens_a_page_and_moves_it_into_a_space);
+    RUN(profiles_get_their_own_session);
+    RUN(tabs_come_back_in_their_own_profile);
+    RUN(extension_buttons_open_their_popups);
+    RUN(extension_menu_items_reach_their_extension);
+    RUN(extension_cards_and_menus_stay_in_their_place);
+    RUN(list_ends_with_room_to_double_click);
+    RUN(update_pill_hidden_without_a_release);
+    RUN(background_tabs_show_while_loading_and_stay_open);
+    RUN(the_empty_page_becomes_a_tab_once_navigated);
+    RUN(tabs_of_removed_pinned_tabs_and_favorites_move_to_today);
+    RUN(a_malformed_pinned_url_doesnt_crash);
+    RUN(popups_close_themselves);
+    RUN(private_windows_write_nothing);
+    RUN(address_bar_edits_the_current_tab);
+    RUN(arc_shortcuts_step_through_the_sidebar);
+    RUN(swiping_the_sidebar_switches_spaces);
+    RUN(pinned_tabs_rename_in_place);
+    RUN(duplicate_and_close_tabs_below);
+    RUN(switching_spaces_slides);
+    RUN(the_slide_and_color_fade_run_smoothly);
+    RUN(switching_spaces_keeps_the_switcher_in_place);
+    RUN(every_chrome_surface_takes_the_space_color);
+    RUN(fills_from_one_password);
+
+#undef RUN
 
     std::printf("%s: %d failure(s)\n", m_failures == 0 ? "ALL PASSED" : "FAILED", m_failures);
     std::fflush(stdout);

@@ -40,11 +40,26 @@ QPixmap SpaceSlide::picture(QWidget& parent, QRect area)
     return pixmap;
 }
 
-SpaceSlide* SpaceSlide::start(QWidget& parent, QRect area, QPixmap from, int direction)
+QPixmap SpaceSlide::picture_in(QWidget& parent, QRect area, Tint tint, Tint now)
+{
+    // Everything in the sidebar paints its color from the tint as it paints, so it's enough to change it just for
+    // this picture; nothing is restyled.
+    ChromeStyle::set_chrome_background_tint(tint.color, tint.amount);
+    auto pixmap = picture(parent, area);
+    ChromeStyle::set_chrome_background_tint(now.color, now.amount);
+    return pixmap;
+}
+
+SpaceSlide::Pictures SpaceSlide::pictures(QWidget& parent, QRect area, Tint old_tint, Tint new_tint)
+{
+    return { picture(parent, area), picture_in(parent, area, new_tint, old_tint) };
+}
+
+SpaceSlide* SpaceSlide::start(QWidget& parent, QRect area, Pictures from, Tint old_tint, Tint new_tint, int direction)
 {
     if (auto* running = running_in(parent))
         running->finish();
-    auto* slide = new SpaceSlide(parent, AK::move(from), direction);
+    auto* slide = new SpaceSlide(parent, AK::move(from), old_tint, new_tint, direction);
     slide->setGeometry(area);
     slide->show();
     slide->raise();
@@ -54,9 +69,11 @@ SpaceSlide* SpaceSlide::start(QWidget& parent, QRect area, QPixmap from, int dir
     return slide;
 }
 
-SpaceSlide::SpaceSlide(QWidget& parent, QPixmap from, int direction)
+SpaceSlide::SpaceSlide(QWidget& parent, Pictures from, Tint old_tint, Tint new_tint, int direction)
     : QWidget(&parent)
     , m_from(AK::move(from))
+    , m_old_tint(AK::move(old_tint))
+    , m_new_tint(AK::move(new_tint))
     , m_direction(direction < 0 ? -1 : 1)
 {
     setObjectName("ArcSpaceSlide");
@@ -89,9 +106,19 @@ void SpaceSlide::take_new_picture()
         layout->activate();
     // Picture the real widgets, with this slide out of the way just for the grab (nothing paints in between).
     hide();
-    m_to = picture(*parentWidget(), geometry());
+    m_to = pictures(*parentWidget(), geometry(), m_old_tint, m_new_tint);
     show();
     m_animation->start();
+    emit started();
+}
+
+void SpaceSlide::set_color_progress(qreal progress)
+{
+    progress = qBound<qreal>(0, progress, 1);
+    if (progress == m_color_progress)
+        return;
+    m_color_progress = progress;
+    update();
 }
 
 void SpaceSlide::finish()
@@ -113,9 +140,19 @@ void SpaceSlide::paintEvent(QPaintEvent*)
     // Whole device pixels, so the two meet without a seam.
     auto dpr = devicePixelRatioF();
     auto offset = qRound(width() * m_progress * m_direction * dpr) / dpr;
-    painter.drawPixmap(QPointF(-offset, 0), m_from);
-    if (!m_to.isNull())
-        painter.drawPixmap(QPointF(width() * m_direction - offset, 0), m_to);
+    auto draw = [&](QPixmap const& from, QPixmap const& to) {
+        painter.drawPixmap(QPointF(-offset, 0), from);
+        if (!to.isNull())
+            painter.drawPixmap(QPointF(width() * m_direction - offset, 0), to);
+    };
+    // The old color, faded into the new as the window is. (Painting over a background mixes linearly, so this is
+    // what painting on the color in between would be.)
+    if (m_color_progress < 1)
+        draw(m_from.in_old_color, m_to.in_old_color);
+    if (m_color_progress > 0) {
+        painter.setOpacity(m_color_progress);
+        draw(m_from.in_new_color, m_to.in_new_color);
+    }
 }
 
 }

@@ -71,9 +71,25 @@ void DownloadsShelf::reveal_rows()
     auto duration = shelf_rows_duration_ms(static_cast<int>(m_items.size()));
     m_rows_animation->stop();
     m_rows_animation->setDuration(duration);
+    m_rows_animation->setStartValue(0.0);
     m_rows_animation->setEndValue(static_cast<qreal>(duration));
     m_rows_elapsed_ms = 0;
     m_rows_animation->start();
+}
+
+int DownloadsShelf::fold_rows()
+{
+    // From wherever they are (still rising, maybe), played back quicker than they came in.
+    static constexpr qreal FOLD_SPEED = 1.6;
+    auto from = qMin<qreal>(m_rows_elapsed_ms, shelf_rows_duration_ms(static_cast<int>(m_items.size())));
+    auto duration = qMax(1, qRound(from / FOLD_SPEED));
+    m_rows_animation->stop();
+    m_rows_animation->setDuration(duration);
+    m_rows_animation->setStartValue(from);
+    m_rows_animation->setEndValue(0.0);
+    m_rows_elapsed_ms = from;
+    m_rows_animation->start();
+    return duration;
 }
 
 void DownloadsShelf::refresh()

@@ -45,6 +45,8 @@ public:
     void set_opacity(qreal);
     // Its rows rise in one after another (see shelf_row_motion()).
     void reveal_rows();
+    // The other way, as it closes: they sink away one after another, the top one first. Returns how long that takes.
+    int fold_rows();
     bool is_empty() const { return m_items.isEmpty(); }
     int preferred_height() const;
 

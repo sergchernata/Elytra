@@ -94,6 +94,14 @@ public:
     // Where the pointer is over the view (set by SidebarTree), and whether Shift is held.
     Optional<QPoint> hover_position;
     bool shift_held { false };
+    // How far a folder's caret has turned, 0 (closed, pointing right) to 1 (open, pointing down). It turns as the
+    // folder slides; `turning_folder` is the one turning, at `caret_progress`.
+    qreal caret_turn(QModelIndex const&) const;
+    QPersistentModelIndex turning_folder;
+    qreal caret_progress { 0 };
+    // While a folder slides, its caret is drawn over the slide (by paint_caret) rather than in its row.
+    bool caret_painted_elsewhere { false };
+    void paint_caret(QPainter&, QRect const& row, QWidget const* view, QPalette const&, qreal turn) const;
     // The pinned row whose icon hover is animating in or out (0: resting, 1: showing its label).
     QPersistentModelIndex pinned_hover_index;
     qreal pinned_hover_progress { 0 };
@@ -217,6 +225,7 @@ private:
     bool m_pressed_pinned_icon { false };
     QVariantAnimation* m_pinned_hover_animation { nullptr };
     void update_pinned_hover();
+    QVariantAnimation* m_caret_animation { nullptr };
 };
 
 }

@@ -2128,15 +2128,17 @@ void ArcSidebar::switch_to_space(QString const& id)
     // Slide from the old space to the new one, when there's a sidebar to see it in.
     if (auto* running = SpaceSlide::running_in(*m_panel))
         running->finish();
-    QPixmap before;
+    SpaceSlide::Pictures before;
     QRect slide_area;
+    SpaceSlide::Tint old_tint { s_applied_tint, s_applied_tint_amount };
+    SpaceSlide::Tint new_tint { store.space(id)->color, space_tint_amount() };
     auto slide = id != m_space_id && m_window && m_window->isVisible() && m_panel->isVisible() && m_panel->width() > 0;
     if (slide) {
         slide_area = space_slide_area();
         slide = slide_area.isValid();
         if (slide) {
             hide_scrollbar_for_slide();
-            before = SpaceSlide::picture(*m_panel, slide_area);
+            before = SpaceSlide::pictures(*m_panel, slide_area, old_tint, new_tint);
         }
     }
     int direction = 1;
@@ -2149,8 +2151,7 @@ void ArcSidebar::switch_to_space(QString const& id)
         }
     }
 
-    // The window keeps the old space's tint while the slide runs, matching the pictures' backgrounds; the new one's
-    // comes in when it ends.
+    // The window keeps the old space's tint until the slide starts moving, then fades to the new one's as it slides.
     if (slide) {
         m_holding_tint = true;
         if (m_tint_fade)
@@ -2222,10 +2223,17 @@ void ArcSidebar::switch_to_space(QString const& id)
     rebuild();
 
     if (slide) {
-        auto* running = SpaceSlide::start(*m_panel, slide_area, before, direction);
-        connect(running, &SpaceSlide::finished, this, [this] {
+        auto* running = SpaceSlide::start(*m_panel, slide_area, AK::move(before), old_tint, new_tint, direction);
+        connect(running, &SpaceSlide::started, this, [this] {
             m_holding_tint = false;
             fade_to_space_tint();
+        });
+        connect(running, &SpaceSlide::finished, this, [this] {
+            // Ended before it moved (another switch): the color still changes.
+            if (m_holding_tint) {
+                m_holding_tint = false;
+                fade_to_space_tint();
+            }
             QTimer::singleShot(0, this, [this] { show_scrollbar_briefly(); }); // As in Arc, a new space's scroll bar flashes in, then fades.
         });
     }
@@ -2786,6 +2794,9 @@ void ArcSidebar::show_shelf()
     position_shelf();
     auto end = m_shelf->pos();
     m_shelf_animation->stop();
+    m_shelf_position_animation->setDuration(SHELF_ANIMATION_MS);
+    m_shelf_opacity_animation->setDuration(SHELF_ANIMATION_MS);
+    m_shelf_opacity_animation->setEasingCurve(QEasingCurve::InOutCubic);
     m_shelf_position_animation->setStartValue(end + QPoint(0, SHELF_SLIDE_DISTANCE));
     m_shelf_position_animation->setEndValue(end);
     m_shelf_opacity_animation->setStartValue(m_shelf->isVisible() ? m_shelf->opacity() : 0.0);
@@ -2809,6 +2820,12 @@ void ArcSidebar::hide_shelf()
     m_shelf_hiding = true;
     auto start = m_shelf->pos();
     m_shelf_animation->stop();
+    // Its rows sink away one by one, as they rose in, while the shelf fades out behind them (mostly at the end, so
+    // they're seen going).
+    auto duration = qMax(SHELF_ANIMATION_MS, m_shelf->fold_rows());
+    m_shelf_position_animation->setDuration(duration);
+    m_shelf_opacity_animation->setDuration(duration);
+    m_shelf_opacity_animation->setEasingCurve(QEasingCurve::InCubic);
     m_shelf_position_animation->setStartValue(start);
     m_shelf_position_animation->setEndValue(start + QPoint(0, SHELF_SLIDE_DISTANCE / 2));
     m_shelf_opacity_animation->setStartValue(m_shelf->opacity());
@@ -3578,13 +3595,15 @@ double ArcSidebar::space_tint_amount() const
 
 void ArcSidebar::apply_space_tint()
 {
-    // A slide between spaces keeps the old tint until it's over, then fades to the new one.
+    // A slide between spaces fades the tint as it goes (see fade_to_space_tint()).
     if (m_holding_tint || (m_tint_fade && m_tint_fade->state() == QAbstractAnimation::Running))
         return;
     apply_tint(space_color(), space_tint_amount());
 }
 
-// The tint partway from one color to another: a space without a color has none to fade from or to.
+// The tint partway from one color to another: a space without a color has none to fade from or to. The color is mixed
+// by how much of it there is, so the tinted background moves in a straight line from the one to the other (as a
+// slide's pictures, faded one into the other, do).
 static std::pair<QColor, double> blend_tints(QColor from, double from_amount, QColor to, double to_amount, qreal progress)
 {
     if (!from.isValid()) {
@@ -3597,12 +3616,15 @@ static std::pair<QColor, double> blend_tints(QColor from, double from_amount, QC
     }
     if (!from.isValid())
         return { QColor(), 0 };
-    auto mix = [progress](qreal a, qreal b) { return a + (b - a) * progress; };
-    return { QColor::fromRgbF(mix(from.redF(), to.redF()), mix(from.greenF(), to.greenF()), mix(from.blueF(), to.blueF())), mix(from_amount, to_amount) };
+    auto amount = from_amount + (to_amount - from_amount) * progress;
+    if (amount <= 0)
+        return { to, 0 };
+    auto mix = [&](qreal a, qreal b) { return qBound<qreal>(0, (a * from_amount * (1 - progress) + b * to_amount * progress) / amount, 1); };
+    return { QColor::fromRgbF(mix(from.redF(), to.redF()), mix(from.greenF(), to.greenF()), mix(from.blueF(), to.blueF())), amount };
 }
 
-// After a slide between spaces, the whole window fades from the old space's color to the new one's. (Not during:
-// each step restyles the window, and would make the slide stutter.)
+// As a slide between spaces moves, the whole window fades from the old space's color to the new one's; the slide's
+// pictures fade along with it.
 void ArcSidebar::fade_to_space_tint()
 {
     static constexpr int TINT_FADE_MS = 240;
@@ -3622,9 +3644,13 @@ void ArcSidebar::fade_to_space_tint()
     connect(m_tint_fade, &QVariantAnimation::valueChanged, this, [this, from_color, from_amount, to_color, to_amount](QVariant const& value) {
         auto [color, amount] = blend_tints(from_color, from_amount, to_color, to_amount, value.toReal());
         apply_tint(color, amount, true);
+        if (auto* slide = SpaceSlide::running_in(*m_panel))
+            slide->set_color_progress(value.toReal());
     });
     connect(m_tint_fade, &QAbstractAnimation::finished, this, [this] {
         apply_tint(space_color(), space_tint_amount());
+        if (auto* slide = SpaceSlide::running_in(*m_panel))
+            slide->set_color_progress(1);
     });
     m_tint_fade->start();
 }
