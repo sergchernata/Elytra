@@ -53,7 +53,7 @@ void CrashReportNotifier::show_pending()
         return;
 
     auto* window = Application::the().active_window_if_any();
-    QWidget* anchor = window ? &window->ladybird_button() : nullptr;
+    QWidget* anchor = window ? &window->popover_anchor() : nullptr; // Fork hook (Arc)
     if (!anchor || !anchor->isVisible() || !window_is_active(*anchor->window()))
         return;
 

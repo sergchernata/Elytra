@@ -2687,7 +2687,9 @@ void Tab::position_private_session_popover()
 
     m_private_session_popover->adjustSize();
 
-    move_popover_below(*m_private_session_popover, m_window->ladybird_button(), PopoverAlignment::Leading, m_window->ladybird_button().tile_rect());
+    // Fork hook (Arc): the popover hangs from the toolbar when the Ladybird button is hidden.
+    auto& anchor = m_window->popover_anchor();
+    move_popover_below(*m_private_session_popover, anchor, PopoverAlignment::Leading, &anchor == &m_window->ladybird_button() ? Optional<QRect> { m_window->ladybird_button().tile_rect() } : Optional<QRect> {});
 }
 
 void Tab::show_restore_session_card(size_t tab_count, Function<void()> on_restore)

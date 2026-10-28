@@ -4353,6 +4353,7 @@ void TabWidget::rebuild_layout_for_vertical_tabs()
         m_tab_bar->hide();
         m_new_tab_button->hide();
         m_vertical_tabs_toggle_button->hide(); // The Arc sidebar has its own.
+        m_ladybird_button->hide();             // Its menu is the app's menu bar's.
         m_vertical_tab_bar_column_layout->addWidget(m_vertical_sidebar_widget, 1);
         m_vertical_sidebar_widget->show();
         return;

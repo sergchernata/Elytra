@@ -198,6 +198,8 @@ public:
     FullscreenMode& fullscreen_mode();
 
     LadybirdButton& ladybird_button() const { return m_tabs_container->ladybird_button(); }
+    // Fork hook (Arc): the Arc sidebar hides the Ladybird button, so popovers that hang from it hang from the toolbar.
+    QWidget& popover_anchor() const;
     static bool has_chrome_in_titlebar();
 
     void show_window_context_menu(QPoint global_position);

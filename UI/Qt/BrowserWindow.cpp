@@ -544,6 +544,16 @@ void BrowserWindow::initialize_ladybird_menu()
 }
 
 // The menu's zoom row: its label like an item's, and the page's zoom level between buttons to zoom out and in.
+QWidget& BrowserWindow::popover_anchor() const
+{
+    auto& button = ladybird_button();
+    if (!button.isVisible()) {
+        if (auto* tab = current_tab(); tab && tab->toolbar_container() && tab->toolbar_container()->isVisible())
+            return *tab->toolbar_container();
+    }
+    return button;
+}
+
 QAction* BrowserWindow::create_ladybird_menu_zoom_row()
 {
     auto& application = Application::the();
