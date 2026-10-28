@@ -26,6 +26,8 @@ public:
     bool is_dimmed() const { return m_dimmed; }
     bool is_hovered() const { return m_hovered; }
     void set_symbol_point_size(int);
+    // Drawn in the toolbar icons' color, muted while the window is inactive, as they are.
+    void set_toolbar_icon(bool);
 
     virtual QSize sizeHint() const override { return { 30, 30 }; }
 
@@ -33,12 +35,14 @@ protected:
     virtual void paintEvent(QPaintEvent*) override;
     virtual void enterEvent(QEnterEvent*) override;
     virtual void leaveEvent(QEvent*) override;
+    virtual void changeEvent(QEvent*) override;
 
 private:
     QString m_symbol;
     QString m_text;
     bool m_dimmed { false };
     bool m_hovered { false };
+    bool m_toolbar_icon { false };
     int m_point_size { ICON_BOX };
 };
 

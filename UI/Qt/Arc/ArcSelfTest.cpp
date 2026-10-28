@@ -1929,6 +1929,20 @@ void SelfTest::the_sidebar_toggle_matches_the_toolbar_buttons()
         auto ratio = image.devicePixelRatio();
         return QRectF(box.x() / ratio, box.y() / ratio, box.width() / ratio, box.height() / ratio);
     };
+    // The color a button draws its icon in: where it differs most from its background.
+    auto ink_color = [&](QWidget& button) {
+        auto image = window().grab(QRect(button.mapTo(&window(), QPoint(0, 0)), button.size())).toImage();
+        auto background = image.pixelColor(1, 1);
+        QColor strongest = background;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                auto color = image.pixelColor(x, y);
+                if (qAbs(color.lightness() - background.lightness()) > qAbs(strongest.lightness() - background.lightness()))
+                    strongest = color;
+            }
+        }
+        return strongest;
+    };
     auto back_ink = ink(*back);
     auto reload_ink = ink(*reload);
     auto toggle_ink = ink(*toggle);
@@ -1938,6 +1952,13 @@ void SelfTest::the_sidebar_toggle_matches_the_toolbar_buttons()
                       .arg(back->width()).arg(back->height()).arg(toggle->width()).arg(toggle->height());
     check(qAbs(toggle_ink.height() - reload_ink.height()) <= 1, "the sidebar toggle is drawn as tall as the reload button", detail);
     check(toggle->size() == back->size(), "in a button the toolbar's size", detail);
+    auto center_y = [&](QWidget& button, QRectF box) { return button.mapTo(&window(), QPoint(0, 0)).y() + box.center().y(); };
+    check(qAbs(center_y(*toggle, toggle_ink) - center_y(*reload, reload_ink)) <= 1, "level with the toolbar's icons",
+        QString("toggle %1, reload %2").arg(center_y(*toggle, toggle_ink)).arg(center_y(*reload, reload_ink)));
+    auto toggle_color = ink_color(*toggle);
+    auto reload_color = ink_color(*reload);
+    auto difference = qAbs(toggle_color.red() - reload_color.red()) + qAbs(toggle_color.green() - reload_color.green()) + qAbs(toggle_color.blue() - reload_color.blue());
+    check(difference <= 15, "and in their color", toggle_color.name() + " vs " + reload_color.name());
 }
 
 static QList<BrowserWindow*> little_arcs()

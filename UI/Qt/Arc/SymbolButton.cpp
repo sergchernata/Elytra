@@ -7,6 +7,7 @@
 #include <UI/Qt/Arc/SymbolButton.h>
 #include <UI/Qt/Arc/SymbolIcon.h>
 #include <UI/Qt/ChromeStyle.h>
+#include <UI/Qt/Theme.h>
 
 #include <QEnterEvent>
 #include <QPainter>
@@ -67,6 +68,19 @@ void SymbolButton::leaveEvent(QEvent* event)
     QAbstractButton::leaveEvent(event);
 }
 
+void SymbolButton::set_toolbar_icon(bool toolbar_icon)
+{
+    m_toolbar_icon = toolbar_icon;
+    update();
+}
+
+void SymbolButton::changeEvent(QEvent* event)
+{
+    QAbstractButton::changeEvent(event);
+    if (m_toolbar_icon && (event->type() == QEvent::ActivationChange || event->type() == QEvent::PaletteChange))
+        update();
+}
+
 void SymbolButton::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
@@ -82,6 +96,11 @@ void SymbolButton::paintEvent(QPaintEvent*)
 
     auto color = ChromeStyle::chrome_text(palette());
     painter.setOpacity(m_dimmed && !m_hovered ? 0.42 : 0.92);
+    if (m_toolbar_icon) {
+        auto const& chrome = Theme::chrome(palette());
+        color = isActiveWindow() ? chrome.icon : chrome.muted;
+        painter.setOpacity(1);
+    }
 
     if (!m_symbol.isEmpty()) {
         auto pixmap = fitted_symbol_pixmap(m_symbol, m_point_size, color, devicePixelRatioF());

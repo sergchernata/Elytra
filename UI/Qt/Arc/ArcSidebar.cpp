@@ -264,6 +264,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle->set_symbol_point_size(SIDEBAR_TOGGLE_SYMBOL_SIZE); // As big as the toolbar's icons.
     m_sidebar_toggle->setFixedSize(32, 28); // The toolbar buttons' size.
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
+    m_sidebar_toggle->set_toolbar_icon(true);
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     // The same toggle, on the window, for while the sidebar is hidden (see current_toggle_rect()).
     m_window_toggle = new SymbolButton(&window);
@@ -272,6 +273,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_window_toggle->set_symbol_point_size(SIDEBAR_TOGGLE_SYMBOL_SIZE);
     m_window_toggle->setFixedSize(m_sidebar_toggle->size());
     m_window_toggle->setToolTip("Toggle Sidebar");
+    m_window_toggle->set_toolbar_icon(true);
     // Native, and in front of the sliding sidebar (itself native, above the page): mid-animation it's the only toggle
     // on screen. Two toggles, one in each, were moved by the window server a frame apart, and showed doubled.
     m_window_toggle->setAttribute(Qt::WA_NativeWindow);
@@ -3102,7 +3104,7 @@ QRect ArcSidebar::docked_toggle_rect() const
     } else {
         auto diameter = m_traffic_lights->diameter();
         auto lights_left = qRound(rects[0].center().x() - 1 - diameter / 2.0);
-        rect = QRect(QPoint(lights_left + m_traffic_lights->width() + 11, qRound(rects[0].center().y() - size.height() / 2.0)), size);
+        rect = QRect(QPoint(lights_left + m_traffic_lights->width() + 11, qRound(rects[0].center().y() + toggle_offset_from_window_buttons() - size.height() / 2.0)), size);
     }
     m_docked_toggle_rect_cache = rect;
     return rect;
@@ -3238,7 +3240,19 @@ void ArcSidebar::place_window_controls(QPoint panel_origin, bool match_native)
 
     auto diameter = m_traffic_lights->diameter();
     m_traffic_lights->move(qRound(first_center.x() - 1 - diameter / 2.0), qRound(first_center.y() - m_traffic_lights->height() / 2.0));
-    m_sidebar_toggle->move(m_traffic_lights->geometry().right() + 12, qRound(first_center.y() - m_sidebar_toggle->height() / 2.0));
+    m_sidebar_toggle->move(m_traffic_lights->geometry().right() + 12, qRound(first_center.y() + toggle_offset_from_window_buttons() - m_sidebar_toggle->height() / 2.0));
+}
+
+qreal ArcSidebar::toggle_offset_from_window_buttons() const
+{
+    auto rects = m_window ? native_window_control_rects(*m_window) : QList<QRectF> {};
+    auto* tab = m_window ? m_window->current_tab() : nullptr;
+    auto* container = tab ? tab->toolbar_container() : nullptr;
+    auto* toolbar = container ? container->findChild<QWidget*>("LadybirdNavigationToolbar") : nullptr;
+    if (rects.size() != 3 || !toolbar || toolbar->height() <= 0)
+        return 0;
+    auto toolbar_center = toolbar->mapTo(m_window, QPoint(0, 0)).y() + toolbar->height() / 2.0;
+    return toolbar_center - rects[0].center().y();
 }
 
 void ArcSidebar::set_panel_card(bool card)

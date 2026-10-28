@@ -222,6 +222,8 @@ private:
     void place_edge_lines();
     void inset_toolbar(QWidget& toolbar);
     QRect docked_toggle_rect() const;
+    // How far below the window buttons' center the toolbar's buttons are centered; the toggle lines up with them.
+    qreal toggle_offset_from_window_buttons() const;
     QRect collapsed_toggle_rect() const;
     QRect current_toggle_rect() const;
     bool window_toggle_shown() const;
