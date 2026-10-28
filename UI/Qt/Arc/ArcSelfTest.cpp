@@ -1866,30 +1866,42 @@ void SelfTest::the_ladybird_menu_button_opens_its_menu()
 // The chrome around the inset page is one color right up to the page's edge: no line runs along its top.
 void SelfTest::nothing_lines_the_top_of_the_page()
 {
-    auto* tab = window().current_tab();
-    if (!tab) {
-        check(false, "a tab shows for the page edge check");
-        return;
-    }
-    settle(300);
-    auto& view = tab->view();
-    auto page = QRect(view.mapTo(&window(), QPoint(0, 0)), view.size());
-    auto image = window().grab().toImage();
-    auto ratio = image.devicePixelRatio();
-    auto pixel = [&](QPoint point) { return image.pixelColor(QPointF(point.x() * ratio, point.y() * ratio).toPoint()); };
-    auto chrome = pixel(QPoint(page.center().x(), page.top() - 4));
-    QStringList odd;
-    for (int x : { page.left() + 2, page.center().x(), page.right() - 2 }) {
-        for (int dy : { 1, 2 }) {
-            auto point = QPoint(x, page.top() - dy);
-            auto color = pixel(point);
-            if (qAbs(color.red() - chrome.red()) > 3 || qAbs(color.green() - chrome.green()) > 3 || qAbs(color.blue() - chrome.blue()) > 3) {
-                auto* widget = window().childAt(point);
-                odd << QString("%1 at %2,%3 (%4 %5)").arg(color.name()).arg(x).arg(-dy).arg(widget ? widget->metaObject()->className() : "none", widget ? widget->objectName() : QString());
+    auto& settings = WebView::Application::settings();
+    auto original = settings.appearance();
+    for (auto mode : { WebView::ShowBookmarksBar::Always, WebView::ShowBookmarksBar::Never, WebView::ShowBookmarksBar::OnHover }) {
+        auto appearance = original;
+        appearance.show_bookmarks_bar = mode;
+        settings.set_appearance(appearance);
+        settle(400);
+        auto* tab = window().current_tab();
+        if (!tab) {
+            check(false, "a tab shows for the page edge check");
+            break;
+        }
+        auto& view = tab->view();
+        auto page = QRect(view.mapTo(&window(), QPoint(0, 0)), view.size());
+        auto image = window().grab().toImage();
+        auto ratio = image.devicePixelRatio();
+        auto pixel = [&](QPoint point) { return image.pixelColor(QPointF(point.x() * ratio, point.y() * ratio).toPoint()); };
+        auto chrome = pixel(QPoint(page.center().x(), page.top() - 4));
+        QStringList odd;
+        for (int x : { page.left() + 2, page.center().x(), page.right() - 2 }) {
+            for (int dy : { 1, 2 }) {
+                auto point = QPoint(x, page.top() - dy);
+                auto color = pixel(point);
+                if (qAbs(color.red() - chrome.red()) > 3 || qAbs(color.green() - chrome.green()) > 3 || qAbs(color.blue() - chrome.blue()) > 3) {
+                    auto* widget = window().childAt(point);
+                    odd << QString("%1 at %2,%3 (%4 %5)").arg(color.name()).arg(x).arg(-dy).arg(widget ? widget->metaObject()->className() : "none", widget ? widget->objectName() : QString());
+                }
             }
         }
+        auto name = mode == WebView::ShowBookmarksBar::Always ? "the chrome above the page is one color up to its edge, with the bookmarks bar shown"
+            : mode == WebView::ShowBookmarksBar::Never        ? "and with it hidden"
+                                                              : "and with it shown on hover";
+        check(odd.isEmpty(), name, "chrome " + chrome.name() + ": " + odd.join(", "));
     }
-    check(odd.isEmpty(), "the chrome above the page is one color up to its edge", "chrome " + chrome.name() + ": " + odd.join(", "));
+    settings.set_appearance(original);
+    settle(300);
 }
 
 // The sidebar's toggle is drawn as big as the toolbar's back and reload buttons beside it, in a button of their size.

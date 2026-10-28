@@ -254,7 +254,8 @@ QString toolbar_container_style_sheet(QPalette const& palette)
     auto background = style_sheet_color(background_color);
     auto surface_hover = style_sheet_color(chrome_control_surface_hover(palette));
     auto surface_pressed = style_sheet_color(chrome_control_surface_pressed(palette));
-    auto separator = style_sheet_color(chrome_border(palette));
+    // Fork hook (Arc): no line under the toolbar; the page is inset in one surface of chrome.
+    auto separator = style_sheet_color(Theme::chrome_is_uniform() ? background_color : chrome_border(palette));
     auto window_controls_separator = style_sheet_color(mix(chrome_background(palette), chrome_border(palette), dark ? 0.36 : 0.46));
     auto text = style_sheet_color(chrome_button_text(palette));
     auto disabled_text = style_sheet_color(chrome_muted_text(palette));
