@@ -33,6 +33,7 @@
 #include <UI/Qt/Arc/UpdateChecker.h>
 #include <UI/Qt/Arc/UpdatePill.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/LadybirdButton.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/LocationEdit.h>
 #include <UI/Qt/MacWindow.h>
@@ -212,6 +213,9 @@ private:
     void picture_in_picture_is_round_and_its_buttons_hold_steady();
     void window_buttons_look_inactive_everywhere();
     void the_docked_sidebar_has_its_toggle_beside_the_window_buttons();
+    void the_ladybird_menu_button_opens_its_menu();
+    void nothing_lines_the_top_of_the_page();
+    void the_sidebar_toggle_matches_the_toolbar_buttons();
     void the_lists_edge_lines_run_from_the_window_edge_to_the_page();
     void the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
@@ -1823,6 +1827,119 @@ void SelfTest::the_docked_sidebar_has_its_toggle_beside_the_window_buttons()
     check(toolbar_toggles == 0, "and the toolbar doesn't show one too", QString::number(toolbar_toggles));
 }
 
+// Upstream's Ladybird button holds the browser's menu. Wherever it shows, a click on it opens that menu.
+void SelfTest::the_ladybird_menu_button_opens_its_menu()
+{
+    QToolButton* button = &window().ladybird_button();
+    QStringList chain;
+    for (auto* widget = button->parentWidget(); widget; widget = widget->parentWidget())
+        chain << (widget->objectName().isEmpty() ? QString(widget->metaObject()->className()) : widget->objectName());
+    QStringList shown { QString(button->isVisible() ? "visible" : "hidden") + " in " + chain.join(" < ") };
+    if (!button->isVisible())
+        button = nullptr;
+    if (!button) {
+        check(true, "the Ladybird button is hidden", shown.join("; "));
+        return;
+    }
+    auto center = button->rect().center();
+    auto* hit = window().childAt(button->mapTo(&window(), center));
+    check(hit == button || button->isAncestorOf(hit), "nothing covers the Ladybird button",
+        (hit ? QString("%1 %2").arg(hit->metaObject()->className(), hit->objectName()) : QString("nothing")) + " | " + shown.join("; "));
+
+    bool opened = false;
+    QTimer::singleShot(300, [&] {
+        if (auto* popup = QApplication::activePopupWidget()) {
+            opened = popup == button->menu();
+            popup->close();
+        }
+    });
+    auto global = button->mapToGlobal(center);
+    QMouseEvent press(QEvent::MouseButtonPress, center, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(hit ? hit : button, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, center, global, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(hit ? hit : button, &release);
+    settle(500);
+    check(opened, "and a click on it opens the browser's menu", button->menu() ? QString("menu set") : QString("no menu"));
+}
+
+
+// The chrome around the inset page is one color right up to the page's edge: no line runs along its top.
+void SelfTest::nothing_lines_the_top_of_the_page()
+{
+    auto* tab = window().current_tab();
+    if (!tab) {
+        check(false, "a tab shows for the page edge check");
+        return;
+    }
+    settle(300);
+    auto& view = tab->view();
+    auto page = QRect(view.mapTo(&window(), QPoint(0, 0)), view.size());
+    auto image = window().grab().toImage();
+    auto ratio = image.devicePixelRatio();
+    auto pixel = [&](QPoint point) { return image.pixelColor(QPointF(point.x() * ratio, point.y() * ratio).toPoint()); };
+    auto chrome = pixel(QPoint(page.center().x(), page.top() - 4));
+    QStringList odd;
+    for (int x : { page.left() + 2, page.center().x(), page.right() - 2 }) {
+        for (int dy : { 1, 2 }) {
+            auto point = QPoint(x, page.top() - dy);
+            auto color = pixel(point);
+            if (qAbs(color.red() - chrome.red()) > 3 || qAbs(color.green() - chrome.green()) > 3 || qAbs(color.blue() - chrome.blue()) > 3) {
+                auto* widget = window().childAt(point);
+                odd << QString("%1 at %2,%3 (%4 %5)").arg(color.name()).arg(x).arg(-dy).arg(widget ? widget->metaObject()->className() : "none", widget ? widget->objectName() : QString());
+            }
+        }
+    }
+    check(odd.isEmpty(), "the chrome above the page is one color up to its edge", "chrome " + chrome.name() + ": " + odd.join(", "));
+}
+
+// The sidebar's toggle is drawn as big as the toolbar's back and reload buttons beside it, in a button of their size.
+void SelfTest::the_sidebar_toggle_matches_the_toolbar_buttons()
+{
+    QToolButton* back = nullptr;
+    QToolButton* reload = nullptr;
+    if (auto* tab = window().current_tab(); tab && tab->toolbar_container()) {
+        for (auto* button : tab->toolbar_container()->findChildren<QToolButton*>()) {
+            if (!button->isVisible() || !button->defaultAction())
+                continue;
+            auto text = button->defaultAction()->text();
+            if (text == "Back" || text == "Go Back")
+                back = button;
+            else if (text == "Reload" || text == "Reload Page")
+                reload = button;
+        }
+    }
+    auto* toggle = s().m_sidebar_toggle;
+    if (!back || !reload || !toggle->isVisible()) {
+        check(false, "the toolbar's buttons and the sidebar toggle show");
+        return;
+    }
+    settle(300);
+    // The box around what a button draws, apart from its background.
+    auto ink = [&](QWidget& button) {
+        auto image = window().grab(QRect(button.mapTo(&window(), QPoint(0, 0)), button.size())).toImage();
+        auto background = image.pixelColor(1, 1);
+        QRect box;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                auto color = image.pixelColor(x, y);
+                if (qAbs(color.lightness() - background.lightness()) > 40)
+                    box |= QRect(x, y, 1, 1);
+            }
+        }
+        auto ratio = image.devicePixelRatio();
+        return QRectF(box.x() / ratio, box.y() / ratio, box.width() / ratio, box.height() / ratio);
+    };
+    auto back_ink = ink(*back);
+    auto reload_ink = ink(*reload);
+    auto toggle_ink = ink(*toggle);
+    auto detail = QString("back %1x%2, reload %3x%4, toggle %5x%6; buttons back %7x%8, toggle %9x%10")
+                      .arg(back_ink.width()).arg(back_ink.height()).arg(reload_ink.width()).arg(reload_ink.height())
+                      .arg(toggle_ink.width()).arg(toggle_ink.height())
+                      .arg(back->width()).arg(back->height()).arg(toggle->width()).arg(toggle->height());
+    check(qAbs(toggle_ink.height() - reload_ink.height()) <= 1, "the sidebar toggle is drawn as tall as the reload button", detail);
+    check(toggle->size() == back->size(), "in a button the toolbar's size", detail);
+}
+
 static QList<BrowserWindow*> little_arcs()
 {
     QList<BrowserWindow*> windows;
@@ -3342,6 +3459,9 @@ int SelfTest::run()
     RUN(picture_in_picture_is_round_and_its_buttons_hold_steady);
     RUN(window_buttons_look_inactive_everywhere);
     RUN(the_docked_sidebar_has_its_toggle_beside_the_window_buttons);
+    RUN(the_ladybird_menu_button_opens_its_menu);
+    RUN(nothing_lines_the_top_of_the_page);
+    RUN(the_sidebar_toggle_matches_the_toolbar_buttons);
     RUN(the_lists_edge_lines_run_from_the_window_edge_to_the_page);
     RUN(the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar);
     RUN(little_arc_opens_a_page_and_moves_it_into_a_space);

@@ -128,7 +128,7 @@ static constexpr int SHOW_SETTLE_MS = 34;
 static constexpr int HANDOFF_MS = 34; // Two frames, for the window server to show one before the other goes.
 static constexpr int HIDDEN_TOOLBAR_LEFT_MARGIN = ArcSidebar::TOOLBAR_LEFT_MARGIN;
 // The sidebar toggle's symbol, fitted to this box: its glyph then stands as tall as the toolbar's back and forward arrows.
-static constexpr int SIDEBAR_TOGGLE_SYMBOL_SIZE = 18;
+static constexpr int SIDEBAR_TOGGLE_SYMBOL_SIZE = 20;
 static constexpr int COLLAPSED_TOGGLE_LEFT = 8; // The hidden sidebar's toggle, from the window's left edge.
 static constexpr int WINDOW_TOGGLE_GAP = 6; // Between the window's sidebar toggle and the toolbar's first button.
 static constexpr int RETRACT_DELAY_MS = 280;
@@ -262,7 +262,7 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
     m_sidebar_toggle = new SymbolButton(m_top_strip);
     m_sidebar_toggle->set_symbol("sidebar.left");
     m_sidebar_toggle->set_symbol_point_size(SIDEBAR_TOGGLE_SYMBOL_SIZE); // As big as the toolbar's icons.
-    m_sidebar_toggle->setFixedSize(28, 28);
+    m_sidebar_toggle->setFixedSize(32, 28); // The toolbar buttons' size.
     m_sidebar_toggle->setToolTip("Toggle Sidebar");
     connect(m_sidebar_toggle, &QAbstractButton::clicked, this, [] { toggle_sidebar(); });
     // The same toggle, on the window, for while the sidebar is hidden (see current_toggle_rect()).
