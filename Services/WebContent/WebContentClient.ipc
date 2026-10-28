@@ -109,7 +109,7 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_destroy_child_frame(Web::PageId page_id, Web::HTML::CrossProcessId frame_id) =|
     did_finish_loading(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id) =|
     [NotRouted] did_start_download_without_request(Web::PageId page_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size) => (Optional<u64> download_id)
-    [NotRouted] did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data) => (Optional<u64> download_id)
+    [NotRouted] did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response) => (Optional<u64> download_id)
     did_receive_download_data(Web::PageId page_id, u64 download_id, ByteBuffer data) =|
     did_finish_download(Web::PageId page_id, u64 download_id) =|
     did_fail_download(Web::PageId page_id, u64 download_id, String error) =|
@@ -193,7 +193,7 @@ endpoint WebContentClient routed by Web::PageId page_id
 
     did_is_known_hsts_host(String domain) => (bool result)
 
-    did_lose_request_server_connection() => (Optional<IPC::TransportHandle> handle)
+    did_lose_request_server_connection(Optional<Utf16String> top_level_site) => (Optional<IPC::TransportHandle> handle)
     request_media_server_connection() => (Optional<IPC::TransportHandle> handle)
     request_audio_server_connection() => (Optional<IPC::TransportHandle> handle)
     request_video_presentation_channel() =|
@@ -262,6 +262,7 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_request_key_event_for_testing(Web::PageId page_id, Web::KeyEvent event) =|
     did_request_spelling_menu_action_for_testing(Web::PageId page_id, Web::SpellingMenuActionForTesting action, u32 guess_index) =|
     did_request_webdriver_mouse_event(Web::PageId page_id, u64 request_id, Web::HTML::CrossProcessId local_root_id, Web::MouseEvent event) =|
+    did_request_pinch_event_for_testing(Web::PageId page_id, Web::HTML::CrossProcessId local_root_id, Web::PinchEvent event) =|
     did_request_set_system_visibility_state(Web::PageId page_id, Web::HTML::VisibilityState visibility_state) =|
     request_history_operation(Web::PageId page_id, Web::HTML::CrossProcessId operation_id, Web::HistoryOperationParameters parameters) =|
     revoke_history_operation(Web::PageId page_id, Web::HTML::CrossProcessId operation_id) =|
@@ -290,7 +291,7 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_execute_js_console_input(Web::PageId page_id, JsonValue result) =|
     did_output_js_console_message(Web::PageId page_id, WebView::ConsoleOutput console_output) =|
 
-    did_block_resource(Web::PageId page_id) =|
+    did_block_resource(Web::PageId page_id, URL::URL url, String kind) =|
     did_start_network_request(Web::PageId page_id, u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type, String referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::RequestPriority priority) =|
     did_receive_network_response_headers(Web::PageId page_id, u64 request_id, u32 status_code, Optional<String> reason_phrase, Vector<HTTP::Header> response_headers, Requests::CacheState cache_state) =|
     did_receive_network_response_body(Web::PageId page_id, u64 request_id, ByteBuffer data) =|

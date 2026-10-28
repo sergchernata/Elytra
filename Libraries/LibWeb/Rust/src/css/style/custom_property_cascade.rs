@@ -340,7 +340,7 @@ pub(super) struct PreparedCustomFunctions<'a> {
 /// What a registered custom property's value computes against: the element's lengths as its style
 /// computes them after line-height, and the color scheme its colors resolve with (a
 /// PreferredColorScheme code). The length context lends no output flag.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(super) struct RegisteredValueContext {
     pub length: crate::css::style_compute::FfiLengthResolutionContext,
     pub color_scheme: u8,
@@ -1257,8 +1257,8 @@ impl RetainedState {
     }
 
     /// Whether the custom declarations of a node, or of one of its pseudo-elements, name a
-    /// registered custom property: its drive then waits for the font it settles before resolving
-    /// them, as `FullDrive::AwaitsRegisteredContext` says.
+    /// registered custom property: its drive may need to resolve them again against the font it
+    /// settles, as `FullDrive::AwaitsRegisteredContext` says.
     pub(super) fn declares_registered_custom_property(
         &self,
         node: StyleNodeID,
@@ -1301,20 +1301,30 @@ impl RetainedState {
                 })
     }
 
-    /// What a registered custom property computes against in a record's element: the record's
-    /// lengths, and the color scheme its table settled. `None` for a record without a font.
+    /// Construct a registered value context with the subject's query containers' sizes.
+    pub(super) fn registered_value_context(
+        &self,
+        node: StyleNodeID,
+        mut length: crate::css::style_compute::FfiLengthResolutionContext,
+        color_scheme: u8,
+    ) -> RegisteredValueContext {
+        self.container_unit_bases(node).apply_to(&mut length);
+        RegisteredValueContext { length, color_scheme }
+    }
+
+    /// What a registered custom property computes against: the record's lengths, the subject's
+    /// query container sizes, and the color scheme its table settled. `None` for a record without a font.
     pub(super) fn record_registered_value_context(
         &self,
+        node: StyleNodeID,
         record: computed::FinalStyleRecordID,
     ) -> Option<RegisteredValueContext> {
         let view = self.computed_group_sets.style_record_view(record.raw())?;
         let length = self.record_length_resolution_context(&view)?;
         let table = view.longhand_table?;
-        Some(RegisteredValueContext {
-            length,
-            color_scheme: u8::try_from(table.effective_color_scheme())
-                .unwrap_or(self.document_style_computation_inputs.preferred_color_scheme),
-        })
+        let color_scheme = u8::try_from(table.effective_color_scheme())
+            .unwrap_or(self.document_style_computation_inputs.preferred_color_scheme);
+        Some(self.registered_value_context(node, length, color_scheme))
     }
 
     /// What a registered custom property computes against where the caller brings nothing
@@ -1336,7 +1346,7 @@ impl RetainedState {
                     .and_then(|parent| self.computed_group_sets.assigned_style_record(parent))
             }),
         };
-        if let Some(context) = record.and_then(|record| self.record_registered_value_context(record)) {
+        if let Some(context) = record.and_then(|record| self.record_registered_value_context(node, record)) {
             return context;
         }
         use crate::css::style_compute::{FfiFontMetrics, FfiLengthResolutionContext};
@@ -1348,8 +1358,9 @@ impl RetainedState {
             zero_advance: inputs.initial_font_zero_advance,
             line_height: 0.0,
         };
-        RegisteredValueContext {
-            length: FfiLengthResolutionContext {
+        self.registered_value_context(
+            node,
+            FfiLengthResolutionContext {
                 viewport_width: inputs.viewport_width,
                 viewport_height: inputs.viewport_height,
                 font_metrics: initial,
@@ -1364,9 +1375,10 @@ impl RetainedState {
                 container_height_basis_depends_on_viewport_metrics: false,
                 subject_inline_axis_is_horizontal: true,
                 resolved_viewport_relative_length: std::ptr::null_mut(),
+                zoom: 1.0,
             },
-            color_scheme: inputs.preferred_color_scheme,
-        }
+            inputs.preferred_color_scheme,
+        )
     }
 
     /// What the custom function calls in the values of a node, or of one of its pseudo-elements,
@@ -1684,7 +1696,8 @@ impl RetainedState {
             .declarations_name_a_registered_custom_property(&cascaded, inputs)
             .then(|| {
                 registered
-                    .copied()
+                    // A backing element supplies its font; query containers belong to its originating element.
+                    .map(|registered| self.registered_value_context(node, registered.length, registered.color_scheme))
                     .unwrap_or_else(|| self.standing_registered_value_context(node, pseudo))
             });
         // A custom function call reads the definitions its scope sees, with the blocks of
@@ -1799,11 +1812,7 @@ impl RetainedState {
         // A registered value computes as the host computes one: against the element's lengths with
         // its query containers' sizes, its place among its siblings, and the random base values
         // drawn for the element, which the engine keeps. A pseudo-element's are its element's.
-        let length = registered.as_ref().map(|registered| {
-            let mut length = registered.length;
-            self.container_unit_bases(node).apply_to(&mut length);
-            length
-        });
+        let length = registered.as_ref().map(|registered| &registered.length);
         let tree_counting = registered
             .is_some()
             .then(|| self.sibling_position(node))
@@ -1814,7 +1823,7 @@ impl RetainedState {
             random_base_values.borrow_mut().ensure(Some(node), name, element_shared)
         };
         let finalization = CustomPropertyFinalization {
-            length: length.as_ref(),
+            length,
             tree_counting,
             random_base_values: &[],
             color_scheme: registered.as_ref().map_or(0, |registered| registered.color_scheme),
@@ -1959,7 +1968,7 @@ impl RetainedState {
     /// against the animated values. Answers each such declaration whose value moved from the one
     /// it holds in `base`, the element's environment beneath its animations. `inheritance` is the
     /// environment the element inherits, and `finalization` computes registered values against the
-    /// element's lengths.
+    /// element's lengths. Returns an error when the declarations or their functions cannot be prepared.
     pub(crate) fn resolve_custom_properties_reading_animated_values(
         &mut self,
         node: StyleNodeID,
@@ -1971,15 +1980,18 @@ impl RetainedState {
             RetainedStyleValueData,
         )],
         finalization: CustomPropertyFinalization<'_>,
-    ) -> Vec<(
-        crate::css::retained_fly_string::RetainedUtf16FlyString,
-        RetainedStyleValueData,
-    )> {
+    ) -> Result<
+        Vec<(
+            crate::css::retained_fly_string::RetainedUtf16FlyString,
+            RetainedStyleValueData,
+        )>,
+        (),
+    > {
         if animated.is_empty() || !self.any_custom_property_is_declared() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Some(cascaded) = self.cascaded_custom_declarations_of(node, pseudo) else {
-            return Vec::new();
+            return Err(());
         };
         let mut moved: HashSet<Arc<[u16]>> = animated
             .iter()
@@ -2011,7 +2023,7 @@ impl RetainedState {
             readers.push((name.clone(), declared, value));
         }
         if readers.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let functions = if readers
@@ -2020,7 +2032,7 @@ impl RetainedState {
         {
             // A container condition the engine cannot decide leaves the declarations as they resolved.
             let Some(functions) = self.prepare_custom_functions(&self.document_functions, node, pseudo) else {
-                return Vec::new();
+                return Err(());
             };
             Some(functions)
         } else {
@@ -2100,9 +2112,9 @@ impl RetainedState {
             finalization,
         );
         let Some(resolved) = resolved else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        readers
+        let readers = readers
             .iter()
             .filter_map(|(name, _, _)| {
                 let name_raw = name.raw.raw();
@@ -2116,7 +2128,8 @@ impl RetainedState {
                     value,
                 ))
             })
-            .collect()
+            .collect();
+        Ok(readers)
     }
 
     /// What a keyframe's written value substitutes to on the element being sampled, against the

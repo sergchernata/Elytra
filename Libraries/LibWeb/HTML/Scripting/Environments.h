@@ -16,14 +16,15 @@
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
+#include <LibWeb/Fetch/Infrastructure/KeepaliveQuotaAccountant.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/Scripting/EnvironmentSettingsObjectAddress.h>
 #include <LibWeb/HTML/Scripting/ModuleMap.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/ServiceWorker/Registration.h>
 #include <LibWebCommon/HTML/Scripting/EnvironmentId.h>
 #include <LibWebCommon/HTML/Scripting/SerializedEnvironmentSettingsObject.h>
-#include <LibWebCommon/UpgradeInsecureRequests/InsecureRequestsPolicy.h>
 
 namespace Web::HTML {
 
@@ -84,6 +85,8 @@ struct WEB_API EnvironmentSettingsObject : public Environment {
 public:
     virtual void finalize() override;
 
+    EnvironmentSettingsObjectAddress address() const { return m_address; }
+
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-environment-target-browsing-context
     JS::ExecutionContext& realm_execution_context();
     JS::ExecutionContext const& realm_execution_context() const;
@@ -135,14 +138,7 @@ public:
 
     // https://fetch.spec.whatwg.org/#concept-fetch-group
     auto& fetch_group() { return m_fetch_group; }
-
-    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy
-    UpgradeInsecureRequests::InsecureRequestsPolicy insecure_requests_policy() const;
-    void set_insecure_requests_policy(UpgradeInsecureRequests::InsecureRequestsPolicy policy) { m_insecure_requests_policy = policy; }
-
-    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set
-    UpgradeInsecureRequests::UpgradeInsecureNavigationsSet upgrade_insecure_navigations_set() const;
-    void add_to_upgrade_insecure_navigations_set(UpgradeInsecureRequests::HostAndPort tuple) { m_upgrade_insecure_navigations_set.insert(move(tuple)); }
+    Fetch::Infrastructure::KeepaliveQuotaAccountant& keepalive_quota_accountant() { return m_keepalive_quota_accountant; }
 
     SerializedEnvironmentSettingsObject serialize();
 
@@ -189,6 +185,7 @@ protected:
 
 private:
     NonnullOwnPtr<JS::ExecutionContext> m_realm_execution_context;
+    EnvironmentSettingsObjectAddress m_address;
     GC::Ptr<ModuleMap> m_module_map;
 
     GC::Ptr<EventLoop> m_responsible_event_loop;
@@ -196,6 +193,7 @@ private:
     // https://fetch.spec.whatwg.org/#concept-fetch-record
     // A fetch group holds an ordered list of fetch records
     Fetch::Infrastructure::FetchRecord::List m_fetch_group;
+    NonnullRefPtr<Fetch::Infrastructure::KeepaliveQuotaAccountant> m_keepalive_quota_accountant;
 
     // https://storage.spec.whatwg.org/#api
     // Each environment settings object has an associated StorageManager object.
@@ -220,15 +218,6 @@ private:
     bool m_discarded { false };
 
     Vector<GC::Ref<WorkerAgentParent>> m_owned_worker_agents;
-
-    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy
-    // It is set to Do Not Upgrade unless otherwise specified.
-    // NB: These hold what the settings object inherited. See insecure_requests_policy() for its own policies.
-    UpgradeInsecureRequests::InsecureRequestsPolicy m_insecure_requests_policy { UpgradeInsecureRequests::InsecureRequestsPolicy::DoNotUpgrade };
-
-    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-insecure-navigations-set
-    // Its value is the empty set unless otherwise specified.
-    UpgradeInsecureRequests::UpgradeInsecureNavigationsSet m_upgrade_insecure_navigations_set;
 };
 
 RunScriptDecision can_run_script(EnvironmentSettingsObject const&);
@@ -241,6 +230,8 @@ WEB_API void clean_up_after_running_callback(EnvironmentSettingsObject const&);
 WEB_API bool module_type_allowed(EnvironmentSettingsObject const&, Utf16View module_type);
 
 WEB_API void add_module_to_resolved_module_set(EnvironmentSettingsObject&, Utf16View serialized_base_url, Utf16View normalized_specifier, Optional<URL::URL> const& as_url);
+
+WEB_API GC::Ptr<EnvironmentSettingsObject> environment_settings_object_at(EnvironmentSettingsObjectAddress);
 
 WEB_API EnvironmentSettingsObject& incumbent_settings_object();
 WEB_API JS::Realm& incumbent_realm();

@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Element.currentCSSZoom basic test
+Pass	Element.currentCSSZoom reacts to style changes

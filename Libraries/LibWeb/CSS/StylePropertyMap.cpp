@@ -6,6 +6,7 @@
 
 #include "StylePropertyMap.h"
 #include <LibGC/Heap.h>
+#include <LibWeb/CSS/CSSNumericValue.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/CSSUnparsedValue.h>
@@ -67,8 +68,13 @@ static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_r
 {
     // To create an internal representation, given a string property and a string or CSSStyleValue value:
     auto internal_representation = TRY(value.visit(
-        [&property](GC::Ref<CSSStyleValue> const& css_style_value) {
-            return css_style_value->create_an_internal_representation(property, CSSStyleValue::PerformTypeCheck::Yes);
+        [&property](GC::Ref<CSSStyleValue> const& css_style_value) -> WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> {
+            auto internal_representation = TRY(css_style_value->create_an_internal_representation(property, CSSStyleValue::PerformTypeCheck::Yes));
+            // INTEROP: Custom properties, including registered ones, only accept CSSUnparsedValue objects and
+            //          CSS-wide keywords.
+            if (property.is_custom_property() && !is<CSSUnparsedValue>(*css_style_value) && !internal_representation->is_css_wide_keyword())
+                return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Custom properties only accept unparsed values and CSS-wide keywords"_utf16 };
+            return internal_representation;
         },
         [&](Utf16String const& css_text) -> WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> {
             // If value is a USVString,
@@ -79,6 +85,20 @@ static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_r
             // AD-HOC: Result is a CSSStyleValue but we want an internal representation, so... convert it again I guess?
             return result.get<GC::Ref<CSSStyleValue>>()->create_an_internal_representation(property, CSSStyleValue::PerformTypeCheck::Yes);
         }));
+
+    if (auto const* css_style_value = value.get_pointer<GC::Ref<CSSStyleValue>>();
+        css_style_value && is<CSSNumericValue>(**css_style_value) && !property.is_custom_property()) {
+        // INTEROP: Shape image thresholds accept typed numbers but not typed percentages.
+        if (property.id() == PropertyID::ShapeImageThreshold && !as<CSSNumericValue>(**css_style_value).type().matches_number({}))
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Shape image thresholds require a number"_utf16 };
+
+        // https://drafts.css-houdini.org/css-typed-om-1/#create-an-internal-representation
+        // If value does not match the grammar of a list-valued property iteration of property, throw a TypeError.
+        // NB: A property's component types do not establish that a numeric value alone matches its whole grammar.
+        auto parsed_value = parse_css_value(Parser::ParsingParams {}, internal_representation->to_utf16_string(SerializationMode::Normal), property.id());
+        if (!parsed_value)
+            return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Numeric value does not match the property's grammar"_utf16 };
+    }
 
     // AD-HOC: Our parser represents a text-indent that is just a length-percentage as a text-indent value, and style
     //         computation expects that.
@@ -188,11 +208,8 @@ WebIDL::ExceptionOr<void> StylePropertyMap::set(Utf16FlyString property_name, Re
     }
 
     // 7. If props[property] exists, remove it.
-    // FIXME: Avoid converting to string and back.
-    // FIXME: We handle this after creating the internal representations (step 9) so that we maintain the original
-    //        value in the case that fails - see https://github.com/w3c/css-houdini-drafts/issues/1175
-    auto removed_value = TRY(props.remove_property(property->name()));
-    (void)removed_value;
+    // NB: Removal and replacement happen together in set_property_style_value(), after validation, so observers
+    //     receive a single style-attribute update.
 
     // AD-HOC: To match the behavior of our parser we should store values of list-valued longhands as lists even if
     //         there is only one value, except in some rare circumstances.
@@ -302,6 +319,10 @@ WebIDL::ExceptionOr<void> StylePropertyMap::append(Utf16FlyString property_name,
     if (existing_value && existing_value->is_unresolved()) {
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, Utf16String::formatted("Existing value for '{}' contains var() references.", property_name) };
     }
+
+    // NB: Appending no values must not replace the declaration or update the style attribute.
+    if (values.is_empty())
+        return {};
 
     // 9. Let temp values be an empty list.
     // NB: StyleValues are immutable, so we always create a new one. We add directly to it instead of using "temp values".

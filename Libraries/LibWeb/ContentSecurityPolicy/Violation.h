@@ -8,7 +8,6 @@
 
 #include <AK/Utf16String.h>
 #include <LibGC/CellAllocator.h>
-#include <LibGC/Function.h>
 #include <LibJS/Heap/Cell.h>
 #include <LibURL/URL.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
@@ -42,7 +41,7 @@ public:
     virtual ~Violation() = default;
 
     [[nodiscard]] static GC::Ref<Violation> create_a_violation_object_for_global_policy_and_directive(GC::Ptr<JS::Object> global_object, NonnullRefPtr<Policy const> policy, String directive);
-    [[nodiscard]] static GC::Ref<Violation> create_a_violation_object_for_request_and_policy(GC::Ref<Fetch::Infrastructure::Request> request, NonnullRefPtr<Policy const>);
+    [[nodiscard]] static GC::Ref<Violation> create_a_violation_object_for_request_and_policy(NonnullRefPtr<Fetch::Infrastructure::Request> request, NonnullRefPtr<Policy const>);
 
     // https://w3c.github.io/webappsec-csp/#violation-url
     [[nodiscard]] URL::URL url() const;
@@ -138,9 +137,6 @@ private:
     // https://w3c.github.io/webappsec-csp/#violation-sample
     // Each violation has a sample, which is a string. It is the empty string unless otherwise specified.
     Utf16String m_sample;
-
-    // Reports this violation to its global object in another process. See create_a_violation_object_for_request_and_policy().
-    GC::Ptr<GC::Function<void()>> m_report_in_other_process;
 };
 
 }

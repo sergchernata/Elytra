@@ -31,15 +31,25 @@ struct ProcessPageSnapshot {
     Optional<String> favicon_hash;
 };
 
+// A tab whose page a WebContent process hosts.
+struct ProcessTabSnapshot {
+    Utf16String title;
+    ProcessPageSnapshot page;
+};
+
 struct ProcessSnapshot {
     u64 child_id { 0 };
     pid_t pid { 0 };
     ProcessType type { ProcessType::Browser };
     Optional<Utf16String> title;
+    Optional<URL::URL> site_url;
     Optional<u64> owner_child_id;
     float cpu_percent { 0 };
     u64 memory_usage_bytes { 0 };
     Optional<ProcessPageSnapshot> page;
+    // The tabs whose pages the process hosts, and how many frames of other tabs' pages it hosts.
+    Vector<ProcessTabSnapshot> tabs;
+    size_t frame_count { 0 };
 };
 
 // Updates the process statistics, and describes every process with the page that best represents it.

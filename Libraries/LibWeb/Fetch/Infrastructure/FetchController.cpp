@@ -15,6 +15,8 @@
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
 #include <LibWeb/Page/RenderingStats.h>
+#include <LibWeb/WebDriver/BiDi/BiDi.h>
+#include <LibWeb/WebDriver/BiDi/Network.h>
 #include <LibWeb/WebIDL/DOMException.h>
 
 namespace Web::Fetch::Infrastructure {
@@ -43,6 +45,7 @@ void FetchController::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_fetch_params);
     visitor.visit(m_pending_preloaded_response);
     visitor.visit(m_stop_steps);
+    visitor.visit(m_pending_responses);
 }
 
 void FetchController::set_pending_request(RefPtr<Requests::Request> const& request)
@@ -113,6 +116,10 @@ void FetchController::abort(JS::Realm& realm, Optional<JS::Value> error)
 {
     // 1. Set controller’s state to "aborted".
     m_state = State::Aborted;
+    if (WebDriver::BiDi::g_network_events_enabled && m_fetch_params)
+        WebDriver::BiDi::network_fetch_error(*m_fetch_params, "Fetch was aborted"sv);
+    else if (WebDriver::BiDi::is_active() && m_fetch_params)
+        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
 
     // 2. Let fallbackError be an "AbortError" DOMException.
     auto fallback_error = WebIDL::AbortError::create("Fetch was aborted"_utf16);
@@ -140,6 +147,10 @@ void FetchController::terminate()
 {
     // To terminate a fetch controller controller, set controller’s state to "terminated".
     m_state = State::Terminated;
+    if (WebDriver::BiDi::g_network_events_enabled && m_fetch_params)
+        WebDriver::BiDi::network_fetch_error(*m_fetch_params, "Fetch was terminated"sv);
+    else if (WebDriver::BiDi::is_active() && m_fetch_params)
+        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
 
     stop_request();
 }
@@ -150,6 +161,8 @@ void FetchController::stop_fetch()
         return;
 
     m_state = State::Stopped;
+    if (WebDriver::BiDi::is_active() && m_fetch_params)
+        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
 
     // AD-HOC: Some HTML elements need to stop an ongoing fetching process without causing any network error to be raised
     //         (which abort() and terminate() will both do). This is tricky because the fetch process runs across several
@@ -210,6 +223,17 @@ void FetchController::fetch_task_queued(u64 fetch_task_id, HTML::TaskID event_id
 void FetchController::fetch_task_complete(u64 fetch_task_id)
 {
     m_ongoing_fetch_tasks.remove(fetch_task_id);
+}
+
+void FetchController::add_pending_response(Badge<Fetching::PendingResponse>, GC::Ref<Fetching::PendingResponse> pending_response)
+{
+    VERIFY(!m_pending_responses.contains_slow(pending_response));
+    m_pending_responses.append(pending_response);
+}
+
+void FetchController::remove_pending_response(Badge<Fetching::PendingResponse>, GC::Ref<Fetching::PendingResponse> pending_response)
+{
+    m_pending_responses.remove_first_matching([&](auto entry) { return entry == pending_response; });
 }
 
 GC_DEFINE_ALLOCATOR(FetchControllerHolder);

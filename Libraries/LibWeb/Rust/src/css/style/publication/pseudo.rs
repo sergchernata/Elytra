@@ -41,6 +41,25 @@ impl PseudoSettlement {
 }
 
 impl RetainedState {
+    /// Remove backdrop and marker kinds from the candidate pseudo-element bitmask `kinds`
+    /// when they cannot generate a box, regardless of their matching rules.
+    /// `marker_is_live` includes any originating or pseudo-element list item the caller must consider.
+    pub(super) fn filter_non_generating_pseudo_kinds(
+        &self,
+        node: StyleNodeID,
+        mut kinds: u64,
+        marker_is_live: bool,
+    ) -> u64 {
+        if self.computed_group_sets.adjustment_facts(node) & bridge::element_adjustment_fact::RENDERED_IN_TOP_LAYER == 0
+        {
+            kinds &= !(1 << pseudo_kind::BACKDROP);
+        }
+        if !marker_is_live {
+            kinds &= !(1 << pseudo_kind::MARKER);
+        }
+        kinds
+    }
+
     /// The pseudo winner rows a settlement reads, republished from the node's answer wherever one
     /// predates it, is missing, or predates the rules that flipped for its kind: settling then
     /// reads a current row for every kind it settles. The kinds are those the answer has rules for
@@ -57,7 +76,7 @@ impl RetainedState {
         flipped_pseudo_rules: u64,
         republication: Option<WinnerRepublication>,
     ) -> Drive<()> {
-        use pseudo_kind::{AFTER, BACKDROP, BEFORE, MARKER};
+        use pseudo_kind::{AFTER, BACKDROP, BEFORE};
 
         let mut required = self.pseudo_kinds_with_rules(node, settlement)?
             & settlement
@@ -66,11 +85,6 @@ impl RetainedState {
                 .filter(|&&kind| settlement.selects(kind, self.deferred_pseudo_elements))
                 .fold(0_u64, |kinds, &kind| kinds | (1 << kind));
         if settlement == PseudoSettlement::Generated {
-            if self.computed_group_sets.adjustment_facts(node) & bridge::element_adjustment_fact::RENDERED_IN_TOP_LAYER
-                == 0
-            {
-                required &= !(1_u64 << BACKDROP);
-            }
             let marker_is_live = new_is_list_item
                 || old_is_list_item
                 || [BEFORE, AFTER, BACKDROP]
@@ -79,9 +93,7 @@ impl RetainedState {
                     .filter_map(|record| self.computed_group_sets.style_record_view(record.raw()))
                     .filter_map(|view| view.longhand_table)
                     .any(|table| table.display_is_list_item());
-            if !marker_is_live {
-                required &= !(1_u64 << MARKER);
-            }
+            required = self.filter_non_generating_pseudo_kinds(node, required, marker_is_live);
         }
         let program_version = self.program.version();
         for (pseudo, version, _, priority_current) in self.current_winner_groups().pseudo_states(node) {
@@ -389,6 +401,8 @@ impl RetainedState {
             // provisionally against the element's font until the drive settles the pseudo-element's
             // own.
             let has_registered_declarations = self.declares_registered_custom_property(node, Some(kind), &inputs);
+            let initial_registered_context =
+                has_registered_declarations.then(|| self.standing_registered_value_context(node, Some(kind)));
             let mut environment =
                 self.engine_custom_property_environment_of(node, Some(kind), element_environment, &inputs, None)?;
             // A store substituting `attr()` or `inherit()` holds the element's attributes or its
@@ -527,7 +541,7 @@ impl RetainedState {
                         &inputs,
                         &mut scratch.font_drive,
                         FontDriveGoal::Complete,
-                        has_registered_declarations,
+                        initial_registered_context.as_ref(),
                     );
                     // The registered custom properties compute against the font the drive
                     // settled, and the winners substitute what they computed to.
@@ -557,7 +571,7 @@ impl RetainedState {
                             &inputs,
                             &mut scratch.font_drive,
                             FontDriveGoal::Complete,
-                            false,
+                            None,
                         );
                     }
                     if let Err(Unanswered::Suspended(_)) = driven {
@@ -1050,6 +1064,9 @@ impl RetainedState {
         let registered_declarations = self
             .declarations_name_a_registered_custom_property(&custom_declarations, &inputs)
             .then(|| custom_declarations.clone());
+        let initial_registered_context = registered_declarations
+            .as_ref()
+            .map(|_| self.standing_registered_value_context(host, None));
         let mut environment = self.engine_custom_property_environment_over(
             host,
             None,
@@ -1077,7 +1094,7 @@ impl RetainedState {
             &inputs,
             &mut scratch.font_drive,
             FontDriveGoal::Complete,
-            registered_declarations.is_some(),
+            initial_registered_context.as_ref(),
         )?;
         if let FullDrive::AwaitsRegisteredContext(registered) = driven
             && let Some(custom_declarations) = registered_declarations
@@ -1105,7 +1122,7 @@ impl RetainedState {
                 &inputs,
                 &mut scratch.font_drive,
                 FontDriveGoal::Complete,
-                false,
+                None,
             )?;
         }
         let FullDrive::Driven(DrivenTable {

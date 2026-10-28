@@ -61,6 +61,7 @@
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/CSS/VisualViewport.h>
+#include <LibWeb/CSS/Zoom.h>
 #include <LibWeb/ComputedValuesRustFFI.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/DOM/AbstractElement.h>
@@ -773,10 +774,14 @@ void Element::download_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTM
     //         document's relevant settings object is used as the request client instead.
     auto request = Fetch::Infrastructure::Request::create();
     request->set_url(url);
-    request->set_client(&document().relevant_settings_object());
+    request->set_client(document().relevant_settings_object().address());
     request->set_initiator(Fetch::Infrastructure::Request::Initiator::Download);
     request->set_use_url_credentials(true);
     // NB: The synchronous flag is not set; the response is instead processed asynchronously on the main thread.
+
+    // AD-HOC: The request's referrer policy is subject's hyperlink referrer policy, as when following the hyperlink.
+    //         See https://github.com/whatwg/html/issues/5623
+    request->set_referrer_policy(hyperlink_referrer_policy());
 
     //    3. Let response be the result of fetching request.
     //    4. Handle as a download response with subject's node navigable and null.
@@ -3194,7 +3199,7 @@ int Element::client_top() const
     auto const& border_top = style_group<CSS::ComputedValues::BorderValues>()->border_top_value();
     if (border_top.line_style == CSS::LineStyle::None || border_top.line_style == CSS::LineStyle::Hidden)
         return 0;
-    return border_top.width.to_int();
+    return CSS::unscaled(border_top.width, CSS::effective_zoom(*this)).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientleft
@@ -3219,7 +3224,7 @@ int Element::client_left() const
     auto const& border_left = style_group<CSS::ComputedValues::BorderValues>()->border_left_value();
     if (border_left.line_style == CSS::LineStyle::None || border_left.line_style == CSS::LineStyle::Hidden)
         return 0;
-    return border_left.width.to_int();
+    return CSS::unscaled(border_left.width, CSS::effective_zoom(*this)).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientwidth
@@ -3247,7 +3252,7 @@ int Element::client_width() const
     // 3. Return the width of the padding edge excluding the width of any rendered scrollbar between the padding edge and the border edge,
     // ignoring any transforms that apply to the element and its ancestors.
     // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
-    return round(Painting::absolute_padding_box_rect(*layout_node).width()).to_int();
+    return round(CSS::unscaled(Painting::absolute_padding_box_rect(*layout_node).width(), CSS::effective_zoom(*layout_node))).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-clientheight
@@ -3275,14 +3280,19 @@ int Element::client_height() const
     // 3. Return the height of the padding edge excluding the height of any rendered scrollbar between the padding edge and the border edge,
     //    ignoring any transforms that apply to the element and its ancestors.
     // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
-    return round(Painting::absolute_padding_box_rect(*layout_node).height()).to_int();
+    return round(CSS::unscaled(Painting::absolute_padding_box_rect(*layout_node).height(), CSS::effective_zoom(*layout_node))).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-currentcsszoom
 double Element::current_css_zoom() const
 {
-    dbgln("FIXME: Implement Element::current_css_zoom()");
-    return 1.0;
+    // The currentCSSZoom attribute must return the effective zoom of the element, or 1.0 if the element isn't being
+    // rendered.
+    const_cast<Document&>(document()).update_style_for_element(AbstractElement { const_cast<Element&>(*this) }, Document::StyleUpdateMode::OnlyIfNeeded);
+    auto const* box_values = style_group<CSS::ComputedValues::BoxValues>();
+    if (!box_values || CSS::display_from_ffi_display(box_values->display).is_none())
+        return 1.0;
+    return CSS::effective_zoom(*this);
 }
 
 static bool style_attribute_is_blocked_by_content_security_policy(Element& element, Utf16View value)
@@ -3848,7 +3858,7 @@ double Element::scroll_top() const
 
     // 9. Return the y-coordinate of the scrolling area at the alignment point with the top of the padding edge of the element.
     // FIXME: Is this correct?
-    return Painting::scroll_offset(*layout_node).y().to_double();
+    return CSS::unscaled(Painting::scroll_offset(*layout_node).y(), CSS::effective_zoom(*layout_node)).to_double();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-scrollleft
@@ -3894,7 +3904,7 @@ double Element::scroll_left() const
 
     // 9. Return the x-coordinate of the scrolling area at the alignment point with the left of the padding edge of the element.
     // FIXME: Is this correct?
-    return Painting::scroll_offset(*layout_node).x().to_double();
+    return CSS::unscaled(Painting::scroll_offset(*layout_node).x(), CSS::effective_zoom(*layout_node)).to_double();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-scrollleft
@@ -3952,7 +3962,8 @@ void Element::set_scroll_left(double x)
 
     // 11. Scroll the element to x,scrollTop, with the scroll behavior being "auto".
     auto scroll_offset = Painting::scroll_offset(*layout_node);
-    scroll_offset.set_x(CSSPixels::nearest_value_for(x));
+    // NB: The value is unscaled, as scrollLeft answers it.
+    scroll_offset.set_x(CSSPixels::nearest_value_for(x * CSS::effective_zoom(*layout_node)));
     if (auto navigable = document.navigable())
         navigable->perform_a_scroll_of_an_element(*this, scroll_offset, Bindings::ScrollBehavior::Auto);
 }
@@ -4011,7 +4022,8 @@ void Element::set_scroll_top(double y)
 
     // 11. Scroll the element to scrollLeft,y, with the scroll behavior being "auto".
     auto scroll_offset = Painting::scroll_offset(*layout_node);
-    scroll_offset.set_y(CSSPixels::nearest_value_for(y));
+    // NB: The value is unscaled, as scrollTop answers it.
+    scroll_offset.set_y(CSSPixels::nearest_value_for(y * CSS::effective_zoom(*layout_node)));
     if (auto navigable = document.navigable())
         navigable->perform_a_scroll_of_an_element(*this, scroll_offset, Bindings::ScrollBehavior::Auto);
 }
@@ -4058,7 +4070,7 @@ int Element::scroll_width()
     // 7. Return the width of the element’s scrolling area.
     // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
     if (auto scrollable_overflow_rect = Painting::scrollable_overflow_rect(*layout_node); scrollable_overflow_rect.has_value())
-        return round(scrollable_overflow_rect->width()).to_int();
+        return round(CSS::unscaled(scrollable_overflow_rect->width(), CSS::effective_zoom(*layout_node))).to_int();
 
     return 0;
 }
@@ -4105,7 +4117,7 @@ int Element::scroll_height()
     // 7. Return the height of the element’s scrolling area.
     // INTEROP: The result is rounded to the nearest integer rather than truncated, as browsers do.
     if (auto scrollable_overflow_rect = Painting::scrollable_overflow_rect(*layout_node); scrollable_overflow_rect.has_value()) {
-        return round(scrollable_overflow_rect->height()).to_int();
+        return round(CSS::unscaled(scrollable_overflow_rect->height(), CSS::effective_zoom(*layout_node))).to_int();
     }
     return 0;
 }
@@ -5921,7 +5933,11 @@ void Element::scroll(Bindings::ScrollToOptions options, GC::Ptr<WebIDL::Promise>
 
     // 11. Scroll the element to x,y, with the scroll behavior being the value of the behavior dictionary member of
     //     options. Let scrollPromise be the Promise returned from this step.
-    auto scroll_offset = CSSPixelPoint { CSSPixels::nearest_value_for(x), CSSPixels::nearest_value_for(y) };
+    // NB: The position is unscaled, as scrollLeft and scrollTop answer it.
+    auto const zoom = CSS::effective_zoom(*layout_node);
+    auto scroll_offset = CSSPixelPoint { CSSPixels::nearest_value_for(x * zoom), CSSPixels::nearest_value_for(y * zoom) };
+    if (relative_displacement.has_value() && zoom != 1)
+        relative_displacement = CSSPixelPoint { CSSPixels::nearest_value_for(relative_displacement->x().to_double() * zoom), CSSPixels::nearest_value_for(relative_displacement->y().to_double() * zoom) };
     if (auto navigable = document.navigable()) {
         auto scroll_promise = navigable->perform_a_scroll_of_an_element(*this, scroll_offset, options.behavior, relative_displacement);
         if (promise)
@@ -6249,19 +6265,24 @@ void Element::set_last_relative_scroll_direction(u8 direction)
 // That is why the unchecked layout node accessor is the right one here.
 void Element::set_scroll_offset(Optional<CSS::PseudoElement> pseudo_element_type, CSSPixelPoint offset)
 {
+    Web::AsyncScrollNodeStableID stable_node_id { .node_id = unique_id(), .kind = Web::AsyncScrollNodeKind::Element };
     if (pseudo_element_type.has_value()) {
         auto pseudo_element = get_synthetic_pseudo_element(*pseudo_element_type);
         if (!pseudo_element.has_value())
             return;
         pseudo_element->set_scroll_offset(offset);
-        return;
+        stable_node_id.kind = Web::AsyncScrollNodeKind::PseudoElement;
+        stable_node_id.pseudo_element_type = static_cast<u8>(to_underlying(pseudo_element_type.value()));
+    } else {
+        if (!offset.is_zero())
+            ensure_element_rare_data().scroll_offset = offset;
+        else if (auto* rare_data = element_rare_data())
+            rare_data->scroll_offset = {};
+        Layout::publish_element_scroll_offset(*this);
     }
 
-    if (!offset.is_zero())
-        ensure_element_rare_data().scroll_offset = offset;
-    else if (auto* rare_data = element_rare_data())
-        rare_data->scroll_offset = {};
-    Layout::publish_element_scroll_offset(*this);
+    if (auto navigable = document().navigable())
+        navigable->did_change_scroll_offset(stable_node_id);
 }
 
 Optional<Element::Dir> Element::dir() const
@@ -7020,10 +7041,17 @@ Optional<Gfx::DecodedImageFrame> Element::capture_the_image()
 }
 
 // https://w3c.github.io/pointerevents/#dfn-active-pointer
-// A mouse connected to the device is always active, and it is the one pointer there is.
-static bool pointer_id_names_an_active_pointer(WebIDL::Long pointer_id)
+static bool pointer_id_names_an_active_pointer(Element const& element, WebIDL::Long pointer_id)
 {
-    return pointer_id == UIEvents::mouse_pointer_id;
+    if (pointer_id == UIEvents::mouse_pointer_id)
+        return true;
+    if (auto owner = element.document().navigable()) {
+        for (auto const& navigable : owner->page().hosted_navigables()) {
+            if (navigable->event_handler().is_active_pointer(pointer_id))
+                return true;
+        }
+    }
+    return false;
 }
 
 // https://w3c.github.io/pointerevents/#setting-pointer-capture
@@ -7031,7 +7059,7 @@ WebIDL::ExceptionOr<void> Element::set_pointer_capture(WebIDL::Long pointer_id)
 {
     // 1. If the pointerId provided as the method's argument does not match any of the active pointers, then throw a
     //    "NotFoundError" DOMException.
-    if (!pointer_id_names_an_active_pointer(pointer_id))
+    if (!pointer_id_names_an_active_pointer(*this, pointer_id))
         return WebIDL::NotFoundError::create("No active pointer has the given pointerId"_utf16);
 
     // 2. Let the pointer be the active pointer specified by the given pointerId.
@@ -7048,12 +7076,12 @@ WebIDL::ExceptionOr<void> Element::set_pointer_capture(WebIDL::Long pointer_id)
     if (!navigable)
         return {};
     auto& event_handler = navigable->event_handler();
-    if (!event_handler.is_mouse_pointer_in_active_buttons_state())
+    if (!event_handler.is_pointer_in_active_buttons_state(pointer_id))
         return {};
 
     // 6. For the specified pointerId, set the pending pointer capture target override to the Element on which this
     //    method was invoked.
-    event_handler.set_pending_pointer_capture_target_override({}, *this);
+    event_handler.set_pending_pointer_capture_target_override({}, pointer_id, *this);
     return {};
 }
 
@@ -7063,7 +7091,7 @@ WebIDL::ExceptionOr<void> Element::release_pointer_capture(WebIDL::Long pointer_
     // 1. If the pointerId provided as the method's argument does not match any of the active pointers and these steps
     //    are not being invoked as a result of the implicit release of pointer capture, then throw a "NotFoundError"
     //    DOMException.
-    if (!pointer_id_names_an_active_pointer(pointer_id))
+    if (!pointer_id_names_an_active_pointer(*this, pointer_id))
         return WebIDL::NotFoundError::create("No active pointer has the given pointerId"_utf16);
 
     // 2. If hasPointerCapture is false for the Element with the specified pointerId, then terminate these steps.
@@ -7071,7 +7099,7 @@ WebIDL::ExceptionOr<void> Element::release_pointer_capture(WebIDL::Long pointer_
         return {};
 
     // 3. For the specified pointerId, clear the pending pointer capture target override, if set.
-    document().navigable()->event_handler().clear_pending_pointer_capture_target_override({});
+    document().navigable()->event_handler().clear_pending_pointer_capture_target_override({}, pointer_id);
     return {};
 }
 
@@ -7081,12 +7109,10 @@ bool Element::has_pointer_capture(WebIDL::Long pointer_id) const
     // Indicates whether the element on which this method is invoked has pointer capture for the pointer identified by
     // the argument pointerId. In particular, returns true if the pending pointer capture target override for pointerId
     // is set to the element on which this method is invoked, and false otherwise.
-    if (!pointer_id_names_an_active_pointer(pointer_id))
-        return false;
     auto navigable = document().navigable();
     if (!navigable)
         return false;
-    return navigable->event_handler().pending_pointer_capture_target_override().ptr() == this;
+    return navigable->event_handler().pending_pointer_capture_target_override(pointer_id).ptr() == this;
 }
 
 GC::Ptr<NamedNodeMap> Element::attributes()

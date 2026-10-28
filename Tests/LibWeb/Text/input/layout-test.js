@@ -23,25 +23,20 @@ function layoutTraceDifference(expected, actual) {
 const layoutTraceLines = (() => {
     const box = String.raw`(\S+)`;
     const cache = String.raw`\(cache=(\w+)\)`;
-    const runFlags = String.raw`(?: \((measurement)?(?:, )?(intrinsic)?\))?`;
     return [
         ["layout FULL", () => ({ event: "layout", partial: false })],
         [`layout PARTIAL ${box}`, box => ({ event: "layout", partial: true, box })],
-        [`${box} MEASURE CELL ${cache}`, (box, cache) => ({ event: "measure cell", box, cache })],
         [
-            `${box} MEASURE ((?:min|max)-content (?:inline|block)) ${cache}(?: FROM (ITEMS|MAX-CONTENT))?`,
+            `${box} MEASURE ((?:min|max)-content (?:inline|block)) ${cache}(?: FROM (ITEMS|FLEX ITEMS|GRID TRACKS|CHILDREN|COLUMNS|REPLACED CONTENT|ORTHOGONAL FLOW|MATH LAYOUT))?`,
             (box, size, cache, from) => ({ event: "measure", box, size, cache, from: from?.toLowerCase() }),
         ],
-        [`${box} INLINE SIZE FROM ITEMS`, box => ({ event: "inline size from items", box })],
         [`${box} REUSE IN-FLOW SUBTREE`, box => ({ event: "reuse in-flow subtree", box })],
         [
-            `${box}/([a-z-]+)${runFlags} ([A-Z][A-Z -]*[A-Z])(?: ${cache})?`,
-            (box, formattingContext, measurement, intrinsic, action, cache) => ({
+            `${box}/([a-z-]+) ([A-Z][A-Z -]*[A-Z])(?: ${cache})?`,
+            (box, formattingContext, action, cache) => ({
                 event: "run",
                 box,
                 formattingContext,
-                measurement: !!measurement,
-                intrinsic: !!intrinsic,
                 action,
                 cache,
             }),
@@ -52,11 +47,11 @@ const layoutTraceLines = (() => {
 // Parses a layout trace into one event per line. Each event has its depth, its kind in `event`, and the
 // name of the box it is about in `box`, except for a full layout pass:
 //   layout                  `partial`
-//   run                     `formattingContext`, `measurement`, `intrinsic`, `action`, `cache`
+//   run                     `formattingContext`, `action`, `cache`
 //   reuse in-flow subtree
-//   measure                 `size` ("min-content inline", ...), `cache`, `from` ("items", "max-content")
-//   measure cell            `cache`
-//   inline size from items
+//   measure                 `size` ("min-content inline", ...), `cache`, `from` ("items", "flex items",
+//                           "grid tracks", "children", "columns", "replaced content", "orthogonal flow",
+//                           "math layout")
 function parseLayoutTrace(text) {
     const events = [];
     for (const line of text.replace(/\r/g, "").split("\n")) {

@@ -131,6 +131,7 @@ public:
     void request_rendering_update();
     void dispatch_mouse_event_to_web_content(Web::MouseEvent const&, bool nested_context_scrolled_since_last_frame = false);
     void dispatch_key_event_to_web_content(Web::KeyEvent const&);
+    void dispatch_pinch_event_to_web_content(Web::PinchEvent const&);
     // Whether the scroll offsets here moved past those of the last frame WebContent presented.
     bool scrolled_since_last_frame() const;
     bool can_dispatch_input_to_web_content() const { return m_page_id.has_value(); }
@@ -158,19 +159,21 @@ public:
     void invalidate_wheel_event_listener_state(u64 generation);
     void invalidate_keyboard_scroll_state(u64 generation);
     ContextUpdateResult handle_key_event(Web::KeyEvent const&);
+    Optional<Web::AsyncScrollNodeStableID> box_scrolled_for_key_event(Web::KeyEvent const&) const;
     ContextUpdateResult handle_mouse_event(Web::MouseEvent const&);
     // The UI's wheel deltas are in CSS pixels; this scales them for the scroll tree, which works in device pixels.
     ContextUpdateResult handle_wheel_event(Web::MouseEvent const&, Optional<MonotonicTime> now_for_testing = {});
     // Takes note of a wheel event from the UI as it arrives, ahead of anything that may turn it away or leave it to
     // the main thread.
-    void note_wheel_event_from_ui(Web::MouseEvent const&, Optional<MonotonicTime> now_for_testing = {});
+    Web::WheelGestureMark note_wheel_event_from_ui(Web::MouseEvent const&, Optional<MonotonicTime> now_for_testing = {});
     ContextUpdateResult handle_pinch_event(Web::PinchEvent const&);
 
     bool may_hand_first_wheel_steps_to_nested_contexts() const;
     Optional<Compositing::NestedContextWheelHit> nested_context_for_wheel_at(Gfx::FloatPoint position);
     ContextUpdateResult scroll_for_wheel_event_passed_on_by_nested_context(Web::MouseEvent const&, MonotonicTime now);
-    void latch_wheel_gesture_to_nested_context(Web::CompositorContextId, Optional<Web::AsyncScrollNodeStableID> scroller, Web::MouseEvent const&, MonotonicTime now);
+    void latch_wheel_gesture_to_nested_context(Web::CompositorContextId, Optional<Web::AsyncScrollNodeStableID> scroller, Web::MouseEvent const&);
     void forget_wheel_gesture_latch() { m_wheel_gesture_routing.clear_latch(); }
+    void clear_per_test_input_state();
 
     FirstWheelStepRoute route_first_wheel_step_from_containing_context(Gfx::FloatPoint position, Gfx::FloatPoint delta_in_css_pixels, Web::WheelDeltaPrecision, Compositing::NestedContextRegions);
     // Latches the gesture to the scroller the route found, or to the one that keeps the step, and scrolls by the step.
@@ -190,7 +193,7 @@ public:
         // The id the UI gave the wheel event, or 0 for a step that did not come from the UI.
         u64 input_event_id,
         Optional<MonotonicTime> now_for_testing = {});
-    AsyncScrollResult smooth_scroll_to(Web::AsyncScrollNodeStableID, Gfx::FloatPoint offset, Gfx::FloatPoint main_thread_offset, Gfx::IntRect viewport_rect, Compositing::ScrollAnimationKind, Compositing::SmoothScrollInitiator, Optional<Compositing::AsyncScrollOperationID> operation_to_continue);
+    Optional<PendingFrame> apply_scroll_requests(ReadonlySpan<Compositing::ScrollRequest>);
     void cancel_smooth_scroll(Web::AsyncScrollNodeStableID);
     Optional<Gfx::IntRect> advance_smooth_scroll_animations(MonotonicTime now);
     bool needs_animation_frames() { return has_active_smooth_scroll_animations() || has_active_scroll_fling() || m_elastic_overscroll_controller.has_rebound() || visual_animations_need_frame() || m_presenter.ui_overlay_fades_need_frame() || m_scrollbar_controller.fades_need_frame(MonotonicTime::now()); }
@@ -206,8 +209,18 @@ public:
     bool start_scroll_fling_if_flicked(Web::MouseEvent const& gesture_end_event, Optional<MonotonicTime> now_for_testing = {});
     // Ends the fling before a wheel event from a new gesture or other input.
     Optional<Web::MouseEvent> interrupt_scroll_fling(Web::MouseEvent const&, Optional<MonotonicTime> now_for_testing = {});
-    void set_scrolls_elastically(bool);
-    void set_scrollbar_track_press_jumps(bool jumps) { m_scrollbar_track_press_jumps = jumps; }
+    // Ends the fling, or the gesture whose momentum the platform is reporting, if it scrolls the box, so that the rest of
+    // its momentum scrolls nothing. Returns the end of the gesture to send on to WebContent.
+    Optional<Web::MouseEvent> end_momentum_scrolling(Web::AsyncScrollNodeStableID);
+    // Whether the wheel event from the UI is momentum, or the end, of a gesture whose momentum was interrupted.
+    bool absorbs_wheel_event_of_interrupted_momentum(Web::MouseEvent const&);
+    // What the presentation a context is shown through makes of the user's scrolling.
+    struct ScrollCapabilities {
+        bool scrolls_elastically { false };
+        bool scrollbar_track_press_jumps { false };
+        Compositing::TouchpadGestureEnd touchpad_gesture_end { Compositing::TouchpadGestureEnd::AfterIdleDelay };
+    };
+    void set_scroll_capabilities(ScrollCapabilities const&);
     Optional<Gfx::IntRect> advance_elastic_overscroll_rebounds(MonotonicTime frame_time);
     Optional<PendingFrame> advance_scrollbar_fades(MonotonicTime frame_time);
     // The installed scrolling state, its routing admission, and how far the given scroller is stretched, as JSON.
@@ -258,6 +271,8 @@ private:
         Compositing::SmoothScrollAnimation animation;
         MonotonicTime started_at;
         bool is_user_scroll { false };
+        // Whether the scroll goes to an end of the scroll range, as the Home and End keys scroll.
+        bool heads_to_an_extent { false };
     };
 
     struct VisualViewportScrollDelta {
@@ -266,13 +281,25 @@ private:
     };
 
     void end_keyboard_scroll_gesture();
+    struct KeyScroll {
+        KeyboardScrollController::KeyStep step;
+        Compositing::AsyncScrollNodeID target;
+    };
+    Optional<KeyScroll> key_scroll_for(Web::KeyEvent const&) const;
+    Optional<Web::MouseEvent> interrupt_reported_scroll_momentum();
     Compositing::ScrollStateSnapshot scroll_state_snapshot_at_keyboard_step_starts() const;
     void adopt_keyboard_scroll_state(Compositing::KeyboardScrollState);
     Optional<VisualViewportScrollDelta> apply_visual_viewport_scroll_delta(Gfx::FloatPoint);
+    void note_user_input_scrolled(Web::AsyncScrollNodeStableID);
+    Optional<Gfx::Orientation> axis_held_by_scrollbar_of(Compositing::AsyncScrollNodeID) const;
+    void scroll_visual_viewport_position_in_page(Compositing::AsyncScrollNodeID viewport_node_id, Compositing::RequestedRelativeScroll const&, Vector<Compositing::AsyncScrollOffset>& answers);
+    // Returns whether the request moved the visual viewport.
+    bool apply_visual_viewport_scroll_request(Compositing::ScrollRequest const&, Vector<Compositing::AsyncScrollOffset>& answers);
     // Pans the visual viewport of a zoomed page by as much of a delta in screen pixels as it has room for, and returns
     // that part of the delta.
     Gfx::FloatPoint pan_visual_viewport_by(Gfx::FloatPoint delta_in_screen_pixels);
-    Optional<Gfx::FloatPoint> reapply_unreconciled_async_scroll_offsets();
+    HashMap<Web::AsyncScrollNodeStableID, Gfx::FloatPoint> scroll_offsets_by_stable_id() const;
+    Optional<Gfx::FloatPoint> keep_scroll_offsets_of_known_nodes(HashMap<Web::AsyncScrollNodeStableID, Gfx::FloatPoint> const&);
     void store_pending_async_scroll_offsets(ReadonlySpan<Compositing::AsyncScrollOffset>, Optional<Compositing::AsyncScrollOperationID> = {});
     enum class VisualViewportPanning : u8 {
         // The step is in the pixels of the scroller, and only scrolls it.
@@ -298,13 +325,13 @@ private:
         Optional<Gfx::FloatPoint> delta_the_node_did_not_scroll_by;
     };
     NodeScrollByWheelDelta scroll_node_by_wheel_delta(Compositing::AsyncScrollNodeID, Gfx::FloatPoint delta, Web::WheelDeltaPrecision, Web::ScrollGesturePhase, Compositing::AsyncScrollOperationTracking, Gfx::IntRect viewport_rect, MonotonicTime now, Compositing::ScrollChaining);
-    WheelGestureRouting::ResolvedLatch resolve_wheel_scroll_latch(Gfx::FloatPoint position, Web::ScrollGesturePhase, u32 modifiers, MonotonicTime now);
+    WheelGestureRouting::ResolvedLatch resolve_wheel_scroll_latch(Web::ScrollGesturePhase);
     struct WheelGestureLatchAttempt {
         Web::InputRoutingDecision decision;
         Optional<Compositing::AsyncScrollNodeID> latched_node_id {};
     };
     // The scroller the first step of a wheel gesture is routed to, which the gesture is latched to.
-    WheelGestureLatchAttempt hit_test_and_latch_wheel_gesture(Gfx::FloatPoint position, Gfx::FloatPoint delta, Web::WheelDeltaPrecision, Web::ScrollGesturePhase, u32 modifiers, MonotonicTime now, Optional<Web::UniqueNodeID> expected_document_id, Compositing::WheelStepDispatch, Compositing::NestedContextRegions);
+    WheelGestureLatchAttempt hit_test_and_latch_wheel_gesture(Gfx::FloatPoint position, Gfx::FloatPoint delta, Web::WheelDeltaPrecision, Web::ScrollGesturePhase, Optional<Web::UniqueNodeID> expected_document_id, Compositing::WheelStepDispatch, Compositing::NestedContextRegions);
     ContextUpdateResult take_wheel_step_from_containing_context(Compositing::AsyncScrollNodeID, Web::InputRoutingDecision, WheelStepFromContainingContext const&, Compositing::ScrollChaining, MonotonicTime now);
     Gfx::IntRect note_async_scrolling_viewport_rect(Gfx::IntRect viewport_rect, Optional<Compositing::AsyncScrollOffset> const&);
     Optional<Compositing::AsyncScrollOperationID> snap_at_gesture_end(MonotonicTime now);
@@ -323,8 +350,10 @@ private:
     AsyncScrollResult smooth_wheel_scroll_by(Optional<Compositing::WheelScrollTarget> const&, Gfx::IntRect viewport_rect, MonotonicTime now);
     void retarget_user_scroll(ActiveSmoothScrollAnimation&, Gfx::FloatPoint destination_offset, MonotonicTime now);
     void report_started_user_scroll(Compositing::AsyncScrollOperationID, Web::AsyncScrollNodeStableID, Gfx::FloatPoint step_start_offset, Gfx::FloatPoint destination_offset, Compositing::ScrollAnimationKind, bool is_absolute_scroll = false);
-    void note_user_scroll_gesture_end_if_drag_ended(bool was_dragging_scrollbar);
-    bool user_scroll_gesture_in_progress() const;
+    Optional<Web::AsyncScrollNodeStableID> box_of_captured_scrollbar() const;
+    void note_user_scroll_gesture_end_if_drag_ended(Optional<Web::AsyncScrollNodeStableID> box_of_dragged_scrollbar);
+    void end_user_scroll_gesture_of_held_keys();
+    AsyncScrollUpdateOutbox::UserScrollGestureState user_scroll_gesture_state() const;
     void schedule_end_of_scroll_step_gestures(MonotonicTime now);
     // A gesture whose steps this context chains ends once they stop arriving, which is reported to WebContent so
     // that it settles the gesture then rather than on a clock of its own.
@@ -356,7 +385,19 @@ private:
     ScrollSnapController m_scroll_snap_controller;
 
     AsyncScrollUpdateOutbox m_async_scroll_update_outbox;
+    // The last of the main thread's scroll requests applied to each box, which the box's reported offsets are marked with.
+    HashMap<Web::AsyncScrollNodeStableID, u64> m_applied_scroll_request_ids;
+    // How many times this context scrolled each box for user input of its own, which the reports are marked with too.
+    HashMap<Web::AsyncScrollNodeStableID, u64> m_user_input_scroll_counts;
+    // The boxes the last frame brought, whose offsets came from that frame's snapshot.
+    HashTable<Web::AsyncScrollNodeStableID> m_scroll_nodes_seeded_by_last_frame;
+    // Whether this context has scrolled boxes to offsets that WebContent's last frame does not have them at.
+    bool m_scroll_offsets_differ_from_last_frame { false };
+    // The document whose visual viewport this context zoomed or panned, which it presents as it left it from then on.
+    Optional<Web::UniqueNodeID> m_visual_viewport_document_id;
     KeyboardScrollController m_keyboard_scroll_controller;
+    // The boxes that the keys held since none was have scrolled, whose gesture lasts until the last of them is released.
+    Vector<Web::AsyncScrollNodeStableID> m_boxes_scrolled_by_held_keys;
     RefPtr<Core::Timer> m_scroll_step_gesture_input_timer;
     WheelGestureRouting m_wheel_gesture_routing;
     Vector<ActiveSmoothScrollAnimation> m_smooth_scroll_animations;
@@ -371,6 +412,8 @@ private:
     bool m_scrollbar_track_press_jumps { false };
     RefPtr<Core::Timer> m_scrollbar_paging_timer;
     ScrollFlingController m_scroll_fling_controller;
+    Optional<Web::MouseEvent> m_last_reported_scroll_momentum_step;
+    bool m_reported_scroll_momentum_was_interrupted { false };
     ElasticOverscrollController m_elastic_overscroll_controller;
     Gfx::IntRect m_async_scrolling_viewport_rect;
     bool m_has_async_scrolling_state { false };

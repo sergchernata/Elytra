@@ -334,6 +334,7 @@ pub(crate) struct RootSizingDirectives {
     // wrapper) can be placed in wrapper coordinates.
     pub(crate) table_box_content_block_offset_in_wrapper: Option<CssPixels>,
     pub(crate) adopt_automatic_content_block_size: bool,
+    pub(crate) finds_automatic_line_clamp_lines: bool,
     // Input-only: a flex item lays out its content against the block size transferred through its aspect ratio, then
     // takes this block size, which the automatic minimum size grew to fit the content.
     pub(crate) content_block_size_after_inside_layout: Option<CssPixels>,
@@ -341,9 +342,14 @@ pub(crate) struct RootSizingDirectives {
     pub(crate) float_avoidance_inline_size: Option<CssPixels>,
     pub(crate) outer_float_intrusion_before_list_item_children: inline_formatting_context::SpaceUsedByFloats,
     pub(crate) treat_block_axis_percentage_insets_as_auto_beyond_root: bool,
+    pub(crate) maximum_inline_size_resolved_by_caller: Option<CssPixels>,
+    pub(crate) root_is_measured_for_its_content_block_size: bool,
     // Input-only: MathML layout lays out an embellished operator with the size its core operator should stretch to
     // cover.
     pub(crate) math_stretch_size_constraint: Option<MathStretchSizeConstraint>,
+    // Input-only: a partial relayout lays out the contents of its root inside the geometry the root committed, which
+    // the run keeps as it is.
+    pub(crate) root_keeps_its_committed_geometry: bool,
 }
 
 /// The size that MathML layout asks the core operator of an embellished operator to stretch to cover.
@@ -364,7 +370,11 @@ pub(crate) enum MathStretchSizeConstraint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ParticipationInParentFormattingContext {
     BlockLevel,
-    Float,
+    /// A float, which its parent block formatting context sizes against the floats beside the content box of its
+    /// containing block, placed here.
+    Float {
+        containing_block_position_in_bfc_root: FfiCssPixelPoint,
+    },
     AtomicInline,
     AbsolutelyPositioned(abspos_inputs::AbsposLayoutInputs),
     Item,
@@ -375,7 +385,6 @@ pub(crate) enum ParticipationInParentFormattingContext {
 pub(crate) struct LayoutInput {
     pub(crate) available_space: AvailableSpace,
     pub(crate) containing_block_constraints: ContainingBlockConstraints,
-    pub(crate) content_box_position_in_bfc_root: Option<FfiCssPixelPoint>,
     pub(crate) sizing: RootSizingDirectives,
     pub(crate) participation: ParticipationInParentFormattingContext,
 }
@@ -389,7 +398,6 @@ impl LayoutInput {
         Self {
             available_space,
             containing_block_constraints,
-            content_box_position_in_bfc_root: None,
             sizing: RootSizingDirectives::default(),
             participation,
         }

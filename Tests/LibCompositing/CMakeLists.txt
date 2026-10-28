@@ -4,11 +4,13 @@ set(TEST_SOURCES
     TestOverlayGeometry.cpp
     TestPausedDebuggerOverlay.cpp
     TestPictureInPictureControls.cpp
+    TestScrollRequest.cpp
     TestScrollState.cpp
     TestSmoothScrollAnimation.cpp
     TestTextureUpload.cpp
     TestUIOverlays.cpp
     TestVideoFrameHold.cpp
+    TestWheelGestureIdentity.cpp
 )
 
 foreach(source IN LISTS TEST_SOURCES)

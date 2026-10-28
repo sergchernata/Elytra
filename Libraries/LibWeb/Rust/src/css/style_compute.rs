@@ -44,7 +44,7 @@ include!(concat!(env!("OUT_DIR"), "/length_units_generated.rs"));
 /// The font metrics needed for font-relative length resolution, as unrounded
 /// CSS pixel values.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct FfiFontMetrics {
     pub font_size: f64,
     pub x_height: f64,
@@ -55,7 +55,7 @@ pub struct FfiFontMetrics {
 
 /// Mirror of the length resolution parts of Length::ResolutionContext.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct FfiLengthResolutionContext {
     pub viewport_width: f64,
     pub viewport_height: f64,
@@ -74,6 +74,10 @@ pub struct FfiLengthResolutionContext {
     /// resolution here consumed viewport metrics. Callers that report the
     /// dependency through their return value may leave this null.
     pub resolved_viewport_relative_length: *mut bool,
+    /// https://drafts.csswg.org/css-viewport/#effective-zoom
+    /// The effective zoom that absolute and viewport-relative lengths are multiplied by. The font metrics are those
+    /// of fonts the effective zoom already applies to.
+    pub zoom: f64,
 }
 
 /// A context with no viewport, font metrics or container basis, which tracks no viewport dependency.
@@ -94,6 +98,7 @@ impl Default for FfiLengthResolutionContext {
             container_height_basis_depends_on_viewport_metrics: false,
             subject_inline_axis_is_horizontal: false,
             resolved_viewport_relative_length: std::ptr::null_mut(),
+            zoom: 1.0,
         }
     }
 }
@@ -314,18 +319,30 @@ pub(crate) fn absolutize_length(value: f64, unit: usize, context: &FfiLengthReso
     let Some(kind) = kinds.get(unit) else {
         return unhandled;
     };
+    // https://drafts.csswg.org/css-viewport/#zoom-property
+    // To apply zoom, the used value of a CSS property is pre-multiplied (before any other steps in the used value
+    // stage) by the used value of zoom for the element.
+    // INTEROP: Lengths are zoomed as they compute instead, as other browsers do. Font-relative lengths resolve against
+    //          font metrics that are zoomed already.
+    let zoom = context.zoom;
     match *kind {
-        LengthUnitKind::Px => FfiAbsolutizedLength {
+        LengthUnitKind::Px if zoom == 1.0 => FfiAbsolutizedLength {
             handled: true,
             changed: false,
             resolved_viewport_relative_length: false,
             px: value,
         },
+        LengthUnitKind::Px => FfiAbsolutizedLength {
+            handled: true,
+            changed: true,
+            resolved_viewport_relative_length: false,
+            px: value * zoom,
+        },
         LengthUnitKind::Absolute { px_per_unit } => FfiAbsolutizedLength {
             handled: true,
             changed: true,
             resolved_viewport_relative_length: false,
-            px: px_per_unit * value,
+            px: px_per_unit * value * zoom,
         },
         LengthUnitKind::FontRelative { metric, root } => {
             let metrics = if root {
@@ -360,7 +377,7 @@ pub(crate) fn absolutize_length(value: f64, unit: usize, context: &FfiLengthReso
                 handled: true,
                 changed: true,
                 resolved_viewport_relative_length: true,
-                px: basis * value / 100.0,
+                px: basis * value / 100.0 * zoom,
             }
         }
         LengthUnitKind::ContainerRelative { axis } => {
@@ -591,6 +608,7 @@ pub extern "C" fn rust_compute_font_width(absolutized_value: &StyleValueData) ->
     compute_font_width(absolutized_value)
 }
 
+/// https://drafts.csswg.org/css-fonts-4/#absolute-size-mapping
 /// An <absolute-size> keyword refers to an entry in a table of font sizes computed and kept by
 /// the user agent. See 2.5.1 Absolute Size Keyword Mapping Table.
 fn absolute_size_font_mapping(keyword: u16, default_font_size: CssPixels) -> Option<CssPixels> {
@@ -600,6 +618,35 @@ fn absolute_size_font_mapping(keyword: u16, default_font_size: CssPixels) -> Opt
                 .div_as_fraction(CssPixels::from_integer(denominator)),
         )
     };
+    // INTEROP: Other browsers share this keyword table for integral default sizes from 9px through 16px, so we use
+    //          it instead of the ratios from the spec's guideline table.
+    let column = match keyword {
+        keyword::XX_SMALL => 0,
+        keyword::X_SMALL => 1,
+        keyword::SMALL => 2,
+        keyword::MEDIUM => 3,
+        keyword::LARGE => 4,
+        keyword::X_LARGE => 5,
+        keyword::XX_LARGE => 6,
+        keyword::XXX_LARGE => 7,
+        _ => return None,
+    };
+    const FONT_SIZE_TABLE: [[i64; 8]; 8] = [
+        [9, 9, 9, 9, 11, 14, 18, 27],
+        [9, 9, 9, 10, 12, 15, 20, 30],
+        [9, 9, 10, 11, 13, 17, 22, 33],
+        [9, 9, 10, 12, 14, 18, 24, 36],
+        [9, 10, 12, 13, 16, 20, 26, 39],
+        [9, 10, 12, 14, 17, 21, 28, 42],
+        [9, 10, 13, 15, 18, 23, 30, 45],
+        [9, 10, 13, 16, 18, 24, 32, 48],
+    ];
+    let default_size = default_font_size.to_int();
+    if (9..=16).contains(&default_size) && default_font_size == CssPixels::from_integer(i64::from(default_size)) {
+        return Some(CssPixels::from_integer(
+            FONT_SIZE_TABLE[(default_size - 9) as usize][column],
+        ));
+    }
     match keyword {
         keyword::XX_SMALL => entry(3, 5),
         keyword::X_SMALL => entry(3, 4),
@@ -623,8 +670,8 @@ fn relative_size_font_mapping(keyword: u16, inherited_font_size: CssPixels) -> O
         )
     };
     match keyword {
-        keyword::SMALLER => entry(4, 5),
-        keyword::LARGER => entry(5, 4),
+        keyword::SMALLER => entry(5, 6),
+        keyword::LARGER => entry(6, 5),
         _ => None,
     }
 }
@@ -640,6 +687,7 @@ fn compute_font_size(
     inherited_font_size: CssPixels,
     inherited_math_depth: i32,
     default_font_size: CssPixels,
+    default_font_size_scale: f64,
 ) -> FfiComputedNumber {
     let computed = |px: f64| FfiComputedNumber {
         handled: true,
@@ -660,7 +708,7 @@ fn compute_font_size(
         StyleValueData::Percentage { value } => computed(inherited_font_size.to_double() * (value / 100.0)),
         StyleValueData::Keyword { keyword } => {
             if let Some(px) = absolute_size_font_mapping(*keyword, default_font_size) {
-                return computed(px.to_double());
+                return computed(px.scaled(default_font_size_scale).to_double());
             }
             if let Some(px) = relative_size_font_mapping(*keyword, inherited_font_size) {
                 return computed(px.to_double());
@@ -739,6 +787,7 @@ pub extern "C" fn rust_compute_font_size(
         CssPixels::from_raw(inherited_font_size_raw),
         inherited_math_depth,
         CssPixels::from_raw(default_font_size_raw),
+        1.0,
     )
 }
 
@@ -771,6 +820,7 @@ pub struct FfiFontSizeRecascadeBatch {
 #[derive(Clone, Copy)]
 pub struct FfiFontSizeRecascadeDocumentInputs {
     pub root_font_size: f64,
+    pub root_effective_zoom: f64,
     pub root_font_metrics_depend_on_viewport_metrics: bool,
     pub viewport_width: f64,
     pub viewport_height: f64,
@@ -780,6 +830,7 @@ impl FfiFontSizeRecascadeDocumentInputs {
     pub(crate) fn from_document(inputs: &crate::css::style::bridge::FfiDocumentStyleComputationInputs) -> Self {
         Self {
             root_font_size: inputs.root_font_size,
+            root_effective_zoom: inputs.root_effective_zoom,
             root_font_metrics_depend_on_viewport_metrics: inputs.root_font_metrics_depend_on_viewport_metrics,
             viewport_width: inputs.viewport_width,
             viewport_height: inputs.viewport_height,
@@ -802,6 +853,8 @@ impl FfiFontSizeRecascadeDocumentInputs {
 pub(crate) fn recascade_font_size_batch<'a>(
     value_count: usize,
     mut value_at: impl FnMut(usize) -> Option<&'a StyleValueData>,
+    effective_zoom_at: impl Fn(usize) -> f64,
+    applies_zoom_at: impl Fn(usize) -> bool,
     start_index: usize,
     current_size_raw: i32,
     current_depends_on_viewport_metrics: bool,
@@ -813,6 +866,11 @@ pub(crate) fn recascade_font_size_batch<'a>(
     let mut current_size = CssPixels::from_raw(current_size_raw);
     let mut depends_on_viewport_metrics = current_depends_on_viewport_metrics;
     let default_size = CssPixels::from_raw(default_size_raw);
+    let root_zoom = if document_inputs.root_effective_zoom > 0.0 {
+        document_inputs.root_effective_zoom
+    } else {
+        1.0
+    };
     let mut skipped_calculated_value = false;
     let stopped =
         |status, next_index, current_size: CssPixels, depends_on_viewport_metrics, skipped_calculated_value| {
@@ -826,13 +884,23 @@ pub(crate) fn recascade_font_size_batch<'a>(
         };
 
     for index in start_index..value_count {
+        // NB: Keep the size before this ancestor for a batch that must retry this index with font metrics.
+        let inherited_size = current_size;
+        let zoom = effective_zoom_at(index);
+        let parent_zoom = index.checked_sub(1).map_or(1.0, &effective_zoom_at);
+        let applies_zoom = applies_zoom_at(index);
+        let own_zoom = if applies_zoom { zoom / parent_zoom } else { 1.0 };
+        let length_zoom = if applies_zoom { zoom } else { 1.0 };
+        let root_metric_zoom = if applies_zoom { zoom / root_zoom } else { 1.0 };
+        current_size = current_size.scaled(own_zoom);
+        let zoomed_default_size = default_size.scaled(length_zoom);
         let Some(value) = value_at(index) else {
             continue;
         };
         match value {
             StyleValueData::Keyword { keyword } => {
                 if *keyword == keyword::INITIAL || *keyword == keyword::UNSET {
-                    current_size = default_size;
+                    current_size = zoomed_default_size;
                     depends_on_viewport_metrics = false;
                     continue;
                 }
@@ -840,7 +908,7 @@ pub(crate) fn recascade_font_size_batch<'a>(
                     continue;
                 }
                 if let Some(px) = absolute_size_font_mapping(*keyword, default_size) {
-                    current_size = px;
+                    current_size = px.scaled(length_zoom);
                     depends_on_viewport_metrics = false;
                     continue;
                 }
@@ -859,13 +927,13 @@ pub(crate) fn recascade_font_size_batch<'a>(
             }
             StyleValueData::Length { value, unit } => {
                 let directly_resolved = match length_unit_kinds().get(*unit as usize) {
-                    Some(LengthUnitKind::Px) => Some((*value, false)),
-                    Some(LengthUnitKind::Absolute { px_per_unit }) => Some((*value * px_per_unit, false)),
+                    Some(LengthUnitKind::Px) => Some((*value * length_zoom, false)),
+                    Some(LengthUnitKind::Absolute { px_per_unit }) => Some((*value * px_per_unit * length_zoom, false)),
                     Some(LengthUnitKind::FontRelative {
                         metric: FontMetricSelector::FontSize,
                         root: true,
                     }) => Some((
-                        *value * document_inputs.root_font_size,
+                        *value * document_inputs.root_font_size * root_metric_zoom,
                         document_inputs.root_font_metrics_depend_on_viewport_metrics,
                     )),
                     Some(LengthUnitKind::FontRelative {
@@ -879,7 +947,7 @@ pub(crate) fn recascade_font_size_batch<'a>(
                             ViewportAxis::Min => document_inputs.viewport_width.min(document_inputs.viewport_height),
                             ViewportAxis::Max => document_inputs.viewport_width.max(document_inputs.viewport_height),
                         };
-                        Some((basis * *value / 100.0, true))
+                        Some((basis * *value / 100.0 * length_zoom, true))
                     }
                     _ => None,
                 };
@@ -895,7 +963,7 @@ pub(crate) fn recascade_font_size_batch<'a>(
                     return stopped(
                         FontSizeRecascadeStatus::NeedsLengthResolution,
                         index,
-                        current_size,
+                        inherited_size,
                         depends_on_viewport_metrics,
                         skipped_calculated_value,
                     );
@@ -905,7 +973,7 @@ pub(crate) fn recascade_font_size_batch<'a>(
                     return stopped(
                         FontSizeRecascadeStatus::NeedsCppLengthResolution,
                         index,
-                        current_size,
+                        inherited_size,
                         depends_on_viewport_metrics,
                         skipped_calculated_value,
                     );
@@ -928,7 +996,7 @@ pub(crate) fn recascade_font_size_batch<'a>(
         return stopped(
             status,
             index,
-            current_size,
+            inherited_size,
             depends_on_viewport_metrics,
             skipped_calculated_value,
         );
@@ -1524,6 +1592,14 @@ pub(crate) fn collect_external_value_dependencies(value: &StyleValueData) -> Ext
                 dependencies.needs_document_base_url |= !url.is_empty() && !resource_context.has_base_url;
                 dependencies.may_need_style_sheet_resource_context |= !url.is_empty();
             }
+            StyleValueData::Url { url, .. } => {
+                if !url.is_empty() && !url.is_fragment() {
+                    let needs_base_url =
+                        liburl_rust::basic_parse(url.url_input(), liburl_rust::BasicParseOptions::new()).is_none();
+                    dependencies.needs_document_base_url |= needs_base_url;
+                    dependencies.may_need_style_sheet_resource_context |= needs_base_url;
+                }
+            }
             StyleValueData::Calculated { rust_calculation, .. } => {
                 collect_calculation(rust_calculation.node(), dependencies);
             }
@@ -2081,15 +2157,17 @@ fn compute_line_height(value: &StyleValueData, computed_font_size: CssPixels) ->
 fn compute_border_or_outline_width(
     value: &StyleValueData,
     device_pixels_per_css_pixel: f64,
+    zoom: f64,
     length_resolution_context: Option<&FfiLengthResolutionContext>,
 ) -> FfiComputedNumber {
     let absolute_length = match value {
         // The thin, medium, and thick keywords are equivalent to 1px, 3px, and 5px, respectively.
         // https://drafts.csswg.org/css-backgrounds/#typedef-line-width
+        // NB: As a length is, the keyword is zoomed by the effective zoom.
         StyleValueData::Keyword { keyword } => match *keyword {
-            keyword::THIN => CssPixels::from_integer(1),
-            keyword::MEDIUM => CssPixels::from_integer(3),
-            keyword::THICK => CssPixels::from_integer(5),
+            keyword::THIN => CssPixels::from_integer(1).scaled(zoom),
+            keyword::MEDIUM => CssPixels::from_integer(3).scaled(zoom),
+            keyword::THICK => CssPixels::from_integer(5).scaled(zoom),
             _ => return NUMBER_UNHANDLED,
         },
         StyleValueData::Length { value, unit } => {
@@ -2979,6 +3057,8 @@ pub struct FfiStyleComputationEnvironment {
     pub device_pixels_per_css_pixel: f64,
     pub initial_font_size_raw: i32,
     pub default_font_size_raw: i32,
+    /// The effective zoom of the document element, whose font metrics `rem` and `rlh` lengths resolve against.
+    pub root_effective_zoom: f64,
 }
 
 #[repr(C)]
@@ -3021,8 +3101,8 @@ pub(crate) fn value_absolutization_is_identity(value: &StyleValueData) -> bool {
         | StyleValueData::CustomIdent { .. }
         | StyleValueData::Percentage { .. }
         | StyleValueData::Flex { .. }
-        | StyleValueData::UnicodeRange { .. }
-        | StyleValueData::Url { .. } => true,
+        | StyleValueData::UnicodeRange { .. } => true,
+        StyleValueData::Url { url, .. } => url.is_empty() || url.is_fragment(),
         _ => false,
     }
 }
@@ -3064,6 +3144,7 @@ fn property_has_dedicated_compute_rule(property_id: u16) -> bool {
             | prop::MATH_DEPTH
             | prop::POSITION_AREA
             | prop::TRANSFORM_ORIGIN
+            | prop::ZOOM
     )
 }
 
@@ -3110,6 +3191,7 @@ fn compute_animation_name(value: &StyleValueData) -> Option<Arc<StyleValueData>>
             StyleValueData::String {
                 string,
                 is_valid_animation_name_custom_ident,
+                ..
             } => Some(if *is_valid_animation_name_custom_ident {
                 RetainedStyleValueData::from_arc(Arc::new(StyleValueData::CustomIdent {
                     custom_ident: string.clone(),
@@ -3470,6 +3552,94 @@ const BACKGROUND_LAYER_LONGHANDS: [u16; 7] = {
     ]
 };
 
+/// https://drafts.csswg.org/css-viewport/#zoom-property
+/// The used value of a computed zoom: a 0 value is treated as if it was 1.
+pub(crate) fn used_zoom(value: Option<&StyleValueData>) -> f64 {
+    match value {
+        Some(StyleValueData::Number { value }) if *value > 0.0 => *value,
+        _ => 1.0,
+    }
+}
+
+/// https://drafts.csswg.org/css-viewport/#effective-zoom
+/// The zoom a longhand drive applies to the lengths it computes.
+#[derive(Clone, Copy)]
+struct DriveZoom {
+    parent_effective_zoom: f64,
+    zoom: f64,
+    root_effective_zoom: f64,
+    /// FIXME: Zoom SVG content as a whole, instead of leaving the lengths of SVG elements unzoomed.
+    applies_to_lengths: bool,
+}
+
+/// AD-HOC: The effective zoom is kept within a range where the lengths it multiplies, and the unscaled values that
+///         divide by it, stay finite.
+const EFFECTIVE_ZOOM_RANGE: std::ops::RangeInclusive<f64> = 1.0e-6..=1.0e6;
+
+impl DriveZoom {
+    fn effective_zoom(self) -> f64 {
+        (self.parent_effective_zoom * self.zoom).clamp(*EFFECTIVE_ZOOM_RANGE.start(), *EFFECTIVE_ZOOM_RANGE.end())
+    }
+
+    /// The factor the element's own zoom multiplies the effective zoom of its parent by.
+    fn own_zoom(self) -> f64 {
+        if EFFECTIVE_ZOOM_RANGE.contains(&(self.parent_effective_zoom * self.zoom)) {
+            self.zoom
+        } else {
+            self.effective_zoom() / self.parent_effective_zoom
+        }
+    }
+
+    /// The zoom the lengths of a value inherited from the parent take.
+    fn length_zoom(self) -> f64 {
+        if self.applies_to_lengths { self.own_zoom() } else { 1.0 }
+    }
+
+    /// The zoom the lengths of a value that is not inherited take.
+    fn length_effective_zoom(self) -> f64 {
+        if self.applies_to_lengths {
+            self.effective_zoom()
+        } else {
+            1.0
+        }
+    }
+
+    fn is_identity(self) -> bool {
+        !self.applies_to_lengths
+            || (self.zoom == 1.0 && self.parent_effective_zoom == 1.0 && self.root_effective_zoom == 1.0)
+    }
+
+    /// The context the lengths of a value resolve against. The lengths of a value inherited from the parent are
+    /// zoomed by the parent's effective zoom already, so they only take the element's own zoom.
+    /// NB: The font metrics of the font phase are the parent's, which the element's own zoom applies to as well.
+    fn context(
+        self,
+        context: &FfiLengthResolutionContext,
+        inherited: bool,
+        font_metrics_are_parents: bool,
+    ) -> FfiLengthResolutionContext {
+        let scaled = |metrics: FfiFontMetrics, factor: f64| FfiFontMetrics {
+            font_size: metrics.font_size * factor,
+            x_height: metrics.x_height * factor,
+            cap_height: metrics.cap_height * factor,
+            zero_advance: metrics.zero_advance * factor,
+            line_height: metrics.line_height * factor,
+        };
+        let mut context = *context;
+        let own_zoom = self.own_zoom();
+        context.zoom = if inherited { own_zoom } else { self.effective_zoom() };
+        if font_metrics_are_parents && own_zoom != 1.0 {
+            context.font_metrics = scaled(context.font_metrics, own_zoom);
+        }
+        // NB: The root font metrics are those of the document element, zoomed by its effective zoom.
+        let root_zoom = self.effective_zoom() / self.root_effective_zoom;
+        if root_zoom != 1.0 {
+            context.root_font_metrics = scaled(context.root_font_metrics, root_zoom);
+        }
+        context
+    }
+}
+
 /// Drives the property computation loop: iterates every longhand in
 /// computation order, resolves logical pairing, reads the winning cascaded
 /// declarations straight from the store, selects between the cascaded,
@@ -3542,6 +3712,24 @@ pub(crate) unsafe fn drive_property_computation(
     let mut cached_writing_mode_and_direction: Option<(u8, u8)> = None;
 
     let computation_order = property_computation_order_for_phase(phase);
+    // https://drafts.csswg.org/css-viewport/#effective-zoom
+    // The effective zoom of an element is the product of its computed value of zoom and all flat tree ancestors'
+    // computed values of zoom.
+    // NB: A drive that does not compute zoom reads what an earlier phase computed.
+    let mut zoom = DriveZoom {
+        parent_effective_zoom: snapshot.map_or(1.0, |snapshot| f64::from(snapshot.table.effective_zoom())),
+        zoom: used_zoom(
+            longhand_table
+                .get(prop::ZOOM)
+                .and_then(RetainedStyleValueData::optional_data),
+        ),
+        root_effective_zoom: if environment.root_effective_zoom > 0.0 {
+            environment.root_effective_zoom
+        } else {
+            1.0
+        },
+        applies_to_lengths: !environment.box_type_input.is_svg_element,
+    };
     let mut pending_overflow_x_store: Option<ComputedStoreEntry> = None;
     let mut pending_effective_color_scheme: i16 = -1;
     // The element's used color scheme, produced by the preceding color-scheme
@@ -3642,7 +3830,22 @@ pub(crate) unsafe fn drive_property_computation(
                 longhand_table.set_raw_cascaded_font_size(Some(value_data.clone()));
             }
         } else if property_id == crate::css::property_metadata::property_id::FONT_SIZE && has_new_font_size {
-            // NOTE: The recascaded font-size has already been stored before the loop.
+            // NB: The recascade walks the ancestors. The inherited result still takes this element's own zoom.
+            if zoom.length_zoom() != 1.0 {
+                let recascaded = longhand_table.get(property_id).and_then(|value| {
+                    if let StyleValueData::Length { value, unit } = value.data() {
+                        Some((
+                            CssPixels::nearest_value_for(value * zoom.length_zoom()).to_double(),
+                            *unit,
+                        ))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((value, unit)) = recascaded {
+                    longhand_table.set_computed(property_id, StyleValueData::Length { value, unit }, -1);
+                }
+            }
             continue;
         } else if property_id == crate::css::property_metadata::property_id::FONT_SIZE {
             longhand_table.set_raw_cascaded_font_size(None);
@@ -3730,7 +3933,30 @@ pub(crate) unsafe fn drive_property_computation(
             required_level = REQUIRES_COMPUTATION_NON_INHERITED;
         }
 
-        let requires_computation = property_requires_computation_level(property_id) >= required_level;
+        // https://drafts.csswg.org/css-viewport/#zoom-property
+        // NB: The lengths an element inherits are zoomed by its parent's effective zoom, so an element with a zoom of
+        //     its own computes them again, zoomed by its own zoom. The lengths of an initial value are zoomed by the
+        //     element's effective zoom as they compute. A drive that resolves no lengths has nothing to zoom.
+        let zooms_value = length_resolution_context.is_some()
+            && if use_initial {
+                zoom.length_effective_zoom() != 1.0
+            } else {
+                zoom.length_zoom() != 1.0 && inherit_fetch_attempted
+            };
+        let requires_computation = property_requires_computation_level(property_id) >= required_level || zooms_value;
+
+        let zoomed_length_resolution_context;
+        let length_resolution_context = match length_resolution_context {
+            Some(context) if !zoom.is_identity() => {
+                zoomed_length_resolution_context = zoom.context(
+                    context,
+                    inherit_fetch_attempted && !use_initial,
+                    phase == LONGHAND_DRIVE_PHASE_FONT,
+                );
+                Some(&zoomed_length_resolution_context)
+            }
+            context => context,
+        };
 
         // Whether the computed value depends on inherited information, so the specified
         // value must be kept for re-resolution when an ancestor changes.
@@ -3883,9 +4109,11 @@ pub(crate) unsafe fn drive_property_computation(
                     unit,
                 } = value_data
             {
-                let resolution_context =
-                    length_resolution_context.expect("a length-valued property must run with a resolution context");
-                let result = absolutize_length(*length_value, *unit as usize, resolution_context);
+                // NB: Recursive simplification already applied zoom to these length leaves.
+                let mut resolution_context =
+                    *length_resolution_context.expect("a length-valued property must run with a resolution context");
+                resolution_context.zoom = 1.0;
+                let result = absolutize_length(*length_value, *unit as usize, &resolution_context);
                 if result.handled {
                     absolutized = Some(result.changed.then_some(result.px));
                 }
@@ -3926,6 +4154,7 @@ pub(crate) unsafe fn drive_property_computation(
                     let result = compute_border_or_outline_width(
                         synthesized.as_ref().unwrap_or(value_data),
                         device_pixels_per_css_pixel,
+                        length_resolution_context.map_or(1.0, |context| context.zoom),
                         None,
                     );
                     if result.handled {
@@ -3952,6 +4181,7 @@ pub(crate) unsafe fn drive_property_computation(
                     let result = compute_border_or_outline_width(
                         value_data,
                         device_pixels_per_css_pixel,
+                        1.0,
                         Some(&calc_resolution_context),
                     );
                     if resolved_viewport_relative_length {
@@ -4078,11 +4308,17 @@ pub(crate) unsafe fn drive_property_computation(
                                         Some(StyleValueData::Integer { value }) => *value,
                                         _ => 0,
                                     };
-                                    Some((CssPixels::nearest_value_for(*value), math_depth))
+                                    // https://drafts.csswg.org/css-viewport/#zoom-property
+                                    // NB: The parent's font-size is zoomed by its effective zoom already, so it takes
+                                    //     the element's own zoom alone.
+                                    Some((CssPixels::nearest_value_for(*value * zoom.length_zoom()), math_depth))
                                 }
                                 _ => None,
                             },
-                            None => Some((CssPixels::from_raw(initial_font_size_raw), 0)),
+                            None => Some((
+                                CssPixels::from_raw(initial_font_size_raw).scaled(zoom.length_effective_zoom()),
+                                0,
+                            )),
                         };
                         match inherited {
                             Some((inherited_font_size, inherited_math_depth)) => {
@@ -4093,6 +4329,7 @@ pub(crate) unsafe fn drive_property_computation(
                                     inherited_font_size,
                                     inherited_math_depth,
                                     CssPixels::from_raw(default_font_size_raw),
+                                    zoom.length_effective_zoom(),
                                 );
                                 if result.handled {
                                     if result.unchanged {
@@ -4453,6 +4690,35 @@ pub(crate) unsafe fn drive_property_computation(
                         None => NativeValue::Unsupported,
                     }
                 }
+                // https://drafts.csswg.org/css-viewport/#zoom-property
+                // Computed value: as specified, but with <percentage> converted to the equivalent <number>
+                (_, prop::ZOOM) => {
+                    let number = match value_data {
+                        StyleValueData::Number { value } => Some(*value),
+                        StyleValueData::Percentage { value } => Some(value / 100.0),
+                        // INTEROP: Other browsers accept normal, as a zoom of 1.
+                        StyleValueData::Keyword {
+                            keyword: keyword::NORMAL,
+                        } => Some(1.0),
+                        StyleValueData::Calculated { .. } => {
+                            let resolution_context =
+                                length_resolution_context.expect("a calculated zoom requires a resolution context");
+                            crate::css::calc::resolve_calculated_number_with_context(value_data, resolution_context)
+                                .or_else(|| {
+                                    crate::css::calc::resolve_calculated_percentage_without_context(value_data)
+                                        .map(|percentage| percentage / 100.0)
+                                })
+                        }
+                        _ => None,
+                    };
+                    match number {
+                        // A 0 value is treated as if it was 1.
+                        // INTEROP: Other browsers compute it to 1.
+                        Some(0.0) => NativeValue::Number(1.0),
+                        Some(number) => NativeValue::Number(number),
+                        None => NativeValue::Unsupported,
+                    }
+                }
                 (_, prop::CONTAIN) => match collapse_containment_list(value_data) {
                     Some(value) => NativeValue::StyleValue(value),
                     None => NativeValue::Unchanged,
@@ -4462,6 +4728,12 @@ pub(crate) unsafe fn drive_property_computation(
                         Some(px) => NativeValue::Px(px),
                         None => NativeValue::Unchanged,
                     }
+                }
+                (None, _)
+                    if externally_absolutized.is_some()
+                        && !property_has_dedicated_compute_rule(inherited_property_id) =>
+                {
+                    NativeValue::Unchanged
                 }
                 (None, _) if !property_has_dedicated_compute_rule(inherited_property_id) => {
                     // The recursive native absolutization: structural values and their
@@ -4649,8 +4921,16 @@ pub(crate) unsafe fn drive_property_computation(
             }
             store(entry);
         }
+        if property_id == prop::ZOOM {
+            zoom.zoom = used_zoom(
+                longhand_table
+                    .get(prop::ZOOM)
+                    .and_then(RetainedStyleValueData::optional_data),
+            );
+        }
     }
 
+    longhand_table.set_effective_zoom(zoom.effective_zoom() as f32);
     assert!(
         pending_overflow_x_store.is_none(),
         "overflow-y must follow overflow-x in computation order"
@@ -5660,6 +5940,7 @@ pub unsafe extern "C" fn rust_create_document_longhand_table(
         device_pixels_per_css_pixel: input.device_pixels_per_css_pixel,
         initial_font_size_raw: input.initial_font_size_raw,
         default_font_size_raw: input.default_font_size_raw,
+        root_effective_zoom: 1.0,
     };
     let mut results = empty_longhand_driver_results();
     let mut effective_color_scheme = -1;
@@ -5814,6 +6095,9 @@ pub(crate) fn compute_animation_keyframe_longhands(
             property_id::_WEBKIT_BOX_ORIENT,
             property_id::CONTINUE,
             property_id::BACKGROUND_IMAGE,
+            // https://drafts.csswg.org/css-viewport/#zoom-property
+            // NB: The keyframe lengths are zoomed by the element's zoom, as its own lengths are.
+            property_id::ZOOM,
         ] {
             if let Some(value) = underlying_longhand_table.get(property_id) {
                 table.set(property_id, value.clone_retained(), -1);
@@ -6055,6 +6339,8 @@ pub struct FfiHostAnimationSample {
     /// The identities of the element's custom-property environment and the one it inherits, under
     /// which values substituted against the element hold.
     pub custom_property_environments: [u64; 2],
+    /// The host's current registrations, which the engine may not have consumed yet.
+    pub custom_property_registration_generation: u64,
     pub inheritance_parent_style_record: u64,
     /// The document's side of the environment keyframes compute in. The engine fills in the
     /// element's own: its place among its siblings and its random bases.
@@ -6092,6 +6378,7 @@ pub struct FfiAnimatedCustomPropertyResult {
 #[repr(C)]
 pub struct FfiHostAnimationSampleResult {
     pub outcome: FfiHostAnimationSampleOutcome,
+    pub custom_properties_trigger_restyle: bool,
     /// The non-inherited style groups a keyframe saying `inherit` read from the parent.
     pub keyframes_inherited_non_inherited_style_groups: u32,
     pub depends_on_viewport_metrics: bool,
@@ -6112,6 +6399,7 @@ impl FfiHostAnimationSampleResult {
     fn with_outcome(outcome: FfiHostAnimationSampleOutcome) -> Self {
         Self {
             outcome,
+            custom_properties_trigger_restyle: true,
             keyframes_inherited_non_inherited_style_groups: 0,
             depends_on_viewport_metrics: false,
             font_metrics_depend_on_viewport_metrics: false,
@@ -6196,6 +6484,7 @@ pub(crate) struct AnimationSampleInput<'a> {
     /// The identities of the element's custom-property environment and the one it inherits, under
     /// which values substituted against the element hold.
     pub(crate) custom_property_environments: [u64; 2],
+    pub(crate) custom_property_registration_generation: u64,
     pub(crate) inheritance_parent_style_record: u64,
     /// The document's side of the environment keyframes compute in.
     pub(crate) environment: &'a FfiStyleComputationEnvironment,
@@ -6310,6 +6599,7 @@ impl FfiHostAnimationSample {
                 element_declares_custom_properties: self.element_declares_own_custom_properties,
             },
             custom_property_environments: self.custom_property_environments,
+            custom_property_registration_generation: self.custom_property_registration_generation,
             inheritance_parent_style_record: self.inheritance_parent_style_record,
             environment,
             element_box_slot: self.element_box_slot,
@@ -6788,6 +7078,9 @@ fn finish_animation_sample(
         && resolved.container_relative_length_unit_mask == 0
         && !resolved.needs_document_base_url
         && resolved.unfixed_random_sharings.is_empty();
+
+    let has_non_custom_property_animation = resolved.properties.iter().any(|property| property.custom_name_id == 0);
+
     let custom_results = anim::evaluate_animations(anim::ComputedAnimationBatch {
         context: input.animation_context(Some(&length_contexts.remaining), reference_box),
         device_pixels_per_css_pixel: input.environment.device_pixels_per_css_pixel,
@@ -6822,7 +7115,22 @@ fn finish_animation_sample(
             &retained,
             finalization,
         );
-        retained.extend(readers);
+        // Failed resolution keeps the default full restyle. On success, only consumers not
+        // updated by this sample can require one.
+        if let Ok(readers) = readers {
+            retained.extend(readers);
+
+            let uncached_interval_values_may_need_substitution =
+                custom_properties.has_uncached_interval_values && result.substitution_marks != 0;
+
+            result.custom_properties_trigger_restyle = engine.animated_custom_properties_trigger_restyle(
+                node,
+                pseudo,
+                has_non_custom_property_animation,
+                uncached_interval_values_may_need_substitution,
+                input.custom_property_registration_generation,
+            );
+        }
         let rows = retained
             .iter()
             .map(|(name, value)| FfiAnimatedCustomPropertyResult {
@@ -8073,6 +8381,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn url_dependencies_only_read_a_base_for_relative_urls() {
+        for (url, needs_base) in [
+            ("https://example.com/paint.svg#fill", false),
+            ("data:image/svg+xml,paint", false),
+            ("https://example.com/色.svg#fill", false),
+            ("paint.svg#fill", true),
+            ("色.svg#fill", true),
+            ("/paint.svg#fill", true),
+            ("//example.com/paint.svg#fill", true),
+            ("#fill", false),
+            ("", false),
+        ] {
+            let value = StyleValueData::Url {
+                url: crate::css::style_value::RetainedString::from_utf16(&url.encode_utf16().collect::<Vec<_>>())
+                    .unwrap(),
+                url_type: 0,
+                modifiers: crate::css::style_value::RetainedRequestUrlModifierList::from_retained_modifiers(Vec::new()),
+            };
+            let dependencies = collect_external_value_dependencies(&value);
+            assert_eq!(dependencies.needs_document_base_url, needs_base, "{url}");
+            assert_eq!(dependencies.may_need_style_sheet_resource_context, needs_base, "{url}");
+        }
+    }
+
+    #[test]
     fn calculated_random_values_record_their_document_dependency() {
         let number = || {
             Arc::new(crate::css::calc::CalcNode::Numeric(
@@ -8275,6 +8608,7 @@ mod tests {
             container_height_basis_depends_on_viewport_metrics: false,
             subject_inline_axis_is_horizontal: true,
             resolved_viewport_relative_length: std::ptr::null_mut(),
+            zoom: 1.0,
         }
     }
 
@@ -8318,12 +8652,15 @@ mod tests {
         let batch = recascade_font_size_batch(
             values.len(),
             |index| values[index],
+            |_| 1.0,
+            |_| true,
             0,
             default_size.raw_value(),
             false,
             default_size.raw_value(),
             FfiFontSizeRecascadeDocumentInputs {
                 root_font_size: 16.0,
+                root_effective_zoom: 1.0,
                 root_font_metrics_depend_on_viewport_metrics: false,
                 viewport_width: 800.0,
                 viewport_height: 600.0,
@@ -8349,12 +8686,15 @@ mod tests {
         let batch = recascade_font_size_batch(
             values.len(),
             |index| values[index],
+            |_| 1.0,
+            |_| true,
             0,
             CssPixels::from_integer(13).raw_value(),
             false,
             CssPixels::from_integer(13).raw_value(),
             FfiFontSizeRecascadeDocumentInputs {
                 root_font_size: 20.0,
+                root_effective_zoom: 1.0,
                 root_font_metrics_depend_on_viewport_metrics: false,
                 viewport_width: 800.0,
                 viewport_height: 600.0,
@@ -8367,6 +8707,41 @@ mod tests {
     }
 
     #[test]
+    fn font_size_recascade_applies_each_ancestor_zoom_once() {
+        let px = StyleValueData::Length {
+            value: 10.0,
+            unit: unit_code("px") as u8,
+        };
+        let percentage = StyleValueData::Percentage { value: 200.0 };
+        let em = StyleValueData::Length {
+            value: 2.0,
+            unit: unit_code("em") as u8,
+        };
+        let values = [Some(&px), None, Some(&percentage), Some(&em)];
+        let zooms = [2.0, 6.0, 3.0, 1.5];
+        let batch = recascade_font_size_batch(
+            values.len(),
+            |index| values[index],
+            |index| zooms[index],
+            |_| true,
+            0,
+            CssPixels::from_integer(13).raw_value(),
+            false,
+            CssPixels::from_integer(13).raw_value(),
+            FfiFontSizeRecascadeDocumentInputs {
+                root_font_size: 20.0,
+                root_effective_zoom: 2.0,
+                root_font_metrics_depend_on_viewport_metrics: false,
+                viewport_width: 800.0,
+                viewport_height: 600.0,
+            },
+            None,
+        );
+        assert!(batch.status == FontSizeRecascadeStatus::Complete);
+        assert_eq!(batch.current_size_raw, CssPixels::from_integer(60).raw_value());
+    }
+
+    #[test]
     fn font_size_recascade_stops_for_a_length_that_needs_font_metrics() {
         let ex = StyleValueData::Length {
             value: 2.0,
@@ -8376,12 +8751,15 @@ mod tests {
         let batch = recascade_font_size_batch(
             values.len(),
             |index| values[index],
+            |_| 1.0,
+            |_| true,
             0,
             CssPixels::from_integer(13).raw_value(),
             false,
             CssPixels::from_integer(13).raw_value(),
             FfiFontSizeRecascadeDocumentInputs {
                 root_font_size: 16.0,
+                root_effective_zoom: 1.0,
                 root_font_metrics_depend_on_viewport_metrics: false,
                 viewport_width: 800.0,
                 viewport_height: 600.0,
@@ -8482,6 +8860,7 @@ mod tests {
             sixteen,
             0,
             sixteen,
+            1.0,
         );
         assert_eq!(medium.value, 16.0);
         let large = compute_font_size(
@@ -8492,9 +8871,17 @@ mod tests {
             sixteen,
             0,
             sixteen,
+            1.0,
         );
-        assert_eq!(large.value, 19.1875); // 16 * 6 / 5 in 6-bit fixed point
-        let percent = compute_font_size(&StyleValueData::Percentage { value: 150.0 }, 0, sixteen, 0, sixteen);
+        assert_eq!(large.value, 18.0);
+        let percent = compute_font_size(
+            &StyleValueData::Percentage { value: 150.0 },
+            0,
+            sixteen,
+            0,
+            sixteen,
+            1.0,
+        );
         assert_eq!(percent.value, 24.0);
         let math = compute_font_size(
             &StyleValueData::Keyword { keyword: keyword::MATH },
@@ -8502,6 +8889,7 @@ mod tests {
             sixteen,
             0,
             sixteen,
+            1.0,
         );
         assert_eq!(math.value, CssPixels::from_integer(16).scaled(0.71).to_double());
         let math_two_levels = compute_font_size(
@@ -8510,6 +8898,7 @@ mod tests {
             sixteen,
             0,
             sixteen,
+            1.0,
         );
         assert_eq!(
             math_two_levels.value,
@@ -8560,19 +8949,20 @@ mod tests {
             value: 2.5,
             unit: unit_code("px") as u8,
         };
-        assert_eq!(compute_border_or_outline_width(&length, 2.0, None).value, 2.5);
+        assert_eq!(compute_border_or_outline_width(&length, 2.0, 1.0, None).value, 2.5);
         // 0.4px at 1 dppx rounds up to 1 device pixel.
         let thin = StyleValueData::Length {
             value: 0.4,
             unit: unit_code("px") as u8,
         };
-        assert_eq!(compute_border_or_outline_width(&thin, 1.0, None).value, 1.0);
+        assert_eq!(compute_border_or_outline_width(&thin, 1.0, 1.0, None).value, 1.0);
         // medium is 3px.
         assert_eq!(
             compute_border_or_outline_width(
                 &StyleValueData::Keyword {
                     keyword: keyword::MEDIUM
                 },
+                1.0,
                 1.0,
                 None
             )

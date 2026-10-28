@@ -12,14 +12,12 @@
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/DirectiveOperations.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/Names.h>
-#include <LibWeb/ContentSecurityPolicy/PolicyList.h>
 #include <LibWeb/ContentSecurityPolicy/SecurityPolicyViolationEvent.h>
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
+#include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
-#include <LibWeb/HTML/PolicyContainers.h>
-#include <LibWeb/HTML/Scripting/EnvironmentSettingsSnapshot.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
@@ -61,6 +59,8 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_di
     //    and column number from the global, set violation’s source file, line number, and column number
     //    accordingly.
     // SPEC ISSUE 1:  Is this kind of thing specified anywhere? I didn’t see anything that looked useful in [ECMA262].
+    // NOTE: User agents need to ensure that the source file is the URL requested by the page, pre-redirects. If that’s
+    //       not possible, user agents need to strip the URL down to an origin to avoid unintentional leakage.
     // NB: We use the innermost stack frame that has a source location.
     for (auto const& frame : JS::VM::the().stack_trace()) {
         if (!frame.source_range.has_value())
@@ -69,18 +69,6 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_di
         auto source_file = URL::Parser::basic_parse(source_range.filename().utf16_view());
         if (!source_file.has_value())
             break;
-
-        // NB: The URL of a classic script is its response URL, which can reveal where a cross-origin request was
-        //     redirected to. Per the note in the spec, we strip such URLs down to their origin. Redirects only lead
-        //     to HTTP(S) URLs, so URLs with an opaque origin, such as file: URLs, are kept as they are.
-        if (global_object) {
-            auto source_origin = source_file->origin();
-            if (!source_origin.is_opaque() && !source_origin.is_same_origin(HTML::relevant_settings_object(*global_object).origin())) {
-                source_file = URL::Parser::basic_parse(source_origin.serialize());
-                if (!source_file.has_value())
-                    break;
-            }
-        }
 
         violation->m_source_file = source_file.release_value();
         violation->m_line_number = source_range.start.line;
@@ -102,7 +90,7 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_global_policy_and_di
 }
 
 // https://w3c.github.io/webappsec-csp/#create-violation-for-request
-GC::Ref<Violation> Violation::create_a_violation_object_for_request_and_policy(GC::Ref<Fetch::Infrastructure::Request> request, NonnullRefPtr<Policy const> policy)
+GC::Ref<Violation> Violation::create_a_violation_object_for_request_and_policy(NonnullRefPtr<Fetch::Infrastructure::Request> request, NonnullRefPtr<Policy const> policy)
 {
     // 1. Let directive be the result of executing § 6.8.1 Get the effective directive for request on request.
     auto directive = Directives::get_the_effective_directive_for_request(request);
@@ -113,28 +101,13 @@ GC::Ref<Violation> Violation::create_a_violation_object_for_request_and_policy(G
 
     // 2. Let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive
     //      on request’s client’s global object, policy, and directive.
-    auto violation = create_a_violation_object_for_global_policy_and_directive(request->client()->global_object(), policy, String { directive->view().to_utf8_but_should_be_ported_to_utf16() });
+    auto client = Fetch::Fetching::resolve_client(request);
+    auto violation = create_a_violation_object_for_global_policy_and_directive(client->global_object(), policy, String { directive->view().to_utf8_but_should_be_ported_to_utf16() });
 
     // 3. Set violation’s resource to request’s url.
     // Spec Note: We use request’s url, and not its current url, as the latter might contain information about redirect
     //            targets to which the page MUST NOT be given access.
     violation->m_resource = request->url();
-
-    // AD-HOC: A request whose client is a snapshot of an environment in another process, such as a worker's outside
-    //         settings when the worker fetches its script, violates that environment's policies. Its global object is
-    //         in that process, so the violation is reported there.
-    if (auto const* snapshot = as_if<HTML::EnvironmentSettingsSnapshot>(*request->client()); snapshot && snapshot->report_violation()) {
-        // NB: Request's policy container is a clone of the snapshot's, which lists the policies in the same order.
-        auto const& policies = request->policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list.policies();
-        for (size_t policy_index = 0; policy_index < policies.size(); ++policy_index) {
-            if (policies[policy_index].ptr() != policy.ptr())
-                continue;
-            violation->m_report_in_other_process = GC::create_function(GC::Heap::the(), [report_violation = GC::Ref { *snapshot->report_violation() }, policy_index, effective_directive = String { violation->m_effective_directive.to_utf8() }, resource = request->url()] {
-                report_violation->function()(policy_index, effective_directive, resource);
-            });
-            break;
-        }
-    }
 
     // 4. Return violation.
     return violation;
@@ -145,7 +118,6 @@ void Violation::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_global_scope);
     visitor.visit(m_element);
-    visitor.visit(m_report_in_other_process);
 }
 
 // https://w3c.github.io/webappsec-csp/#violation-url
@@ -317,12 +289,6 @@ void Violation::report_a_violation(JS::Realm& realm)
         obtain_the_blocked_uri_of_resource(),
         m_effective_directive);
 
-    // AD-HOC: See create_a_violation_object_for_request_and_policy().
-    if (m_report_in_other_process) {
-        m_report_in_other_process->function()();
-        return;
-    }
-
     // 1. Let global be violation’s global object.
     auto global_scope = m_global_scope;
 
@@ -472,7 +438,7 @@ void Violation::report_a_violation(JS::Realm& realm)
 
                         // client
                         //    violation's global object's relevant settings object
-                        request->set_client(&environment_settings_object);
+                        request->set_client(environment_settings_object.address());
 
                         // destination
                         //    "report"

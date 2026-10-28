@@ -27,6 +27,7 @@
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebCompatReport.h>
+#include <UI/Qt/ScreenshotSelectionOverlay.h>
 
 #include <LibWebCommon/Page/QueuedInputEvent.h>
 #include <QImage>
@@ -35,6 +36,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVariant>
+#include <memory>
 
 #ifdef AK_OS_MACOS
 #    define LADYBIRD_QT_USE_IOSURFACE_LAYER 1
@@ -87,13 +89,11 @@ using WebContentViewBase = QWidget;
 class CrashOverlayUrlLabel;
 class CrashReportReviewWidget;
 class PageOverlay;
-class ScreenshotSelectionOverlay;
 class ScreenshotViewer;
 class SelectDropdown;
 
 struct WebCompatReportCapture {
     WebView::WebCompatReport::Page page;
-    QImage frame;
     QImage screenshot;
     NonnullRefPtr<Core::Promise<String>> page_dumps;
 };
@@ -154,6 +154,12 @@ public:
     void set_zoom_level(double);
     void set_vertical_tab_overlay_insets(int left, int right);
     void set_bookmarks_bar_overlay_height(int);
+    // How much the page is dimmed under a page dialog, from 0 to 1, where the page is presented above anything Qt paints
+    // over it.
+    void set_page_dim(qreal);
+    // A card that floats over the page, such as the find bar. Qt paints it above the page, so whatever presents the
+    // page above Qt's painting steps aside while it shows.
+    void add_floating_surface(QWidget&);
     void prepare_for_window_move();
     void finish_window_move();
     void close_select_dropdown_after_crash();
@@ -161,8 +167,11 @@ public:
     void review_hidden_crash_report(ByteString const& report_name);
     void leave_report_review();
     void review_web_compat_report(WebCompatReportCapture);
+    void select_web_compat_report_screenshot(Function<void(QImage)> on_selected, Function<void()> on_close = {});
 
     Function<void(WebCompatReportCapture)> on_request_web_compat_report_review;
+    Function<void(Function<void(QImage)> on_selected)> on_request_web_compat_report_screenshot;
+    Function<void()> on_close_web_compat_report_tab;
 
     enum class PaletteMode {
         Default,
@@ -192,6 +201,7 @@ public:
 
 signals:
     void ready_to_paint();
+    void crash_overlay_changed();
     void urls_dropped(QList<QUrl> const&);
 
 private:
@@ -230,7 +240,8 @@ private:
 #endif
     Web::DevicePixelPoint node_picker_position_for(QSinglePointEvent const&) const;
 
-    void enqueue_native_event(Web::MouseEvent::Type, QSinglePointEvent const& event);
+    // The platform may report a phase of a wheel event's gesture that Qt does not pass on.
+    void enqueue_native_event(Web::MouseEvent::Type, QSinglePointEvent const& event, Optional<Web::ScrollGesturePhase> scroll_gesture_phase_the_platform_reports = {});
     void handle_pointer_leave();
 
     void enqueue_native_event(Web::DragEvent::Type, QDropEvent const& event);
@@ -245,12 +256,14 @@ private:
     void show_crash_report_review(Optional<ByteString> const& hidden_crash_report_name = {});
 
     void start_web_compat_report();
-    void select_screenshot(QImage const& frame, Function<void(QImage)> on_selected);
+    ScreenshotSelectionOverlay& select_screenshot(QImage const& frame, ScreenshotSelectionOverlay::Purpose, Function<void()> on_close = {});
+    void start_screenshot();
     QPointer<QWidget> show_transient_overlay(QWidget&);
     void close_transient_overlay(QWidget&, QPointer<QWidget> const& focus_to_restore);
 
     Array<QWidget*, 4> overlays() const;
     bool is_page_covered_by_overlay() const;
+    bool has_floating_surface_over_page() const;
 
 #if !defined(Q_OS_WIN)
     virtual void accessibilityActiveChanged(bool active) override;
@@ -306,22 +319,33 @@ private:
 
     QPointer<ScreenshotSelectionOverlay> m_screenshot_selection_overlay;
     QPointer<ScreenshotViewer> m_screenshot_viewer;
+    Vector<QPointer<QWidget>> m_floating_surfaces;
     PageOverlay* m_web_compat_report_overlay { nullptr };
 
 #ifdef AK_OS_MACOS
     NativeTextEditingBindings m_native_text_editing_bindings;
+
+    // The end of a flick's fingers, held back while the momentum AppKit said would follow it has yet to begin.
+    std::unique_ptr<QWheelEvent> m_wheel_end_awaiting_momentum;
+    Qt::ScrollPhase m_last_wheel_event_phase { Qt::NoScrollPhase };
+    quint64 m_last_wheel_event_timestamp { 0 };
 #endif
 
 #ifdef LADYBIRD_QT_USE_IOSURFACE_LAYER
+    virtual bool eventFilter(QObject*, QEvent*) override;
+    void watch_ancestors_for_moves();
+    void place_native_view_again();
+    Vector<QPointer<QWidget>> m_watched_ancestors;
+
     bool ensure_iosurface_layer_attached_to_native_view();
     void present_current_paintable_as_layer_contents();
     void update_iosurface_layer_frame();
     void update_iosurface_layer_background_color();
-    void update_iosurface_layer_border();
     void detach_iosurface_layer_from_native_view();
     void destroy_iosurface_layer();
 
     void* m_iosurface_layer { nullptr };
+    void* m_page_dim_layer { nullptr };
 #endif
 
 #ifdef LADYBIRD_QT_USE_RHI_WIDGET

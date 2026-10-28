@@ -82,6 +82,7 @@
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
+#include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Loader/SourceHighlighter.h>
 #include <LibWeb/Namespace.h>
@@ -483,6 +484,9 @@ void ConnectionFromClient::connect_to_compositor_process(IPC::TransportHandle ha
     m_compositor_connection->on_key_event = [this](Web::PageId page_id, Web::KeyEvent event) {
         key_event(page_id, move(event));
     };
+    m_compositor_connection->on_pinch_event = [this](Web::PageId page_id, Web::PinchEvent event) {
+        pinch_event(page_id, event);
+    };
     m_compositor_connection->on_compositor_lost = [this] {
         m_page_host->compositor_process_lost();
     };
@@ -499,10 +503,10 @@ void ConnectionFromClient::compositor_process_reconnected()
     m_page_host->compositor_process_reconnected();
 }
 
-void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle, int client_id)
+void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle, int client_id, Optional<Utf16String> top_level_site)
 {
     if (on_request_server_connection)
-        on_request_server_connection(handle, client_id);
+        on_request_server_connection(handle, client_id, top_level_site);
 }
 
 ErrorOr<NonnullOwnPtr<IPC::Transport>> ConnectionFromClient::request_media_server_transport()
@@ -551,7 +555,7 @@ void ConnectionFromClient::set_site_compatibility_data(JsonValue data)
         warnln("Ignoring invalid site compatibility data: {}", parsed_data.error());
         return;
     }
-    Web::ResourceLoader::the().set_site_compatibility_data(parsed_data.release_value());
+    Web::set_site_compatibility_data(parsed_data.release_value());
 }
 
 void ConnectionFromClient::update_screen_rects(Web::PageId page_id, Vector<Web::DevicePixelRect> rects, Vector<Web::DevicePixelRect> available_rects, u32 main_screen)
@@ -921,10 +925,17 @@ void ConnectionFromClient::enqueue_mouse_event(Web::PageId page_id, Optional<Web
         if (auto const* mouse_event = m_input_event_queue.tail().event.get_pointer<Web::MouseEvent>()) {
             if (mouse_event->type != event.type)
                 return nullptr;
+            auto* previous_pointer = mouse_event->pointer_data.ptr();
+            auto* pointer = event.pointer_data.ptr();
+            if (!!previous_pointer != !!pointer)
+                return nullptr;
+            if (pointer && (previous_pointer->pointer_id != pointer->pointer_id || previous_pointer->pointer_type != pointer->pointer_type))
+                return nullptr;
             if (event.type == Web::MouseEvent::Type::MouseWheel
                 && (mouse_event->async_scroll_performed_default_action != event.async_scroll_performed_default_action
                     || mouse_event->wheel_delta_precision != event.wheel_delta_precision
-                    || mouse_event->scroll_gesture_phase != event.scroll_gesture_phase))
+                    || mouse_event->scroll_gesture_phase != event.scroll_gesture_phase
+                    || mouse_event->wheel_gesture_mark != event.wheel_gesture_mark))
                 return nullptr;
             return mouse_event;
         }
@@ -969,7 +980,8 @@ void ConnectionFromClient::pinch_event(Web::PageId page_id, Web::PinchEvent even
     //               to applying each zoom in sequence.
     if (!m_input_event_queue.is_empty() && m_input_event_queue.tail().page_id == page_id) {
         if (auto const* pinch_event = m_input_event_queue.tail().event.get_pointer<Web::PinchEvent>()) {
-            if (pinch_event->position != event.position || pinch_event->modifiers != event.modifiers)
+            if (pinch_event->position != event.position || pinch_event->modifiers != event.modifiers
+                || pinch_event->async_zoom_performed_default_action != event.async_zoom_performed_default_action)
                 return enqueue_input_event({ page_id, move(event), {}, {} });
 
             event.scale_delta = (1.0 + pinch_event->scale_delta) * (1.0 + event.scale_delta) - 1.0;
@@ -1174,7 +1186,7 @@ void ConnectionFromClient::debug_request(Web::PageId page_id, ByteString request
     }
 
     if (request == "spoof-user-agent") {
-        Web::ResourceLoader::the().set_user_agent(MUST(String::from_byte_string(argument)));
+        Web::update_loader_config([&](auto& config) { config.user_agent = MUST(String::from_byte_string(argument)); });
         return;
     }
 
@@ -3205,7 +3217,7 @@ void ConnectionFromClient::set_preferred_languages(Web::PageId, Vector<String> p
     // object global return a new set of language tags, the user agent must queue a global task on the DOM manipulation
     // task source given global to fire an event named languagechange at global, and wait until that task begins to be
     // executed before actually returning a new value.
-    Web::ResourceLoader::the().set_preferred_languages(move(preferred_languages));
+    Web::update_loader_config([&](auto& config) { config.preferred_languages = move(preferred_languages); });
 }
 
 void ConnectionFromClient::set_browsing_behavior(Web::PageId page_id, WebView::BrowsingBehavior browsing_behavior)
@@ -3224,7 +3236,7 @@ void ConnectionFromClient::consume_user_activation(Web::PageId page_id, Web::HTM
 
 void ConnectionFromClient::set_enable_global_privacy_control(Web::PageId, bool enable)
 {
-    Web::ResourceLoader::the().set_enable_global_privacy_control(enable);
+    Web::update_loader_config([&](auto& config) { config.enable_global_privacy_control = enable; });
 }
 
 void ConnectionFromClient::set_geolocation_emulated_position(Web::PageId page_id, WebView::GeolocationPositionData position, Optional<u16> error_code)
@@ -3275,10 +3287,10 @@ void ConnectionFromClient::set_maximum_frames_per_second(Web::PageId page_id, do
         page->set_maximum_frames_per_second(maximum_frames_per_second);
 }
 
-void ConnectionFromClient::set_viewport_corner_radius(Web::PageId page_id, double radius)
+void ConnectionFromClient::set_frame_rate_capped(Web::PageId page_id, bool capped)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->set_viewport_corner_radius(radius);
+        page->set_frame_rate_capped(capped);
 }
 
 void ConnectionFromClient::set_window_position(Web::PageId page_id, Web::DevicePixelPoint position)

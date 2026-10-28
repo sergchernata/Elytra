@@ -117,7 +117,7 @@ pub(crate) fn utf16_equals_ascii_case_insensitive(value: &[u16], expected: &[u8]
             .all(|(&left, &right)| u8::try_from(left).is_ok_and(|left| left.eq_ignore_ascii_case(&right)))
 }
 
-fn split_var_arguments(values: &[ComponentValue]) -> Option<(&[u16], Option<&[ComponentValue]>)> {
+pub(crate) fn split_var_arguments(values: &[ComponentValue]) -> Option<(&[u16], Option<&[ComponentValue]>)> {
     if !crate::css::parser::arbitrary_substitution::arguments_are_valid_for_ffi(5, values) {
         return None;
     }
@@ -1861,6 +1861,7 @@ pub enum StyleValueData {
     String {
         string: CssString,
         is_valid_animation_name_custom_ident: bool,
+        serialize_without_quotes: bool,
     },
     /// An unrecognized CSS function, kept as its name and argument value.
     Function {
@@ -3608,6 +3609,40 @@ pub(crate) unsafe fn retain_style_value(value: *const StyleValueData) -> *const 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_style_value_retain(value: *const StyleValueData) -> *const StyleValueData {
     unsafe { retain_style_value(value) }
+}
+
+/// https://drafts.csswg.org/css-viewport/#zoom-om
+/// Computed style APIs (i.e., all values returned by getComputedStyle()) that are non-auto and non-percentage lengths
+/// must be unscaled.
+/// The computed value `value` of an element whose effective zoom is `zoom`, with its lengths unscaled, retained for the
+/// caller; null where unscaling changes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_style_value_unscaled_by_zoom(value: &StyleValueData, zoom: f64) -> *const StyleValueData {
+    if zoom == 1.0 || !zoom.is_normal() || zoom < 0.0 {
+        return std::ptr::null();
+    }
+    let length = crate::css::style_compute::FfiLengthResolutionContext {
+        zoom: 1.0 / zoom,
+        ..Default::default()
+    };
+    let context = crate::css::absolutize::AbsolutizationContext {
+        length: &length,
+        scheme: None,
+        resolved_viewport_relative_length: std::cell::Cell::new(false),
+        tree_counting: None,
+        random_base_values: &[],
+        document_base_url: &[],
+        style_sheet_resource_context: None,
+        current_color: None,
+    };
+    match crate::css::absolutize::absolutize(value, &context) {
+        Some(crate::css::absolutize::Absolutized::Changed(unscaled)) => {
+            let pointer = unscaled.pointer();
+            std::mem::forget(unscaled);
+            pointer
+        }
+        _ => std::ptr::null(),
+    }
 }
 
 #[cfg(test)]

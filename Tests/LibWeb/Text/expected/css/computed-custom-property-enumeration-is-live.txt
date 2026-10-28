@@ -1,0 +1,5 @@
+initial: "--sheet-initial"
+specified: "--dynamic, --sheet-initial"
+registered: "--api-initial, --dynamic, --sheet-initial"
+stylesheet: "--api-initial, --dynamic, --replacement-initial"
+removed: "--api-initial, --replacement-initial"

@@ -34,6 +34,7 @@
 #include <LibWeb/Bindings/Document.h>
 #include <LibWeb/Bindings/NavigationType.h>
 #include <LibWeb/CSS/CustomPropertyRegistration.h>
+#include <LibWeb/CSS/ImageStyleValueResourceKey.h>
 #include <LibWeb/CSS/ScrollStateContainerQuery.h>
 #include <LibWeb/CSS/StyleScope.h>
 #include <LibWeb/CSS/StyleUpdateInputs.h>
@@ -430,7 +431,13 @@ public:
 
     virtual Utf16FlyString node_name() const override { return "#document"_utf16_fly_string; }
 
+    enum class BoundaryEventTypes {
+        Pointer,
+        Mouse,
+        All,
+    };
     void set_hovered_node(GC::Ptr<Node>, Optional<HoverEventData> = {});
+    void dispatch_boundary_events(GC::Ptr<Node> old_target, GC::Ptr<Node> target, Optional<HoverEventData>, BoundaryEventTypes);
     Node* hovered_node() { return m_hovered_node.ptr(); }
     Node const* hovered_node() const { return m_hovered_node.ptr(); }
 
@@ -1210,8 +1217,9 @@ public:
     HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>>& shared_resource_requests();
     HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>> const& shared_resource_requests() const;
     CSS::ImageStyleValueResource* css_image_resource(URL::URL const&);
-    CSS::ImageStyleValueResource& create_css_image_resource(GC::Ref<HTML::SharedResourceRequest>);
-    void remove_css_image_resource_if_unused(URL::URL const&);
+    CSS::ImageStyleValueResource& create_css_image_resource(CSS::ImageStyleValueResourceKey, GC::Ref<HTML::SharedResourceRequest>);
+    void remove_css_image_resource_if_unused(CSS::ImageStyleValueResourceKey const&);
+    CSS::ImageStyleValueResource* css_image_resource(CSS::ImageStyleValueResourceKey const&);
     void prune_image_resource_caches();
 
     void restore_the_history_object_state(NonnullRefPtr<HTML::SessionHistoryEntry> entry);
@@ -1700,6 +1708,7 @@ public:
     // https://www.w3.org/TR/css-properties-values-api-1/#dom-window-registeredpropertyset-slot
     HashMap<Utf16FlyString, CSS::CustomPropertyRegistration>& registered_property_set();
     Optional<CSS::CustomPropertyRegistration const&> get_registered_custom_property(Utf16FlyString const& name) const;
+    void for_each_registered_custom_property(Function<void(CSS::CustomPropertyRegistration const&)> const&) const;
     size_t custom_property_registration_generation() const { return m_custom_property_registration_generation; }
     void const* rust_custom_property_registry() const { return m_rust_custom_property_registry; }
     void did_change_custom_property_registrations(Optional<Utf16FlyString> registered_property_set_change = {});
@@ -2228,6 +2237,9 @@ private:
 
     HashMap<HTML::SharedResourceRequest::Key, GC::Ptr<HTML::SharedResourceRequest>> m_shared_resource_requests;
     HashMap<URL::URL, OwnPtr<CSS::ImageStyleValueResource>> m_css_image_resources;
+    // NB: The resources of url() values with request modifiers. m_css_image_resources holds those without any, which
+    //     most url() values are.
+    HashMap<CSS::ImageStyleValueResourceKey, OwnPtr<CSS::ImageStyleValueResource>> m_css_image_resources_with_request_url_modifiers;
 
     // https://www.w3.org/TR/web-animations-1/#timeline-associated-with-a-document
     HashTable<GC::Ref<Animations::AnimationTimeline>> m_associated_animation_timelines;

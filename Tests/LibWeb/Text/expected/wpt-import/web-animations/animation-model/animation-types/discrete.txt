@@ -1,0 +1,10 @@
+Harness status: OK
+
+Found 5 tests
+
+5 Pass
+Pass	Test animating discrete values
+Pass	Test discrete animation is used when interpolation fails
+Pass	Test discrete animation is used only for pairs of values that cannot be interpolated
+Pass	Test the 50% switch point for discrete animation is based on the effect easing
+Pass	Test the 50% switch point for discrete animation is based on the keyframe easing

@@ -345,7 +345,10 @@ GC::Ref<FontFace> FontFaceState::create_for_constructor(JS::Object& relevant_glo
                     font_computer->register_font_face(*font);
 
                 // For each FontFaceSet font face is in:
-                for (auto& font_face_set : font->m_containing_sets) {
+                for (auto& font_face_set : font->containing_sets()) {
+                    if (!font->m_containing_sets.contains(font_face_set))
+                        continue;
+
                     // 1. Add font face to the FontFaceSet’s [[LoadedFonts]] list.
                     font_face_set->loaded_fonts().append(font);
 
@@ -371,7 +374,10 @@ GC::Ref<FontFace> FontFaceState::create_for_constructor(JS::Object& relevant_glo
                 font->reject_status_promise(WebIDL::SyntaxError::create(Utf16String::formatted("Failed to load font: {}", error)));
 
                 // For each FontFaceSet font face is in:
-                for (auto& font_face_set : font->m_containing_sets) {
+                for (auto& font_face_set : font->containing_sets()) {
+                    if (!font->m_containing_sets.contains(font_face_set))
+                        continue;
+
                     // 1. Add font face to the FontFaceSet’s [[FailedFonts]] list.
                     font_face_set->failed_fonts().append(font);
 
@@ -581,6 +587,16 @@ Optional<FontComputer&> FontFaceState::font_computer() const
     return {};
 }
 
+// NB: Switching a FontFaceSet to loaded can run script that adds the font face to or deletes it from sets. Callers
+//     skip the sets it was deleted from.
+GC::RootVector<GC::Ref<FontFaceSet>> FontFaceState::containing_sets() const
+{
+    GC::RootVector<GC::Ref<FontFaceSet>> sets;
+    for (auto& font_face_set : m_containing_sets)
+        sets.append(font_face_set);
+    return sets;
+}
+
 Optional<ComputationContext> FontFaceState::computation_context() const
 {
     if (m_css_font_face_rule_identity.has_value()) {
@@ -756,8 +772,8 @@ void FontFaceState::update_font_display_period()
     if (!next_deadline.has_value() || m_font_display_time_for_testing.has_value())
         return;
     if (!m_font_download_timer) {
-        m_font_download_timer = Platform::Timer::create_single_shot(GC::Heap::the(), AK::Duration::from_milliseconds(0), GC::create_function(GC::Heap::the(), [this] {
-            update_font_display_period();
+        m_font_download_timer = Platform::Timer::create_single_shot(GC::Heap::the(), AK::Duration::from_milliseconds(0), GC::create_function(GC::Heap::the(), [font_root = keep_alive_during_load()] {
+            font_root->elements().first()->update_font_display_period();
         }));
     }
     m_font_download_timer->start(AK::Duration::from_milliseconds(static_cast<int>(*next_deadline - elapsed)));
@@ -968,7 +984,10 @@ void FontFaceState::did_load(RefPtr<Gfx::Typeface const> maybe_typeface)
         invalidate_font_display();
 
         // For each FontFaceSet font face is in:
-        for (auto& font_face_set : m_containing_sets) {
+        for (auto& font_face_set : containing_sets()) {
+            if (!m_containing_sets.contains(font_face_set))
+                continue;
+
             // 1. Add font face to the FontFaceSet’s [[FailedFonts]] list.
             font_face_set->failed_fonts().append(*this);
 
@@ -994,7 +1013,10 @@ void FontFaceState::did_load(RefPtr<Gfx::Typeface const> maybe_typeface)
             font_computer->register_font_face(*this);
 
         // For each FontFaceSet font face is in:
-        for (auto& font_face_set : m_containing_sets) {
+        for (auto& font_face_set : containing_sets()) {
+            if (!m_containing_sets.contains(font_face_set))
+                continue;
+
             // 1. Add font face to the FontFaceSet’s [[LoadedFonts]] list.
             font_face_set->loaded_fonts().append(*this);
 

@@ -436,7 +436,7 @@ GC::Ref<HTMLLinkElement::LinkProcessingOptions> HTMLLinkElement::create_link_opt
 }
 
 // https://html.spec.whatwg.org/multipage/semantics.html#create-a-link-request
-GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTMLLinkElement::LinkProcessingOptions const& options)
+RefPtr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTMLLinkElement::LinkProcessingOptions const& options)
 {
     // 1. Assert: options's href is not the empty string.
     VERIFY(!options.href.is_empty());
@@ -456,7 +456,9 @@ GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTM
     auto request = create_potential_CORS_request(*url, options.destination, options.crossorigin);
 
     // 6. Set request's policy container to options's policy container.
-    request->set_policy_container(options.policy_container);
+    // AD-HOC: A clone of it, so that the request and its redirects keep the policies its document had when the request
+    //         was created, its CSP list included, as a request whose policy container is "client" keeps its client's.
+    request->set_policy_container(options.policy_container->clone());
 
     // 7. Set request's integrity metadata to options's integrity.
     request->set_integrity_metadata(options.integrity);
@@ -468,7 +470,7 @@ GC::Ptr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTM
     request->set_referrer_policy(options.referrer_policy);
 
     // 10. Set request's client to options's environment.
-    request->set_client(options.environment);
+    request->set_client(options.environment->address());
 
     // 11. Set request's priority to options's fetch priority.
     request->set_priority(options.fetch_priority);
@@ -1654,7 +1656,7 @@ void HTMLLinkElement::load_fallback_favicon_if_needed(GC::Ref<DOM::Document> doc
 
     auto request = Fetch::Infrastructure::Request::create();
     request->set_url(favicon_url.release_value());
-    request->set_client(&document->relevant_settings_object());
+    request->set_client(document->relevant_settings_object().address());
     request->set_destination(Fetch::Infrastructure::Request::Destination::Image);
     request->set_credentials_mode(Fetch::Infrastructure::Request::CredentialsMode::Include);
     request->set_use_url_credentials(true);

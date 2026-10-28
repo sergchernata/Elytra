@@ -48,7 +48,6 @@ set(ABOUT_PAGES
     downloads.html
     history.html
     newtab.html
-    search-engine-controls.js
     settings.html
     services.html
     version.html

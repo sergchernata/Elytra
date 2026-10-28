@@ -116,6 +116,9 @@ public:
 
     virtual Optional<String> system_font_family() const { return {}; }
     virtual Optional<String> ui_font_family() const { return {}; }
+    // The browser's own pages, such as about:settings, are part of its interface, so they follow the interface theme
+    // rather than the website color scheme.
+    virtual Web::CSS::PreferredColorScheme interface_color_scheme() const;
 
     static RequestServerManager& request_server_manager() { return *the().m_request_server_manager; }
     // The UI process's own client of the session's RequestServer with no site.
@@ -126,7 +129,6 @@ public:
 
     virtual bool supports_system_menu_bar() const { return false; }
     virtual bool supports_vertical_tabs() const { return false; }
-    virtual bool supports_content_blocking_controls() const { return false; }
     virtual bool supports_private_browsing_windows() const { return false; }
     virtual bool supports_client_side_window_decorations() const { return false; }
     virtual bool supports_picture_in_picture() const;
@@ -272,7 +274,7 @@ public:
     void update_compositor_display_metadata(Web::CompositorContextId, Optional<u64> display_id, double refresh_rate);
     void update_compositor_context_visibility(Web::CompositorContextId, Web::HTML::VisibilityState);
     bool handle_and_dispatch_key_event_in_compositor(Web::CompositorContextId, Web::KeyEvent const&, bool allow_keyboard_scroll);
-    void handle_pinch_event_in_compositor(Web::CompositorContextId, Web::PinchEvent const&);
+    bool handle_and_dispatch_pinch_event_in_compositor(Web::CompositorContextId, Web::PinchEvent const&);
     bool handle_and_dispatch_mouse_event_in_compositor(Web::CompositorContextId, Web::MouseEvent const&);
     void notify_compositor_presented_bitmap_ready_to_paint(Web::CompositorContextId, i32 bitmap_id);
 
@@ -387,7 +389,7 @@ public:
     Action& toggle_menu_bar_action() { return *m_toggle_menu_bar_action; }
 
     Menu& bookmarks_menu() { return *m_bookmarks_menu; }
-    void toggle_bookmark_for_view(ViewImplementation&);
+    virtual void toggle_bookmark_for_view(ViewImplementation&);
     Action& toggle_bookmark_bar_action() { return *m_toggle_bookmark_bar_action; }
 
     Menu& history_menu() { return *m_history_menu; }
@@ -433,8 +435,6 @@ protected:
     virtual Core::EventLoop& create_platform_event_loop();
 
     virtual bool should_coordinate_browser_process() const { return true; }
-    // An application whose state must not leak between runs — or into a developer's own browsing state.
-    virtual bool should_use_temporary_profile_by_default() const { return false; }
     virtual SiteIsolationMode default_site_isolation_mode() const { return SiteIsolationMode::IFrame; }
 
     virtual Optional<ByteString> ask_user_for_download_path([[maybe_unused]] ByteString const& file) const { return {}; }
@@ -455,7 +455,11 @@ protected:
     bool has_spare_web_content_process() const { return m_spare_web_content_process; }
 
 private:
+    ErrorOr<void> create_profile(Optional<StringView> profile_name, Optional<StringView> profile_path, bool force_new_process, bool temporary_profile);
+    void create_mach_port_server(ByteString const& profile_identity);
+    void update_website_color_scheme();
     ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(BrowsingSession&, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {}, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables = {}, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry = {}, Web::HTML::VisibilityState system_visibility_state = Web::HTML::VisibilityState::Hidden);
+
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
     ErrorOr<void> launch_compositor_process();

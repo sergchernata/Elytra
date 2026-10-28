@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Optional.h>
+#include <AK/RefCounted.h>
 #include <AK/Utf16String.h>
 #include <LibGC/CellAllocator.h>
 #include <LibGC/Ptr.h>
@@ -28,6 +29,18 @@
 
 namespace Web::HTML {
 
+// NB: Reconstructed response callbacks and download adoption share one terminal-event owner.
+struct NavigationResponseNetworkEventState : RefCounted<NavigationResponseNetworkEventState> {
+    AK_ALLOC_WITH_KMALLOC;
+
+    enum class Owner {
+        Renderer,
+        Download,
+        Completed,
+    };
+    Owner owner { Owner::Renderer };
+};
+
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#navigation-params
 struct NavigationParams : GC::Cell {
     GC_CELL(NavigationParams, GC::Cell);
@@ -40,7 +53,7 @@ struct NavigationParams : GC::Cell {
     GC::Ptr<LocalNavigable> navigable;
 
     // null or a request that started the navigation
-    GC::Ptr<Fetch::Infrastructure::Request> request;
+    RefPtr<Fetch::Infrastructure::Request> request;
 
     // a response that ultimately was navigated to (potentially a network error)
     GC::Ptr<Fetch::Infrastructure::Response> response;
@@ -52,6 +65,11 @@ struct NavigationParams : GC::Cell {
     //         a descriptor carry the fetch's timing info here instead, so the new Document's navigation timing entry
     //         still sees it.
     RefPtr<Fetch::Infrastructure::FetchTimingInfo> fetch_timing_info { nullptr };
+
+    // AD-HOC: The terminal network event follows the owner of a transferred
+    // response, including a download.
+    JsonValue webdriver_bidi_network_response;
+    RefPtr<NavigationResponseNetworkEventState> webdriver_bidi_network_response_state;
 
     // AD-HOC: The agent cluster of the agent the UI process obtained for the new Document's window, and that agent
     //         cluster's cross-origin isolation mode.
@@ -75,7 +93,7 @@ struct NavigationParams : GC::Cell {
     OpenerPolicyEnforcementResult coop_enforcement_result;
 
     // null or an environment reserved for the new Document
-    Fetch::Infrastructure::Request::ReservedClientType reserved_environment;
+    GC::Ptr<Environment> reserved_environment;
 
     // an origin to use for the new Document
     URL::Origin origin;
@@ -107,12 +125,12 @@ protected:
     NavigationParams(
         Optional<Utf16String> id,
         GC::Ptr<LocalNavigable> navigable,
-        GC::Ptr<Fetch::Infrastructure::Request> request,
+        RefPtr<Fetch::Infrastructure::Request> request,
         GC::Ptr<Fetch::Infrastructure::Response> response,
         GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller,
         GC::Ptr<GC::Function<void(DOM::Document&)>> commit_early_hints,
         OpenerPolicyEnforcementResult coop_enforcement_result,
-        Fetch::Infrastructure::Request::ReservedClientType reserved_environment,
+        GC::Ptr<Environment> reserved_environment,
         URL::Origin origin,
         RefPtr<PolicyContainer> policy_container,
         SandboxingFlagSet final_sandboxing_flag_set,

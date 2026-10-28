@@ -167,8 +167,6 @@ public:
     void reload_for_webdriver_bidi(BypassCache, Utf16String navigation_id);
     void stop_loading();
     bool is_loading() const { return m_is_loading; }
-    // Whether the most recent load ran to completion, rather than being stopped or canceled.
-    bool last_load_finished() const { return m_last_load_finished; }
 
     bool crash_overlay_active() const { return m_crash_state.has_value(); }
     String crash_overlay_failed_url() const;
@@ -211,8 +209,7 @@ public:
     double maximum_frames_per_second() const { return m_maximum_frames_per_second; }
     // Sends the display metadata to every page hosting documents of the tab.
     void set_display_metadata(Optional<u64> display_id, double maximum_frames_per_second);
-    double viewport_corner_radius() const { return m_viewport_corner_radius; }
-    void set_viewport_corner_radius(double);
+    void set_frame_rate_capped(bool);
 
     struct ScreenRects {
         Vector<Web::DevicePixelRect> rects;
@@ -267,6 +264,8 @@ public:
     }
 
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
+    // Sends the interface theme to the pages showing the browser's own pages, which follow it.
+    void update_interface_color_scheme();
     void set_preferred_contrast(Web::CSS::PreferredContrast);
     void set_preferred_motion(Web::CSS::PreferredMotion);
     // A page created to host documents of the tab in another process takes the preferences the view's page has.
@@ -385,8 +384,8 @@ public:
     void list_style_sheets();
     void request_style_sheet_source(Web::CSS::StyleSheetIdentifier const&);
 
-    void did_block_resource(Badge<WebContentPage>);
-    void reset_blocked_request_count();
+    void did_block_resource(Badge<WebContentPage>, URL::URL const&, StringView kind);
+    void reset_blocked_resources();
     void notify_content_blocking_changed();
     ContentBlockingSnapshot content_blocking_snapshot() const;
 
@@ -433,7 +432,7 @@ public:
     Web::HTML::AudioPlayState audio_play_state() const { return m_audio_play_state; }
     void did_change_screen_wake_lock_state(Badge<WebContentPage>, Web::ScreenWakeLockState);
 
-    void did_reset_session_history_for_testing(Badge<WebContentPage>, Web::HTML::SessionHistoryEntryDescriptor);
+    void did_reset_state_for_testing(Badge<WebContentPage>, Web::HTML::SessionHistoryEntryDescriptor);
     bool capture_session_history_snapshot_for_testing(Badge<WebContentPage>);
     bool restore_captured_session_history_snapshot_for_testing(Badge<WebContentPage>);
     bool register_session_store_tab_for_testing(Badge<WebContentPage>);
@@ -446,10 +445,12 @@ public:
     void run_webdriver_content_command(u64 command_id, Web::WebDriver::SessionBrowsingContext, String const& name, JsonValue payload, Vector<String> arguments);
     // https://w3c.github.io/webdriver-bidi/#commands
     void run_webdriver_bidi_content_command(u64 command_id, Web::HTML::CrossProcessId navigable_id, String const& method, JsonValue params);
+    void run_webdriver_bidi_content_command(WebContentPage&, u64 command_id, Web::HTML::CrossProcessId navigable_id, String const& method, JsonValue params);
     void run_webdriver_commands_waiting_for_a_document(Badge<CanonicalTraversable>);
     void did_complete_webdriver_content_command(WebContentPage&, u64 command_id, Web::WebDriver::Response);
     void did_set_webdriver_current_browsing_context(Badge<WebContentPage>, u64 command_id, Web::HTML::CrossProcessId navigable_id);
     void enqueue_webdriver_mouse_event(Badge<WebContentPage>, Web::MouseEvent, Function<void()> on_handled);
+    void enqueue_pinch_event_for_testing(Badge<WebContentPage>, Web::PinchEvent);
     void did_lose_page(Badge<CanonicalTraversable>, WebContentPage&, WebContentProcessLost);
     void move_pending_webdriver_commands_to_new_host(Badge<CanonicalNavigable>, Web::HTML::CrossProcessId navigable_id, WebContentPage& old_host, WebContentPage& new_host);
     void set_webdriver_current_browsing_context_to_top_level();
@@ -472,6 +473,8 @@ public:
         Full,
     };
     NonnullRefPtr<Core::Promise<LexicalPath>> take_screenshot(ScreenshotType);
+    void take_and_save_screenshot(ScreenshotType);
+    void save_screenshot(Gfx::Bitmap const&);
     NonnullRefPtr<Core::Promise<LexicalPath>> take_dom_node_screenshot(Web::UniqueNodeID);
     virtual void did_receive_screenshot(Badge<WebContentPage>, Gfx::ShareableBitmap const&);
 
@@ -527,6 +530,7 @@ public:
     Function<void(URL::URL const&, URL::Origin const&, ExternalURLHandler const&, Function<void(bool)>)> on_request_external_url_confirmation;
     Function<void()> on_request_accept_dialog;
     Function<void()> on_request_website_issue_report;
+    Function<void()> on_request_screenshot;
     Function<void()> on_request_dismiss_dialog;
     Function<void(JsonObject)> on_received_dom_tree;
     Function<void(DOMNodeProperties)> on_received_dom_node_properties;
@@ -691,7 +695,7 @@ protected:
     void dump_session_history(StringView reason, SessionHistoryDumpMode = SessionHistoryDumpMode::IfDebuggingEnabled) const;
     void recover_current_session_history_entry_with_history_operation();
     void reconstruct_current_session_history_entry_with_history_operation(StringView reason);
-    NonnullRefPtr<Core::Promise<Empty>> reset_session_history_for_testing();
+    NonnullRefPtr<Core::Promise<Empty>> reset_state_for_testing();
 
     virtual void update_zoom();
 
@@ -725,6 +729,7 @@ protected:
     void set_page_background_color_to_system_canvas(bool dark);
     void set_page_background_color(Gfx::Color);
     Gfx::Color preferred_canvas_background_color() const;
+    Web::CSS::PreferredColorScheme preferred_color_scheme_for_page(WebContentPage const&) const;
 
     void initialize_tab(Web::HTML::VisibilityState, Optional<CanonicalTraversable&> = {});
     void display_traversable(CanonicalTraversable&, Web::HTML::VisibilityState);
@@ -822,7 +827,7 @@ protected:
     double m_device_pixel_ratio { 1.0 };
     Optional<u64> m_display_id;
     double m_maximum_frames_per_second { 60.0 };
-    double m_viewport_corner_radius { 0 };
+    bool m_frame_rate_capped { false };
     bool m_scales_frames_to_fit { false };
 
     RefPtr<Menu> m_page_context_menu;
@@ -863,9 +868,7 @@ protected:
     HashMap<u64, NonnullRefPtr<Core::Promise<bool>>> m_pending_select_word_for_dictionary_lookup_requests;
     HashMap<u64, NonnullRefPtr<Core::Promise<ByteString>>> m_pending_cut_selected_text_requests;
 
-    RefPtr<Action> m_take_visible_screenshot_action;
-    RefPtr<Action> m_take_full_screenshot_action;
-    RefPtr<Action> m_report_website_issue_action;
+    RefPtr<Action> m_take_screenshot_action;
 
     RefPtr<Action> m_open_in_new_tab_action;
     RefPtr<Action> m_open_in_new_window_action;
@@ -973,7 +976,6 @@ protected:
     bool m_can_undo { false };
     bool m_can_redo { false };
     bool m_is_loading { false };
-    bool m_last_load_finished { false };
     // WebDriver's observation of the top-level navigation completion state. The navigation itself is the
     // canonical traversable's ongoing navigation record.
     struct WebDriverNavigationObservation {
@@ -1008,6 +1010,7 @@ protected:
         String name;
         Optional<Web::HTML::CrossProcessId> navigable_id;
         WebDriverProtocol protocol { WebDriverProtocol::Classic };
+        bool stays_on_page { false };
     };
     HashMap<u64, PendingWebDriverCommand> m_pending_webdriver_commands;
     HashMap<u64, PendingWebDriverCommand> m_pending_webdriver_crash_commands;
@@ -1051,8 +1054,8 @@ protected:
     CanonicalTraversable* m_top_level_traversable { nullptr };
     Optional<SessionTabId> m_session_tab_id;
     Optional<SessionHistorySnapshot> m_captured_session_history_snapshot_for_testing;
-    RefPtr<Core::Promise<Empty>> m_pending_session_history_reset_for_testing;
-    RefPtr<Core::Promise<Empty>> m_pending_session_history_reset_queue_promise;
+    RefPtr<Core::Promise<Empty>> m_pending_test_state_reset;
+    RefPtr<Core::Promise<Empty>> m_pending_test_state_reset_queue_promise;
 
     struct WebDriverNavigationCompletionRequest {
         AK_ALLOC_WITH_KMALLOC;
@@ -1127,7 +1130,7 @@ protected:
     HashMap<u64, NavigationListener> m_navigation_listeners;
     u64 m_next_navigation_listener_id { 1 };
 
-    u64 m_blocked_request_count { 0 };
+    Vector<BlockedResource> m_blocked_resources;
 
     enum class NodePickerRequestType : u8 {
         Hovered,

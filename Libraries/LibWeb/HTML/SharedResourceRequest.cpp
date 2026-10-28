@@ -35,7 +35,11 @@ static u64 s_next_memory_cache_touch_serial;
 
 GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Document& document, URL::URL const& url, CORSSettingAttribute cors_setting)
 {
-    Key key { url, cors_setting };
+    return get_or_create(document, { url, cors_setting, {}, ReferrerPolicy::ReferrerPolicy::EmptyString });
+}
+
+GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Document& document, Key key)
+{
     auto& shared_resource_requests = document.shared_resource_requests();
     if (auto it = shared_resource_requests.find(key); it != shared_resource_requests.end()) {
         it->value->touch_memory_cache_entry();
@@ -56,7 +60,7 @@ GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Documen
             ? CORSSettingAttribute::UseCredentials
             : CORSSettingAttribute::Anonymous;
     }
-    return get_or_create(document, request.url(), cors_setting);
+    return get_or_create(document, { request.url(), cors_setting, request.integrity_metadata(), request.referrer_policy() });
 }
 
 SharedResourceRequest::SharedResourceRequest(GC::Ref<Page> page, Key key, GC::Ref<DOM::Document> document)
@@ -129,7 +133,7 @@ void SharedResourceRequest::set_fetch_controller(GC::Ptr<Fetch::Infrastructure::
     m_fetch_controller = move(fetch_controller);
 }
 
-void SharedResourceRequest::fetch_resource(GC::Ref<Fetch::Infrastructure::Request> request)
+void SharedResourceRequest::fetch_resource(NonnullRefPtr<Fetch::Infrastructure::Request> request)
 {
     auto& realm = HTML::relevant_realm(*m_document);
     VERIFY(needs_fetching());

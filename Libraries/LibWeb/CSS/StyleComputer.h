@@ -80,6 +80,9 @@ public:
     [[nodiscard]] CSSPixelRect const& viewport_rect_for_style_environment() const { return m_viewport_rect; }
     [[nodiscard]] Length::FontMetrics const& root_element_font_metrics() const { return m_root_element_font_metrics; }
     [[nodiscard]] bool root_element_font_metrics_depend_on_viewport_metrics() const { return m_root_element_font_metrics_depend_on_viewport_metrics; }
+    // https://drafts.csswg.org/css-viewport/#effective-zoom
+    // NB: The root element font metrics are zoomed by this effective zoom of the root element.
+    [[nodiscard]] double root_element_effective_zoom() const { return m_root_element_effective_zoom; }
     // Moves with the viewport rect the environment resolves viewport units against.
     void bump_viewport_environment_version() { ++m_viewport_environment_version; }
     // The environment as a compositor animation request names it: the document's version and the viewport's.
@@ -187,7 +190,7 @@ private:
     void finish_animation_sample(AnimationSample&, ComputedValuesFFI::FfiHostAnimationSampleResult const&) const;
     void finish_animation_refresh(Layout::BegunRead const& read, DOM::AbstractElement, ComputedStyleWorkingSet&) const;
     void publish_animated_custom_properties(Layout::BegunRead const&, ComputedStyleWorkingSet&, DOM::AbstractElement) const;
-    void invalidate_animated_custom_property_readers(Layout::BegunRead const&, DOM::AbstractElement, OrderedHashMap<Utf16FlyString, NonnullRefPtr<StyleValue const>> const& animated_values, RefPtr<CustomPropertyData const> old_data) const;
+    void invalidate_animated_custom_property_readers(Layout::BegunRead const&, DOM::AbstractElement, OrderedHashMap<Utf16FlyString, NonnullRefPtr<StyleValue const>> const& animated_values, RefPtr<CustomPropertyData const> old_data, bool recompute_style) const;
     RefPtr<ComputedStyleWorkingSet> start_needed_transitions(Layout::BegunRead const& read, DOM::AbstractElement, StyleRecordID before_change_style_record) const;
     [[nodiscard]] bool has_provisional_transition_states(DOM::AbstractElement) const;
     void finalize_animated_box_type(Layout::BegunRead const& read, ComputedStyleWorkingSet&, DOM::AbstractElement) const;
@@ -256,6 +259,7 @@ private:
     Length::FontMetrics m_default_font_metrics;
     mutable Length::FontMetrics m_root_element_font_metrics;
     mutable bool m_root_element_font_metrics_depend_on_viewport_metrics { false };
+    mutable double m_root_element_effective_zoom { 1 };
 
     mutable u64 m_style_update_depth { 0 };
     mutable Optional<MediaEnvironmentSnapshot> m_style_update_media_environment;

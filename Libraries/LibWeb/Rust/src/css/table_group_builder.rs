@@ -673,6 +673,7 @@ fn build_grid_group(values: &EffectiveValues, parent: Option<GroupPayloadRef<'_>
         grid_column_end_style_value: retained_slot(property_id::GRID_COLUMN_END),
         grid_row_start_style_value: retained_slot(property_id::GRID_ROW_START),
         grid_row_end_style_value: retained_slot(property_id::GRID_ROW_END),
+        fit_tolerance_style_value: retained_slot(property_id::FIT_TOLERANCE),
     };
     rust_build_grid_group(group_index::GRID, built, parent)
 }
@@ -2992,6 +2993,17 @@ fn build_box_group(
         }
     }
 
+    // https://drafts.csswg.org/css-contain-2/#skips-its-contents
+    // When an element skips its contents, the user agent must change the used value of the contain property so as to
+    // turn on layout containment, style containment, paint containment, and size containment.
+    if matches!(values.value(property_id::CONTENT_VISIBILITY), Some(StyleValueData::Keyword { keyword: code }) if *code == keyword::HIDDEN)
+    {
+        size_containment = true;
+        layout_containment = true;
+        style_containment = true;
+        paint_containment = true;
+    }
+
     // container-type, which the extractor only fans out from a value list.
     let mut is_size_container = false;
     let mut is_inline_size_container = false;
@@ -3357,6 +3369,7 @@ pub(crate) fn rebuild_group_from_table_and_overlay(
             values.handle(property_id::CONTENT_VISIBILITY),
             values.handle(property_id::IMAGE_RENDERING),
             values.handle(property_id::TEXT_ORIENTATION),
+            table.effective_zoom(),
             parent,
         ),
         group_index::SIZING => build_sizing_group(
@@ -3441,6 +3454,7 @@ pub(crate) unsafe fn build_group_payloads_from_table(
                     values.handle(property_id::CONTENT_VISIBILITY),
                     values.handle(property_id::IMAGE_RENDERING),
                     values.handle(property_id::TEXT_ORIENTATION),
+                    table.effective_zoom(),
                     parent,
                 ),
                 group_index::SIZING => build_sizing_group(

@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	auto - rows
+Pass	min - rows
+Pass	max - rows
+Pass	size - rows
+Pass	min max - rows
+Pass	min size - rows
+Pass	max size - rows
+Pass	min max size - rows

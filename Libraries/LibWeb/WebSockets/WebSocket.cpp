@@ -22,6 +22,7 @@
 #include <LibWeb/DOM/EventDispatcher.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/DOMURL/DOMURL.h>
+#include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/NetworkPartitionKey.h>
 #include <LibWeb/Fetch/Infrastructure/PortBlocking.h>
@@ -35,6 +36,7 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MixedContent/AbstractOperations.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
@@ -184,9 +186,9 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     // 2. Let request be a new request, whose URL is requestURL, client is client, service-workers mode is "none",
     //    referrer is "no-referrer", mode is "websocket", credentials mode is "include", cache mode is "no-store", and
     //    redirect mode is "error".
-    auto request = Fetch::Infrastructure::Request::create(client.vm());
+    auto request = Fetch::Infrastructure::Request::create();
     request->set_url(move(request_url));
-    request->set_client(&client);
+    request->set_client(client.address());
     request->set_service_workers_mode(Fetch::Infrastructure::Request::ServiceWorkersMode::None);
     request->set_referrer(Fetch::Infrastructure::Request::Referrer::NoReferrer);
     request->set_mode(Fetch::Infrastructure::Request::Mode::WebSocket);
@@ -197,6 +199,7 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     // FIXME: Fetch request as per the remaining steps of https://websockets.spec.whatwg.org/#concept-websocket-establish
     // AD-HOC: Until the opening handshake goes through fetch, run the blocking checks of main fetch here.
     request->set_policy_container(client.policy_container()->clone());
+    request->set_client_snapshot(Fetch::Fetching::snapshot_client_context(client));
     auto report_violation = ContentSecurityPolicy::violation_reporter_for_request(client.realm(), request);
     ContentSecurityPolicy::report_content_security_policy_violations_for_request(request, report_violation);
     UpgradeInsecureRequests::upgrade_request_to_a_potentially_trustworthy_url_if_appropriate(request);
@@ -227,20 +230,22 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
 
     auto additional_headers = HTTP::HeaderList::create();
 
-    additional_headers->append({ "User-Agent"sv, ResourceLoader::the().user_agent_for_websocket_url(connection_url).to_byte_string() });
+    auto user_agent = current_loader_config()->config.user_agent_for_websocket_url(connection_url);
+    additional_headers->append({ "User-Agent"sv, user_agent.to_byte_string() });
 
     if (ResourceLoader::proxy_autoconfig_url().has_value()) {
         dbgln("FIXME: Evaluate the PAC file to find the proxy for {}; failing the WebSocket connection", url_record);
         return Error::from_string_literal("PAC proxy configurations are not supported");
     }
 
-    auto request_client = ResourceLoader::the().request_client();
+    auto network_isolation_key = Fetch::Infrastructure::determine_the_network_partition_key(client);
+    auto request_client = ResourceLoader::the().request_client_for(network_isolation_key);
 
     // FIXME: We could put this request in a queue until the client connection is re-established.
     if (!request_client)
         return Error::from_string_literal("RequestServer is currently unavailable");
 
-    m_websocket = request_client->websocket_connect(connection_url, Fetch::Infrastructure::determine_the_network_partition_key(client), origin_string, protocol_byte_strings, {}, additional_headers);
+    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers);
 
     m_websocket->on_open = GC::weak_callback(*this, [](auto& self) {
         self.on_open();

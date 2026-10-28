@@ -208,6 +208,8 @@ void PageClient::set_has_focus(bool has_focus)
     // The focus ring, the text caret, and selection highlight colors all depend on the window focus state, so
     // nothing painted before the change can be reused; repaint every document the page hosts.
     for (auto const& navigable : page().hosted_navigables()) {
+        if (!has_focus)
+            navigable->event_handler().release_held_scroll_key();
         auto document = navigable->active_document();
         if (!document)
             continue;
@@ -687,10 +689,16 @@ void PageClient::request_rendering_opportunity_if_needed()
     if (Web::HTML::main_thread_event_loop().rendering_task_queued_or_running())
         return;
 
-    // NB: Headless tests have no display clock to follow. Schedule their frames locally so
-    //     compositor IPC latency cannot let document timers overtake a requested frame.
+    // NB: Headless tests have no display clock to follow. Schedule their frames locally so compositor IPC latency cannot
+    //     let document timers overtake a requested frame. Unless the frame rate is capped, there is no frame rate to
+    //     wait for: the frame comes as soon as the event loop has handled what is already pending.
     if (is_headless() && Web::HTML::Window::in_test_mode()) {
-        schedule_local_rendering_opportunity();
+        if (m_frame_rate_capped) {
+            schedule_local_rendering_opportunity();
+            return;
+        }
+        m_frame_timer_purpose = FrameTimerPurpose::LocalFallback;
+        m_frame_timer->restart(AK::Duration::zero());
         return;
     }
 
@@ -872,20 +880,6 @@ void PageClient::inject_rendering_opportunity(double frame_time)
     grant_rendering_opportunity(frame_time, Web::HTML::EventLoop::RenderingOpportunitySource::Manual);
 }
 
-void PageClient::set_viewport_corner_radius(double radius)
-{
-    static constexpr double maximum_viewport_corner_radius = 64;
-    if (!isfinite(radius) || radius < 0)
-        return;
-    radius = min(radius, maximum_viewport_corner_radius);
-    if (m_viewport_corner_radius == radius)
-        return;
-    m_viewport_corner_radius = radius;
-
-    if (page().has_local_traversable())
-        page().local_traversable()->viewport_corner_radius_did_change();
-}
-
 void PageClient::set_maximum_frames_per_second(double maximum_frames_per_second)
 {
     if (!isfinite(maximum_frames_per_second) || maximum_frames_per_second <= 0)
@@ -1038,9 +1032,9 @@ void PageClient::page_did_finish_loading(Web::HTML::CrossProcessId navigable_id,
     client().async_did_finish_loading(m_id, navigable_id, document_id);
 }
 
-Optional<u64> PageClient::page_did_start_download(Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> const& navigation_id, URL::URL const& url, ByteString const& suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data)
+Optional<u64> PageClient::page_did_start_download(Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> const& navigation_id, URL::URL const& url, ByteString const& suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response)
 {
-    auto response = client().send_sync<Messages::WebContentClient::DidStartDownload>(m_id, navigable_id, navigation_id, url, suggested_filename, total_size, request_server_client_id, request_server_request_id, move(initial_data));
+    auto response = client().send_sync<Messages::WebContentClient::DidStartDownload>(m_id, navigable_id, navigation_id, url, suggested_filename, total_size, request_server_client_id, request_server_request_id, move(initial_data), move(network_response));
     return response->download_id();
 }
 
@@ -1518,9 +1512,9 @@ void PageClient::did_delete_all_cookies(u64 request_id)
     Web::WebIDL::resolve_promise(realm, promise);
 }
 
-void PageClient::page_did_lose_request_server_connection()
+void PageClient::page_did_lose_request_server_connection(Optional<Utf16String> const& top_level_site)
 {
-    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidLoseRequestServerConnection>();
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::DidLoseRequestServerConnection>(top_level_site);
     if (!response)
         return;
 
@@ -1529,7 +1523,7 @@ void PageClient::page_did_lose_request_server_connection()
         return;
 
     if (client().on_request_server_connection)
-        client().on_request_server_connection(*handle, {});
+        client().on_request_server_connection(*handle, {}, top_level_site);
 }
 
 void PageClient::page_did_simulate_worker_request_server_connection_loss()
@@ -1698,6 +1692,11 @@ void PageClient::page_did_request_webdriver_mouse_event(Web::HTML::CrossProcessI
     auto request_id = m_next_webdriver_mouse_event_request_id++;
     m_pending_webdriver_mouse_events.set(request_id, on_handled);
     client().async_did_request_webdriver_mouse_event(m_id, request_id, local_root_id, move(event));
+}
+
+void PageClient::page_did_request_pinch_event_for_testing(Web::HTML::CrossProcessId local_root_id, Web::PinchEvent const& event)
+{
+    client().async_did_request_pinch_event_for_testing(m_id, local_root_id, event);
 }
 
 void PageClient::did_handle_webdriver_mouse_event(u64 request_id)
@@ -2237,9 +2236,9 @@ void PageClient::page_did_post_extension_message(u64 context_id, String const& m
     client().async_did_post_extension_message(m_id, context_id, message);
 }
 
-void PageClient::page_did_block_resource()
+void PageClient::page_did_block_resource(URL::URL const& url, StringView kind)
 {
-    client().async_did_block_resource(id());
+    client().async_did_block_resource(id(), url, MUST(String::from_utf8(kind)));
 }
 
 void PageClient::page_did_start_network_request(u64 request_id, URL::URL const& url, ByteString const& method, Vector<HTTP::Header> const& request_headers, ReadonlyBytes request_body, Optional<String> initiator_type, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority priority)

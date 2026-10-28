@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<script src="../include.js"></script>
+<style>
+    body {
+        margin: 0;
+    }
+
+    #scroller {
+        width: 100px;
+        height: 100px;
+        overflow: scroll;
+    }
+
+    #spacer {
+        height: 600px;
+    }
+</style>
+<div id="scroller"><div id="spacer"></div></div>
+<script>
+    promiseTest(async () => {
+        await animationFrame();
+        await animationFrame();
+
+        // The compositor takes the pan before the script scrolls, whose position the box goes to all the same. The
+        // layout dirtied before the compositor's offset is adopted must not get in the way.
+        const wheelPromise = internals.wheel(50, 50, 0, 100, true);
+        scroller.scrollTop = 200;
+        println(`script scrollTop: ${scroller.scrollTop}`);
+        scroller.appendChild(document.createElement("div"));
+
+        await wheelPromise;
+
+        println(`final scrollTop: ${scroller.scrollTop}`);
+    });
+</script>

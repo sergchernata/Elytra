@@ -768,6 +768,7 @@ NonnullOwnPtr<StyleComputer::AnimationSample> StyleComputer::begin_animation_sam
         .device_pixels_per_css_pixel = m_document->page().client().device_pixels_per_css_pixel(),
         .initial_font_size_raw = InitialValues::font_size().raw_value(),
         .default_font_size_raw = default_user_font_size().raw_value(),
+        .root_effective_zoom = root_element_effective_zoom(),
     };
 
     using SampleContext = AnimationSample::Context;
@@ -788,6 +789,7 @@ NonnullOwnPtr<StyleComputer::AnimationSample> StyleComputer::begin_animation_sam
             custom_property_data ? custom_property_data->identity() : 0,
             inheritance_custom_property_data ? inheritance_custom_property_data->identity() : 0,
         },
+        .custom_property_registration_generation = document().custom_property_registration_generation(),
         .inheritance_parent_style_record = inheritance_parent.has_value() ? inheritance_parent->style_record_identity().value() : 0,
         .environment = &sample->environment,
         .element_box_slot = Layout::Node::slot_id(abstract_element.element().unsafe_layout_node(read)).index,
@@ -840,6 +842,7 @@ void StyleComputer::finish_animation_sample(AnimationSample& sample, ComputedVal
     case ComputedValuesFFI::FfiHostAnimationSampleOutcome::Evaluated:
         break;
     }
+    computed_properties.set_animated_custom_properties_trigger_restyle(Badge<StyleComputer> {}, result.custom_properties_trigger_restyle);
     m_keyframes_inherited_non_inherited_style_groups |= result.keyframes_inherited_non_inherited_style_groups;
     if (result.depends_on_viewport_metrics)
         computed_properties.set_depends_on_viewport_metrics();
@@ -866,7 +869,7 @@ void StyleComputer::publish_animated_custom_properties(Layout::BegunRead const& 
     if (animated_values.is_empty()) {
         if (base.ptr() != data.ptr()) {
             abstract_element.replace_custom_property_data(Badge<StyleComputer> {}, base);
-            invalidate_animated_custom_property_readers(read, abstract_element, animated_values, move(data));
+            invalidate_animated_custom_property_readers(read, abstract_element, animated_values, move(data), true);
         }
         return;
     }
@@ -894,21 +897,25 @@ void StyleComputer::publish_animated_custom_properties(Layout::BegunRead const& 
             });
     }
     abstract_element.replace_custom_property_data(Badge<StyleComputer> {}, CustomPropertyData::create_animation_overlay(move(overlay_values), move(base), abstract_element));
-    invalidate_animated_custom_property_readers(read, abstract_element, animated_values, move(data));
+    invalidate_animated_custom_property_readers(read, abstract_element, animated_values, move(data), computed_properties.animated_custom_properties_trigger_restyle());
 }
 
-void StyleComputer::invalidate_animated_custom_property_readers(Layout::BegunRead const& read, DOM::AbstractElement abstract_element, OrderedHashMap<Utf16FlyString, NonnullRefPtr<StyleValue const>> const& animated_values, RefPtr<CustomPropertyData const> old_data) const
+void StyleComputer::invalidate_animated_custom_property_readers(Layout::BegunRead const& read, DOM::AbstractElement abstract_element, OrderedHashMap<Utf16FlyString, NonnullRefPtr<StyleValue const>> const& animated_values, RefPtr<CustomPropertyData const> old_data, bool recompute_style) const
 {
     auto& element = abstract_element.element();
-    // Which custom properties the element's own declarations read is not recorded: an element
-    // whose custom properties animate recomputes.
     auto& style_engine = element.document().style_computer().style_engine();
-    style_engine.record_derived_element_style_input_change(element.style_node_id(), StyleEngine::PublishedStyle | StyleEngine::RecomputeStyle);
+    if (recompute_style) {
+        style_engine.record_derived_element_style_input_change(element.style_node_id(), StyleEngine::PublishedStyle | StyleEngine::RecomputeStyle);
+    } else if (!abstract_element.pseudo_element().has_value()) {
+        // Style container queries can read animated values even when those values do not inherit.
+        element.invalidate_descendant_styles_depending_on_style_container_query();
+    }
 
-    auto any_animated_custom_property_inherits = [&] {
-        if (animated_values.is_empty())
-            return true;
-        for (auto const& [name, value] : animated_values) {
+    if (abstract_element.pseudo_element().has_value())
+        return;
+
+    auto any_custom_property_inherits = [&](auto const& values) {
+        for (auto const& [name, value] : values) {
             auto registration = m_document->get_registered_custom_property(name);
             if (!registration.has_value() || registration->inherit)
                 return true;
@@ -916,8 +923,12 @@ void StyleComputer::invalidate_animated_custom_property_readers(Layout::BegunRea
         return false;
     };
     // What the element hands down moved too. Its descendants take the moved environment as they take one a style
-    // reaction moved: only those that read a name whose value moved compute again.
-    if (!abstract_element.pseudo_element().has_value() && any_animated_custom_property_inherits())
+    // reaction moved: only those that read a name whose value moved compute again. Include names from the previous
+    // animation overlay, since an inheriting property may have stopped animating while non-inheriting ones remain.
+    bool const new_values_inherit = any_custom_property_inherits(animated_values);
+    bool const old_values_inherit = old_data && old_data->is_animation_overlay_for(abstract_element)
+        && any_custom_property_inherits(old_data->own_values());
+    if (new_values_inherit || old_values_inherit)
         move_custom_property_environment_below_animated_element(read, element, move(old_data));
 }
 
@@ -1861,6 +1872,7 @@ void StyleComputer::update_root_element_font_metrics(ComputedValues const& value
 {
     m_root_element_font_metrics = Length::FontMetrics { values.font_size(), values.font_list().first_available_font().pixel_metrics(), values.line_height() };
     m_root_element_font_metrics_depend_on_viewport_metrics = values.font_metrics_depend_on_viewport_metrics();
+    m_root_element_effective_zoom = values.effective_zoom();
 }
 
 CSSPixels StyleComputer::default_user_font_size()
@@ -1874,6 +1886,22 @@ CSSPixels StyleComputer::absolute_size_mapping(AbsoluteSize absolute_size, CSSPi
 {
     // An <absolute-size> keyword refers to an entry in a table of font sizes computed and kept by the user agent. See
     // § 2.5.1 Absolute Size Keyword Mapping Table.
+    // INTEROP: Other browsers share this keyword table for integral default sizes from 9px through 16px, so we use
+    //          it instead of the ratios from the spec's guideline table.
+    static constexpr Array<Array<u8, 8>, 8> font_size_table { {
+        { 9, 9, 9, 9, 11, 14, 18, 27 },
+        { 9, 9, 9, 10, 12, 15, 20, 30 },
+        { 9, 9, 10, 11, 13, 17, 22, 33 },
+        { 9, 9, 10, 12, 14, 18, 24, 36 },
+        { 9, 10, 12, 13, 16, 20, 26, 39 },
+        { 9, 10, 12, 14, 17, 21, 28, 42 },
+        { 9, 10, 13, 15, 18, 23, 30, 45 },
+        { 9, 10, 13, 16, 18, 24, 32, 48 },
+    } };
+    auto default_size = default_font_size.to_int();
+    if (default_size >= 9 && default_size <= 16 && default_font_size == CSSPixels(default_size))
+        return CSSPixels(font_size_table[default_size - 9][to_underlying(absolute_size)]);
+
     switch (absolute_size) {
     case AbsoluteSize::XxSmall:
         return default_font_size * CSSPixels(3) / 5;

@@ -610,7 +610,21 @@ impl<'a> GraphBuilder<'a> {
         // NB: The entry block has no predecessors and jumps to the first bytecode
         //     block, which may be a loop header.
         let entry = self.start_new_block(Vec::new());
-        self.enter_function(entry);
+        // OPTIMIZATION: The code of top-level code that a loop triggered the compile of is only entered inside, so
+        //               what only its start reaches is left out, like a large literal that ran before the loop.
+        let builds_entry_at_osr_pc = self.snapshot.options.osr_pc.is_some_and(|pc| {
+            let index = self
+                .function
+                .instructions
+                .iter()
+                .position(|instruction| instruction.pc == pc);
+            index.is_some_and(|index| self.can_build_osr_entry(index))
+        });
+        if self.snapshot.options.runs_once && self.build_osr_entries && builds_entry_at_osr_pc {
+            self.set_control(Op::Unreachable, Vec::new());
+        } else {
+            self.enter_function(entry);
+        }
         if self.build_osr_entries {
             self.build_osr_entries()?;
             self.build_resume_entries()?;
@@ -722,7 +736,7 @@ impl<'a> GraphBuilder<'a> {
             // NB: Frame memory holds the slots the loop does not assign, and
             //     the others get phis of what the back edges bring.
             let mut frame = AbstractFrame::in_memory(self.function.layout.tracked_slot_count());
-            let live = self.function.liveness.live_in(first_instruction).clone();
+            let live = self.function.liveness.live_in(first_instruction);
             let assigned = self.function.cfg.blocks[block_index]
                 .loop_index
                 .map(|loop_index| self.function.loop_phi_slots[loop_index].clone());
@@ -753,11 +767,7 @@ impl<'a> GraphBuilder<'a> {
     /// predecessors where the merged slot is only in memory.
     fn merge(&mut self, block_index: BlockIndex, incoming: Vec<(BlockId, AbstractFrame)>) -> AbstractFrame {
         let bytecode_block = &self.function.cfg.blocks[block_index];
-        let live = self
-            .function
-            .liveness
-            .live_in(bytecode_block.instructions.start)
-            .clone();
+        let live = self.function.liveness.live_in(bytecode_block.instructions.start);
         let assigned_in_loop = bytecode_block
             .loop_index
             .map(|loop_index| self.function.loop_phi_slots[loop_index].clone());
@@ -1027,8 +1037,7 @@ impl<'a> GraphBuilder<'a> {
         let live = self
             .function
             .liveness
-            .live_in(self.function.cfg.blocks[target].instructions.start)
-            .clone();
+            .live_in(self.function.cfg.blocks[target].instructions.start);
         for slot in 0..header_frame.slots.len() {
             if !self.tracks_slot(slot) || !live.contains(slot) {
                 continue;
@@ -1354,7 +1363,7 @@ impl<'a> GraphBuilder<'a> {
             return frame_state;
         }
         let frame_state = self.new_frame_state(
-            self.function.liveness.live_in(self.function.instruction_index),
+            &self.function.liveness.live_in(self.function.instruction_index),
             ResumeMode::ResumeAt,
         );
         let frame_state = self.graph.add_frame_state(frame_state);
@@ -1820,7 +1829,7 @@ impl<'a> GraphBuilder<'a> {
         if let Some(continuation) = continuation {
             let block = self.block_for_label(continuation)?;
             let start = self.function.cfg.blocks[block].instructions.start;
-            let live = self.function.liveness.live_in(start).clone();
+            let live = self.function.liveness.live_in(start);
             for slot in live.iter() {
                 if self.tracks_slot(slot) {
                     self.sync_slot(slot);
@@ -2064,7 +2073,7 @@ impl<'a> GraphBuilder<'a> {
             .iter()
             .filter_map(|operand| self.function.layout.tracked_index(*operand))
             .collect::<Vec<_>>();
-        let live_in = self.function.liveness.live_in(self.function.instruction_index).clone();
+        let live_in = self.function.liveness.live_in(self.function.instruction_index);
         // NB: A virtual arguments object stays virtual unless the slow path reads
         //     it; codegen creates it if the slow path leaves the compiled code.
         let mut read_slots = Vec::new();

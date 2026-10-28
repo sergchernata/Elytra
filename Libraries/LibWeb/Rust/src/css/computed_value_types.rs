@@ -83,7 +83,9 @@ pub struct AlignmentValues {
     pub justify_content: u8,
     pub justify_items: u8,
     pub justify_self: u8,
-    /// The explicit overflow alignment of 'align-self' and 'justify-self': one of the OVERFLOW_ALIGNMENT_* values.
+    /// The explicit overflow alignment: one of the OVERFLOW_ALIGNMENT_* values.
+    pub align_items_overflow: u8,
+    pub justify_items_overflow: u8,
     pub align_self_overflow: u8,
     pub justify_self_overflow: u8,
     pub column_gap: ComputedGap,
@@ -662,6 +664,7 @@ pub struct GridValues {
     pub grid_column_end_style_value: ComputedStyleValueHandle,
     pub grid_row_start_style_value: ComputedStyleValueHandle,
     pub grid_row_end_style_value: ComputedStyleValueHandle,
+    pub fit_tolerance_style_value: ComputedStyleValueHandle,
 }
 
 /// Layout of the non-inherited SVG geometry and painting properties.

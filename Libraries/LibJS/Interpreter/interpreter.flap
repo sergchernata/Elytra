@@ -2559,8 +2559,15 @@ handler ToString(
 
 handler ToPrimitiveWithStringHint(
     dst: out Operand,
-    value: Operand
-) @cold = call_slow_path(to_primitive_with_string_hint);
+    value: in Operand
+) {
+    let primitive = load(value);
+    guard primitive is not Value<Object> else @cold {
+        call_slow_path(to_primitive_with_string_hint);
+    };
+    store(dst, primitive);
+    dispatch_next;
+}
 
 handler ToObject(
     dst: out Operand,
@@ -2916,8 +2923,9 @@ handler PutByValue(
         guard property_cache.shape == shape else try_cache;
         guard property_cache.prototype == 0 else try_cache;
         guard property_cache.shape_dictionary_generation == shape.dictionary_generation else try_cache;
-        guard object.named_properties[property_cache.property_offset] is not Value<Accessor> else try_cache;
+        # NB: Addition entries have no slot at their offset.
         guard property_cache.writes_data_property != 0 else try_cache;
+        guard object.named_properties[property_cache.property_offset] is not Value<Accessor> else try_cache;
         object.named_properties[property_cache.property_offset] = load(src);
         dispatch_next;
     };
@@ -3358,8 +3366,9 @@ handler PutById(
     guard property_cache.shape == shape else try_cache;
     guard property_cache.prototype == 0 else try_cache;
     guard property_cache.shape_dictionary_generation == shape.dictionary_generation else try_cache;
-    guard object.named_properties[property_cache.property_offset] is not Value<Accessor> else try_cache;
+    # NB: Addition entries have no slot at their offset.
     guard property_cache.writes_data_property != 0 else try_cache;
+    guard object.named_properties[property_cache.property_offset] is not Value<Accessor> else try_cache;
     object.named_properties[property_cache.property_offset] = load(src);
     dispatch_next;
 }

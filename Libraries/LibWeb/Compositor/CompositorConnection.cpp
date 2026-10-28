@@ -225,6 +225,11 @@ bool CompositorConnectionFrameSink::submit(CompositorFrame&& frame)
         if (!post(encoded_message))
             return false;
     }
+    if (!frame.scroll_requests.is_empty()) {
+        auto encoded_message = MUST(Messages::CompositorWebContentServer::ApplyScrollRequests::static_encode(context_id, frame.scroll_requests));
+        if (!post(encoded_message))
+            return false;
+    }
     if (frame.present_viewport_rect.has_value()) {
         auto encoded_message = MUST(Messages::CompositorWebContentServer::PresentFrame::static_encode(context_id, *frame.present_viewport_rect));
         if (!post(encoded_message))
@@ -494,19 +499,6 @@ Compositing::AsyncScrollEnqueueResult CompositorConnection::async_scroll_by(Web:
     return response->take_result();
 }
 
-Compositing::AsyncScrollEnqueueResult CompositorConnection::smooth_scroll_to(Web::CompositorContextId context_id, Web::AsyncScrollNodeStableID stable_node_id, Gfx::FloatPoint offset, Gfx::FloatPoint main_thread_offset, Gfx::IntRect viewport_rect, Compositing::ScrollAnimationKind animation_kind, Compositing::SmoothScrollInitiator initiator, Optional<Compositing::AsyncScrollOperationID> operation_to_continue)
-{
-    if (!can_send_message_to_compositor())
-        return {};
-
-    auto response = send_sync_but_allow_failure<Messages::CompositorWebContentServer::SmoothScrollTo>(context_id, stable_node_id, offset, main_thread_offset, viewport_rect, animation_kind, initiator, operation_to_continue);
-    if (!response) {
-        did_lose_compositor();
-        return {};
-    }
-    return response->take_result();
-}
-
 String CompositorConnection::scroll_state_for_testing(Web::CompositorContextId context_id, Web::AsyncScrollNodeStableID stretched_scroller)
 {
     if (!can_send_message_to_compositor())
@@ -550,6 +542,14 @@ void CompositorConnection::begin_input_trace_for_testing(Web::CompositorContextI
         did_lose_compositor();
 }
 
+void CompositorConnection::clear_per_test_input_state_for_testing(Web::CompositorContextId context_id)
+{
+    if (!can_send_message_to_compositor())
+        return;
+    if (!send_sync_but_allow_failure<Messages::CompositorWebContentServer::ClearPerTestInputStateForTesting>(context_id))
+        did_lose_compositor();
+}
+
 Vector<Web::InputTraceRecord> CompositorConnection::take_input_trace_for_testing(Web::CompositorContextId context_id)
 {
     if (!can_send_message_to_compositor())
@@ -560,13 +560,6 @@ Vector<Web::InputTraceRecord> CompositorConnection::take_input_trace_for_testing
         return {};
     }
     return response->take_records();
-}
-
-void CompositorConnection::cancel_smooth_scroll(Web::CompositorContextId context_id, Web::AsyncScrollNodeStableID stable_node_id)
-{
-    if (!can_send_message_to_compositor())
-        return;
-    async_cancel_smooth_scroll(context_id, stable_node_id);
 }
 
 Compositing::PendingAsyncScrollUpdates CompositorConnection::take_pending_async_scroll_updates(Web::CompositorContextId context_id, Compositing::AsyncScrollUpdateFreshness freshness)
@@ -607,16 +600,19 @@ Compositing::PendingAsyncScrollUpdates CompositorConnection::take_pending_async_
     updates.completed_operation_ids = move(pending->completed_operation_ids);
     updates.operation_ids_taken_over_by_user_input = move(pending->operation_ids_taken_over_by_user_input);
     updates.started_user_scrolls = move(pending->started_user_scrolls);
+    updates.applied_scroll_requests = move(pending->applied_scroll_requests);
     updates.document_id = pending->document_id;
-    updates.user_scroll_gesture_in_progress = pending->user_scroll_gesture_in_progress;
-    updates.user_scroll_gesture_ended = pending->user_scroll_gesture_ended;
+    updates.boxes_in_user_scroll_gesture = pending->boxes_in_user_scroll_gesture;
+    updates.boxes_whose_user_scroll_gesture_ended = move(pending->boxes_whose_user_scroll_gesture_ended);
+    updates.wheel_latched_scroller = pending->wheel_latched_scroller;
     // Whether a gesture is in progress is a state the compositor process keeps current; the rest
     // was consumed here.
     pending->scroll_offsets.clear();
     pending->completed_operation_ids.clear();
     pending->operation_ids_taken_over_by_user_input.clear();
     pending->started_user_scrolls.clear();
-    pending->user_scroll_gesture_ended = false;
+    pending->applied_scroll_requests.clear();
+    pending->boxes_whose_user_scroll_gesture_ended.clear();
     return updates;
 }
 
@@ -634,8 +630,7 @@ void CompositorConnection::merge_async_scroll_updates(Web::CompositorContextId c
     for (auto const& scroll_offset : updates.scroll_offsets) {
         auto existing = pending.scroll_offsets.find_if([&](auto const& existing) { return existing.stable_node_id == scroll_offset.stable_node_id; });
         if (existing != pending.scroll_offsets.end()) {
-            existing->compositor_scroll_offset = scroll_offset.compositor_scroll_offset;
-            existing->unadopted_scroll_delta.translate_by(scroll_offset.unadopted_scroll_delta);
+            existing->merge_later_scroll(scroll_offset);
         } else {
             pending.scroll_offsets.append(scroll_offset);
         }
@@ -643,11 +638,16 @@ void CompositorConnection::merge_async_scroll_updates(Web::CompositorContextId c
     pending.completed_operation_ids.extend(move(updates.completed_operation_ids));
     pending.operation_ids_taken_over_by_user_input.extend(move(updates.operation_ids_taken_over_by_user_input));
     pending.started_user_scrolls.extend(move(updates.started_user_scrolls));
+    pending.applied_scroll_requests.extend(move(updates.applied_scroll_requests));
     if (is_newest) {
         pending.document_id = updates.document_id;
-        pending.user_scroll_gesture_in_progress = updates.user_scroll_gesture_in_progress;
+        pending.boxes_in_user_scroll_gesture = move(updates.boxes_in_user_scroll_gesture);
+        pending.wheel_latched_scroller = updates.wheel_latched_scroller;
     }
-    pending.user_scroll_gesture_ended |= updates.user_scroll_gesture_ended;
+    for (auto box : updates.boxes_whose_user_scroll_gesture_ended) {
+        if (!pending.boxes_whose_user_scroll_gesture_ended.contains_slow(box))
+            pending.boxes_whose_user_scroll_gesture_ended.append(box);
+    }
 }
 
 void CompositorConnection::viewport_size_updated(Web::CompositorContextId context_id, Gfx::IntSize viewport_size, double device_pixel_ratio, Compositing::WindowResizingInProgress window_resize_in_progress)
@@ -820,6 +820,12 @@ void CompositorConnection::key_event(u64 page_id, Web::KeyEvent event)
 {
     if (on_key_event)
         on_key_event(Web::PageId { page_id }, move(event));
+}
+
+void CompositorConnection::pinch_event(u64 page_id, Web::PinchEvent event)
+{
+    if (on_pinch_event)
+        on_pinch_event(Web::PageId { page_id }, event);
 }
 
 void CompositorConnection::mouse_event(u64 page_id, Web::MouseEvent event)

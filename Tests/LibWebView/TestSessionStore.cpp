@@ -75,6 +75,8 @@ static SessionTabId open_tab(SessionStore& store, SessionWindowId window, String
 // Takes the schema back to SESSIONS_SCHEMA_DOCUMENT_POLICY_VERSION, so every migration after it runs again.
 static void rewind_sessions_schema_to_version_4(Database::Database& database)
 {
+    MUST(database.execute_raw("DROP TABLE SessionUpgradeInsecureNavigations;"sv));
+    MUST(database.execute_raw("ALTER TABLE SessionPolicyContainers DROP COLUMN insecure_requests_policy;"sv));
     MUST(database.execute_raw("ALTER TABLE Sessions DROP COLUMN maximized;"sv));
     MUST(database.execute_raw("ALTER TABLE Sessions DROP COLUMN height;"sv));
     MUST(database.execute_raw("ALTER TABLE Sessions DROP COLUMN width;"sv));
@@ -101,10 +103,10 @@ TEST_CASE(fresh_database_migrates_to_the_latest_schema)
     auto database = TRY_OR_FAIL(Database::Database::create_memory_backed({ .foreign_keys = Database::Database::ForeignKeys::Yes }));
     EXPECT_EQ(TRY_OR_FAIL(WebView::SessionStore::migrate_schema(*database)), Database::MigrationOutcome::Success);
 
-    for (auto table : { "Sessions"sv, "SessionTabs"sv, "SessionUsedSteps"sv, "SessionHistories"sv, "SessionNestedHistories"sv, "SessionEntries"sv })
+    for (auto table : { "Sessions"sv, "SessionTabs"sv, "SessionUsedSteps"sv, "SessionHistories"sv, "SessionNestedHistories"sv, "SessionEntries"sv, "SessionUpgradeInsecureNavigations"sv })
         EXPECT(TRY_OR_FAIL(database->table_exists(table)));
 
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 8u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 9u });
 }
 
 TEST_CASE(deleting_a_session_cascades_through_its_tabs)
@@ -151,7 +153,8 @@ TEST_CASE(version_4_database_migrates_to_the_latest_schema)
     rewind_sessions_schema_to_version_4(*database);
 
     EXPECT_EQ(TRY_OR_FAIL(SessionStore::migrate_schema(*database)), Database::MigrationOutcome::Success);
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 8u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("Sessions"sv)), Optional<u32> { 9u });
+    EXPECT(TRY_OR_FAIL(database->table_exists("SessionUpgradeInsecureNavigations"sv)));
     EXPECT_EQ(select_i64(*database, "SELECT pinned FROM SessionTabs WHERE id = 2;"_string), 0);
     EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM Sessions WHERE id = 1 AND width IS NULL;"_string), 1);
     EXPECT_EQ(select_i64(*database, "SELECT maximized FROM Sessions WHERE id = 1;"_string), 0);
@@ -215,6 +218,33 @@ TEST_CASE(a_changed_user_agent_initiated_flag_alone_flushes)
     store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
     store->flush_dirty_state();
     EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM SessionEntries WHERE user_agent_initiated = 1;"_string), 1);
+}
+
+TEST_CASE(a_changed_insecure_requests_policy_alone_replaces_a_pending_push)
+{
+    auto database = create_session_database();
+    auto store = TRY_OR_FAIL(SessionStore::create(*database));
+
+    auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = {}, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+
+    auto snapshot = make_snapshot({ "https://a.example/"sv });
+    snapshot.entries[0].document_state.history_policy_container = Web::HTML::SerializedPolicyContainer {};
+    store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
+
+    // The inherited policy is the only difference from the pending push, which it still replaces.
+    auto& policy_container = snapshot.entries[0].document_state.history_policy_container.get<Web::HTML::SerializedPolicyContainer>();
+    policy_container.insecure_requests_policy = Web::UpgradeInsecureRequests::InsecureRequestsPolicy::Upgrade;
+    store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
+    store->flush_dirty_state();
+    EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM SessionPolicyContainers WHERE insecure_requests_policy = 1;"_string), 1);
+    EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM SessionUpgradeInsecureNavigations;"_string), 0);
+
+    // So does a set that grows while the policy stays Upgrade.
+    store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
+    policy_container.upgrade_insecure_navigations_set.insert({ URL::Host { "a.example"_string }, {} });
+    store->update_tab_state({ .tab_id = tab, .history = snapshot, .url = parse_url("https://a.example/"sv) });
+    store->flush_dirty_state();
+    EXPECT_EQ(select_i64(*database, "SELECT COUNT(*) FROM SessionUpgradeInsecureNavigations;"_string), 1);
 }
 
 TEST_CASE(unstorable_snapshot_flushes_url_only)
@@ -822,6 +852,40 @@ TEST_CASE(retried_closes_keep_reopen_order)
     auto older = TRY_OR_FAIL(store->take_most_recently_closed());
     EXPECT(older.has_value());
     EXPECT_EQ(older->tabs[0].active_url.serialize(), "https://a.example/"sv);
+}
+
+TEST_CASE(any_recently_closed_unit_can_be_reopened)
+{
+    auto database = create_session_database();
+    auto store = TRY_OR_FAIL(SessionStore::create(*database));
+
+    auto window = TRY_OR_FAIL(store->window_opened());
+    Vector<StringView> urls { "https://a.example/"sv, "https://b.example/"sv, "https://c.example/"sv };
+    for (size_t i = 0; i < urls.size(); ++i) {
+        auto tab = TRY_OR_FAIL(store->tab_opened({ .window_id = window, .initial_url = parse_url("about:blank"sv), .insertion_index = {}, .is_active = SessionStore::IsActive::No }));
+        store->update_tab_state({ .tab_id = tab, .history = make_snapshot({ urls[i] }), .url = parse_url(urls[i]) });
+        TRY_OR_FAIL(store->tab_closed({ .tab_id = tab, .closed_at = UnixDateTime::from_seconds_since_epoch(100 + static_cast<i64>(i)) }));
+    }
+    store->flush_dirty_state();
+
+    auto closed = store->recently_closed_units(10);
+    EXPECT_EQ(closed.size(), 3u);
+    EXPECT_EQ(closed[0].active_url.serialize(), "https://c.example/"sv);
+    EXPECT_EQ(closed[1].active_url.serialize(), "https://b.example/"sv);
+    EXPECT_EQ(closed[2].active_url.serialize(), "https://a.example/"sv);
+    EXPECT_EQ(closed[0].closed_at, UnixDateTime::from_seconds_since_epoch(102));
+    EXPECT_EQ(store->recently_closed_units(2).size(), 2u);
+
+    auto middle = TRY_OR_FAIL(store->take_closed_unit(closed[1].id));
+    EXPECT(middle.has_value());
+    EXPECT_EQ(middle->tabs[0].active_url.serialize(), "https://b.example/"sv);
+    EXPECT(!TRY_OR_FAIL(store->take_closed_unit(closed[1].id)).has_value());
+
+    auto newest = TRY_OR_FAIL(store->take_most_recently_closed());
+    EXPECT_EQ(newest->tabs[0].active_url.serialize(), "https://c.example/"sv);
+    auto oldest = TRY_OR_FAIL(store->take_most_recently_closed());
+    EXPECT_EQ(oldest->tabs[0].active_url.serialize(), "https://a.example/"sv);
+    EXPECT(!store->has_closed_units());
 }
 
 TEST_CASE(crashed_pending_close_recovers_a_contiguous_window)

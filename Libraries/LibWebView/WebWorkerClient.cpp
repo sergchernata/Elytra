@@ -20,6 +20,9 @@ namespace WebView {
 WebWorkerClient::WebWorkerClient(NonnullOwnPtr<IPC::Transport> transport, BrowsingSession& session, Web::HTML::WorkerAgentId agent_id)
     : IPC::ConnectionToServer<WebWorkerClientEndpoint, WebWorkerServerEndpoint>(*this, move(transport))
     , m_is_private(session.is_private())
+    , m_request_server_site_bindings([this](RequestServerClientConnection& connection, Optional<Utf16String> const& top_level_site) {
+        async_connect_to_request_server(move(connection.handle), connection.client_id, top_level_site);
+    })
     , m_agent_id(agent_id)
     , m_audio_tab_id(allocate_audio_tab_id())
 {
@@ -165,8 +168,8 @@ Messages::WebWorkerClient::DidIsKnownHstsHostResponse WebWorkerClient::did_is_kn
 
 Messages::WebWorkerClient::RequestMediaServerConnectionResponse WebWorkerClient::request_media_server_connection()
 {
-    auto connection = connect_new_media_server_client(m_media_server_client, [this] {
-        return connect_new_audio_server_client(m_audio_server_client, m_audio_tab_id);
+    auto connection = connect_new_media_server_client(m_media_server_client, child_id(), [this] {
+        return connect_new_audio_server_client(m_audio_server_client, child_id(), m_audio_tab_id);
     });
     if (connection.is_error()) {
         warnln("Unable to connect a MediaServer client: {}", connection.error());

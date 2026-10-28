@@ -16,6 +16,7 @@ class NullWebContentClient final : public Compositor::CompositorStateWebContentC
 public:
     virtual void dispatch_mouse_event_to_web_content(u64, Web::MouseEvent const&) override { }
     virtual void dispatch_key_event_to_web_content(u64, Web::KeyEvent const&) override { }
+    virtual void dispatch_pinch_event_to_web_content(u64, Web::PinchEvent const&) override { }
     virtual void request_rendering_update() override { }
     virtual void rendering_opportunity(Web::CompositorContextId, i64, double) override { }
     virtual void clock_tick(Web::CompositorContextId, i64, double, Vector<Web::CompositorScrollOffset> const&) override { }
@@ -73,6 +74,53 @@ TEST_CASE(pinch_zoom_of_a_page_without_scroll_nodes_survives_a_display_list_upda
     EXPECT(!context.handle_pinch_event(pinch_event(1.0)).accepted);
 }
 
+TEST_CASE(pinch_zoom_is_reported_on_the_visual_viewport)
+{
+    NullWebContentClient client;
+    Compositor::CanvasSurfaceRegistry canvas_surface_registry;
+    Compositor::ContextState context { Web::CompositorContextId { 1 }, 1, client, Compositor::OwnedCanvasSurfaces { canvas_surface_registry, client.canvas_surface_owner_id() } };
+    install_display_list_without_scroll_nodes(context);
+
+    // Zooming in 2x around the middle of the viewport moves the visual viewport to the middle of the page.
+    EXPECT(context.handle_pinch_event(pinch_event(1.0)).accepted);
+    auto updates = context.take_pending_async_scroll_updates();
+    EXPECT_EQ(updates.scroll_offsets.size(), 1u);
+    auto const& scroll_offset = updates.scroll_offsets.first();
+    EXPECT_EQ(scroll_offset.stable_node_id.node_id, document_id);
+    EXPECT(scroll_offset.stable_node_id.kind == Web::AsyncScrollNodeKind::VisualViewport);
+    EXPECT_EQ(scroll_offset.visual_viewport_scale, 2.0f);
+    EXPECT_EQ(scroll_offset.compositor_scroll_offset, Gfx::FloatPoint(200, 150));
+    EXPECT_EQ(scroll_offset.unadopted_scroll_delta, Gfx::FloatPoint(200, 150));
+}
+
+TEST_CASE(pinch_zoom_is_presented_until_the_main_thread_asks_for_another)
+{
+    NullWebContentClient client;
+    Compositor::CanvasSurfaceRegistry canvas_surface_registry;
+    Compositor::ContextState context { Web::CompositorContextId { 1 }, 1, client, Compositor::OwnedCanvasSurfaces { canvas_surface_registry, client.canvas_surface_owner_id() } };
+    install_display_list_without_scroll_nodes(context);
+
+    // A display list the main thread recorded without the zoom keeps it at its maximum.
+    EXPECT(context.handle_pinch_event(pinch_event(4.0)).accepted);
+    install_display_list_without_scroll_nodes(context);
+    EXPECT(!context.handle_pinch_event(pinch_event(1.0)).accepted);
+
+    // A request of the main thread's own, such as resetting the zoom, is what moves the visual viewport from there.
+    Compositing::ScrollRequest reset_zoom {
+        .stable_node_id = { .node_id = document_id, .kind = Web::AsyncScrollNodeKind::VisualViewport },
+        .request_id = 1,
+        .jump_offset = Gfx::FloatPoint {},
+        .visual_viewport_scale = 1.0f,
+        .relative_scroll = {},
+        .relative_scroll_moves_visual_viewport_first = false,
+        .instant_scroll_is_for_user_input = false,
+        .smooth_scroll = {},
+        .takes_over_from_momentum = false,
+    };
+    (void)context.apply_scroll_requests({ &reset_zoom, 1 });
+    EXPECT(context.handle_pinch_event(pinch_event(1.0)).accepted);
+}
+
 TEST_CASE(wheel_pans_the_zoomed_visual_viewport_of_a_page_without_scroll_nodes)
 {
     NullWebContentClient client;
@@ -90,16 +138,17 @@ TEST_CASE(wheel_pans_the_zoomed_visual_viewport_of_a_page_without_scroll_nodes)
     EXPECT(!context.handle_wheel_event(wheel_event).accepted);
 
     EXPECT(context.handle_pinch_event(pinch_event(1.0)).accepted);
+    (void)context.take_pending_async_scroll_updates();
     auto result = context.handle_wheel_event(wheel_event);
     EXPECT(result.accepted);
     EXPECT(result.frame_to_present.has_value());
 
-    // The main thread adopts the pan as a scroll of the document's viewport, at half the delta since the zoom is 2x.
+    // The main thread adopts the pan as a scroll of the document's visual viewport, at half the delta at 2x zoom.
     auto updates = context.take_pending_async_scroll_updates();
     EXPECT_EQ(updates.document_id, document_id);
     EXPECT_EQ(updates.scroll_offsets.size(), 1u);
     auto const& scroll_offset = updates.scroll_offsets.first();
     EXPECT_EQ(scroll_offset.stable_node_id.node_id, document_id);
-    EXPECT_EQ(scroll_offset.stable_node_id.kind, Web::AsyncScrollNodeKind::Viewport);
+    EXPECT_EQ(scroll_offset.stable_node_id.kind, Web::AsyncScrollNodeKind::VisualViewport);
     EXPECT_EQ(scroll_offset.unadopted_scroll_delta, Gfx::FloatPoint(0, 25));
 }

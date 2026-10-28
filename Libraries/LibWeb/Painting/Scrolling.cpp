@@ -213,18 +213,25 @@ ScrollHandled set_scroll_offset_from_user_input(Layout::Node& node, CSSPixelPoin
     if (navigable && stable_node_id.has_value())
         navigable->abort_in_flight_smooth_scrolls_taken_over_by_user_input(*stable_node_id, scroll_offset_before_scroll);
 
-    auto scroll_handled = set_scroll_offset(node, offset);
+    auto scroll_handled = ScrollHandled::No;
+    if (navigable && stable_node_id.has_value()) {
+        if (navigable->set_scroll_offset_for_user_input(node, *stable_node_id, offset))
+            scroll_handled = ScrollHandled::Yes;
+    } else {
+        scroll_handled = set_scroll_offset(node, offset);
+    }
     if (scroll_handled == ScrollHandled::Yes && scroll_kind == ScrollKind::Relative)
         node.document().scroll_state_query_containers().did_scroll_relatively(node, scroll_offset(node) - scroll_offset_before_scroll);
     if (!navigable)
         return scroll_handled;
 
+    if (!stable_node_id.has_value())
+        return scroll_handled;
     if (scroll_handled == ScrollHandled::Yes) {
-        if (auto event_target = scroll_event_target(node))
-            navigable->queue_scrollend_event_after_user_scroll(*event_target, stable_node_id, scroll_offset_before_scroll);
+        navigable->note_user_scroll_gesture_of(stable_node_id.value(), scroll_offset_before_scroll, HTML::LocalNavigable::UserScrollMovedBox::Yes);
     } else {
         // User input keeps the scroll gesture in progress even when it does not move the scrolling box.
-        navigable->defer_user_scroll_settlement();
+        navigable->extend_user_scroll_gesture_of(stable_node_id.value());
     }
     return scroll_handled;
 }

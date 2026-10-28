@@ -4150,6 +4150,22 @@ asm_handler_ThrowIfNullish:
 asm_handler_ThrowIfNullish_hot_end:
 
 .p2align 4
+asm_handler_ToPrimitiveWithStringHint:
+    ldr w0, [x21, #8]
+    ldr x0, [x27, x0, lsl #3]
+    lsr x9, x0, #48
+    mov w10, #65529
+    cmp x9, x10
+    b.eq .Lasm_ToPrimitiveWithStringHint.ssa_block_1
+    ldr w9, [x21, #4]
+    str x0, [x27, x9, lsl #3]
+    ldrb w9, [x21, #16]
+    add x21, x21, #16
+    ldr x10, [x19, x9, lsl #3]
+    br x10
+asm_handler_ToPrimitiveWithStringHint_hot_end:
+
+.p2align 4
 asm_handler_BitwiseNot:
     ldr w0, [x21, #8]
     ldr x0, [x27, x0, lsl #3]
@@ -5109,38 +5125,38 @@ asm_handler_PutByValue:
     b.eq .Lasm_PutByValue.ssa_block_2
     and x0, x0, #0xfffffffffffffffc
     ldr w2, [x21, #4]
-    ldr x3, [x27, x2, lsl #3]
-    lsr x9, x3, #48
+    ldr x2, [x27, x2, lsl #3]
+    lsr x9, x2, #48
     mov w10, #65529
     cmp x9, x10
     b.ne .Lasm_PutByValue.ssa_block_1
     ldr x9, [x0, #48]
     cmp x9, x1
     b.ne .Lasm_PutByValue.ssa_block_3
-    and x3, x3, #0x3ffffffffff
-    add x3, x3, x24
-    ldr x1, [x3, #24]
+    and x2, x2, #0x3ffffffffff
+    add x2, x2, x24
+    ldr x1, [x2, #24]
     cbz x1, .Lasm_PutByValue.assert_failure_2
-    ldp x4, x2, [x0, #24]
+    ldp x4, x3, [x0, #24]
     cmp x4, x1
     b.ne .Lasm_PutByValue.ssa_block_3
-    cbnz x2, .Lasm_PutByValue.ssa_block_3
-    ldp w2, w4, [x0, #4]
+    cbnz x3, .Lasm_PutByValue.ssa_block_3
+    ldp w3, w4, [x0, #4]
     ldr w9, [x1, #52]
     cmp w9, w4
     b.ne .Lasm_PutByValue.ssa_block_3
-    ldr x1, [x3, #32]
-    cbz x1, .Lasm_PutByValue.assert_failure_3
-    ldr x3, [x1, x2, lsl #3]
-    lsr x9, x3, #48
+    ldrb w9, [x0, #12]
+    cbz w9, .Lasm_PutByValue.ssa_block_3
+    ldr x0, [x2, #32]
+    cbz x0, .Lasm_PutByValue.assert_failure_3
+    ldr x1, [x0, x3, lsl #3]
+    lsr x9, x1, #48
     mov w10, #65532
     cmp x9, x10
     b.eq .Lasm_PutByValue.ssa_block_3
-    ldrb w9, [x0, #12]
-    cbz w9, .Lasm_PutByValue.ssa_block_3
-    ldr w0, [x21, #12]
-    ldr x0, [x27, x0, lsl #3]
-    str x0, [x1, x2, lsl #3]
+    ldr w1, [x21, #12]
+    ldr x1, [x27, x1, lsl #3]
+    str x1, [x0, x3, lsl #3]
     ldrb w9, [x21, #32]
     add x21, x21, #32
     ldr x10, [x19, x9, lsl #3]
@@ -5273,18 +5289,18 @@ asm_handler_PutById:
     ldr w9, [x1, #52]
     cmp w9, w4
     b.ne .Lasm_PutById.ssa_block_2
-    ldr x1, [x2, #32]
-    cbz x1, .Lasm_PutById.assert_failure_2
-    ldr x2, [x1, x3, lsl #3]
-    lsr x9, x2, #48
+    ldrb w9, [x0, #12]
+    cbz w9, .Lasm_PutById.ssa_block_2
+    ldr x0, [x2, #32]
+    cbz x0, .Lasm_PutById.assert_failure_2
+    ldr x1, [x0, x3, lsl #3]
+    lsr x9, x1, #48
     mov w10, #65532
     cmp x9, x10
     b.eq .Lasm_PutById.ssa_block_2
-    ldrb w9, [x0, #12]
-    cbz w9, .Lasm_PutById.ssa_block_2
-    ldr w0, [x21, #12]
-    ldr x0, [x27, x0, lsl #3]
-    str x0, [x1, x3, lsl #3]
+    ldr w1, [x21, #12]
+    ldr x1, [x27, x1, lsl #3]
+    str x1, [x0, x3, lsl #3]
     ldrb w9, [x21, #32]
     add x21, x21, #32
     ldr x10, [x19, x9, lsl #3]
@@ -12433,8 +12449,9 @@ asm_handler_ToString_hot_end:
 asm_handler_ToString_cold:
 asm_handler_ToString_cold_end:
 
-.p2align 4
-asm_handler_ToPrimitiveWithStringHint:
+asm_handler_ToPrimitiveWithStringHint_cold:
+// Cold paths for ToPrimitiveWithStringHint
+.Lasm_ToPrimitiveWithStringHint.ssa_block_1:
     mov x0, x20
     sub w1, w21, w26
     str w1, [x28, #64]
@@ -12446,8 +12463,12 @@ asm_handler_ToPrimitiveWithStringHint:
     sub w1, w21, w26
     mov x2, x21
     bl CSYM(asm_slow_path_to_primitive_with_string_hint)
-    tbnz x0, #63, .Lasm_ToPrimitiveWithStringHint.scalar_result_done_1
-    tbz x0, #32, .Lasm_ToPrimitiveWithStringHint.scalar_result_done_1
+    tbz x0, #63, 1f
+    b .Lasm_ToPrimitiveWithStringHint.scalar_result_done_1
+1:
+    tbnz x0, #32, 1f
+    b .Lasm_ToPrimitiveWithStringHint.scalar_result_done_1
+1:
     ldr w9, [x21, #4]
     str x1, [x27, x9, lsl #3]
     add x21, x26, w0, uxtw
@@ -12458,7 +12479,9 @@ asm_handler_ToPrimitiveWithStringHint:
     tbz x0, #63, 1f
     b .Lexit
 1:
-    tbz x0, #32, .Lasm_ToPrimitiveWithStringHint.slow_path_transfer_2
+    tbnz x0, #32, 1f
+    b .Lasm_ToPrimitiveWithStringHint.slow_path_transfer_2
+1:
     add x21, x26, w0, uxtw
     ldrb w9, [x21]
     ldr x10, [x19, x9, lsl #3]
@@ -12472,10 +12495,7 @@ asm_handler_ToPrimitiveWithStringHint:
     ldrb w9, [x21]
     ldr x10, [x19, x9, lsl #3]
     br x10
-asm_handler_ToPrimitiveWithStringHint_hot_end:
-asm_handler_ToPrimitiveWithStringHint_cold:
 asm_handler_ToPrimitiveWithStringHint_cold_end:
-
 .p2align 4
 asm_handler_ToObject:
     mov x0, x20

@@ -43,6 +43,10 @@ JS::Value IDBCursor::primary_key(JS::Realm& realm)
     //       is inspected, until the cursor's effective key is changed. This means that if the object is modified,
     //       those modifications will be seen by anyone inspecting the value of the cursor. However modifying such an
     //       object does not modify the contents of the database.
+    // AD-HOC: The effective key of a cursor whose key is undefined is undefined too, as in other engines.
+    if (!current_key())
+        return JS::js_undefined();
+
     auto effective_key = this->effective_key();
     if (m_cached_primary_key_value.key.ptr() != effective_key.ptr())
         m_cached_primary_key_value = { effective_key, convert_a_key_to_a_value(realm, effective_key) };
@@ -50,11 +54,11 @@ JS::Value IDBCursor::primary_key(JS::Realm& realm)
 }
 
 IDBCursor::IDBCursor(CursorSourceHandle source_handle, GC::Ptr<Key> position, CursorDirection direction, GotValue got_value, GC::Ptr<Key> key, JS::Value value, GC::Ref<IDBKeyRange> range, KeyOnly key_only)
-    : m_value(value)
+    : m_key(key)
+    , m_value(value)
     , m_position(position)
     , m_direction(direction)
     , m_got_value(got_value == GotValue::Yes)
-    , m_key(key)
     , m_source_handle(source_handle)
     , m_range(range)
     , m_key_only(key_only == KeyOnly::Yes)
@@ -161,7 +165,7 @@ WebIDL::ExceptionOr<void> IDBCursor::continue_(Optional<JS::Value> key)
         // 1. Let r be the result of converting a value to a key with key. Rethrow any exceptions.
         auto r = TRY(convert_a_value_to_a_key(realm, *key));
 
-        // 2. If r is invalid, throw a "DataError" DOMException.
+        // 2. If r is "invalid value" or "invalid type", throw a "DataError" DOMException.
         if (r->is_invalid())
             return WebIDL::DataError::create(r->value_as_string());
 
@@ -298,7 +302,7 @@ WebIDL::ExceptionOr<void> IDBCursor::continue_primary_key(JS::Value key_param, J
     // 7. Let r be the result of converting a value to a key with key. Rethrow any exceptions.
     auto r = TRY(convert_a_value_to_a_key(realm, key_param));
 
-    // 8. If r is invalid, throw a "DataError" DOMException.
+    // 8. If r is "invalid value" or "invalid type", throw a "DataError" DOMException.
     if (r->is_invalid())
         return WebIDL::DataError::create(r->value_as_string());
 
@@ -308,7 +312,7 @@ WebIDL::ExceptionOr<void> IDBCursor::continue_primary_key(JS::Value key_param, J
     // 10. Let r be the result of converting a value to a key with primaryKey. Rethrow any exceptions.
     r = TRY(convert_a_value_to_a_key(realm, primary_key_param));
 
-    // 11. If r is invalid, throw a "DataError" DOMException.
+    // 11. If r is "invalid value" or "invalid type", throw a "DataError" DOMException.
     if (r->is_invalid())
         return WebIDL::DataError::create(r->value_as_string());
 
@@ -439,7 +443,7 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBCursor::update(JS::Value value)
     return request;
 }
 
-// https://w3c.github.io/IndexedDB/#dom-idbcursor-update
+// https://w3c.github.io/IndexedDB/#dom-idbcursor-delete
 WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBCursor::delete_()
 {
     auto& realm = HTML::relevant_realm(relevant_global_object());

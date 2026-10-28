@@ -9,12 +9,51 @@ on:
         description: 'Version to build, such as 2026.11.1 or 2027.1.4.alpha'
         required: true
         type: string
+  workflow_call:
 
 jobs:
+  Source:
+    if: github.repository == 'LadybirdBrowser/ladybird'
+    name: Source
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Package
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          name="ladybird${RELEASE_VERSION:+-${RELEASE_VERSION}}"
+          git archive --prefix= --add-virtual-file="${name}/REVISION:$(git rev-parse HEAD)" --prefix="${name}/" \
+            --output="${name}-source.tar" HEAD
+          xz -9 -T0 "${name}-source.tar"
+
+      - name: Attest
+        if: ${{ inputs.version != '' }}
+        uses: actions/attest@v4
+        with:
+          subject-path: '*-source.tar.xz'
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-source
+          path: '*-source.tar.xz'
+          compression-level: 0
+          if-no-files-found: error
+
   Build:
     if: github.repository == 'LadybirdBrowser/ladybird'
     name: ${{ matrix.os_name }}, ${{ matrix.arch }}, Distribution, Clang
-    runs-on: ${{ fromJSON(matrix.runner_labels) }}
+    runs-on: ${{ fromJSON(!inputs.version && matrix.snapshot_runner_labels || matrix.runner_labels) }}
+    container: ${{ fromJSON(matrix.container) }}
 
     strategy:
       fail-fast: false
@@ -23,6 +62,16 @@ jobs:
           - os_name: 'macOS'
             arch: 'arm64'
             runner_labels: '{"group": "Distribution build runners", "labels": ["self-hosted", "macos-27", "arm64"]}'
+            snapshot_runner_labels: '["blacksmith-6vcpu-macos-26"]'
+            container: 'null'
+          - os_name: 'Linux'
+            arch: 'x86_64'
+            runner_labels: '["blacksmith-16vcpu-ubuntu-2404"]'
+            container: &ci_container '{"image":"ghcr.io/ladybirdbrowser/ladybird-ci:2026.10.16"}'
+          - os_name: 'Linux'
+            arch: 'arm64'
+            runner_labels: '["blacksmith-16vcpu-ubuntu-2404-arm"]'
+            container: *ci_container
 
     permissions:
       contents: read
@@ -43,6 +92,14 @@ jobs:
           version: ${{ inputs.version }}
           vcpkg_cache_sas: ${{ secrets.VCPKG_CACHE_SAS }}
 
+      - name: Start PulseAudio
+        if: ${{ matrix.os_name == 'Linux' }}
+        run: |
+          echo "PULSE_SERVER=unix:/tmp/pulse-native" >> "$GITHUB_ENV"
+          pulseaudio --system -D --exit-idle-time=1800 \
+            --load="module-native-protocol-unix auth-anonymous=1 socket=/tmp/pulse-native" \
+            --load="module-null-sink sink_name=virtual_sink"
+
       - name: Test
         working-directory: ${{ github.workspace }}
         run: ctest --output-on-failure -E 'LibWebAccessibilityBridge|AccessibilityBridgeMac' --test-dir Build --timeout 1800
@@ -52,18 +109,126 @@ jobs:
       - name: Package
         working-directory: ${{ github.workspace }}/Build
         run: |
-          cpack -G TZST -B packages -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_Symbols" \
-            -D CPACK_ARCHIVE_COMPRESSION_LEVEL=19 -D CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY=ON
+          cpack -G TXZ -B packages -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_Symbols" \
+            -D CPACK_ARCHIVE_COMPRESSION_LEVEL=9 -D CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY=ON
+
+      - name: Install rpmbuild
+        if: ${{ matrix.os_name == 'Linux' }}
+        run: |
+          apt-get update -o APT::Update::Error-Mode=any
+          apt-get install -y --no-install-recommends rpm
+
+      - name: Package for Linux distributions
+        if: ${{ matrix.os_name == 'Linux' }}
+        working-directory: ${{ github.workspace }}/Build
+        run: |
+          cpack -G "DEB;RPM" -B packages \
+            -D CPACK_COMPONENTS_ALL="ladybird_Runtime;ladybird_SystemIntegration;ladybird_SystemSymbols"
 
       - name: Attest
+        if: ${{ inputs.version != '' }}
         uses: actions/attest@v4
         with:
-          subject-path: '${{ github.workspace }}/Build/packages/*.tar.zst'
+          subject-path: |
+            Build/packages/*.tar.xz
+            Build/packages/*.deb
+            Build/packages/*.rpm
 
       - name: Upload
         uses: actions/upload-artifact@v7
         with:
           name: ladybird-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: Build/packages/*.tar.zst
+          path: |
+            Build/packages/*.tar.xz
+            Build/packages/*.deb
+            Build/packages/*.rpm
+          compression-level: 0
+          if-no-files-found: error
+
+  Flatpak:
+    if: github.repository == 'LadybirdBrowser/ladybird'
+    name: Flatpak, ${{ matrix.arch }}
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'x86_64'
+            runner_labels: '["blacksmith-16vcpu-ubuntu-2404"]'
+          - arch: 'aarch64'
+            runner_labels: '["blacksmith-16vcpu-ubuntu-2404-arm"]'
+
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.10
+      options: --privileged
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    env:
+      BUNDLE: ladybird-${{ inputs.version && format('{0}-', inputs.version) }}Linux-${{ matrix.arch }}.flatpak
+      DEBUG_BUNDLE: ladybird-${{ inputs.version && format('{0}-', inputs.version) }}Linux-${{ matrix.arch }}-debug.flatpak
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # The image bakes the SDK into a read-only layer, and the action always has flatpak-builder update it from
+      # Flathub. An update renames the old deployment into /var/lib/flatpak/.removed, and overlayfs can't rename a
+      # directory that lives in a lower layer (EXDEV), so whenever Flathub carries a newer SDK than the image, the
+      # build dies before compiling anything. Copying the installation up into the writable layer first (about 5 GB,
+      # some 15 seconds) makes that rename an ordinary one, whatever Flathub has published since the image was built.
+      - name: Make the baked-in Flatpak installation writable
+        run: |
+          cp -a /var/lib/flatpak /var/lib/flatpak.rw
+          rm -rf /var/lib/flatpak
+          mv /var/lib/flatpak.rw /var/lib/flatpak
+
+      - name: Set the version in the manifest
+        if: ${{ inputs.version != '' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'SCRIPT'
+          import json
+          import os
+
+          path = "Meta/CMake/flatpak/org.ladybird.Ladybird.json"
+          with open(path) as file:
+              manifest = json.load(file)
+          ladybird = next(module for module in manifest["modules"] if module["name"] == "Ladybird")
+          ladybird["config-opts"].append(f"-DLADYBIRD_VERSION={os.environ['RELEASE_VERSION']}")
+          with open(path, "w") as file:
+              json.dump(manifest, file, indent=4)
+          SCRIPT
+
+      - name: Build
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: ${{ env.BUNDLE }}
+          build-debug-bundle: true
+          manifest-path: Meta/CMake/flatpak/org.ladybird.Ladybird.json
+          arch: ${{ matrix.arch }}
+          save-cache: false
+          upload-artifact: false
+
+      - name: Attest
+        if: ${{ inputs.version != '' }}
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ env.BUNDLE }}
+            ${{ env.DEBUG_BUNDLE }}
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-Flatpak-${{ matrix.arch }}
+          path: |
+            ${{ env.BUNDLE }}
+            ${{ env.DEBUG_BUNDLE }}
           compression-level: 0
           if-no-files-found: error

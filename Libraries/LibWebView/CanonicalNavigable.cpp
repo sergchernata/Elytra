@@ -615,12 +615,10 @@ bool CanonicalNavigable::allowed_by_sandboxing_to_navigate(CanonicalNavigable co
     if (source.is_ancestor_of(target))
         return true;
 
-    // 3. If target is an ancestor of source, then:
-    if (target.is_ancestor_of(source)) {
-        // 1. If target is not a top-level traversable, then return true.
-        if (!target.is_top_level_traversable())
-            return true;
-
+    // 3. If target is an ancestor of source:
+    // AD-HOC: Only for a top-level target, which drops step 1, so that other ancestors reach step 5.
+    //         See https://github.com/whatwg/html/pull/13150
+    if (target.is_top_level_traversable() && target.is_ancestor_of(source)) {
         // 2. If sourceSnapshotParams's has transient activation is true, and sourceSnapshotParams's sandboxing flags's
         //    sandboxed top-level navigation with user activation browsing context flag is set, then return false.
         if (source_snapshot_params.has_transient_activation
@@ -828,8 +826,11 @@ ErrorOr<NonnullRefPtr<WebContentPage>> CanonicalNavigable::obtain_page_to_host(C
     auto page = TRY(obtain_page_to_host_in(process_to_host(document, initiator_origin)));
     if (document.is_local_file_content())
         page->client().set_has_hosted_local_file_content();
-    if (auto const& web_ui_host = document.web_ui_host(); web_ui_host.has_value())
+    if (auto const& web_ui_host = document.web_ui_host(); web_ui_host.has_value()) {
         page->client().set_hosted_web_ui(*web_ui_host);
+        // NB: The page took the view's preferences before it hosted the WebUI, so it now takes the interface theme.
+        page->async_set_preferred_color_scheme(Application::the().interface_color_scheme());
+    }
     if (auto const& extension_host = document.extension_host(); extension_host.has_value()) {
         auto newly_hosted = page->client().hosted_extension() != *extension_host;
         page->client().set_hosted_extension(*extension_host);
@@ -1037,6 +1038,8 @@ void CanonicalNavigable::abandon_populated_document(NonnullRefPtr<CanonicalDocum
 void CanonicalNavigable::place_populated_document(CanonicalDocument& document, WebContentPage& page)
 {
     document.set_host(page);
+    if (auto* bidi = WebDriverBiDi::the())
+        bidi->push_session_state_for_client(page.client());
     send_viewport_to_host();
 }
 
@@ -1157,6 +1160,7 @@ void CanonicalNavigable::update_container_state(Web::HTML::ReplicatedContainerSt
     m_hosted_state->container = state;
     if (has_remote_host())
         remote_host().async_update_local_root_container_state(id(), move(state));
+    send_replicated_state();
 }
 
 void CanonicalNavigable::update_hosted_state(Web::HTML::HostedNavigableState state)

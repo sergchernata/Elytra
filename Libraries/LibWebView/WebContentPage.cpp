@@ -138,6 +138,12 @@ static bool is_download_in_progress(FileDownloader const& file_downloader, u64 d
     return download.has_value() && download->status == FileDownloader::DownloadStatus::InProgress;
 }
 
+// An error page's title is about the failure, not the page it couldn't load, so it's never recorded in history.
+static bool shows_error_page(ViewImplementation const& view)
+{
+    return view.has_traversable() && view.traversable().active_document().creation_url() == URL::about_error();
+}
+
 static Optional<String> history_title(Utf16String const& title, URL::URL const& url)
 {
     if (title.is_empty())
@@ -358,13 +364,7 @@ bool WebContentPage::continue_navigation_population_in_selected_process(Web::HTM
         host->async_populate_navigation(weak_loader->request(), weak_loader->take_result());
     };
     // Wait for the destination RequestServer to acknowledge the import before the host adopts it.
-    if (auto client_id = host->client().request_server_site_bindings().client_id(); client_id.has_value()) {
-        if (auto request_server = RequestServerManager::the().instance_for_client(*client_id)) {
-            weak_loader->move_response_body_to(*request_server, move(finish_handoff));
-            return true;
-        }
-    }
-    finish_handoff(false);
+    weak_loader->move_response_body_to(host->client().request_server_site_bindings(), move(finish_handoff));
     return true;
 }
 
@@ -495,10 +495,11 @@ bool WebContentPage::handle_and_dispatch_key_event_in_compositor(Web::KeyEvent c
     return posted;
 }
 
-void WebContentPage::handle_pinch_event_in_compositor(Web::PinchEvent const& event)
+bool WebContentPage::handle_and_dispatch_pinch_event_in_compositor(Web::PinchEvent const& event)
 {
-    dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI posted pinch event {} for page {} to the compositor", event.id, m_id);
-    Application::the().handle_pinch_event_in_compositor(compositor_context_id(), event);
+    auto posted = Application::the().handle_and_dispatch_pinch_event_in_compositor(compositor_context_id(), event);
+    dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI posted pinch event {} for page {} to the compositor: {}", event.id, m_id, posted);
+    return posted;
 }
 
 bool WebContentPage::handle_and_dispatch_mouse_event_in_compositor(Web::MouseEvent const& event)
@@ -645,11 +646,27 @@ void WebContentPage::close()
     }
     m_needs_beforeunload_check = true;
     m_history_recorded_url_for_current_load.clear();
-    if (m_client)
+    if (m_client) {
         m_client->update_audio_capture_permission();
+        if (auto* bidi = WebDriverBiDi::the())
+            bidi->push_session_state_for_client(*m_client);
+    }
+    m_web_ui = nullptr;
     auto owed_replies = move(m_owed_replies);
     for (auto owed : owed_replies)
         owe_reply(owed);
+}
+
+void WebContentPage::set_web_ui(RefPtr<WebUI> web_ui)
+{
+    m_web_ui = move(web_ui);
+}
+
+// A WebUI whose connection closed is dropped, unless the page has another by then.
+void WebContentPage::web_ui_disconnected(Badge<WebUI>, WebUI& web_ui)
+{
+    if (m_web_ui == &web_ui)
+        m_web_ui = nullptr;
 }
 
 void WebContentPage::owe_reply(OwedReply owed)
@@ -1222,9 +1239,9 @@ void WebContentPage::did_output_js_console_message(ConsoleOutput console_output)
     }
 }
 
-void WebContentPage::did_block_resource()
+void WebContentPage::did_block_resource(URL::URL url, String kind)
 {
-    view().did_block_resource({});
+    view().did_block_resource({}, url, kind);
 }
 
 void WebContentPage::did_start_network_request(u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type, String referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::RequestPriority priority)
@@ -2425,14 +2442,28 @@ Messages::WebContentClient::DidStartDownloadWithoutRequestResponse WebContentPag
     return { download_id };
 }
 
-Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_download(Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data)
+Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_download(Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response)
 {
     // A download taking over an in-flight population's response body ends that navigation without a document;
     // the reporting process ends its side when its population output says the download was handled. The body
     // identifiers preserve the original RequestServer transfer lease, so only the process and navigation that
     // received that response may claim it, and only while its population is in flight.
+    FileDownloader::ResponseFinished on_response_finished;
     bool matches_in_flight_navigation = false;
     if (auto navigable = population_worker_navigable(navigable_id); navigable.has_value()) {
+        if (auto* bidi = WebDriverBiDi::the();
+            bidi && network_response.is_object()) {
+            on_response_finished = [weak_bidi = bidi->make_weak_ptr(),
+                                       context = WebDriverBiDi::navigable_id(*navigable),
+                                       metadata = network_response.as_object()](
+                                       u64 decoded_size,
+                                       Requests::RequestTimingInfo const* timing,
+                                       Optional<StringView> error) {
+                if (weak_bidi)
+                    weak_bidi->download_response_finished(context, metadata, decoded_size,
+                        timing, error);
+            };
+        }
         auto ongoing_navigation = navigation_id.has_value() ? navigable->navigation_with_id(*navigation_id) : nullptr;
         if (ongoing_navigation
             && (ongoing_navigation->state.has<CanonicalNavigation::CreatingNavigationParams>() || ongoing_navigation->state.has<CanonicalNavigation::Populating>())
@@ -2441,15 +2472,25 @@ Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_d
             navigable->did_cancel_navigation(*navigation_id);
         }
     }
-    if (!matches_in_flight_navigation)
+    if (!matches_in_flight_navigation) {
+        if (on_response_finished)
+            on_response_finished(
+                0, nullptr,
+                "Navigation response is no longer available for download"sv);
         return { Optional<u64> {} };
+    }
 
     auto destination = choose_download_destination_or_report_error(url, suggested_filename);
-    if (!destination.has_value())
+    if (!destination.has_value()) {
+        if (on_response_finished)
+            on_response_finished(0, nullptr,
+                "Download destination was not selected"sv);
         return { Optional<u64> {} };
+    }
 
     auto& file_downloader = Application::the().file_downloader();
-    auto download_id = file_downloader.adopt_download(client().is_private(), url, destination.release_value(), total_size, request_server_client_id, request_server_request_id, initial_data.bytes(), &client().session());
+    auto download_id = file_downloader.adopt_download(client().is_private(), url, destination.release_value(), total_size, request_server_client_id, request_server_request_id, initial_data.bytes(),
+        move(on_response_finished), &client().session());
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
 
@@ -2507,15 +2548,17 @@ void WebContentPage::did_finish_loading(Web::HTML::CrossProcessId navigable_id, 
         // The WebUI channel goes to the process the UI process gave the WebUI's document to, never by a URL a process
         // reports. A page that loads anything else loses its channel.
         if (auto const& web_ui_host = navigable->active_document().web_ui_host(); web_ui_host.has_value() && client().hosted_web_ui() == web_ui_host) {
-            if (auto web_ui = WebUI::create(client(), m_id, *web_ui_host); web_ui.is_error())
+            if (auto web_ui = WebUI::create(client(), m_id, *web_ui_host); web_ui.is_error()) {
                 warnln("Could not create WebUI for {}: {}", committed_url, web_ui.error());
-            else
-                client().set_web_ui(web_ui.release_value());
-        } else if (auto const& web_ui = client().web_ui(); web_ui && web_ui->page_id() == m_id) {
-            client().set_web_ui(nullptr);
+                m_web_ui = nullptr;
+            } else {
+                m_web_ui = web_ui.release_value();
+            }
+        } else {
+            m_web_ui = nullptr;
         }
 
-        auto title = history_title(view().title(), committed_url);
+        auto title = shows_error_page(view()) ? Optional<String> {} : history_title(view().title(), committed_url);
 
         dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Load finished for page {} at '{}' with title '{}'",
             m_id,
@@ -2546,7 +2589,7 @@ void WebContentPage::did_change_title(Utf16String title)
         process->set_title(title);
 
     if (displays_tab()) {
-        if (!title.is_empty()) {
+        if (!title.is_empty() && !shows_error_page(view())) {
             auto title_utf8 = title.to_utf8();
 
             maybe_record_history_visit_for_current_load(view().url(), title_utf8, "title change"sv);
@@ -2888,6 +2931,22 @@ void WebContentPage::did_update_session_history_entry_scroll_restoration_mode(We
     navigable->top_level_traversable().update_session_history_entry_scroll_restoration_mode(*navigable, entry_identity, scroll_restoration_mode);
 }
 
+void WebContentPage::did_request_pinch_event_for_testing(Web::HTML::CrossProcessId local_root_id, Web::PinchEvent event)
+{
+    // NB: As for a key event for testing, the event is dispatched as the user's own.
+    if (!WebContentClient::renderers_may_synthesize_input()) {
+        client().did_misbehave("did_request_pinch_event_for_testing"sv, "not driven by WebDriver or a test"sv);
+        return;
+    }
+
+    // The event is relative to the viewport of the local root its page dispatches input to.
+    if (auto root = view().traversable().find(local_root_id); root.has_value())
+        event.position.translate_by(view().traversable().local_root_offset(*root));
+    // Only the compositor sets this, on its way to WebContent.
+    event.async_zoom_performed_default_action = false;
+    view().enqueue_pinch_event_for_testing({}, event);
+}
+
 void WebContentPage::did_request_webdriver_mouse_event(u64 request_id, Web::HTML::CrossProcessId local_root_id, Web::MouseEvent event)
 {
     // NB: As for a key event for testing, the event is dispatched as the user's own.
@@ -2908,6 +2967,7 @@ void WebContentPage::did_request_webdriver_mouse_event(u64 request_id, Web::HTML
     // Only the compositor sets these, on its way to WebContent.
     event.async_scroll_performed_default_action = false;
     event.scrollbar_dragged_by_compositor = {};
+    event.wheel_gesture_mark = {};
     view().enqueue_webdriver_mouse_event({}, move(event), move(on_handled));
 }
 
@@ -3024,19 +3084,19 @@ void WebContentPage::did_request_traverse_history_by_delta_for_testing(i32 delta
         view().traverse_the_history_by_delta(delta);
 }
 
-void WebContentPage::reset_session_history_for_testing()
+void WebContentPage::reset_state_for_testing()
 {
     auto* client = routed_connection();
     if (!client || !client->test_connection())
         return;
     client->transport().flush();
-    client->test_connection()->async_reset_session_history_for_testing(m_id);
+    client->test_connection()->async_reset_state_for_testing(m_id);
 }
 
-void WebContentPage::did_reset_session_history_for_testing(Web::HTML::SessionHistoryEntryDescriptor active_entry)
+void WebContentPage::did_reset_state_for_testing(Web::HTML::SessionHistoryEntryDescriptor active_entry)
 {
     if (displays_tab())
-        view().did_reset_session_history_for_testing({}, move(active_entry));
+        view().did_reset_state_for_testing({}, move(active_entry));
 }
 
 Messages::WebContentTestClient::DidRequestCaptureSessionHistorySnapshotForTestingResponse WebContentPage::did_request_capture_session_history_snapshot_for_testing()

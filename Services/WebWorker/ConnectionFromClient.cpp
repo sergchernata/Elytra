@@ -11,6 +11,8 @@
 #include <LibWeb/FileAPI/BlobURLStore.h>
 #include <LibWeb/HTML/BroadcastChannel.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
+#include <LibWeb/Loader/LoaderConfig.h>
+#include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Platform/FontPlugin.h>
 #include <WebWorker/ConnectionFromClient.h>
 #include <WebWorker/PageHost.h>
@@ -18,10 +20,10 @@
 
 namespace WebWorker {
 
-void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle, int client_id)
+void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle, int client_id, Optional<Utf16String> top_level_site)
 {
     if (on_request_server_connection)
-        on_request_server_connection(handle, client_id);
+        on_request_server_connection(handle, client_id, top_level_site);
 
     // A real connection loss defers this callback. Exercise the case where the replacement connection arrives before
     // that deferred callback runs.
@@ -29,13 +31,12 @@ void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle
         request_server_died_callback();
 }
 
-void ConnectionFromClient::simulate_request_server_connection_loss_and_reconnect_for_testing(IPC::TransportHandle replacement_handle, int client_id)
+void ConnectionFromClient::simulate_request_server_connection_loss_and_reconnect_for_testing(IPC::TransportHandle replacement_handle, int client_id, Optional<Utf16String> top_level_site)
 {
-    auto disconnected_client = move(Web::ResourceLoader::the().request_client());
-    m_request_server_died_callback_for_testing = move(disconnected_client->on_request_server_died);
-    disconnected_client = nullptr;
+    if (auto disconnected_client = Web::ResourceLoader::the().take_client_for_testing(top_level_site))
+        m_request_server_died_callback_for_testing = move(disconnected_client->on_request_server_died);
 
-    connect_to_request_server(move(replacement_handle), client_id);
+    connect_to_request_server(move(replacement_handle), client_id, move(top_level_site));
 }
 
 void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
@@ -82,12 +83,12 @@ void ConnectionFromClient::set_site_compatibility_data(JsonValue data)
         warnln("Ignoring invalid site compatibility data: {}", parsed_data.error());
         return;
     }
-    Web::ResourceLoader::the().set_site_compatibility_data(parsed_data.release_value());
+    Web::set_site_compatibility_data(parsed_data.release_value());
 }
 
 void ConnectionFromClient::set_user_agent(String user_agent)
 {
-    Web::ResourceLoader::the().set_user_agent(move(user_agent));
+    Web::update_loader_config([&](auto& config) { config.user_agent = move(user_agent); });
 }
 
 void ConnectionFromClient::set_navigator_compatibility_mode(Web::NavigatorCompatibilityMode mode)
@@ -97,7 +98,7 @@ void ConnectionFromClient::set_navigator_compatibility_mode(Web::NavigatorCompat
 
 void ConnectionFromClient::set_preferred_languages(Vector<String> preferred_languages)
 {
-    Web::ResourceLoader::the().set_preferred_languages(move(preferred_languages));
+    Web::update_loader_config([&](auto& config) { config.preferred_languages = move(preferred_languages); });
 }
 
 void ConnectionFromClient::close_worker()

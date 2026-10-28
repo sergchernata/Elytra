@@ -3,6 +3,19 @@ if (NOT Qt6_FOUND)
     return()
 endif()
 
+# The chrome's styles take their colors from the theme, which follows the system's appearance.
+function(add_chrome_style_sources target)
+    target_sources(${target} PRIVATE
+        "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearance.cpp"
+        "${LADYBIRD_SOURCE_DIR}/UI/Qt/Theme.cpp"
+    )
+    if (APPLE)
+        target_sources(${target} PRIVATE "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearanceMac.mm")
+        target_link_libraries(${target} PRIVATE "-framework AppKit")
+    endif()
+    set_target_properties(${target} PROPERTIES AUTOMOC ON)
+endfunction()
+
 add_library(QtEventLoopTestMain OBJECT
     QtEventLoopTestMain.cpp
     "${LADYBIRD_SOURCE_DIR}/Libraries/LibTest/AssertionHandler.cpp"
@@ -40,14 +53,12 @@ add_library(QtTestMain OBJECT
 )
 target_link_libraries(QtTestMain PRIVATE AK LibCore LibTest Qt::Core Qt::Gui Qt::Widgets)
 
-# QtTestMain runs its tests on Qt's offscreen platform plugin, and on Windows nothing deploys that plugin where a test
-# binary can find it: The ladybird target's deploy step copies only the "windows" platform plugin into the bin/platforms
-# directory — and for a binary in a deployed layout, that directory is the whole platform-plugin search path. So a
-# QApplication there finds no platform plugin at all, which is fatal.
-# NB: On Windows, Qt puts up a modal message box before that abort whenever the process has no console window — and a
-# CI test process has none. So the test doesn't fail: It sits in the box until CTest's timeout kills it. Call this for
-# every test that links QtTestMain, so the plugin sits next to the test binary, where Qt looks for it.
+# QtTestMain runs its tests on Qt's offscreen platform plugin, so every test that links it must call this. A static Qt
+# only links the default platform plugin into an executable, so the offscreen plugin is imported. On Windows, Qt only
+# searches bin/platforms, where the ladybird target deploys just the "windows" plugin, so the offscreen plugin is copied
+# there too. Without it, Qt shows a modal message box that blocks the test until CTest's timeout kills it.
 function(deploy_qt_offscreen_platform_plugin target)
+    qt_import_plugins(${target} INCLUDE Qt6::QOffscreenIntegrationPlugin)
     if (NOT WIN32)
         return()
     endif()
@@ -72,20 +83,35 @@ if (APPLE OR LINUX)
         "${LADYBIRD_SOURCE_DIR}/UI/Qt/ReportReview.cpp"
         "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
     )
+    add_chrome_style_sources(TestCrashReportReviewWidget)
     deploy_qt_offscreen_platform_plugin(TestCrashReportReviewWidget)
 endif()
 
 ladybird_test("TestScreenshotSelectionOverlay.cpp" UI/Qt
     CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
-    LIBS LibURL Qt::Core Qt::Gui Qt::Widgets
+    LIBS LibCore LibURL Qt::Core Qt::Gui Qt::Widgets
 )
 target_sources(TestScreenshotSelectionOverlay PRIVATE
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Icon.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/Popover.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ScreenshotSelectionOverlay.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
 )
+add_chrome_style_sources(TestScreenshotSelectionOverlay)
 deploy_qt_offscreen_platform_plugin(TestScreenshotSelectionOverlay)
+
+ladybird_test("TestChromeIcons.cpp" UI/Qt
+    CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
+    LIBS LibURL Qt::Core Qt::Gui Qt::Widgets
+)
+target_sources(TestChromeIcons PRIVATE
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Icon.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
+)
+add_chrome_style_sources(TestChromeIcons)
+deploy_qt_offscreen_platform_plugin(TestChromeIcons)
 
 ladybird_test("TestScreenshotViewer.cpp" UI/Qt
     CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
@@ -96,6 +122,7 @@ target_sources(TestScreenshotViewer PRIVATE
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ScreenshotViewer.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
 )
+add_chrome_style_sources(TestScreenshotViewer)
 deploy_qt_offscreen_platform_plugin(TestScreenshotViewer)
 
 ladybird_test("TestWebCompatReportReview.cpp" UI/Qt
@@ -109,6 +136,7 @@ target_sources(TestWebCompatReportReview PRIVATE
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/WebCompatReportReview.cpp"
 )
+add_chrome_style_sources(TestWebCompatReportReview)
 deploy_qt_offscreen_platform_plugin(TestWebCompatReportReview)
 
 ladybird_test("TestHiddenPageSizing.cpp" UI/Qt
@@ -139,6 +167,7 @@ target_sources(TestProcessManagerWindow PRIVATE
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ProcessManagerWindow.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
 )
+add_chrome_style_sources(TestProcessManagerWindow)
 target_compile_definitions(TestProcessManagerWindow PRIVATE TEST_RESOURCE_ROOT="${LADYBIRD_SOURCE_DIR}/Base/res")
 deploy_qt_offscreen_platform_plugin(TestProcessManagerWindow)
 
@@ -165,17 +194,22 @@ endif()
 
 ladybird_test("TestNativeWindowContainerFocus.cpp" UI/Qt LIBS Qt::Core Qt::Gui Qt::Widgets)
 target_sources(TestNativeWindowContainerFocus PRIVATE "${LADYBIRD_SOURCE_DIR}/UI/Qt/NativeWindowContainer.cpp")
+deploy_qt_offscreen_platform_plugin(TestNativeWindowContainerFocus)
 
 ladybird_test("TestJavaScriptDialog.cpp" UI/Qt
     CUSTOM_MAIN "$<TARGET_OBJECTS:QtTestMain>"
-    LIBS LibURL Qt::Core Qt::Gui Qt::Widgets
+    LIBS LibCore LibURL Qt::Core Qt::Gui Qt::Widgets
 )
 target_sources(TestJavaScriptDialog PRIVATE
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Icon.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/JavaScriptDialog.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/NativeTextEditingLineEdit.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Popover.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
 )
+add_chrome_style_sources(TestJavaScriptDialog)
+deploy_qt_offscreen_platform_plugin(TestJavaScriptDialog)
 
 ladybird_test("TestWindowCloseCoordinator.cpp" UI/Qt LIBS Qt::Core)
 target_sources(TestWindowCloseCoordinator PRIVATE "${LADYBIRD_SOURCE_DIR}/UI/Qt/WindowCloseCoordinator.cpp")

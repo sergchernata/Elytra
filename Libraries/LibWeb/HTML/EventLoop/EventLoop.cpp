@@ -28,6 +28,7 @@
 #include <LibWeb/HTML/EventLoop/ClockPlan.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/FrameCompletion.h>
+#include <LibWeb/HTML/EventLoop/RenderingSchedulerCounters.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/ListOfAvailableImages.h>
@@ -233,7 +234,7 @@ void EventLoop::process()
 
     if (oldest_task && oldest_task->source() != Task::Source::Rendering) {
         auto task_duration = task_end_time - task_start_time;
-        auto task_duration_microseconds = static_cast<u64>(task_duration * 1000.0);
+        auto task_duration_microseconds = rendering_scheduler_duration_microseconds(task_duration);
         ++m_rendering_scheduler_counters.tasks_between_updates;
         m_rendering_scheduler_counters.task_microseconds_between_updates += task_duration_microseconds;
         switch (oldest_task->source()) {
@@ -446,7 +447,7 @@ void EventLoop::process_input_events() const
             //         or leave is dropped, as the queue coalesces the moves it holds, and the newer move's own event
             //         follows. Any other event is handled, without moving the hover or the pointer.
             bool input_is_outdated = false;
-            if (auto const* mouse_event = event.event.get_pointer<Web::MouseEvent>()) {
+            if (auto const* mouse_event = event.event.get_pointer<Web::MouseEvent>(); mouse_event && (!mouse_event->pointer_data.ptr() || mouse_event->pointer_data.ptr()->pointer_type == PointerType::Mouse)) {
                 auto document = root->active_document();
                 auto* arena = document ? document->layout_node_arena_if_created() : nullptr;
                 input_is_outdated = arena && Layout::RustFFI::document_host_mouse_event_is_outdated(arena->host(), mouse_event->id);
@@ -477,6 +478,8 @@ void EventLoop::process_input_events() const
                     VERIFY_NOT_REACHED();
                 },
                 [&](Web::MouseEvent const& mouse_event) {
+                    if (auto* pointer = mouse_event.pointer_data.ptr(); pointer && pointer->pointer_type != PointerType::Mouse)
+                        return root->event_handler().handle_pointer_event(mouse_event, page.device_to_css_point(mouse_event.position), page.device_to_css_point(mouse_event.screen_position), &remote_target);
                     switch (mouse_event.type) {
                     case Web::MouseEvent::Type::MouseDown:
                         return page.handle_mousedown(*root, mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.click_count, mouse_event.scrollbar_dragged_by_compositor, &remote_target);
@@ -491,9 +494,9 @@ void EventLoop::process_input_events() const
                     case Web::MouseEvent::Type::MouseWheel:
                         if (mouse_event.async_scroll_performed_default_action) {
                             dbgln_if(COMPOSITOR_DEBUG, "[Compositor] Main thread handling DOM wheel after async default action");
-                            return page.handle_mousewheel(*root, mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y, mouse_event.wheel_tick_120ths_x, mouse_event.wheel_tick_120ths_y, mouse_event.wheel_delta_precision, mouse_event.scroll_gesture_phase, true, nullptr, &remote_target);
+                            return page.handle_mousewheel(*root, mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y, mouse_event.wheel_tick_120ths_x, mouse_event.wheel_tick_120ths_y, mouse_event.wheel_delta_precision, mouse_event.scroll_gesture_phase, true, nullptr, &remote_target, mouse_event.wheel_gesture_mark);
                         }
-                        return page.handle_mousewheel(*root, mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y, mouse_event.wheel_tick_120ths_x, mouse_event.wheel_tick_120ths_y, mouse_event.wheel_delta_precision, mouse_event.scroll_gesture_phase, false, nullptr, &remote_target);
+                        return page.handle_mousewheel(*root, mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y, mouse_event.wheel_tick_120ths_x, mouse_event.wheel_tick_120ths_y, mouse_event.wheel_delta_precision, mouse_event.scroll_gesture_phase, false, nullptr, &remote_target, mouse_event.wheel_gesture_mark);
                     }
                     VERIFY_NOT_REACHED();
                 },
@@ -501,7 +504,7 @@ void EventLoop::process_input_events() const
                     return page.handle_drag_and_drop_event(*root, drag_event.type, drag_event.position, drag_event.screen_position, drag_event.button, drag_event.buttons, drag_event.modifiers, move(drag_event.files));
                 },
                 [&](Web::PinchEvent& pinch_event) {
-                    return page.handle_pinch_event(*root, pinch_event.position, pinch_event.modifiers, pinch_event.scale_delta);
+                    return page.handle_pinch_event(*root, pinch_event.position, pinch_event.modifiers, pinch_event.scale_delta, pinch_event.async_zoom_performed_default_action);
                 });
 
             finish_handling_coalesced_input_events(event);
@@ -588,7 +591,7 @@ struct EventLoop::RenderingUpdateInFlight {
 void EventLoop::finish_rendering_update(double update_start_time)
 {
     auto update_end_time = HighResolutionTime::unsafe_shared_current_time();
-    m_rendering_scheduler_counters.update_microseconds += static_cast<u64>((update_end_time - update_start_time) * 1000.0);
+    m_rendering_scheduler_counters.update_microseconds += rendering_scheduler_duration_microseconds(update_end_time - update_start_time);
     m_running_rendering_task = false;
 
     for (auto const& page : pages_of_local_roots())
@@ -909,6 +912,7 @@ void EventLoop::update_the_rendering()
         if (auto navigable = document->navigable()) {
             navigable->process_main_thread_smooth_scrolls();
             navigable->adopt_pending_async_scroll_offsets();
+            navigable->end_scroll_sequences_that_completed_since_the_last_frame();
         }
         // AD-HOC: A text control that script edited reveals its cursor now, once for all of the edits. See the note
         //         at FormAssociatedTextControlElement::CursorRevealAfterEdit.
@@ -1626,7 +1630,9 @@ void EventLoop::perform_a_microtask_checkpoint()
     }
 
     // 4. For each environment settings object settingsObject whose responsible event loop is this event loop, notify about rejected promises given settingsObject's global object.
-    auto environments = GC::RootVector { m_related_environment_settings_objects };
+    GC::RootVector<GC::Ref<EnvironmentSettingsObject>> environments;
+    for (auto const& entry : m_related_environment_settings_objects)
+        environments.append(*entry.value);
     for (auto& environment_settings_object : environments) {
         auto& global_object = environment_settings_object->global_object();
         if (auto* worklet_global_scope = Bindings::impl_from<WorkletGlobalScope>(&global_object)) {
@@ -1767,13 +1773,19 @@ EnvironmentSettingsObject& EventLoop::top_of_backup_incumbent_realm_stack()
 
 void EventLoop::register_environment_settings_object(Badge<EnvironmentSettingsObject>, EnvironmentSettingsObject& environment_settings_object)
 {
-    m_related_environment_settings_objects.append(&environment_settings_object);
+    auto result = m_related_environment_settings_objects.set(environment_settings_object.address(), &environment_settings_object);
+    VERIFY(result == HashSetResult::InsertedNewEntry);
 }
 
 void EventLoop::unregister_environment_settings_object(Badge<EnvironmentSettingsObject>, EnvironmentSettingsObject& environment_settings_object)
 {
-    bool did_remove = m_related_environment_settings_objects.remove_first_matching([&](auto& entry) { return entry == &environment_settings_object; });
+    bool did_remove = m_related_environment_settings_objects.remove(environment_settings_object.address());
     VERIFY(did_remove);
+}
+
+GC::Ptr<EnvironmentSettingsObject> EventLoop::environment_settings_object_at(EnvironmentSettingsObjectAddress address) const
+{
+    return m_related_environment_settings_objects.get(address).value_or(nullptr);
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#same-loop-windows

@@ -57,22 +57,6 @@ pub(crate) unsafe fn style_payloads<'a>(style: StylePayloadsRef) -> Option<&'a F
     (!style.is_null()).then(|| unsafe { style.deref() })
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct FfiReplacedContentFacts {
-    pub has_auto_content_width: bool,
-    pub auto_content_width: CssPixels,
-    pub has_auto_content_height: bool,
-    pub auto_content_height: CssPixels,
-    pub auto_content_aspect_ratio_numerator: CssPixels,
-    pub auto_content_aspect_ratio_denominator: CssPixels,
-    pub has_default_preferred_width: bool,
-    pub default_preferred_width: CssPixels,
-    pub has_default_preferred_height: bool,
-    pub default_preferred_height: CssPixels,
-    pub text_entry_content_is_ordinary_box: bool,
-}
-
 impl From<crate::painting::host::FfiNaturalSize> for crate::css::style::NaturalSize {
     fn from(size: crate::painting::host::FfiNaturalSize) -> Self {
         Self {
@@ -232,13 +216,11 @@ pub(crate) enum AncestorFact {
     IsAnonymousButtonContentWrapper = 1 << 2,
     /// An anonymous box whose parent is an anonymous button content wrapper.
     IsAnonymousButtonContentBox = 1 << 3,
-    /// The node or one of its ancestors has an inline outer display type.
-    HasInlineLevelInclusiveAncestor = 1 << 4,
     /// An anonymous box whose nearest non-anonymous ancestor puts an ellipsis on overflowing lines.
-    InheritsTextOverflowEllipsis = 1 << 5,
-    ParentLaysOutInColumns = 1 << 6,
+    InheritsTextOverflowEllipsis = 1 << 4,
+    ParentLaysOutInColumns = 1 << 5,
     /// The parent lays out its children with a MathML layout algorithm.
-    ParentUsesMathLayout = 1 << 7,
+    ParentUsesMathLayout = 1 << 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

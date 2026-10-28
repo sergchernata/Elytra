@@ -59,6 +59,18 @@ pub(crate) fn arbitrary_substitution_function(name: &[u16]) -> Option<ArbitraryS
     None
 }
 
+/// Stops at the first arbitrary substitution function.
+/// Does not validate argument syntax: a matching function with invalid arguments still returns true.
+pub(crate) fn contains_arbitrary_substitution_function(values: &[ComponentValue]) -> bool {
+    values.iter().any(|value| match &value.kind {
+        ComponentKind::Function { name, values } => {
+            arbitrary_substitution_function(name).is_some() || contains_arbitrary_substitution_function(values)
+        }
+        ComponentKind::SimpleBlock { values, .. } => contains_arbitrary_substitution_function(values),
+        ComponentKind::Token(_) => false,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum EndToken {
     Colon,
@@ -139,7 +151,7 @@ fn parse_declaration_value_then_optional_declaration_value(
         return false;
     }
     if *position == values.len() {
-        return true;
+        return matches!(separator, EndToken::Comma);
     }
     if !is_end_token(&values[*position], separator) {
         return false;
@@ -215,10 +227,11 @@ pub(crate) fn arguments_are_valid(function: ArbitrarySubstitutionFunction, value
             true
         }
         ArbitrarySubstitutionFunction::If => {
+            discard_whitespace(values, &mut position);
             let mut branch_count = 0;
             while position < values.len() {
                 if !parse_declaration_value_then_optional_declaration_value(values, &mut position, EndToken::Colon) {
-                    break;
+                    return false;
                 }
                 branch_count += 1;
                 if !values
@@ -228,6 +241,7 @@ pub(crate) fn arguments_are_valid(function: ArbitrarySubstitutionFunction, value
                     break;
                 }
                 position += 1;
+                discard_whitespace(values, &mut position);
             }
             branch_count != 0 && position == values.len()
         }
@@ -470,7 +484,6 @@ mod tests {
             "attr(data-name type(<string>), fallback)",
             "env(safe-area-inset-top, 0px)",
             "inherit(color, red)",
-            "if(value)",
             "if(style(--flag): one; else: two;)",
             "--mix()",
             "--mix({ value }, fallback)",
@@ -484,6 +497,7 @@ mod tests {
             "env(name, fallback ! invalid)",
             "inherit(value; fallback)",
             "if()",
+            "if(value)",
             "if(condition: value ! invalid)",
             "--mix(, value)",
             "--mix({})",

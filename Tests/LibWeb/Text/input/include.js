@@ -146,12 +146,16 @@ function printInputTrace(trace, { stages } = {}) {
     }
 }
 
+// The offset has stopped once it holds for as long as five frames take at 60 Hz, however often frames come.
 async function scrollOffsetStopsChanging(readScrollOffset) {
-    let previousScrollOffset = null;
-    while (previousScrollOffset !== readScrollOffset()) {
-        previousScrollOffset = readScrollOffset();
-        for (let frame = 0; frame < 5; frame++) {
-            await animationFrame();
+    const settleDuration = (5 * 1000) / 60;
+    let scrollOffset = readScrollOffset();
+    let lastChangeTime = performance.now();
+    while (performance.now() - lastChangeTime < settleDuration) {
+        await animationFrame();
+        if (readScrollOffset() !== scrollOffset) {
+            scrollOffset = readScrollOffset();
+            lastChangeTime = performance.now();
         }
     }
 }
@@ -257,7 +261,7 @@ class HTTPTestServer {
         return `${this.baseURL}/static/${path}`;
     }
     #echoPath(path) {
-        const echoScope = this.echoScope ?? (__pageEchoScope ??= crypto.randomUUID());
+        const echoScope = this.echoScope ?? (__pageEchoScope ??= uniqueID());
         return `/echo/${echoScope}${path}`;
     }
 }
@@ -283,10 +287,20 @@ function httpTestServer() {
     return __httpTestServer;
 }
 
+// A random identifier that a page which is not a secure context can make too.
+function uniqueID() {
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 // Per-call unique loopback host, so tests that mutate global per-host state
 // (e.g. HSTS) don't collide under the parallel runner or --repeat clones.
 function uniqueLocalhostHostname(prefix) {
-    return `${prefix}-${crypto.randomUUID()}.localhost`;
+    return `${prefix}-${uniqueID()}.localhost`;
+}
+
+// Per-call unique loopback host whose origin is not potentially trustworthy.
+function uniqueTestHostname(prefix) {
+    return `${prefix}-${uniqueID()}.test`;
 }
 
 const remoteFrameCount = () => (internals.dumpSiteIsolationProcessTree().match(/remote/g) || []).length;

@@ -14,6 +14,18 @@ endif()
 
 set(ladybird_applications ladybird WebDriver ${ladybird_helper_processes})
 
+# CMake installs the binaries unstripped when it has no strip tool, or ignores the failure to run it, for instance when
+# packaging in a different environment than the build. Refuse to install anything in that case. MSVC-style toolchains
+# have no strip tool to begin with.
+if (NOT MSVC)
+    install(CODE "
+    if (CMAKE_INSTALL_DO_STRIP AND NOT EXISTS \"${CMAKE_STRIP}\")
+      message(FATAL_ERROR \"Cannot strip the installed binaries, since the strip tool '${CMAKE_STRIP}' does not exist\")
+    endif()
+  "
+            COMPONENT ladybird_Runtime)
+endif()
+
 install(TARGETS ladybird WebDriver
   EXPORT ladybirdTargets
   RUNTIME
@@ -109,9 +121,10 @@ if (LADYBIRD_GENERATE_SYMBOL_FILES)
             set(output "${symbol_file}/Contents/Info.plist")
             set(command dsymutil "$<TARGET_FILE:${target}>" -o "${symbol_file}")
         else()
-            set(symbol_file "${symbol_files_dir}/${name}.debug")
-            set(output "${symbol_file}")
-            set(command "${CMAKE_OBJCOPY}" --only-keep-debug "$<TARGET_FILE:${target}>" "${symbol_file}")
+            set(output "${CMAKE_BINARY_DIR}/symbol_file_stamps/${name}")
+            set(command "${CMAKE_COMMAND}" "-DREADELF=${CMAKE_READELF}" "-DOBJCOPY=${CMAKE_OBJCOPY}"
+                "-DBINARY=$<TARGET_FILE:${target}>" "-DSYMBOL_FILES_DIR=${symbol_files_dir}" "-DSTAMP=${output}"
+                -P "${LADYBIRD_SOURCE_DIR}/Meta/CMake/write_symbol_file.cmake")
         endif()
         add_custom_command(OUTPUT "${output}" COMMAND ${command} DEPENDS ${target}
             COMMENT "Writing the symbols of ${name}" VERBATIM)
@@ -124,6 +137,14 @@ if (LADYBIRD_GENERATE_SYMBOL_FILES)
         COMPONENT ladybird_Symbols
         EXCLUDE_FROM_ALL
     )
+
+    if (LINUX)
+        install(DIRECTORY "${symbol_files_dir}/.build-id"
+            DESTINATION /usr/lib/debug
+            COMPONENT ladybird_SystemSymbols
+            EXCLUDE_FROM_ALL
+        )
+    endif()
 endif()
 
 write_basic_package_version_file(
@@ -163,16 +184,44 @@ if (NOT APPLE)
     install_ladybird_resources("${CMAKE_INSTALL_DATADIR}/Lagom" ladybird_Runtime)
 endif()
 
-if (ENABLE_INSTALL_FREEDESKTOP_FILES)
+if (ENABLE_INSTALL_FREEDESKTOP_FILES OR LINUX)
     set(FREEDESKTOP_RESOURCE_DIR "${LADYBIRD_SOURCE_DIR}/Meta/CMake/freedesktop")
     string(TIMESTAMP DATE "%Y-%m-%d" UTC)
-    execute_process(
-        COMMAND git rev-parse --short=10 HEAD
-        WORKING_DIRECTORY ${LADYBIRD_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_HASH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+
+    # Source tarballs record their commit in a REVISION file, since they have no Git history of their own. They might be
+    # unpacked inside another Git repository though, so the file takes precedence.
+    if (EXISTS "${LADYBIRD_SOURCE_DIR}/REVISION")
+        file(STRINGS "${LADYBIRD_SOURCE_DIR}/REVISION" GIT_HASH LIMIT_COUNT 1 REGEX "^[0-9a-f]+$")
+        string(SUBSTRING "${GIT_HASH}" 0 10 GIT_HASH)
+    else()
+        execute_process(
+            COMMAND git rev-parse --short=10 HEAD
+            WORKING_DIRECTORY ${LADYBIRD_SOURCE_DIR}
+            OUTPUT_VARIABLE GIT_HASH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif()
+    if (LADYBIRD_VERSION STREQUAL "")
+        set(METAINFO_RELEASE_VERSION "${CMAKE_PROJECT_VERSION}-snapshot-${GIT_HASH}")
+        set(METAINFO_RELEASE_TYPE "snapshot")
+        set(METAINFO_RELEASE_DESCRIPTION "Development snapshot.")
+    elseif (LADYBIRD_VERSION MATCHES "\\.alpha$")
+        set(METAINFO_RELEASE_VERSION "${LADYBIRD_PACKAGE_VERSION}")
+        set(METAINFO_RELEASE_TYPE "development")
+        set(METAINFO_RELEASE_DESCRIPTION "Alpha release.")
+    elseif (LADYBIRD_VERSION MATCHES "\\.beta$")
+        set(METAINFO_RELEASE_VERSION "${LADYBIRD_PACKAGE_VERSION}")
+        set(METAINFO_RELEASE_TYPE "development")
+        set(METAINFO_RELEASE_DESCRIPTION "Beta release.")
+    else()
+        set(METAINFO_RELEASE_VERSION "${LADYBIRD_VERSION}")
+        set(METAINFO_RELEASE_TYPE "stable")
+        set(METAINFO_RELEASE_DESCRIPTION "Stable release.")
+    endif()
     configure_file("${FREEDESKTOP_RESOURCE_DIR}/org.ladybird.Ladybird.metainfo.xml.in" "${CMAKE_CURRENT_BINARY_DIR}/org.ladybird.Ladybird.metainfo.xml" @ONLY)
+endif()
+
+if (ENABLE_INSTALL_FREEDESKTOP_FILES)
     install(FILES
         "${FREEDESKTOP_RESOURCE_DIR}/org.ladybird.Ladybird.svg"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
@@ -192,5 +241,45 @@ if (ENABLE_INSTALL_FREEDESKTOP_FILES)
         "${CMAKE_CURRENT_BINARY_DIR}/org.ladybird.Ladybird.metainfo.xml"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo"
         COMPONENT ladybird_Runtime
+    )
+endif()
+
+# Linux packages install Ladybird into LADYBIRD_PACKAGE_INSTALL_PREFIX, and only add a command, the desktop integration
+# and the debug symbols to the rest of the system.
+if (LINUX)
+    set(system_integration_dir "${CMAKE_CURRENT_BINARY_DIR}/system_integration")
+    set(packaged_ladybird "${LADYBIRD_PACKAGE_INSTALL_PREFIX}/bin/Ladybird")
+    foreach (file IN ITEMS org.ladybird.Ladybird.desktop org.ladybird.Ladybird.service)
+        file(READ "${FREEDESKTOP_RESOURCE_DIR}/${file}" contents)
+        string(REPLACE "Exec=Ladybird " "Exec=${packaged_ladybird} " contents "${contents}")
+        file(WRITE "${system_integration_dir}/${file}" "${contents}")
+    endforeach()
+    file(MAKE_DIRECTORY "${system_integration_dir}/bin")
+    file(CREATE_LINK "${packaged_ladybird}" "${system_integration_dir}/bin/ladybird" SYMBOLIC)
+
+    install(FILES "${system_integration_dir}/bin/ladybird"
+        DESTINATION /usr/bin
+        COMPONENT ladybird_SystemIntegration
+        EXCLUDE_FROM_ALL
+    )
+    install(FILES "${system_integration_dir}/org.ladybird.Ladybird.desktop"
+        DESTINATION /usr/share/applications
+        COMPONENT ladybird_SystemIntegration
+        EXCLUDE_FROM_ALL
+    )
+    install(FILES "${system_integration_dir}/org.ladybird.Ladybird.service"
+        DESTINATION /usr/share/dbus-1/services
+        COMPONENT ladybird_SystemIntegration
+        EXCLUDE_FROM_ALL
+    )
+    install(FILES "${FREEDESKTOP_RESOURCE_DIR}/org.ladybird.Ladybird.svg"
+        DESTINATION /usr/share/icons/hicolor/scalable/apps
+        COMPONENT ladybird_SystemIntegration
+        EXCLUDE_FROM_ALL
+    )
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/org.ladybird.Ladybird.metainfo.xml"
+        DESTINATION /usr/share/metainfo
+        COMPONENT ladybird_SystemIntegration
+        EXCLUDE_FROM_ALL
     )
 endif()

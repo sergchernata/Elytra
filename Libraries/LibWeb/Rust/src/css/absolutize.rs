@@ -666,10 +666,7 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
         } else {
             absolutize_child(origin_color, context, &mut changed)?
         };
-        if !changed {
-            return Some(Absolutized::Unchanged);
-        }
-        return Some(Absolutized::Changed(retain_new(StyleValueData::ColorFunction {
+        let rebuilt = StyleValueData::ColorFunction {
             color_base: *color_base,
             channel_0: absolutized_c1,
             channel_1: absolutized_c2,
@@ -678,7 +675,20 @@ fn absolutize_color_function(value: &StyleValueData, context: &AbsolutizationCon
             has_name: *has_name,
             name: name.clone(),
             origin_color: absolutized_origin,
-        })));
+        };
+        // NB: Other properties keep currentcolor unresolved until the element's own color is available.
+        if !(context.current_color.is_none() && value_depends_on_current_color(&rebuilt))
+            && let Some(resolved) = resolve_relative_form(&rebuilt, &color_resolution_input(context))
+        {
+            return Some(Absolutized::Changed(retain_new(
+                crate::css::color_resolution::relative_color_computed_value_form(resolved),
+            )));
+        }
+        return Some(if changed {
+            Absolutized::Changed(retain_new(rebuilt))
+        } else {
+            Absolutized::Unchanged
+        });
     }
 
     let descriptor = descriptor_for_color_type(color_base.color_type);
@@ -1212,10 +1222,26 @@ fn absolutize_basic_shape(
                 *changed = true;
                 retain_new(StyleValueData::Percentage { value: percentage })
             };
+            // NB: Drop resolved position wrappers so positions and explicit coordinate pairs have
+            //     identical computed representations, including implicit and explicit "from origin".
+            let mut resolve_coordinate = |value: &RetainedStyleValueData, changed: &mut bool| {
+                let value = resolve(&keyword_as_percentage(value, changed), changed)?;
+                if let Some(StyleValueData::Edge {
+                    has_edge: false,
+                    offset,
+                    ..
+                }) = value.optional_data()
+                {
+                    *changed = true;
+                    Some(offset.clone_retained())
+                } else {
+                    Some(value)
+                }
+            };
             for point in points.as_slice() {
                 let [x, y] = point.values();
-                let x = resolve(&keyword_as_percentage(x, &mut changed), &mut changed)?;
-                let y = resolve(&keyword_as_percentage(y, &mut changed), &mut changed)?;
+                let x = resolve_coordinate(x, &mut changed)?;
+                let y = resolve_coordinate(y, &mut changed)?;
                 absolutized_points.push(crate::css::style_value::RetainedShapePoint::from_retained_values(x, y));
             }
             if !changed {
@@ -1814,7 +1840,24 @@ pub(crate) fn absolutize(value: &StyleValueData, context: &AbsolutizationContext
             values,
         } => {
             let mut changed = false;
-            let values = absolutize_list(values, context, &mut changed)?;
+            let mut values = absolutize_list(values, context, &mut changed)?;
+            // https://drafts.csswg.org/css-viewport/#zoom-property
+            // NB: The translation of a matrix is a length given in pixels, which zoom applies to as it does to a
+            //     <length>.
+            let translation = match *transform_function {
+                crate::css::serialize::transform_function::MATRIX => 4..6,
+                crate::css::serialize::transform_function::MATRIX3D => 12..15,
+                _ => 0..0,
+            };
+            let zoom = context.length.zoom;
+            if zoom != 1.0 && !translation.is_empty() && values.len() >= translation.end {
+                for value in &mut values[translation] {
+                    if let Some(StyleValueData::Number { value: number }) = value.optional_data() {
+                        *value = retain_new(StyleValueData::Number { value: number * zoom });
+                        changed = true;
+                    }
+                }
+            }
             rebuild!(
                 changed,
                 StyleValueData::Transformation {
@@ -2052,6 +2095,43 @@ pub(crate) fn absolutize(value: &StyleValueData, context: &AbsolutizationContext
                 StyleValueData::Integer {
                     value: i32::try_from(value).expect("sibling count exceeds CSS integer range"),
                 }
+            })))
+        }
+        StyleValueData::Url {
+            url,
+            url_type,
+            modifiers,
+        } => {
+            // https://drafts.csswg.org/css-values-4/#local-urls
+            // When serializing a url() with the local url flag set, it must serialize as just the fragment.
+            if url.is_empty() || url.is_fragment() {
+                return Some(Absolutized::Unchanged);
+            }
+
+            // https://drafts.csswg.org/css-values-4/#relative-urls
+            // When a <url> appears in the computed value of a property, it is resolved to an absolute URL.
+            // The computed value of a URL that the UA cannot resolve to an absolute URL is the specified value.
+            let resolved_url = liburl_rust::basic_parse(url.url_input(), liburl_rust::BasicParseOptions::new())
+                .or_else(|| {
+                    let base_url = context
+                        .style_sheet_resource_context
+                        .map(|resource_context| resource_context.base_url)
+                        .filter(|base_url| !base_url.is_empty())
+                        .unwrap_or(context.document_base_url);
+                    let base_url = std::str::from_utf8(base_url).ok()?;
+                    let base_url = liburl_rust::basic_parse(base_url, liburl_rust::BasicParseOptions::new())?;
+                    liburl_rust::basic_parse(
+                        url.url_input(),
+                        liburl_rust::BasicParseOptions::new().base_url(&base_url),
+                    )
+                });
+            let Some(resolved_url) = resolved_url else {
+                return Some(Absolutized::Unchanged);
+            };
+            Some(Absolutized::Changed(retain_new(StyleValueData::Url {
+                url: crate::css::style_value::RetainedString::from_ascii(resolved_url.into()),
+                url_type: *url_type,
+                modifiers: modifiers.clone(),
             })))
         }
         StyleValueData::Image { .. } => absolutize_image(value, context),

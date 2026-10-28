@@ -11,37 +11,43 @@
 #include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/Forward.h>
+#include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
+#include <AK/RefCounted.h>
 #include <AK/String.h>
 #include <AK/Time.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf16View.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
-#include <LibGC/Ptr.h>
 #include <LibHTTP/Cache/CacheMode.h>
 #include <LibHTTP/HeaderList.h>
-#include <LibJS/Forward.h>
-#include <LibJS/Heap/Cell.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
+#include <LibWeb/Fetch/Infrastructure/ClientContextSnapshot.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
-#include <LibWeb/Forward.h>
+#include <LibWeb/Fetch/Infrastructure/KeepaliveQuotaAccountant.h>
+#include <LibWeb/HTML/Scripting/EnvironmentSettingsObjectAddress.h>
+#include <LibWeb/HTML/Scripting/RemoteEnvironmentSettings.h>
 #include <LibWebCommon/Fetch/Infrastructure/HTTP/RequestPriority.h>
 #include <LibWebCommon/Fetch/Infrastructure/HTTP/RequestReferrer.h>
+#include <LibWebCommon/HTML/CrossProcessId.h>
 #include <LibWebCommon/HTML/Scripting/EnvironmentId.h>
+
+namespace Web::WebDriver::BiDi {
+
+class NetworkRequest;
+
+}
 
 namespace Web::Fetch::Infrastructure {
 
 class Response;
 
 // https://fetch.spec.whatwg.org/#concept-request
-class WEB_API Request final : public JS::Cell {
-    GC_CELL(Request, JS::Cell);
-    GC_DECLARE_ALLOCATOR(Request);
-
+class WEB_API Request final : public RefCounted<Request> {
 public:
     enum class CredentialsMode {
         Omit,
@@ -158,15 +164,15 @@ public:
     // Members are implementation-defined
     struct InternalPriority { };
 
-    using BodyType = Variant<Empty, ByteBuffer, GC::Ref<Body>>;
+    using BodyType = Variant<Empty, ByteBuffer, FetchBody>;
     using OriginType = Variant<Origin, URL::Origin>;
     using PolicyContainerType = Variant<PolicyContainer, NonnullRefPtr<HTML::PolicyContainer const>>;
     using ReferrerType = RequestReferrerType;
-    using ReservedClientType = GC::Ptr<HTML::Environment>;
-    using TraversableForUserPromptsType = Variant<TraversableForUserPrompts, GC::Ptr<HTML::EnvironmentSettingsObject>, GC::Ptr<HTML::Navigable>>;
+    using TraversableForUserPromptsType = Variant<TraversableForUserPrompts, HTML::CrossProcessId>;
+    using ClientType = Variant<HTML::EnvironmentSettingsObjectAddress, NonnullRefPtr<HTML::RemoteEnvironmentSettings const>>;
 
-    [[nodiscard]] static GC::Ref<Request> create();
-    [[nodiscard]] static GC::Ref<Request> create(JS::VM&);
+    [[nodiscard]] static NonnullRefPtr<Request> create();
+    ~Request();
 
     [[nodiscard]] ByteString const& method() const { return m_method; }
     void set_method(ByteString method) { m_method = move(method); }
@@ -182,15 +188,21 @@ public:
 
     [[nodiscard]] BodyType const& body() const { return m_body; }
     [[nodiscard]] BodyType& body() { return m_body; }
-    void set_body(BodyType body) { m_body = move(body); }
+    void set_body(BodyType body)
+    {
+        if (body.has<Empty>())
+            m_keepalive_quota_reservation.clear();
+        m_body = move(body);
+    }
 
-    [[nodiscard]] GC::Ptr<HTML::EnvironmentSettingsObject const> client() const { return m_client; }
-    [[nodiscard]] GC::Ptr<HTML::EnvironmentSettingsObject> client() { return m_client; }
-    void set_client(GC::Ptr<HTML::EnvironmentSettingsObject> client) { m_client = client; }
+    [[nodiscard]] Optional<ClientType> const& client() const { return m_client; }
+    void set_client(Optional<ClientType> client) { m_client = move(client); }
 
-    [[nodiscard]] ReservedClientType const& reserved_client() const { return m_reserved_client; }
-    [[nodiscard]] ReservedClientType& reserved_client() { return m_reserved_client; }
-    void set_reserved_client(ReservedClientType reserved_client) { m_reserved_client = move(reserved_client); }
+    [[nodiscard]] RefPtr<ClientContextSnapshot const> const& client_snapshot() const { return m_client_snapshot; }
+    void set_client_snapshot(RefPtr<ClientContextSnapshot const> client_snapshot) { m_client_snapshot = move(client_snapshot); }
+
+    [[nodiscard]] RefPtr<ReservedClientContextSnapshot const> const& reserved_client_snapshot() const { return m_reserved_client_snapshot; }
+    void set_reserved_client_snapshot(RefPtr<ReservedClientContextSnapshot const> reserved_client_snapshot) { m_reserved_client_snapshot = move(reserved_client_snapshot); }
 
     [[nodiscard]] HTML::EnvironmentId const& replaces_client_id() const { return m_replaces_client_id; }
     void set_replaces_client_id(HTML::EnvironmentId replaces_client_id) { m_replaces_client_id = move(replaces_client_id); }
@@ -301,7 +313,14 @@ public:
     void set_prevent_no_cache_cache_control_header_modification(bool prevent_no_cache_cache_control_header_modification) { m_prevent_no_cache_cache_control_header_modification = prevent_no_cache_cache_control_header_modification; }
 
     [[nodiscard]] bool done() const { return m_done; }
-    void set_done(bool done) { m_done = done; }
+    void set_done(bool done)
+    {
+        m_done = done;
+        if (done)
+            m_keepalive_quota_reservation.clear();
+    }
+
+    void set_keepalive_quota_reservation(KeepaliveQuotaAccountant::Reservation reservation) { m_keepalive_quota_reservation = move(reservation); }
 
     [[nodiscard]] bool timing_allow_failed() const { return m_timing_allow_failed; }
     void set_timing_allow_failed(bool timing_allow_failed) { m_timing_allow_failed = timing_allow_failed; }
@@ -319,42 +338,26 @@ public:
 
     [[nodiscard]] bool is_subresource_request() const;
     [[nodiscard]] bool is_navigation_request() const;
-    [[nodiscard]] GC::Ptr<HTML::BrowsingContext> target_browsing_context() const;
 
     [[nodiscard]] RedirectTaint redirect_taint() const;
 
     [[nodiscard]] String serialize_origin() const;
     [[nodiscard]] ByteString byte_serialize_origin() const;
 
-    enum class BodyCloning : u8 {
-        Tee,
-        FromSource,
-    };
-    [[nodiscard]] GC::Ref<Request> clone(JS::Realm&, BodyCloning) const;
+    [[nodiscard]] NonnullRefPtr<Request> clone() const;
 
     void add_range_header(u64 first, Optional<u64> const& last);
     void add_origin_header();
 
     [[nodiscard]] bool cross_origin_embedder_policy_allows_credentials() const;
 
-    // Non-standard
-    void add_pending_response(Badge<Fetching::PendingResponse>, GC::Ref<Fetching::PendingResponse> pending_response)
-    {
-        VERIFY(!m_pending_responses.contains_slow(pending_response));
-        m_pending_responses.append(pending_response);
-    }
-
-    void remove_pending_response(Badge<Fetching::PendingResponse>, GC::Ref<Fetching::PendingResponse> pending_response)
-    {
-        m_pending_responses.remove_first_matching([&](auto gc_ptr) { return gc_ptr == pending_response; });
-    }
-
     UnixDateTime request_time() const { return m_request_time; }
+
+    RefPtr<WebDriver::BiDi::NetworkRequest> webdriver_bidi_network_request() const;
+    void set_webdriver_bidi_network_request(RefPtr<WebDriver::BiDi::NetworkRequest>);
 
 private:
     explicit Request(NonnullRefPtr<HTTP::HeaderList>);
-
-    virtual void visit_edges(JS::Cell::Visitor&) override;
 
     // https://fetch.spec.whatwg.org/#concept-request-method
     // A request has an associated method (a method). Unless stated otherwise it is `GET`.
@@ -378,12 +381,17 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-request-client
     // A request has an associated client (null or an environment settings object).
-    GC::Ptr<HTML::EnvironmentSettingsObject> m_client;
+    // NB: A settings object of this process is held by its address.
+    Optional<ClientType> m_client;
+
+    // What fetching reads from the client, null when the client is.
+    RefPtr<ClientContextSnapshot const> m_client_snapshot;
 
     // https://fetch.spec.whatwg.org/#concept-request-reserved-client
     // A request has an associated reserved client (null, an environment, or an environment settings object). Unless
     // stated otherwise it is null.
-    ReservedClientType m_reserved_client;
+    // NB: The reserved client is held as a snapshot of what fetching reads from it.
+    RefPtr<ReservedClientContextSnapshot const> m_reserved_client_snapshot;
 
     // https://fetch.spec.whatwg.org/#concept-request-replaces-client-id
     // A request has an associated replaces client id (a string). Unless stated otherwise it is the empty string.
@@ -392,6 +400,7 @@ private:
     // https://fetch.spec.whatwg.org/#concept-request-window
     // A request has an associated traversable for user prompts, that is "no-traversable", "client", or a traversable
     // navigable. Unless stated otherwise it is "client".
+    // NB: A traversable navigable is held by its id.
     TraversableForUserPromptsType m_traversable_for_user_prompts { TraversableForUserPrompts::Client };
 
     // https://fetch.spec.whatwg.org/#request-keepalive-flag
@@ -554,6 +563,9 @@ private:
     // A request has an associated done flag. Unless stated otherwise, it is unset.
     bool m_done { false };
 
+    // Counts this request's body against its client's keepalive quota until its done flag is set or its body is null.
+    Optional<KeepaliveQuotaAccountant::Reservation> m_keepalive_quota_reservation;
+
     // https://fetch.spec.whatwg.org/#timing-allow-failed
     // A request has an associated timing allow failed flag. Unless stated otherwise, it is unset.
     bool m_timing_allow_failed { false };
@@ -563,8 +575,8 @@ private:
     Vector<Vector<String>> m_navigation_timing_allow_values_list;
 
     // Non-standard
-    Vector<GC::Ref<Fetching::PendingResponse>> m_pending_responses;
     UnixDateTime m_request_time;
+    RefPtr<WebDriver::BiDi::NetworkRequest> m_webdriver_bidi_network_request;
 };
 
 WEB_API StringView request_destination_to_string(Request::Destination);

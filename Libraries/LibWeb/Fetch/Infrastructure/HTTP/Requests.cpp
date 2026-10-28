@@ -6,32 +6,22 @@
 
 #include <AK/Array.h>
 #include <AK/CharacterTypes.h>
-#include <LibGC/Heap.h>
-#include <LibJS/Runtime/Realm.h>
 #include <LibTextCodec/Encoder.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/Names.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
 #include <LibWeb/DOMURL/DOMURL.h>
-#include <LibWeb/Fetch/Fetching/PendingResponse.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/PolicyContainers.h>
-#include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/WebDriver/BiDi/Network.h>
 
 namespace Web::Fetch::Infrastructure {
 
-GC_DEFINE_ALLOCATOR(Request);
-
-GC::Ref<Request> Request::create()
+NonnullRefPtr<Request> Request::create()
 {
-    return GC::Heap::the().allocate<Request>(HTTP::HeaderList::create());
-}
-
-GC::Ref<Request> Request::create(JS::VM&)
-{
-    return create();
+    return adopt_ref(*new Request(HTTP::HeaderList::create()));
 }
 
 Request::Request(NonnullRefPtr<HTTP::HeaderList> header_list)
@@ -40,14 +30,16 @@ Request::Request(NonnullRefPtr<HTTP::HeaderList> header_list)
 {
 }
 
-void Request::visit_edges(JS::Cell::Visitor& visitor)
+Request::~Request() = default;
+
+RefPtr<WebDriver::BiDi::NetworkRequest> Request::webdriver_bidi_network_request() const
 {
-    Base::visit_edges(visitor);
-    visitor.visit(m_client);
-    visitor.visit(m_body);
-    visitor.visit(m_reserved_client);
-    visitor.visit(m_traversable_for_user_prompts);
-    visitor.visit(m_pending_responses);
+    return m_webdriver_bidi_network_request;
+}
+
+void Request::set_webdriver_bidi_network_request(RefPtr<WebDriver::BiDi::NetworkRequest> state)
+{
+    m_webdriver_bidi_network_request = move(state);
 }
 
 // https://fetch.spec.whatwg.org/#concept-request-url
@@ -145,15 +137,6 @@ bool Request::is_navigation_request() const
     });
 }
 
-// Mixed Content refers to a request's target browsing context, which Fetch does not define. A navigation request targets
-// its reserved client's target browsing context: the navigable's active browsing context when the client was reserved.
-GC::Ptr<HTML::BrowsingContext> Request::target_browsing_context() const
-{
-    if (!m_reserved_client)
-        return {};
-    return m_reserved_client->target_browsing_context.ptr();
-}
-
 // https://fetch.spec.whatwg.org/#concept-request-tainted-origin
 RedirectTaint Request::redirect_taint() const
 {
@@ -222,7 +205,7 @@ ByteString Request::byte_serialize_origin() const
 }
 
 // https://fetch.spec.whatwg.org/#concept-request-clone
-GC::Ref<Request> Request::clone(JS::Realm& realm, BodyCloning body_cloning) const
+NonnullRefPtr<Request> Request::clone() const
 {
     // To clone a request request, run these steps:
     // 1. Let newRequest be a copy of request, except for its body.
@@ -233,7 +216,8 @@ GC::Ref<Request> Request::clone(JS::Realm& realm, BodyCloning body_cloning) cons
         new_request->header_list()->append(header);
     new_request->set_unsafe_request(m_unsafe_request);
     new_request->set_client(m_client);
-    new_request->set_reserved_client(m_reserved_client);
+    new_request->set_client_snapshot(m_client_snapshot);
+    new_request->set_reserved_client_snapshot(m_reserved_client_snapshot);
     new_request->set_replaces_client_id(m_replaces_client_id);
     new_request->set_traversable_for_user_prompts(m_traversable_for_user_prompts);
     new_request->set_keepalive(m_keepalive);
@@ -274,18 +258,8 @@ GC::Ref<Request> Request::clone(JS::Realm& realm, BodyCloning body_cloning) cons
     new_request->m_extension_request_id = m_extension_request_id;
 
     // 2. If request’s body is non-null, set newRequest’s body to the result of cloning request’s body.
-    if (auto const* body = m_body.get_pointer<GC::Ref<Body>>()) {
-        switch (body_cloning) {
-        case BodyCloning::Tee:
-            new_request->set_body((*body)->clone(realm));
-            break;
-        case BodyCloning::FromSource:
-            // AD-HOC: The fetch algorithms never read both this clone's body and the request's (see the note on cloning
-            //         in HTTP-network-or-cache fetch), so the clone reads the source, and a body without one is shared.
-            new_request->set_body((*body)->source().has_value() ? Body::create_from_source(realm, (*body)->fetch_body()) : *body);
-            break;
-        }
-    }
+    // AD-HOC: A request's body has no stream; whatever holds its stream tees that stream itself.
+    new_request->set_body(m_body);
 
     // 3. Return newRequest.
     return new_request;
@@ -390,7 +364,7 @@ bool Request::cross_origin_embedder_policy_allows_credentials() const
         return true;
 
     // 3. If request’s client is null, then return true.
-    if (m_client == nullptr)
+    if (!m_client.has_value())
         return true;
 
     // 4. If request’s client’s policy container’s embedder policy’s value is not "credentialless", then return true.

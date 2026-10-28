@@ -1,0 +1,12 @@
+Harness status: OK
+
+Found 7 tests
+
+7 Fail
+Fail	.test 1
+Fail	.test 2
+Fail	.test 3
+Fail	.test 4
+Fail	.test 5
+Fail	.test 6
+Fail	.test 7

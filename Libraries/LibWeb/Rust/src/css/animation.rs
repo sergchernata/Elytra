@@ -327,6 +327,7 @@ struct AnimationKeyframeValue {
     keyframe: usize,
     /// The keyframe's computed value, or none where the keyframe leaves the property out.
     value: RetainedStyleValueData,
+    is_implicit: bool,
 }
 
 struct AnimationValueInput<'a> {
@@ -570,6 +571,7 @@ pub(crate) struct ResolvedAnimationProperty {
     pub(crate) value_source: FfiAnimationSpecifiedValueSource,
     pub(crate) style_sheet_resource_context: FfiAnimationStyleSheetResourceContext,
     pub(crate) is_transition: bool,
+    is_implicit: bool,
 }
 
 /// The `SUBSTITUTION_MARK_*` bits of the arbitrary-substitution functions a written value holds.
@@ -685,6 +687,7 @@ fn resolve_animation_declarations(
                 value_source,
                 style_sheet_resource_context: candidate.style_sheet_resource_context,
                 is_transition: candidate.is_transition,
+                is_implicit: candidate.use_initial,
             });
         }
     }
@@ -844,11 +847,15 @@ fn interpolate_f64(from: f64, to: f64, delta: f32, range: Option<(f64, f64)>) ->
 }
 
 fn interpolate_i32(from: i32, to: i32, delta: f32, range: Option<(f64, f64)>) -> i32 {
-    // https://drafts.csswg.org/css-values/#combine-integers
+    // https://drafts.csswg.org/css-values-4/#combine-integers
     // Interpolation of <integer> is defined as Vresult = round((1 - p) × VA + p × VB);
     // that is, interpolation happens in the real number space as for <number>s, and the result is converted to an <integer> by rounding to the nearest integer.
-    let value = (from as f32 + (to as f32 - from as f32) * delta).round();
-    clamp_to_range(f64::from(value), range) as i32
+    let value = interpolate_f64(f64::from(from), f64::from(to), delta, None);
+    // https://drafts.csswg.org/css-values-4/#integers
+    // Unless otherwise specified, in the CSS specifications rounding to the nearest integer requires rounding in the
+    // direction of +∞ when the fractional portion is exactly 0.5. (For example, 1.5 rounds to 2, while -1.5 rounds to
+    // -1.)
+    clamp_to_range((value + 0.5).floor(), range) as i32
 }
 
 // https://drafts.csswg.org/css-borders-4/#normalized-superellipse-half-corner
@@ -1198,14 +1205,17 @@ fn is_sizing_property(property_id: u16) -> bool {
     )
 }
 
-/// Interpolates two sizes where one is a sizing keyword or a calc-size(), as calc-size() values, or returns None
-/// where they do not interpolate that way.
-/// https://drafts.csswg.org/css-values-5/#interpolate-calc-size
-fn interpolate_calc_size(
+/// NB: Combines two sizes where one is a sizing keyword or a calc-size(), as calc-size() values, or returns None
+///     where they cannot combine that way.
+/// https://drafts.csswg.org/css-sizing-4/#interpolate-calc-size
+fn combine_calc_size(
     context: Option<&FfiAnimationContext>,
     from: &StyleValueData,
     to: &StyleValueData,
-    delta: f32,
+    combine: impl FnOnce(
+        Arc<crate::css::calc::CalcNode>,
+        Arc<crate::css::calc::CalcNode>,
+    ) -> Option<(Arc<crate::css::calc::CalcNode>, crate::css::calc::FfiNumericType)>,
 ) -> Option<StyleValueData> {
     use crate::css::css_enums::keyword;
 
@@ -1236,7 +1246,7 @@ fn interpolate_calc_size(
     if from_kind == to_kind && from_kind != Kind::CalcSize {
         return None;
     }
-    // https://drafts.csswg.org/css-values-5/#valdef-interpolate-size-allow-keywords
+    // https://drafts.csswg.org/css-sizing-4/#valdef-interpolate-size-allow-keywords
     // Sizing values can also be combined if one of them is an <size-keyword> and the other is a <length-percentage>.
     let keyword_and_length =
         [&from_kind, &to_kind].contains(&&Kind::Keyword) && [&from_kind, &to_kind].contains(&&Kind::LengthPercentage);
@@ -1263,9 +1273,7 @@ fn interpolate_calc_size(
     } else {
         return None;
     };
-    // The result's calc-size calculation is the interpolation of the two input calc-size calculations.
-    let (calculation, resolved_type) =
-        crate::css::calc::interpolate_calc_size_calculations(from_calculation, to_calculation, delta)?;
+    let (calculation, resolved_type) = combine(from_calculation, to_calculation)?;
     let calculation = crate::css::calc::length_percentage_calculated_style_value(calculation, resolved_type);
     Some(crate::css::calc_size::calc_size_function(basis, calculation))
 }
@@ -6468,6 +6476,7 @@ fn animation_length_resolution_context(
         container_height_basis_depends_on_viewport_metrics: false,
         subject_inline_axis_is_horizontal: true,
         resolved_viewport_relative_length: std::ptr::null_mut(),
+        zoom: 1.0,
     })
 }
 
@@ -7551,7 +7560,11 @@ pub(crate) fn interpolate_value(
         return discrete_value(context, from, to, delta);
     }
     if is_sizing_property(property_id)
-        && let Some(value) = interpolate_calc_size(context, from, to, delta)
+        && let Some(value) = combine_calc_size(context, from, to, |from, to| {
+            // https://drafts.csswg.org/css-sizing-4/#interpolate-calc-size
+            // If they can be interpolated, the result’s calc-size calculation is the interpolation of the two input calc-size calculations.
+            crate::css::calc::interpolate_calc_size_calculations(from, to, delta)
+        })
     {
         return owned(value);
     }
@@ -7706,15 +7719,11 @@ pub(crate) fn interpolate_value(
         ) else {
             return discrete_value(context, from, to, delta);
         };
-        let font_style = if from_font_style == to_font_style {
-            from_font_style
-        } else if !context.is_some_and(|context| context.allow_discrete) {
-            return handled_without_value();
-        } else if delta < 0.5 {
-            from_font_style
-        } else {
-            to_font_style
-        };
+        // https://drafts.csswg.org/web-animations-1/#by-computed-value
+        // If the number of components or the types of corresponding components do not match, or if any component value uses discrete animation and the two corresponding values do not match, then the property values combine as discrete.
+        if from_font_style != to_font_style {
+            return discrete_value(context, from, to, delta);
+        }
         let angle_value = match (from_angle, to_angle) {
             (Some((from_value, from_unit)), Some((to_value, to_unit))) => {
                 let (Some(from_value), Some(to_value)) = (
@@ -7731,7 +7740,7 @@ pub(crate) fn interpolate_value(
             _ => RetainedStyleValueData::none(),
         };
         return owned(StyleValueData::FontStyle {
-            font_style,
+            font_style: from_font_style,
             angle_value,
         });
     }
@@ -7926,6 +7935,14 @@ fn composite_batch_value<'a>(
         composite_offset_rotate(underlying, animated).map_or_else(handled_without_value, owned)
     } else if property_id == crate::css::property_metadata::property_id::TRANSFORM {
         composite_transform_list(context, underlying, animated, operation).map_or_else(handled_without_value, owned)
+    } else if is_sizing_property(property_id) {
+        combine_calc_size(
+            Some(context),
+            underlying,
+            animated,
+            crate::css::calc::add_calc_size_calculations,
+        )
+        .map_or_else(|| composite_scalar_value(underlying, animated, operation), owned)
     } else {
         composite_scalar_value(underlying, animated, operation)
     };
@@ -8025,8 +8042,20 @@ fn evaluate_animation_value(
         .optional_data()
         .or(input.initial)
         .expect("an animated property must have an initial value");
-    let start = composite_batch_value(context, input.property_id, underlying, start, start_plan.composite);
-    let end = composite_batch_value(context, input.property_id, underlying, end, end_plan.composite);
+    // https://drafts.csswg.org/web-animations-1/#the-effect-value-of-a-keyframe-animation-effect
+    // NB: Steps 8 and 9 generate implicit endpoints with "a property value set to underlying value, a
+    //     keyframe-specific composite operation of replace". Take the current underlying value, including
+    //     the effects already composed beneath this one, rather than the value captured during preparation.
+    let start = if start_keyframe.is_implicit {
+        BatchAnimationValue::Borrowed(underlying)
+    } else {
+        composite_batch_value(context, input.property_id, underlying, start, start_plan.composite)
+    };
+    let end = if end_keyframe.is_implicit {
+        BatchAnimationValue::Borrowed(underlying)
+    } else {
+        composite_batch_value(context, input.property_id, underlying, end, end_plan.composite)
+    };
     let result = interpolate_value(Some(context), input.property_id, start.data(), end.data(), progress);
     assert!(result.handled);
     AnimatedProperty {
@@ -8082,6 +8111,8 @@ pub(crate) struct AnimatedCustomProperties {
     stores: KeyframeStores,
     names: Vec<crate::css::retained_fly_string::RetainedUtf16FlyString>,
     units: Vec<Vec<u16>>,
+    /// Whether any interval values are resolved afresh rather than retained across samples.
+    pub(crate) has_uncached_interval_values: bool,
 }
 
 type Registry = crate::css::custom_properties::CustomPropertyRegistry;
@@ -8331,6 +8362,7 @@ pub(crate) fn resolve_published_animation_declarations(
         stores,
         names: Vec::new(),
         units: Vec::new(),
+        has_uncached_interval_values: false,
     };
     let substitution_marks = std::cell::Cell::new(0_u8);
     let style_query_references = std::cell::RefCell::new(None);
@@ -8505,7 +8537,7 @@ pub(crate) fn resolve_published_animation_declarations(
             }
             let name = custom_properties.units(name_id);
             let interval_span = select_custom_property_interval_span(effect, &keyframe_lookups, selection.current_key);
-            let interval_values = effect.resolve_custom_property_interval_values(
+            let (interval_values, values_are_retained) = effect.resolve_custom_property_interval_values(
                 interval_span.map(|lookup| lookup.declaration_index),
                 registry.name_has_interpolable_syntax(name),
                 || {
@@ -8537,6 +8569,7 @@ pub(crate) fn resolve_published_animation_declarations(
                     is_transition,
                 });
             }
+            custom_properties.has_uncached_interval_values |= !values_are_retained;
         }
         effects.push(FfiAnimationEffect {
             first_keyframe_index,
@@ -8714,6 +8747,7 @@ pub(crate) fn evaluate_animations(batch: ComputedAnimationBatch<'_>) -> Vec<(u32
                         .map(|&property_index| AnimationKeyframeValue {
                             keyframe: resolved.properties[property_index].keyframe_index,
                             value: computed_keyframe_values[property_index].clone(),
+                            is_implicit: resolved.properties[property_index].is_implicit,
                         })
                         .collect()
                 })
@@ -9197,6 +9231,7 @@ mod tests {
             .map(|(keyframe, value)| AnimationKeyframeValue {
                 keyframe,
                 value: number(value),
+                is_implicit: false,
             })
             .collect::<Vec<_>>();
         let input = AnimationValueInput {
@@ -9232,6 +9267,7 @@ mod tests {
             .map(|(keyframe, value)| AnimationKeyframeValue {
                 keyframe,
                 value: RetainedStyleValueData::from_arc(Arc::new(StyleValueData::Number { value })),
+                is_implicit: false,
             })
             .collect::<Vec<_>>();
         let evaluate = |current_key| {
@@ -9282,10 +9318,12 @@ mod tests {
                 AnimationKeyframeValue {
                     keyframe: 0,
                     value: start_value,
+                    is_implicit: false,
                 },
                 AnimationKeyframeValue {
                     keyframe: 1,
                     value: end_value,
+                    is_implicit: false,
                 },
             ];
             let input = AnimationValueInput {

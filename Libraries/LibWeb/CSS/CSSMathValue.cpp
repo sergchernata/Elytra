@@ -31,19 +31,21 @@ WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> CSSMathValue::create_an_int
     //
     //     Return the value.
 
-    // FIXME: Check types allowed by registered custom properties.
     auto context = CalculationContext::for_property(property);
     auto matches = [&] {
         if (type().matches_angle(context.percentages_resolve_as))
             return property_accepts_type(property.id(), ValueType::Angle);
-        if (type().matches_flex(context.percentages_resolve_as))
-            return property_accepts_type(property.id(), ValueType::Flex);
+        if (type().matches_flex(context.percentages_resolve_as)) {
+            // https://drafts.csswg.org/css-grid-2/#fr-unit
+            // NB: <flex> values "cannot be represented in or combined with other unit types in calc() expressions".
+            return property.is_custom_property() && property_accepts_type(property.id(), ValueType::Flex);
+        }
         if (type().matches_frequency(context.percentages_resolve_as))
             return property_accepts_type(property.id(), ValueType::Frequency);
         if (type().matches_length(context.percentages_resolve_as))
             return property_accepts_type(property.id(), ValueType::Length);
         if (type().matches_number(context.percentages_resolve_as))
-            return property_accepts_type(property.id(), ValueType::Number) || property_accepts_type(property.id(), ValueType::OpacityValue);
+            return property_accepts_type(property.id(), ValueType::Number) || property_accepts_type(property.id(), ValueType::Integer) || property_accepts_type(property.id(), ValueType::OpacityValue);
         if (type().matches_percentage())
             return property_accepts_type(property.id(), ValueType::Percentage) || property_accepts_type(property.id(), ValueType::OpacityValue);
         if (type().matches_resolution(context.percentages_resolve_as))

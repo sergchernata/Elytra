@@ -69,6 +69,10 @@ public:
 
         setAttribute(Qt::WA_ShowWithoutActivating);
 #if defined(AK_OS_MACOS)
+        // NB: The window is clear outside its rounded corners.
+        setAttribute(Qt::WA_TranslucentBackground);
+#endif
+#if defined(AK_OS_MACOS)
         // A tool window otherwise hides whenever Ladybird is inactive. Qt's WA_MacAlwaysShowToolWindow would also make
         // it order every window to the front whenever Ladybird is activated, bringing browser windows forward too.
         keep_appkit_window_visible_while_inactive(*this);

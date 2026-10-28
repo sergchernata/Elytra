@@ -25,9 +25,11 @@ set(SOURCES
     Bindings/InterfaceObject.cpp
     Bindings/Intrinsics.cpp
     Bindings/MainThreadVM.cpp
+    Bindings/NewGlobalObject.cpp
     Bindings/OptionConstructor.cpp
     Bindings/PlatformObject.cpp
     Bindings/RustBindingsServices.cpp
+    Bindings/StylePropertyMapReadOnlyIterator.cpp
     Bindings/PrincipalHostDefined.cpp
     Bindings/Wrappable.cpp
     Bindings/WrapperWorld.cpp
@@ -199,6 +201,7 @@ set(SOURCES
     CSS/StyleInvalidation.cpp
     CSS/StyleProperty.cpp
     CSS/StylePropertyMapReadOnly.cpp
+    CSS/Zoom.cpp
     CSS/StylePropertyMap.cpp
     CSS/StyleScope.cpp
     CSS/StyleSheet.cpp
@@ -262,6 +265,7 @@ set(SOURCES
     DOM/DocumentLoadEventDelayer.cpp
     DOM/DocumentLoading.cpp
     DOM/DocumentObserver.cpp
+    DOM/DocumentOrShadowRoot.cpp
     DOM/DocumentType.cpp
     DOM/DOMEventListener.cpp
     DOM/DOMImplementation.cpp
@@ -353,6 +357,7 @@ set(SOURCES
     Fetch/Engine/WholeBodyTransport.cpp
     Fetch/Fetching/BodyStreamPullSource.cpp
     Fetch/Fetching/Checks.cpp
+    Fetch/Fetching/ClientContextSnapshots.cpp
     Fetch/Fetching/FetchedDataReceiver.cpp
     Fetch/Fetching/NetworkBodyPump.cpp
     Fetch/Fetching/Fetching.cpp
@@ -373,6 +378,7 @@ set(SOURCES
     Fetch/Infrastructure/HTTP/Requests.cpp
     Fetch/Infrastructure/HTTP/Responses.cpp
     Fetch/Infrastructure/IncrementalReadLoopReadRequest.cpp
+    Fetch/Infrastructure/KeepaliveQuotaAccountant.cpp
     Fetch/Infrastructure/MimeTypeBlocking.cpp
     Fetch/Infrastructure/NetworkPartitionKey.cpp
     Fetch/Infrastructure/NoSniffBlocking.cpp
@@ -622,8 +628,8 @@ set(SOURCES
     HTML/Scripting/Agent.cpp
     HTML/Scripting/ClassicScript.cpp
     HTML/Scripting/Environments.cpp
-    HTML/Scripting/EnvironmentSettingsSnapshot.cpp
     HTML/Scripting/ExceptionReporter.cpp
+    HTML/Scripting/FetchClient.cpp
     HTML/Scripting/Fetching.cpp
     HTML/Scripting/ImportMap.cpp
     HTML/Scripting/ImportMapParseResult.cpp
@@ -735,6 +741,7 @@ set(SOURCES
     Loader/ContentBlocker.cpp
     Loader/FileRequest.cpp
     Loader/GeneratedPagesLoader.cpp
+    Loader/LoaderConfig.cpp
     Loader/ResourceLoader.cpp
     Loader/SourceHighlighter.cpp
     MathML/AttributeNames.cpp
@@ -968,6 +975,9 @@ set(SOURCES
     UIEvents/PointerEvent.cpp
     UIEvents/PointerTypes.cpp
     UIEvents/TextEvent.cpp
+    UIEvents/Touch.cpp
+    UIEvents/TouchEvent.cpp
+    UIEvents/TouchList.cpp
     UIEvents/UIEvent.cpp
     UIEvents/WheelEvent.cpp
     UserTiming/PerformanceMark.cpp
@@ -1036,6 +1046,7 @@ set(SOURCES
     WebDriver/BiDi/BiDi.cpp
     WebDriver/BiDi/BrowsingContext.cpp
     WebDriver/BiDi/Input.cpp
+    WebDriver/BiDi/Network.cpp
     WebDriver/BiDi/RemoteValue.cpp
     WebDriver/BiDi/Script.cpp
     WebDriver/Contexts.cpp

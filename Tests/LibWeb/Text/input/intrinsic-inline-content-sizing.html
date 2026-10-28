@@ -10,6 +10,7 @@
     .container { width: 240px; height: 100px; font: 10px/20px Ahem; }
     .target { display: inline-block; }
     .atomic { display: inline-block; }
+    .block-after::after { content: "beta gamma"; display: block; }
     .geometry-container {
         font: 20px/30px Ahem;
         white-space: break-spaces;
@@ -17,6 +18,18 @@
     }
 </style>
 <script>
+    function runsUnderInlineSizeMeasurements(events) {
+        let runs = 0;
+        const openInlineSizeMeasurementDepths = [];
+        for (const event of events) {
+            while (openInlineSizeMeasurementDepths.length && openInlineSizeMeasurementDepths.at(-1) >= event.depth)
+                openInlineSizeMeasurementDepths.pop();
+            if (event.event === "run" && openInlineSizeMeasurementDepths.length) runs++;
+            if (event.event === "measure" && event.size.endsWith("inline")) openInlineSizeMeasurementDepths.push(event.depth);
+        }
+        return runs;
+    }
+
     asyncTest(async done => {
         await document.fonts.load("10px Ahem");
         const cases = [
@@ -50,6 +63,8 @@
             ["absolute", "position: relative", 'alpha<span style="position: absolute">long positioned text</span> beta'],
             ["vertical", "writing-mode: vertical-rl", 'alpha <span class=atomic>beta gamma</span>'],
             ["orthogonal atomic", "", '<span class=atomic style="writing-mode: vertical-rl; height: 60px">alpha beta gamma</span> delta'],
+            ["vertical grid limited to min-content", "", '<div style="display: grid; writing-mode: vertical-rl; max-width: min-content; height: 60px"><div>alpha beta</div><div>gamma delta</div></div>'],
+            ["vertical grid limited to max-content", "", '<div style="display: grid; writing-mode: vertical-rl; max-width: max-content; height: 60px"><div>alpha beta</div><div>gamma delta</div></div>'],
             ["replaced", "", '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="20"></svg> alpha'],
             ["aspect ratio", "", '<span class=atomic style="height: 40px; aspect-ratio: 2">alpha</span> beta'],
             ["percentage aspect ratio", "height: 50%", '<span class=atomic style="height: 50%; aspect-ratio: 2">alpha</span> beta'],
@@ -58,6 +73,95 @@
             ["inline table", "", '<span style="display: inline-table"><span style="display: table-cell">alpha beta</span><span style="display: table-cell">gamma</span></span> delta'],
             ["containment", "contain: size; contain-intrinsic-size: 35px 25px", "alpha beta gamma"],
             ["scroll container", "overflow: scroll", "alpha beta gamma"],
+            ["hanging indent", "text-indent: 13px hanging", "alpha beta gamma"],
+            ["each-line indent", "text-indent: 13px each-line", "alpha<br>beta gamma"],
+            ["percentage indent", "text-indent: 50%", "alpha beta gamma"],
+            ["negative indent before break", "text-indent: -13px", "alpha<br>beta"],
+            ["indent around block", "text-indent: 13px", "alpha <span>beta<div>gamma delta</div>epsilon</span> zeta"],
+            ["indent before leading block", "text-indent: 13px", "<span><div>alpha beta</div>gamma</span>"],
+            ["hanging indent around block", "text-indent: 13px hanging", "alpha<span><div>beta</div>gamma</span>"],
+            ["each-line indent around block", "text-indent: 13px each-line", "alpha<br>beta<span><div>gamma</div>delta</span>"],
+            ["block between inline edges", "", '<span style="padding: 0 6px; margin-left: 4px">alpha<div style="margin: 0 3px">beta</div>gamma</span>'],
+            ["block with constraints", "", 'alpha<span><div style="width: 70px; padding: 0 5px">beta gamma</div></span>delta'],
+            ["block with percentage width", "", 'alpha<span><div style="width: 50%">beta gamma delta</div></span>'],
+            ["anywhere inside inline edges", "overflow-wrap: anywhere", 'alpha <span style="padding: 0 7px">betagamma</span>'],
+            ["break-word", "word-break: break-word", "alphabeta gamma"],
+            ["scroll container with indent", "overflow: auto; text-indent: 13px", "alpha beta gamma"],
+            ["scroll container with block", "overflow: auto", "alpha<span><div>beta gamma</div></span>delta"],
+            ["hanging indent wider than first line", "text-indent: 40px hanging", "aa bb"],
+            ["negative indent wider than first line", "text-indent: -40px", "a bbbbb"],
+            ["negative indent wider than content", "text-indent: -100px", "aa bb"],
+            ["negative margin wider than first line", "", '<span style="margin-left: -40px">a</span> bbbbb'],
+            ["negative block margins", "", '<div style="margin: 0 -15px">alpha beta</div><div style="margin-left: -8px">gamma</div>'],
+            ["block margins beyond content", "", '<div style="margin-right: -200px">alpha beta</div>'],
+            ["nested block contributions", "", '<div style="padding: 0 5px"><div style="width: 70px">alpha</div><div style="margin-left: 20px">beta gamma</div></div><div style="border-left: 3px solid">delta</div>'],
+            ["block constraints", "", '<div style="width: 80px; min-width: 90px; max-width: 100px; padding: 0 4px; margin: 0 3px">alpha</div><div style="max-width: 60px">beta gamma delta</div><div style="min-width: 130px">epsilon</div>'],
+            ["block percentages", "", '<div style="width: 50%; margin-left: 10%; padding-right: 5%">alpha beta</div><div>gamma</div>'],
+            ["new formatting context blocks", "", '<div style="display: flow-root; margin: 0 -10px 0 25px">alpha beta</div><div style="overflow: hidden; margin-left: -20px">gamma delta</div>'],
+            ["floats in sibling blocks", "", '<div><div style="float: left; width: 100px; height: 100px"></div></div><div><div style="float: left; width: 80px; height: 10px"></div></div>'],
+            ["float in a block beside later inline content", "", '<div><div style="float: left; width: 50px; height: 20px"></div></div>text <span style="float: left; width: 30px; height: 20px"></span>more'],
+            ["float beside float", "", '<div style="float: left">alpha</div><div style="float: right">beta</div>'],
+            ["float clearing one side", "", '<div style="float: left">alpha</div><div style="float: right">beta</div><div style="float: left; clear: left">gamma</div><div style="float: right">delta</div>'],
+            ["float clearing both sides", "", '<div style="float: left">alpha</div><div style="float: right">beta</div><div style="float: left; clear: both">gamma</div>'],
+            ["floats with negative margins", "", '<div style="float: left; margin-right: -60px">alpha</div><div style="float: left; margin-right: -20px">beta</div>gamma'],
+            ["new formatting context beside a float", "", '<div style="float: left">alpha</div><div style="display: flow-root">beta gamma</div>'],
+            ["new formatting context with a negative margin beside a float", "", '<div style="float: left">alpha</div><div style="overflow: hidden; margin-left: -20px">beta gamma</div>'],
+            ["new formatting context with a positive margin beside a float", "", '<div style="float: right">alpha</div><div style="overflow: hidden; margin: 0 20px 0 70px">beta gamma</div>'],
+            ["new formatting context with clearance", "", '<div style="float: left">alpha</div><div style="display: flow-root; clear: left">beta gamma</div>'],
+            ["block after a float", "", '<div style="float: left">alpha</div><div>beta gamma</div>'],
+            ["floats followed by inline content", "", '<div>alpha</div><div style="float: left">beta</div><div style="float: right">gamma</div>delta<br>epsilon zeta eta'],
+            ["float followed by inline content with a clearing float", "", '<div>x</div><div style="float: left">alpha</div>beta<span style="float: left; clear: left">gamma</span>'],
+            ["floats in inline content across a forced break", "", '<span style="float: left">alpha</span>beta<br><span style="float: left">gamma</span>delta'],
+            ["tall float beside two lines", "", '<div style="float: left; width: 50px; height: 100px"></div>aa<br>bbbbbbbb'],
+            ["new formatting context beside a float, separated by whitespace", "", '\n<div style="float: left">alpha</div>\n<div style="display: flow-root">beta gamma</div>\n'],
+            ["float clearing one side, separated by whitespace", "", '\n<div style="float: left">alpha</div>\n<div style="float: right">beta</div>\n<div style="float: left; clear: left">gamma</div>\n<div style="float: right">delta</div>\n'],
+            ["float clearing one side, separated by whitespace, before a block", "", '\n<div style="float: left">alpha</div>\n<div style="float: right">beta</div>\n<div style="float: left; clear: left">gamma</div>\n<div style="float: right">delta</div>\n<div>x</div>'],
+            ["float beside a block inside an inline", "", '<div>x</div><div style="float: left">alpha</div><span><div>beta</div></span>'],
+            ["float before a block pseudo-element", "", '<div class=block-after><div>x</div><div style="float: left">alpha</div></div>'],
+            ["hanging indent wider than first line in a block", "", '<div style="text-indent: 40px hanging">aa bb</div>'],
+            ["negative indent wider than first line in a block", "", '<div style="text-indent: -40px">a bbbbb</div>'],
+            ["negative margin wider than first line in a block", "", '<div><span style="margin-left: -40px">a</span> bbbbb</div>'],
+            ["column spanner", "columns: 2; column-gap: 10px", '<div>alpha beta</div><div style="column-span: all">gamma delta epsilon</div>'],
+            ["fieldset", "", '<fieldset style="margin: 0; padding: 0 5px; border: 2px solid"><legend style="padding: 0">alpha beta gamma</legend>delta</fieldset>'],
+            ["fieldset legend with min-width", "", '<fieldset style="margin: 0; padding: 0 5px; border: 2px solid"><legend style="padding: 0; min-width: 200px">ab</legend>x</fieldset>'],
+            ["fieldset legend with max-width", "", '<fieldset style="margin: 0; padding: 0 5px; border: 2px solid"><legend style="padding: 0; max-width: 50px">alpha beta gamma</legend>delta</fieldset>'],
+            ["block button", "", '<button style="display: block; font: inherit; padding: 0 3px; border: 1px solid">alpha beta</button><div>gamma</div>'],
+            ["list item", "", '<ul style="margin: 0; padding-left: 20px"><li>alpha beta</li></ul>'],
+            ["percentage height through anonymous block", "height: 100px", '<div>alpha</div>beta <span class=atomic style="height: 50%; aspect-ratio: 2"></span>'],
+            ["size-contained blocks", "", '<div style="contain: size">alpha beta gamma</div><div style="contain: inline-size; contain-intrinsic-width: 30px">alpha beta gamma</div><div>delta</div>'],
+            ["block table", "", '<table style="border-spacing: 3px"><tr><td>alpha beta</td><td>gamma</td></tr></table>'],
+            ["inline table with caption", "", '<table style="display: inline-table; border-spacing: 0"><caption>alpha beta gamma delta</caption><tr><td>x</td></tr></table> epsilon'],
+            ["collapsed table borders", "", '<table style="border-collapse: collapse; border: 6px solid"><tr><td style="border: 4px solid; padding: 0 3px">alpha beta</td><td style="border: 2px solid">gamma</td></tr></table>'],
+            ["fixed table layout", "", '<table style="table-layout: fixed; width: 150px; border-spacing: 0"><tr><td style="width: 40px">alpha beta</td><td>gamma delta</td></tr></table>'],
+            ["table constraints", "", '<table style="min-width: 130px; padding: 0 4px; border: 3px solid"><tr><td>alpha beta</td></tr></table><table style="max-width: 60px; border-spacing: 0"><tr><td>alpha beta gamma delta</td></tr></table>'],
+            ["floating table", "", '<table style="float: left; border-spacing: 0"><tr><td>alpha beta</td></tr></table>gamma'],
+            ["floating table with collapsed borders", "", '<table style="float: left; border-collapse: collapse"><tr><td style="border: 4px solid">alpha beta</td><td style="border: 4px solid">gamma</td></tr></table>'],
+            ["percentage height table cell", "height: 80px", '<table style="height: 100%; border-spacing: 0"><tr><td style="height: 50%">alpha beta</td></tr></table>'],
+            ["row flex", "", '<div style="display: flex; column-gap: 5px"><div>alpha beta</div><div style="padding: 0 3px">gamma</div></div>'],
+            ["row flex with flex factors", "", '<div style="display: flex"><div style="flex: 2 1 10px">alpha beta</div><div style="flex: 1 2 40px">gamma</div></div>'],
+            ["row flex with item constraints", "", '<div style="display: flex"><div style="min-width: 120px">alpha</div><div style="max-width: 30px">gamma delta</div><div style="flex-basis: content; width: 20px">beta</div></div>'],
+            ["row flex with a scroll container item", "", '<div style="display: flex"><div style="overflow: auto">alphabeta</div><div>gamma</div></div>'],
+            ["row flex with a percentage gap", "", '<div style="display: flex; column-gap: 10%"><div>alpha</div><div>beta</div></div>'],
+            ["wrapping row flex", "", '<div style="display: flex; flex-wrap: wrap; gap: 4px"><div>alpha beta</div><div>gamma</div><div>delta</div></div>'],
+            ["column flex", "", '<div style="display: flex; flex-direction: column"><div>alpha beta</div><div style="min-width: 70px; margin-left: 5px">gamma</div></div>'],
+            ["wrapping column flex", "", '<div style="display: flex; flex-direction: column; flex-wrap: wrap; height: 40px; column-gap: 5px"><div>alpha beta</div><div>gamma</div><div>delta</div></div>'],
+            ["column flex with an aspect ratio item", "", '<div style="display: flex; flex-direction: column"><div style="aspect-ratio: 2; height: 20px"></div><div>alpha</div></div>'],
+            ["nested flex", "", '<div style="display: flex"><div style="display: flex; flex-direction: column"><div>alpha beta</div><div style="display: flex"><span>x</span><span>yyyy</span></div></div><div>gamma</div></div>'],
+            ["row flex with a stretched aspect ratio item", "", '<div style="display: flex"><div style="aspect-ratio: 1"></div><div style="width: 10px; height: 60px"></div></div>'],
+            ["grid with fixed and flexible columns", "", '<div style="display: grid; grid-template-columns: 1fr 30px 2fr; column-gap: 5px"><div>alpha beta</div><div>x</div><div>gamma</div></div>'],
+            ["grid with intrinsic track bounds", "", '<div style="display: grid; grid-template-columns: minmax(min-content, max-content) minmax(20px, 1fr) fit-content(40px)"><div>alpha beta</div><div>gamma</div><div>delta epsilon</div></div>'],
+            ["grid with flexible intrinsic minimums", "", '<div style="display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(min-content, 2fr)"><div>alpha beta</div><div>gamma delta</div></div>'],
+            ["grid with spanning items", "", '<div style="display: grid; grid-template-columns: auto 1fr auto; gap: 4px"><div style="grid-column: span 2">alpha beta gamma delta</div><div>x</div><div style="grid-column: 2 / span 2">epsilon</div></div>'],
+            ["grid with item constraints", "", '<div style="display: grid; grid-template-columns: auto auto auto"><div style="min-width: 120px">alpha</div><div style="max-width: 30px">gamma delta</div><div style="width: 50%; padding: 0 3px; margin-left: 4px">beta</div></div>'],
+            ["grid with a scroll container item", "", '<div style="display: grid; grid-template-columns: auto auto"><div style="overflow: auto">alphabeta</div><div>gamma</div></div>'],
+            ["auto-fill grid with a percentage minimum", "", '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(30px, 1fr)); min-width: 50%"><div>alpha</div><div>beta</div><div>gamma</div></div>'],
+            ["auto-fit grid with a percentage gap", "", '<div style="display: grid; grid-template-columns: repeat(auto-fit, 40px) auto; column-gap: 10%"><div>alpha</div><div>beta gamma</div></div>'],
+            ["column flow grid with dense placement", "", '<div style="display: grid; grid-auto-flow: column dense; grid-template-rows: auto auto"><div>alpha</div><div style="grid-row: span 2">beta gamma</div><div>delta</div></div>'],
+            ["subgrid", "", '<div style="display: grid; grid-template-columns: auto auto; column-gap: 6px"><div style="display: grid; grid-column: span 2; grid-template-columns: subgrid; column-gap: 2px"><div>alpha beta</div><div>gamma</div></div><div>delta epsilon</div></div>'],
+            ["grid with an orthogonal item", "", '<div style="display: grid; grid-template-columns: auto auto"><div style="writing-mode: vertical-rl; height: 60px">alpha beta gamma</div><div>delta</div></div>'],
+            ["grid with an aspect ratio item sized by its row", "height: 80px", '<div style="display: grid; height: 100%; grid-template-columns: auto auto"><div style="aspect-ratio: 2; height: 50%"></div><div>alpha</div></div>'],
+            ["empty grid with fixed columns", "", '<div style="display: grid; grid-template-columns: 20px 1fr 30px; column-gap: 7px"></div>'],
+            ["row flex with a grid item distributing its columns", "", '<div style="display: flex"><div style="display: grid; width: 100px; grid-template-columns: 20px 20px; justify-content: space-between"><div>alpha</div><div>beta</div></div><div>gamma</div></div>'],
         ];
         for (const [name, declarations, content] of cases) {
             const container = document.createElement("div");
@@ -156,6 +260,34 @@
         println(`nowrap flex item width: ${flexItem.offsetWidth}`);
         flexContainer.remove();
 
+        const tableHost = document.createElement("div");
+        tableHost.style.cssText = "display:inline-block;font:20px/30px Ahem";
+        tableHost.innerHTML = "<table style='display:inline-table'><caption>AB CD</caption><tr><td>ABCD EF</td><td style='height:70px'>GH</td></tr><tr><td rowspan=2>IJ</td></tr></table>";
+        const tableWork = layoutWork(() => document.body.append(tableHost));
+        println(`inline table in an inline-block: width ${tableHost.offsetWidth}, runs under inline size measurements ${runsUnderInlineSizeMeasurements(tableWork.events)}`);
+        tableHost.remove();
+
+        const verticalHost = document.createElement("div");
+        verticalHost.style.cssText = "float:left;writing-mode:vertical-rl;height:100px;font:20px/30px Ahem";
+        verticalHost.innerHTML = "<div style='padding-left:1px'>".repeat(20) + "AB CD" + "</div>".repeat(20);
+        const verticalWork = layoutWork(() => document.body.append(verticalHost));
+        println(`nested vertical blocks in a float: width ${verticalHost.offsetWidth}, runs under inline size measurements ${runsUnderInlineSizeMeasurements(verticalWork.events)}`);
+        verticalHost.remove();
+
+        for (const [name, hostStyle, tableStyle] of [
+            ["percentage max-width table in a flex container", "display:flex;width:400px", "max-width:50%"],
+            ["min-content max-width table in a flex container", "display:flex;width:400px", "width:300px;max-width:min-content"],
+            ["percentage max-width floating table", "width:400px", "float:left;max-width:50%"],
+        ]) {
+            const host = document.createElement("div");
+            host.style.cssText = `${hostStyle};font:20px/30px Ahem`;
+            host.innerHTML = `<table style="${tableStyle};border-spacing:0"><caption>AB</caption><tr><td style="padding:0">ABCD EF GH IJ KL</td></tr></table><div style="width:10px;height:10px"></div>`;
+            document.body.append(host);
+            const table = host.querySelector("table");
+            println(`${name}: table width ${table.offsetWidth}, caption width ${table.querySelector("caption").offsetWidth}`);
+            host.remove();
+        }
+
         for (const whitespace of ["normal", "pre-wrap", "break-spaces"]) {
             for (const width of ["min-content", "max-content"]) {
                 const scrollContainer = document.createElement("div");
@@ -163,8 +295,7 @@
                 scrollContainer.innerHTML = "<p id=\"first\">ABCD EF GH</p><p id=\"second\">AB CD</p>";
                 const work = layoutWork(() => document.body.append(scrollContainer));
                 const measuredWidth = scrollContainer.offsetWidth;
-                const measuredParagraphs = work.boxes({ event: "inline size from items" }).join(", ") || "none";
-                println(`${whitespace}, ${width}: width ${measuredWidth}, paragraphs measured from items ${measuredParagraphs}`);
+                println(`${whitespace}, ${width}: width ${measuredWidth}, runs under inline size measurements ${runsUnderInlineSizeMeasurements(work.events)}`);
                 scrollContainer.remove();
             }
         }

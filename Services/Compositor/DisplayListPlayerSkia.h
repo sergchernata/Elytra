@@ -54,8 +54,7 @@ public:
 
     void flush(Gfx::PaintingSurface&) override;
     void flush_async(Gfx::PaintingSurface&, Function<void()>&&);
-    // A corner clip radius that is not zero shapes the thumb to the corner clip rect with that radius.
-    void paint_scrollbar(Gfx::PaintingSurface&, ScrollbarController::PresentedScrollbar const&, Gfx::IntRect const& corner_clip_rect = {}, int corner_clip_radius = 0);
+    void paint_scrollbar(Gfx::PaintingSurface&, ScrollbarController::PresentedScrollbar const&);
 
 private:
 #define DECLARE_PLAY_COMMAND(command_type) \
@@ -93,11 +92,6 @@ private:
     ScrollbarController const* m_scrollbar_controller { nullptr };
     DisplayListRasterCache* m_raster_cache { nullptr };
     DisplayListRasterCache& raster_cache() const { return *m_raster_cache; }
-
-    // Layer filters are built from their bytes once per frame node and kept until the visual
-    // context tree's structure changes, so a replayed frame does not rebuild them.
-    struct LayerImageFilterCache;
-    NonnullOwnPtr<LayerImageFilterCache> m_layer_image_filter_cache;
 };
 
 }

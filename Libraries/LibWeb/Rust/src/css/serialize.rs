@@ -10,6 +10,8 @@
 //! The output stays ASCII until the first non-ASCII code unit forces UTF-16 storage, matching
 //! AK::Utf16String's ASCII-or-UTF16 representation, then moves a native string owner to C++.
 
+use std::fmt::Write;
+
 mod shorthand;
 
 use crate::css::css_enums::keyword;
@@ -213,6 +215,18 @@ impl TextSink {
     }
 }
 
+impl Write for TextSink {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if text.is_ascii() {
+            self.push_ascii(text);
+        } else {
+            text.chars()
+                .for_each(|character| self.push_code_point(u32::from(character)));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn serialize_computed_size(size: &crate::css::computed_value_types::ComputedSize) -> String {
     use crate::css::computed_value_types::ComputedSizeKind;
 
@@ -282,6 +296,25 @@ pub(crate) fn serialize_component_values_to_utf16(
         ));
     }
     sink.into_utf16()
+}
+
+pub(crate) fn normalized_component_values_equal(
+    first: &[crate::css::parser::component_value::ComponentValue],
+    second: &[crate::css::parser::component_value::ComponentValue],
+) -> bool {
+    let mut first_sink = TextSink::new();
+    let mut second_sink = TextSink::new();
+    assert!(serialize_component_values_into(
+        &mut first_sink,
+        first,
+        ComponentSerializationMode::Normalized,
+    ));
+    assert!(serialize_component_values_into(
+        &mut second_sink,
+        second,
+        ComponentSerializationMode::Normalized,
+    ));
+    first_sink.content_equals(&second_sink)
 }
 
 pub(crate) fn original_component_values_source(
@@ -508,7 +541,7 @@ fn format_double_with_precision(sink: &mut TextSink, mut value: f64, precision: 
     } else if sign_always {
         sink.push_ascii("+");
     }
-    sink.push_ascii(&format!("{integer_part:.0}"));
+    write!(sink, "{integer_part:.0}").unwrap();
     if fraction_length > 0 {
         sink.push_ascii(".");
         for &digit in &fraction_digits[..fraction_length] {
@@ -528,7 +561,7 @@ pub(crate) fn serialize_a_number(sink: &mut TextSink, value: f64, mode: Serializ
         } else if value.is_nan() {
             sink.push_ascii("NaN");
         } else {
-            sink.push_ascii(&value.to_string());
+            write!(sink, "{value}").unwrap();
         }
         return;
     }
@@ -585,7 +618,7 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
             serialize_a_number(sink, *value, mode);
         }
         StyleValueData::Integer { value } => {
-            sink.push_ascii(&value.to_string());
+            write!(sink, "{value}").unwrap();
         }
         StyleValueData::Percentage { value } => {
             serialize_a_number(sink, *value, mode);
@@ -653,8 +686,18 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
                 serialize_a_dimension(sink, *value, LENGTH_UNIT_NAMES[*unit as usize], mode);
             }
         }
-        StyleValueData::String { string, .. } => {
-            with_fly_string_units(string, |units| serialize_a_string(sink, &units));
+        StyleValueData::String {
+            string,
+            serialize_without_quotes,
+            ..
+        } => {
+            if *serialize_without_quotes {
+                for &unit in string.units() {
+                    sink.push_code_unit(unit);
+                }
+            } else {
+                with_fly_string_units(string, |units| serialize_a_string(sink, &units));
+            }
         }
         StyleValueData::CustomIdent { custom_ident } => {
             with_fly_string_units(custom_ident, |units| serialize_an_identifier(sink, &units));
@@ -1943,7 +1986,7 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
                         }
                         sink.push_ascii(exponent);
                     } else {
-                        sink.push_ascii(&number.to_string());
+                        write!(sink, "{number}").unwrap();
                     }
                     continue;
                 }
@@ -2955,6 +2998,7 @@ fn serialize_display(sink: &mut TextSink, raw: u32) {
                     _ if inside == display_inside::FLEX => Some("flex"),
                     _ if inside == display_inside::_WEBKIT_BOX => Some("-webkit-box"),
                     _ if inside == display_inside::GRID => Some("grid"),
+                    _ if inside == display_inside::GRID_LANES => Some("grid-lanes"),
                     _ if inside == display_inside::TABLE => Some("table"),
                     _ => None,
                 }
@@ -2965,6 +3009,7 @@ fn serialize_display(sink: &mut TextSink, raw: u32) {
                     _ if inside == display_inside::FLEX => Some("inline-flex"),
                     _ if inside == display_inside::_WEBKIT_BOX => Some("-webkit-inline-box"),
                     _ if inside == display_inside::GRID => Some("inline-grid"),
+                    _ if inside == display_inside::GRID_LANES => Some("inline-grid-lanes"),
                     _ if inside == display_inside::RUBY => Some("ruby"),
                     _ if inside == display_inside::TABLE => Some("inline-table"),
                     _ if inside == display_inside::MATH => Some("math"),

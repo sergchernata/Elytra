@@ -106,6 +106,7 @@ runs:
         toolchain: ${{ inputs.toolchain }}
         cache_key_extra: ${{ inputs.os == 'Windows' && inputs.build_preset || steps.build-parameters.outputs.ccache_key }}
         ccache_path: ${{ steps.setup.outputs.ccache_path }}
+        sccache_path: ${{ steps.setup.outputs.sccache_path }}
         vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
 
     - name: Cache the WebAssembly spec test suite
@@ -129,7 +130,7 @@ runs:
       shell: bash
       env:
         VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas || '' }}
-        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
+        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas != '' && 'write' || '' }}
         RELEASE_VERSION: ${{ inputs.version }}
       run: |
         cmake --preset ${{ inputs.build_preset }} -B Build \
@@ -145,7 +146,7 @@ runs:
       shell: pwsh
       env:
         VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas || '' }}
-        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
+        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas != '' && 'write' || '' }}
       run: |
         cmake --preset ${{ inputs.build_preset }} -B Build `
           -DENABLE_CI_BASELINE_CPU=ON
@@ -156,7 +157,7 @@ runs:
       shell: bash
       env:
         VCPKG_CACHE_SAS: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas || '' }}
-        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && 'write' || '' }}
+        VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas != '' && 'write' || '' }}
       run: |
         cmake --preset ${{ inputs.build_preset }} -B Build \
           ${{ steps.build-parameters.outputs.cmake_options }} \
@@ -182,5 +183,7 @@ runs:
         arch: ${{ inputs.arch }}
         ccache_path: ${{ steps.setup.outputs.ccache_path }}
         ccache_primary_key: ${{ steps.cache-restore.outputs.ccache_primary_key }}
+        sccache_path: ${{ steps.setup.outputs.sccache_path }}
+        sccache_primary_key: ${{ steps.cache-restore.outputs.sccache_primary_key }}
         vcpkg_cache_path: ${{ steps.setup.outputs.vcpkg_cache_path }}
         vcpkg_cache_primary_key: ${{ steps.cache-restore.outputs.vcpkg_cache_primary_key }}

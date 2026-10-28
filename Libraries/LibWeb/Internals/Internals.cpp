@@ -8,6 +8,7 @@
 #include <AK/Find.h>
 #include <AK/HashTable.h>
 #include <AK/JsonObject.h>
+#include <AK/JsonParser.h>
 #include <AK/NumericLimits.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf16StringBuilder.h>
@@ -96,6 +97,7 @@
 #include <LibWeb/Layout/TreeBuilderRustFFI.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
+#include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
@@ -108,6 +110,8 @@
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/Streams/ReadableStream.h>
 #include <LibWeb/StyleValueRustFFI.h>
+#include <LibWeb/WebDriver/Actions.h>
+#include <LibWeb/WebDriver/InputState.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/Promise.h>
 #include <LibWeb/WebSockets/WebSocket.h>
@@ -117,6 +121,7 @@
 #include <LibWebCommon/Page/DragEvent.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
+#include <LibWebCommon/WebDriver/Response.h>
 
 namespace Web::Internals {
 
@@ -175,6 +180,11 @@ void Internals::visit_edges(GC::Cell::Visitor& visitor)
 
 void Internals::signal_test_is_done(Utf16String const& text)
 {
+    // NB: A listener may finish a test while the UI still owns input from its action sequence.
+    if (m_actions_running) {
+        m_pending_action_test_result = text;
+        return;
+    }
     perform_per_test_cleanup();
     page().client().page_did_finish_test(text);
 }
@@ -624,8 +634,8 @@ void Internals::send_text(HTML::HTMLElement& target, Utf16String const& text, We
 // The compositor context that the UI routes this page's input through.
 static Compositor::CompositorContextHandle* compositor_context_routing_input_for(HTML::Window& window)
 {
-    auto local_root = window.navigable()->local_root();
-    if (!local_root->has_compositor_context())
+    auto local_root = local_root_of(window);
+    if (!local_root || !local_root->has_compositor_context())
         return nullptr;
     return &local_root->compositor_context();
 }
@@ -643,6 +653,11 @@ static void let_compositor_take_in_every_rendered_frame(HTML::Window& window)
         compositor_context->synchronize_for_testing();
 }
 
+void Internals::synchronize_compositor()
+{
+    let_compositor_take_in_every_rendered_frame(window());
+}
+
 void Internals::send_text_through_ui_process(Utf16String const& text)
 {
     let_compositor_take_in_every_rendered_frame(window());
@@ -655,6 +670,17 @@ void Internals::send_text_through_ui_process(Utf16String const& text)
             event.should_insert_text = type == Web::KeyEvent::Type::KeyDown;
             page().client().page_did_request_key_event_for_testing(move(event));
         }
+    }
+}
+
+void Internals::send_key_through_ui_process(Utf16String const& key_name)
+{
+    let_compositor_take_in_every_rendered_frame(window());
+    for (auto type : { Web::KeyEvent::Type::KeyDown, Web::KeyEvent::Type::KeyUp }) {
+        Web::KeyEvent event;
+        event.type = type;
+        event.key = UIEvents::key_code_from_string(key_name.utf16_view());
+        page().client().page_did_request_key_event_for_testing(move(event));
     }
 }
 
@@ -731,6 +757,49 @@ static Web::MouseEvent::Type mouse_event_type_from(Bindings::MouseEventThroughUI
     VERIFY_NOT_REACHED();
 }
 
+void Internals::perform_actions(Utf16String const& json, GC::Ref<WebIDL::Promise> promise)
+{
+    auto& realm = window().principal_realm();
+    auto reject = [&](String const& message) {
+        WebIDL::reject_promise(realm, promise, JS::PrimitiveString::create(vm(), Utf16String::from_utf8(message)));
+    };
+    if (m_actions_running) {
+        reject("An action sequence is already running"_string);
+        return;
+    }
+    auto value = JsonValue::from_string(json.to_utf8());
+    if (value.is_error()) {
+        reject("Invalid action JSON"_string);
+        return;
+    }
+    auto& input_state = WebDriver::get_input_state(*window().navigable()->top_level_traversable());
+    WebDriver::ActionsOptions options;
+    options.is_element_origin = [](JsonValue const&) { return false; };
+    auto actions = WebDriver::extract_an_action_sequence(input_state, value.release_value(), options);
+    if (actions.is_error()) {
+        reject(actions.error().message);
+        return;
+    }
+    let_compositor_take_in_every_rendered_frame(window());
+    m_actions_running = true;
+    auto executor = WebDriver::dispatch_actions(input_state, actions.release_value(), *window().associated_document().browsing_context(), options,
+        GC::create_function(heap(), [this, promise, realm = GC::Ref { realm }](WebDriver::Response response) {
+            HTML::TemporaryExecutionContext context { *realm };
+            m_actions_running = false;
+            m_actions_executor = {};
+            if (response.is_error())
+                WebIDL::reject_promise(*realm, promise, JS::PrimitiveString::create(realm->vm(), Utf16String::from_utf8(response.error().message)));
+            else
+                WebIDL::resolve_promise(*realm, promise);
+            if (m_pending_action_test_result.has_value()) {
+                auto text = m_pending_action_test_result.release_value();
+                signal_test_is_done(text);
+            }
+        }));
+    if (m_actions_running)
+        m_actions_executor = GC::make_root(executor);
+}
+
 void Internals::mouse_event_through_ui_process(Bindings::MouseEventThroughUIProcessType type, double x, double y, Bindings::MouseEventThroughUIProcessOptions const& options, GC::Ref<WebIDL::Promise> promise)
 {
     auto event = mouse_event_through_ui_process_at(mouse_event_type_from(type), x, y);
@@ -741,6 +810,22 @@ void Internals::mouse_event_through_ui_process(Bindings::MouseEventThroughUIProc
         event.buttons = event.button;
     event.modifiers = static_cast<UIEvents::KeyModifier>(options.modifiers);
     event.click_count = options.click_count;
+    if (options.pointer.has_value() && (options.pointer->pointer_type == u"pen"sv || options.pointer->pointer_type == u"touch"sv)) {
+        auto const& init = *options.pointer;
+        PointerProperties properties;
+        properties.pointer_id = init.pointer_id;
+        properties.pointer_type = init.pointer_type == u"touch"sv ? PointerType::Touch : PointerType::Pen;
+        properties.width = init.width;
+        properties.height = init.height;
+        properties.pressure = init.pressure;
+        properties.tangential_pressure = init.tangential_pressure;
+        properties.tilt_x = init.tilt_x.value_or(0);
+        properties.tilt_y = init.tilt_y.value_or(0);
+        properties.twist = init.twist;
+        properties.altitude_angle = init.altitude_angle.value_or(AK::Pi<double> / 2);
+        properties.azimuth_angle = init.azimuth_angle.value_or(0);
+        event.pointer_data = PointerInputData { properties };
+    }
     Vector<Web::MouseEvent> events;
     events.append(move(event));
     send_mouse_events_through_ui_process(move(events), promise);
@@ -805,26 +890,26 @@ UIEvents::MouseButton Internals::button_from_unsigned_short(WebIDL::UnsignedShor
     }
 }
 
-void Internals::mouse_down(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers)
+void Internals::mouse_down(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers, Optional<WebIDL::UnsignedShort> buttons)
 {
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
     auto pressed_button = button_from_unsigned_short(button);
-    page.handle_mousedown(position, position, pressed_button, pressed_button, modifiers, click_count);
+    page.handle_mousedown(position, position, pressed_button, buttons.value_or(pressed_button), modifiers, click_count);
 }
 
-void Internals::mouse_up(double x, double y, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers)
+void Internals::mouse_up(double x, double y, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers, WebIDL::UnsignedShort buttons)
 {
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
-    page.handle_mouseup(position, position, button_from_unsigned_short(button), 0, modifiers);
+    page.handle_mouseup(position, position, button_from_unsigned_short(button), buttons, modifiers);
 }
 
-void Internals::mouse_move(double x, double y, WebIDL::UnsignedShort modifiers)
+void Internals::mouse_move(double x, double y, WebIDL::UnsignedShort modifiers, WebIDL::UnsignedShort buttons)
 {
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
-    page.handle_mousemove(position, position, 0, modifiers);
+    page.handle_mousemove(position, position, buttons, modifiers);
 }
 
 void Internals::mouse_leave()
@@ -848,7 +933,7 @@ void Internals::click_and_hold(double x, double y, WebIDL::UnsignedShort click_c
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
     auto mouse_button = button_from_unsigned_short(button);
-    page.handle_mousedown(position, position, mouse_button, 0, modifiers, click_count);
+    page.handle_mousedown(position, position, mouse_button, mouse_button, modifiers, click_count);
 }
 
 void Internals::wheel(GC::Ref<WebIDL::Promise> promise, double x, double y, double delta_x, double delta_y, bool precise, Bindings::ScrollGesturePhase phase, Bindings::WheelTicks const& ticks)
@@ -960,6 +1045,16 @@ void Internals::pinch(double x, double y, double scale_delta, WebIDL::UnsignedSh
     auto& page = this->page();
     auto position = page.css_to_device_point({ x, y });
     page.handle_pinch_event(position, modifiers, scale_delta);
+}
+
+void Internals::pinch_through_ui_process(double x, double y, double scale_delta)
+{
+    let_compositor_take_in_every_rendered_frame(window());
+
+    Web::PinchEvent event;
+    event.position = page().css_to_device_point(window().navigable()->to_page_position({ x, y }));
+    event.scale_delta = scale_delta;
+    page().client().page_did_request_pinch_event_for_testing(window().navigable()->local_root()->id(), event);
 }
 
 void Internals::reset_zoom()
@@ -1221,18 +1316,24 @@ bool Internals::set_disk_cache_enabled_for_navigations(bool enabled)
 
 void Internals::simulate_request_server_connection_loss()
 {
-    auto disconnected_client = move(ResourceLoader::the().request_client());
-    auto request_server_died_callback = move(disconnected_client->on_request_server_died);
-    disconnected_client = nullptr;
+    Vector<Optional<Utf16String>> top_level_sites { OptionalNone {} };
+    for (auto& top_level_site : ResourceLoader::the().top_level_sites())
+        top_level_sites.append(move(top_level_site));
 
-    // Synchronously obtain a replacement connection from the UI process, so that this process is not left unable to
-    // load resources.
-    page().client().page_did_lose_request_server_connection();
+    for (auto const& top_level_site : top_level_sites) {
+        auto disconnected_client = ResourceLoader::the().take_client_for_testing(top_level_site);
+        if (!disconnected_client)
+            continue;
+        auto request_server_died_callback = move(disconnected_client->on_request_server_died);
+        disconnected_client = nullptr;
 
-    // A real connection loss defers this callback. Exercise the case where the replacement connection arrives before
-    // that deferred callback runs.
-    if (request_server_died_callback)
-        request_server_died_callback();
+        // Replace the connection synchronously so resource loading can continue.
+        page().client().page_did_lose_request_server_connection(top_level_site);
+
+        // Exercise reconnection before the deferred connection-loss callback runs.
+        if (request_server_died_callback)
+            request_server_died_callback();
+    }
 }
 
 void Internals::simulate_worker_request_server_connection_loss()
@@ -1290,7 +1391,7 @@ WebIDL::ExceptionOr<void> Internals::set_site_compatibility_data(Utf16String con
     if (data.is_error())
         return window().principal_realm().vm().throw_completion<JS::InternalError>(Utf16String::formatted("Could not set site compatibility data: {}", data.error()));
 
-    ResourceLoader::the().set_site_compatibility_data(data.release_value());
+    Web::set_site_compatibility_data(data.release_value());
     return {};
 }
 
@@ -1957,8 +2058,12 @@ void Internals::perform_per_test_cleanup()
     m_gamepads.clear();
 
     // Clear any input state
-    if (auto local_root = local_root_of(window()))
+    if (auto local_root = local_root_of(window())) {
         local_root->event_handler().clear_per_test_input_state({});
+        WebDriver::reset_input_state(*local_root->top_level_traversable());
+    }
+    if (auto* compositor_context = compositor_context_routing_input_for(window()))
+        compositor_context->clear_per_test_input_state_for_testing();
     if (page().input_trace().is_recording())
         (void)take_input_trace_records(window());
 

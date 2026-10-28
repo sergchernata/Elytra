@@ -32,6 +32,9 @@ use drive::{DrivenTable, FontDriveGoal, FullDrive, PartialDrive};
 pub(super) struct RootFontInputs {
     metrics: [u64; 5],
     depends_on_viewport: bool,
+    /// https://drafts.csswg.org/css-viewport/#effective-zoom
+    /// The bits of the effective zoom of the document element, which the metrics are zoomed by.
+    effective_zoom: u64,
 }
 
 /// An element's old and new style records.
@@ -83,6 +86,11 @@ impl RootFontInputs {
         )
     }
 
+    /// https://drafts.csswg.org/css-viewport/#effective-zoom
+    pub(super) fn effective_zoom(self) -> f64 {
+        f64::from_bits(self.effective_zoom)
+    }
+
     fn apply_to(self, inputs: &mut bridge::FfiDocumentStyleComputationInputs) {
         inputs.root_font_size = f64::from_bits(self.metrics[0]);
         inputs.root_font_x_height = f64::from_bits(self.metrics[1]);
@@ -90,6 +98,7 @@ impl RootFontInputs {
         inputs.root_font_zero_advance = f64::from_bits(self.metrics[3]);
         inputs.root_line_height = f64::from_bits(self.metrics[4]);
         inputs.root_font_metrics_depend_on_viewport_metrics = self.depends_on_viewport;
+        inputs.root_effective_zoom = f64::from_bits(self.effective_zoom);
     }
 
     pub(super) fn from_document(inputs: &bridge::FfiDocumentStyleComputationInputs) -> Self {
@@ -102,6 +111,7 @@ impl RootFontInputs {
                 inputs.root_line_height.to_bits(),
             ],
             depends_on_viewport: inputs.root_font_metrics_depend_on_viewport_metrics,
+            effective_zoom: inputs.root_effective_zoom.to_bits(),
         }
     }
 }
@@ -637,6 +647,8 @@ impl RetainedState {
         // republishes the record under the new one. A registered name declared here computes
         // against the record's font until a drive settles the font anew.
         let has_registered_declarations = self.declares_registered_custom_property(node, None, &inputs);
+        let initial_registered_context =
+            has_registered_declarations.then(|| self.standing_registered_value_context(node, None));
         // Every installed record is published with an environment; a record without is
         // republished as moved.
         let old_environment = self
@@ -1084,7 +1096,7 @@ impl RetainedState {
                     &inputs,
                     &mut scratch.font_drive,
                     goal,
-                    has_registered_declarations,
+                    initial_registered_context.as_ref(),
                 )?;
                 // The registered custom properties compute against the font the drive settled,
                 // and the winners substitute what they computed to.
@@ -1120,7 +1132,7 @@ impl RetainedState {
                         &inputs,
                         &mut scratch.font_drive,
                         goal,
-                        false,
+                        None,
                     )?;
                 }
                 match driven {
@@ -1513,6 +1525,8 @@ impl RetainedState {
         // A registered name declared here computes provisionally against the parent's font until
         // the drive settles the element's own.
         let has_registered_declarations = self.declares_registered_custom_property(node, None, &inputs);
+        let initial_registered_context =
+            has_registered_declarations.then(|| self.standing_registered_value_context(node, None));
         // A function's container condition the engine cannot decide yet waits, as the row does.
         let mut environment = self
             .engine_custom_property_environment_by_answer(node, parent_environment, &inputs)
@@ -1701,7 +1715,7 @@ impl RetainedState {
             &inputs,
             &mut scratch.font_drive,
             goal,
-            has_registered_declarations,
+            initial_registered_context.as_ref(),
         )?;
         // The registered custom properties compute against the font the drive settled, and the
         // winners substitute what they computed to.
@@ -1724,7 +1738,7 @@ impl RetainedState {
             environment = settled;
             store = std::sync::Arc::new(settled_store);
             self.note_node_substitution(node, scratch, state, environment);
-            driven = self.engine_full_drive(subject, None, &store, &inputs, &mut scratch.font_drive, goal, false)?;
+            driven = self.engine_full_drive(subject, None, &store, &inputs, &mut scratch.font_drive, goal, None)?;
         }
         let DrivenTable {
             table,
@@ -2607,11 +2621,16 @@ impl RetainedState {
     }
 
     pub(super) fn root_font_inputs_from_record(&self, record: computed::FinalStyleRecordID) -> Option<RootFontInputs> {
-        use crate::css::computed_value_types::STYLE_GROUP_INDEX_FONT;
+        use crate::css::computed_value_types::{STYLE_GROUP_INDEX_FONT, STYLE_GROUP_INDEX_INHERITED_BOX};
         let view = self.computed_group_sets.style_record_view(record.raw())?;
         let font = unsafe {
             view.payloads[STYLE_GROUP_INDEX_FONT]
                 .cast::<crate::css::computed_value_types::FontValues>()
+                .deref()
+        };
+        let inherited_box = unsafe {
+            view.payloads[STYLE_GROUP_INDEX_INHERITED_BOX]
+                .cast::<crate::css::computed_values::InheritedBoxValues>()
                 .deref()
         };
         Some(RootFontInputs {
@@ -2623,6 +2642,7 @@ impl RetainedState {
                 font.line_height_used.to_double().to_bits(),
             ],
             depends_on_viewport: view.dependency_flags & FONT_METRICS_DEPEND_ON_VIEWPORT_METRICS != 0,
+            effective_zoom: f64::from(inherited_box.effective_zoom()).to_bits(),
         })
     }
 
@@ -2860,14 +2880,15 @@ impl RetainedState {
         let mut summary = cascade::StateSummary::default();
         // NB: A winner whose written value `node` does not find, such as an element declaration hidden for a demand,
         //     says nothing of other nodes, so the summary is only kept when every value was found.
-        let mut every_value_found = true;
         for winner in self.winner_groups.winners_in_state(state) {
             let inherited = crate::css::property_metadata::property_is_inherited(winner.property);
             let Some(winner) = self.winner_groups.resolved_winner(winner) else {
+                summary.has_unknown_values = true;
                 continue;
             };
             let longhand = winner.property >= crate::css::property_metadata::FIRST_LONGHAND_PROPERTY_ID;
             if inherited && !longhand {
+                summary.has_unknown_values = true;
                 continue;
             }
             let group_mask = || match crate::css::computed_values::StyleGroupMasks::get().dependencies(winner.property)
@@ -2884,6 +2905,7 @@ impl RetainedState {
                     declarations.winner_value(winner.property, winner.important, winner.key.value)
                 }),
                 WinnerSource::ExactCascade => {
+                    summary.has_unknown_values = true;
                     if !inherited {
                         summary.explicitly_inherited_groups = u32::MAX;
                     }
@@ -2891,7 +2913,7 @@ impl RetainedState {
                 }
             };
             let Some(value) = value else {
-                every_value_found = false;
+                summary.has_unknown_values = true;
                 if !inherited {
                     summary.explicitly_inherited_groups |= group_mask();
                 }
@@ -2912,7 +2934,7 @@ impl RetainedState {
                 summary.has_substitutions = true;
             }
         }
-        if every_value_found {
+        if !summary.has_unknown_values {
             self.winner_groups.note_state_summary(state, summary);
         }
         summary
@@ -3155,6 +3177,104 @@ impl RetainedState {
     /// from it reads the node's custom-property environment.
     pub(super) fn state_has_substitutions(&self, node: StyleNodeID, state: CascadeStateID) -> bool {
         self.state_summary(node, state).has_substitutions
+    }
+
+    /// Whether publishing sampled custom properties requires another style computation.
+    /// The sample has already resolved the target's custom declarations that read animated values.
+    pub(crate) fn animated_custom_properties_trigger_restyle(
+        &self,
+        node: StyleNodeID,
+        pseudo: Option<u8>,
+        has_non_custom_property_animation: bool,
+        uncached_interval_values_may_need_substitution: bool,
+        host_custom_property_registration_generation: u64,
+    ) -> bool {
+        // Animations of non-custom properties may read the sampled custom properties or change the font context
+        // their registered readers compute against.
+        if has_non_custom_property_animation {
+            return true;
+        }
+
+        let has_unresolved_keyframe_easing = self
+            .element_animation_effects(node, pseudo.map_or(0, |kind| kind + 1))
+            .iter()
+            .any(|effect| {
+                effect.keyframes.iter().any(|keyframe| {
+                    keyframe
+                        .easing_value
+                        .as_ref()
+                        .is_some_and(|value| matches!(value.data(), StyleValueData::Unresolved { .. }))
+                })
+            });
+
+        // Unresolved keyframe easing may read the sampled custom properties.
+        if has_unresolved_keyframe_easing {
+            return true;
+        }
+
+        // Retained discrete intervals keep their substituted values. Fresh intervals may need
+        // another sample against the custom properties this sample publishes.
+        if uncached_interval_values_may_need_substitution {
+            return true;
+        }
+
+        // Animation sampling precedes the transaction that consumes pending registration changes.
+        // In that case, the sample used the engine's outdated registrations and underlying values.
+        if host_custom_property_registration_generation != self.custom_property_registration_generation() {
+            return true;
+        }
+
+        let target = computed::ComputedStyleTarget::new(node, pseudo.unwrap_or(u8::MAX));
+
+        // Without an assigned style record, we cannot establish that sampling covers all consumers.
+        let Some(record) = self.computed_group_sets.assigned_final_style_record(target) else {
+            return true;
+        };
+
+        // The record must still be available so we can inspect the target's current style.
+        let Some(view) = self.computed_group_sets.style_record_view(record.raw()) else {
+            return true;
+        };
+
+        if pseudo.is_none() && self.has_pseudo_styles_to_recompute(node, &view) {
+            return true;
+        }
+
+        self.ordinary_properties_may_need_substitution(node, pseudo)
+    }
+
+    /// Whether pseudo styles need updating when the element's custom properties change.
+    fn has_pseudo_styles_to_recompute(&self, node: StyleNodeID, view: &computed::StyleRecordView<'_>) -> bool {
+        // Existing pseudo-element styles may inherit the sampled values and need to be recomputed.
+        if self.computed_group_sets.assigned_pseudo_kinds(node).next().is_some() {
+            return true;
+        }
+
+        // Ignore rules for pseudo-elements that generate no box.
+        let pseudo_kinds = view.pseudo_element_styles & !self.inert_pseudo_kinds(node);
+        let marker_is_live = view.longhand_table.is_none_or(|table| table.display_is_list_item());
+        self.filter_non_generating_pseudo_kinds(node, pseudo_kinds, marker_is_live) != 0
+    }
+
+    /// Whether ordinary properties may need to compute against changed custom properties.
+    /// Missing winners or values prevent ruling out substitution.
+    fn ordinary_properties_may_need_substitution(&self, node: StyleNodeID, pseudo: Option<u8>) -> bool {
+        let key = match pseudo {
+            Some(kind) => WinnerGroupKey::current_pseudo(
+                node,
+                tree::PseudoElementTarget::new(tree::PseudoElementKind(u16::from(kind))),
+                self.program.version(),
+            ),
+            None => WinnerGroupKey::current(node, self.program.version()),
+        };
+
+        let Lookup::Known((_, state)) = self.current_winner_groups().token_for(key) else {
+            return true;
+        };
+
+        let summary = self.state_summary(node, state);
+
+        summary.has_unknown_values || summary.has_substitutions
     }
 
     pub(super) fn state_custom_property_reads(
@@ -5491,6 +5611,13 @@ mod tests {
             source: WinnerSource::Element(kind),
         };
         let state = engine.winner_groups.intern_sorted(&[winner], None);
+        // Missing declaration inputs must not cache an answer that hides a later complete summary.
+        assert!(engine.state_summary(second, state).has_unknown_values);
+        assert!(engine.winner_groups.state_summary(state).is_none());
+        let summary = engine.state_summary(first, state);
+        assert!(!summary.has_unknown_values);
+        assert!(!summary.has_substitutions);
+        assert_eq!(engine.winner_groups.state_summary(state), Some(summary));
         let cascade_state = (0, state);
         for order in [[first, second], [second, first]] {
             let mut scratch = EngineComputabilityScratch::default();

@@ -57,9 +57,7 @@ pub(crate) struct LineBuilder<'builder, 'context> {
     current_block_offset: CssPixels,
     max_block_size_on_current_line: CssPixels,
     unbreakable_run_inline_size_interrupted_by_float: CssPixels,
-    text_indent: CssPixels,
-    text_indent_hanging: bool,
-    text_indent_each_line: bool,
+    text_indentation: inline_formatting_context::TextIndentation,
     direction: u8,
     last_line_needs_update: bool,
     is_continuation: bool,
@@ -108,9 +106,7 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
             current_block_offset: CssPixels::default(),
             max_block_size_on_current_line: CssPixels::default(),
             unbreakable_run_inline_size_interrupted_by_float: CssPixels::default(),
-            text_indent: style.text_indent().to_px(containing_inline_size),
-            text_indent_hanging: style.text_indent_hanging(),
-            text_indent_each_line: style.text_indent_each_line(),
+            text_indentation: inline_formatting_context::TextIndentation::of(style, containing_inline_size),
             direction: style.direction(),
             last_line_needs_update: false,
             is_continuation: false,
@@ -249,15 +245,11 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
         self.max_block_size_on_current_line = CssPixels::default();
         self.last_line_needs_update = true;
         self.should_advance_to_last_line_box_block_end = false;
-        let mut should_indent = (self.line_count() <= 1 && !self.is_continuation)
-            || (self.text_indent_each_line && forced == ForcedBreak::Yes);
-        if self.text_indent_hanging {
-            should_indent = !should_indent;
-        }
-        if should_indent {
-            let indent = self.text_indent;
-            self.line_mut(line_index).inline_length += indent;
-        }
+        let indent = self.text_indentation.indent_of_line(
+            self.line_count() <= 1 && !self.is_continuation,
+            forced == ForcedBreak::Yes,
+        );
+        self.line_mut(line_index).inline_length += indent;
         self.current_line_committed_pending_margin = false;
     }
 
@@ -318,8 +310,7 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
     pub(crate) fn remaining_inline_size_for_overflow_break(&mut self) -> Option<CssPixels> {
         match self.available_inline_size_for_current_line {
             AvailableSize::Definite(_) => self.remaining_inline_size_on_current_line(),
-            AvailableSize::MinContent => Some(CssPixels::default()),
-            AvailableSize::MaxContent | AvailableSize::Indefinite => None,
+            _ => None,
         }
     }
 
@@ -377,12 +368,12 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
         content_baselines: DerivedBaselines,
     ) {
         self.prepare_to_append_inline_content();
-        let used = self.context().used(node);
-        let content_inline = used.content_inline_size.get();
-        let content_block = used.content_block_size.get();
-        let border_start = used.border_box_top(false);
-        let border_end = used.border_box_bottom(false);
-        let margin_block_size = used.margin_box_block_size(false);
+        let atomic_inline = self.context().box_metrics(node);
+        let content_inline = atomic_inline.content_inline_size();
+        let content_block = atomic_inline.content_block_size();
+        let border_start = atomic_inline.border_box_top(false);
+        let border_end = atomic_inline.border_box_bottom(false);
+        let margin_block_size = atomic_inline.margin_box_block_size(false);
         let line_index = self.ensure_last_line_index();
         let fragment_index = self.line(line_index).fragments.len();
         let fragment_facts = self.fragment_facts(node);
@@ -535,14 +526,20 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
         block_end: CssPixels,
         block_end_margin: CssPixels,
     ) {
-        let used = self.context().used(node);
-        assert!(used.has_content_offset.get());
-        let inline_offset = used.content_offset.get().x;
-        let block_offset = used.content_offset.get().y;
-        let inline_length = used.content_inline_size.get();
-        let block_length = used.content_block_size.get();
-        let border_start = used.border_box_top(false);
-        let line_inline_length = used.margin_box_inline_size(false);
+        let block = self.context().box_metrics(node);
+        let content_offset = self
+            .context()
+            .run
+            .records
+            .placement_of(node)
+            .expect("a block-level box is placed before its line takes it")
+            .content_offset_in_containing_block;
+        let inline_offset = content_offset.x;
+        let block_offset = content_offset.y;
+        let inline_length = block.content_inline_size();
+        let block_length = block.content_block_size();
+        let border_start = block.border_box_top(false);
+        let line_inline_length = block.margin_box_inline_size(false);
         let ensured_line_index = self.ensure_last_line_index();
         assert_eq!(line_index, ensured_line_index);
         assert!(self.line(line_index).fragments.is_empty());
@@ -587,7 +584,7 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
     }
 
     pub(crate) fn ceiling_for_float_to_be_inserted_here(&mut self, node: Node) -> CssPixels {
-        let float_inline_size = self.context().used(node).margin_box_inline_size(false);
+        let float_inline_size = self.context().box_metrics(node).margin_box_inline_size(false);
         let mut candidate = self.current_block_offset;
         let line_index = self.ensure_last_line_index();
         let mut line = self.line_mut(line_index);
@@ -612,9 +609,6 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
     }
 
     fn should_break(&mut self, next_item_inline_size: CssPixels) -> bool {
-        if self.available_inline_size_for_current_line == AvailableSize::MaxContent {
-            return false;
-        }
         if self.current_line_is_empty() {
             let line_height = self.containing_style().line_height();
             if !self
@@ -630,7 +624,7 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
             .pixels_greater_than(current_inline_size + next_item_inline_size)
     }
 
-    fn baseline_for_style(style: StyleValues, line_height: CssPixels) -> CssPixels {
+    pub(super) fn baseline_for_style(style: StyleValues, line_height: CssPixels) -> CssPixels {
         let typographic = CssPixels::nearest_value_for_f32(style.font_ascent() + style.font_descent());
         CssPixels::nearest_value_for_f32(style.font_ascent()) + (line_height - typographic) / 2
     }
@@ -797,7 +791,9 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
                 .visible_fragments()
                 .map(|fragment| {
                     if fragment.is_atomic_inline {
-                        self.context().used(fragment.layout_node).margin_box_block_size(false)
+                        self.context()
+                            .box_metrics(fragment.layout_node)
+                            .margin_box_block_size(false)
                     } else {
                         fragment.block_length
                     }
@@ -860,11 +856,12 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
             let fragment_baseline = if is_block_ellipsis || self.facts(node).is_text_node() {
                 Self::baseline_for_style(style, style.line_height())
             } else {
+                let metrics = self.context().box_metrics(node);
                 formatting_context::inline_box_baseline(
                     &self.context().callbacks,
                     node,
-                    self.context().used(node),
-                    content_baselines.unwrap_or_else(|| self.context().used(node).content_baselines_from_cells()),
+                    &metrics,
+                    content_baselines.unwrap_or_else(|| metrics.content_baselines()),
                 )
             };
             self.line_mut(line_index).fragments[fragment_index].baseline = fragment_baseline;
@@ -933,9 +930,11 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
                 line_height: style.line_height(),
             };
             if snapshot.is_atomic_inline {
-                let used = self.context().used(snapshot.layout_node);
-                metrics.effective_box_block_start_offset = used.margin_top.get() + used.border_box_top(false);
-                metrics.effective_box_block_end_offset = used.margin_bottom.get() + used.border_box_bottom(false);
+                let atomic_inline = self.context().box_metrics(snapshot.layout_node);
+                metrics.effective_box_block_start_offset =
+                    atomic_inline.margin_top() + atomic_inline.border_box_top(false);
+                metrics.effective_box_block_end_offset =
+                    atomic_inline.margin_bottom() + atomic_inline.border_box_bottom(false);
             }
             let containing_block = self.context().containing_block;
             let new_inline_offset = inline_offset + snapshot.inline_offset;
@@ -1027,13 +1026,13 @@ impl<'builder, 'context> LineBuilder<'builder, 'context> {
             }
 
             let (inline_box_start, mut inline_box_end) = if snapshot.is_atomic_inline {
-                let used = self.context().used(snapshot.layout_node);
+                let atomic_inline = self.context().box_metrics(snapshot.layout_node);
                 (
-                    snapshot.block_offset - (used.margin_top.get() + used.border_box_top(false)),
+                    snapshot.block_offset - (atomic_inline.margin_top() + atomic_inline.border_box_top(false)),
                     snapshot.block_offset
-                        + used.content_block_size.get()
-                        + used.margin_bottom.get()
-                        + used.border_box_bottom(false),
+                        + atomic_inline.content_block_size()
+                        + atomic_inline.margin_bottom()
+                        + atomic_inline.border_box_bottom(false),
                 )
             } else {
                 let typographic = CssPixels::nearest_value_for_f32(style.font_ascent() + style.font_descent());

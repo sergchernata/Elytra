@@ -12,6 +12,7 @@
 #include <LibWeb/ContentSecurityPolicy/Violation.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOMURL/DOMURL.h>
+#include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -69,6 +70,11 @@ ContentSecurityPolicy::Directives::Directive::Result require_trusted_types_for_p
     // 3. Let encodedScriptSource be the result of removing the leading "javascript:" from urlString.
     auto const encoded_script_source = MUST(url_string.substring_from_byte_offset("javascript:"sv.length()));
 
+    // AD-HOC: The global object of a client another process hosts is in that process, so its default policy cannot
+    //         convert the script source here.
+    if (Fetch::Fetching::remote_client(request))
+        return Result::Blocked;
+
     // 4. Let convertedScriptSource be the result of executing Process value with a default policy algorithm, with the following arguments:
     //    expectedType:
     //      TrustedScript
@@ -78,9 +84,10 @@ ContentSecurityPolicy::Directives::Directive::Result require_trusted_types_for_p
     //      encodedScriptSource:
     //    sink:
     //      "Location href":
+    auto client = Fetch::Fetching::resolve_client(request);
     auto converted_script_source = process_value_with_a_default_policy(
         TrustedTypeName::TrustedScript,
-        request.client()->global_object(),
+        client->global_object(),
         Utf16String::from_utf8(encoded_script_source),
         InjectionSink::Location_href);
 

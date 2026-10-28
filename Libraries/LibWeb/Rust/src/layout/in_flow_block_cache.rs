@@ -38,10 +38,7 @@ impl InFlowBlockKey {
         incoming_margins: block_formatting_context::BlockMarginState,
     ) -> Self {
         Self {
-            input: LayoutInput {
-                content_box_position_in_bfc_root: None,
-                ..input
-            },
+            input,
             containing_block_inline_size,
             containing_block_is_right_to_left,
             incoming_margins,
@@ -63,7 +60,7 @@ impl InFlowBlockKey {
 pub(super) struct InFlowBlockEntry {
     pub(super) key: InFlowBlockKey,
     pub(super) validity: fc_run_cache::FcRunCacheValidity,
-    /// The child's record as it was before its placement.
+    /// The child's record as its layout left it.
     pub(super) cells: used_values::UsedValuesCellState,
     pub(super) offset_from_flow_position: FfiCssPixelPoint,
     pub(super) flow_position_advance: CssPixels,

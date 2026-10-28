@@ -8,9 +8,11 @@
 #pragma once
 
 #include <AK/Forward.h>
+#include <AK/HashMap.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/OwnPtr.h>
+#include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
 #include <LibCompositing/Scrolling/AsyncScrollingState.h>
 #include <LibCompositing/Scrolling/WheelGestureIdentity.h>
@@ -74,16 +76,17 @@ public:
     bool handling_outdated_input() const { return m_handling_outdated_input; }
     u64 handling_input_event_id() const { return m_handling_input_event_id; }
     EventResult handle_mouseup(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Optional<RemoteInputEventTarget>* remote_target = nullptr);
-    EventResult handle_mousewheel(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, double wheel_tick_120ths_x, double wheel_tick_120ths_y, Web::WheelDeltaPrecision = Web::WheelDeltaPrecision::Discrete, Web::ScrollGesturePhase = Web::ScrollGesturePhase::None, bool async_scroll_performed_default_action = false, Optional<AsyncScrollOperation>* async_scroll_operation = nullptr, Optional<RemoteInputEventTarget>* remote_target = nullptr);
+    EventResult handle_mousewheel(CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, double wheel_delta_x, double wheel_delta_y, double wheel_tick_120ths_x, double wheel_tick_120ths_y, Web::WheelDeltaPrecision = Web::WheelDeltaPrecision::Discrete, Web::ScrollGesturePhase = Web::ScrollGesturePhase::None, bool async_scroll_performed_default_action = false, Optional<AsyncScrollOperation>* async_scroll_operation = nullptr, Optional<RemoteInputEventTarget>* remote_target = nullptr, Optional<Web::WheelGestureMark> = {});
     EventResult handle_mouseleave();
     EventResult handle_mousecancel();
+    EventResult handle_pointer_event(Web::MouseEvent const&, CSSPixelPoint, CSSPixelPoint screen_position, Optional<RemoteInputEventTarget>* remote_target = nullptr);
 
     // https://w3c.github.io/pointerevents/#pointer-capture
-    // The mouse is the one pointer there is. It is in its active buttons state while the page holds a button of it.
-    bool is_mouse_pointer_in_active_buttons_state() const { return m_buttons_of_last_dispatched_pointer_event != 0; }
-    GC::Ptr<DOM::Element> pending_pointer_capture_target_override() const { return m_pending_pointer_capture_target_override.ptr(); }
-    void set_pending_pointer_capture_target_override(Badge<DOM::Element>, DOM::Element&);
-    void clear_pending_pointer_capture_target_override(Badge<DOM::Element>);
+    bool is_active_pointer(i32 pointer_id) const;
+    bool is_pointer_in_active_buttons_state(i32 pointer_id) const;
+    GC::Ptr<DOM::Element> pending_pointer_capture_target_override(i32 pointer_id) const;
+    void set_pending_pointer_capture_target_override(Badge<DOM::Element>, i32 pointer_id, DOM::Element&);
+    void clear_pending_pointer_capture_target_override(Badge<DOM::Element>, i32 pointer_id);
     EventResult insert_replacement_text(Utf16String const&);
 #if defined(AK_OS_MACOS)
     bool select_word_for_dictionary_lookup(CSSPixelPoint visual_viewport_position);
@@ -108,7 +111,7 @@ public:
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
-    EventResult handle_pinch_event(CSSPixelPoint, unsigned modifiers, double scale_delta);
+    EventResult handle_pinch_event(CSSPixelPoint, unsigned modifiers, double scale_delta, bool async_zoom_performed_default_action);
     [[nodiscard]] EventResult perform_paste_action();
     EventResult perform_paste_action(NonnullRefPtr<HTML::DragDataStore> const&);
 
@@ -142,6 +145,9 @@ public:
         return {};
     }
 
+    // For a held key whose release will not reach the page, as when the window loses focus.
+    void release_held_scroll_key();
+
     void clear_per_test_input_state(Badge<Internals::Internals>);
 
 private:
@@ -166,6 +172,53 @@ private:
         CSSPixelPoint viewport_position;
         CSSPixelPoint offset;
     };
+    struct PointerEventPosition {
+        MouseEventCoordinates coordinates;
+        CSSPixelPoint screen_position;
+    };
+    struct PointerEventSnapshot {
+        PointerEventPosition position;
+        PointerProperties properties;
+        bool is_primary { false };
+        GC::Weak<DOM::Node> target;
+    };
+    struct PointerState {
+        PointerProperties properties;
+        bool active { false };
+        bool is_primary { true };
+        // https://w3c.github.io/pointerevents/#the-pointerdown-event
+        // The PREVENT MOUSE EVENT flag.
+        bool prevent_mouse_event { false };
+        // NB: A canceled touch event or a multi-touch gesture suppresses the click as well as the mouse events.
+        bool suppress_click { false };
+        // NB: Touch delivery can continue after its PointerEvent stream has been suppressed.
+        bool pointer_event_stream_suppressed { false };
+        unsigned buttons { 0 };
+        unsigned modifiers { 0 };
+        // NB: A pointercancel uses the last dispatched position.
+        Optional<PointerEventPosition> last_position;
+        Optional<PointerEventSnapshot> last_event;
+        GC::Weak<DOM::Node> hovered_node;
+        GC::Weak<DOM::Node> down_target;
+        GC::Weak<DOM::Node> nested_target;
+        // https://w3c.github.io/pointerevents/#dfn-pending-pointer-capture-target-override
+        GC::Weak<DOM::Element> pending_capture_target;
+        // https://w3c.github.io/pointerevents/#dfn-pointer-capture-target-override
+        // NB: Once the element is removed, lostpointercapture targets its document.
+        GC::Weak<DOM::Node> capture_target;
+        // NB: The contact's latest Touch, which the touch lists of later touch events include.
+        GC::Ptr<UIEvents::Touch> touch;
+    };
+    struct AdditionalPointerState : public RefCounted<AdditionalPointerState> {
+        PointerState state;
+    };
+    GC::Ref<UIEvents::PointerEvent> create_pointer_event(PointerState&, DOM::Node&, Utf16FlyString const&, MouseEventCoordinates const&, CSSPixelPoint screen_position, i16 button, CSSPixelPoint movement = {}) const;
+    void update_pointer_hover(Layout::BegunRead const&, PointerState&, GC::Ptr<DOM::Node>, MouseEventCoordinates const&, CSSPixelPoint screen_position);
+    bool dispatch_touch_event(PointerState&, DOM::Node&, Utf16FlyString const&, MouseEventCoordinates const&, CSSPixelPoint screen_position);
+    bool has_pointer_capture_in_subtree(i32 pointer_id) const;
+    PointerState const* pointer_state(i32 pointer_id) const;
+    PointerState* pointer_state(i32 pointer_id);
+
     bool fire_click_events(GC::Ref<DOM::Node>, MouseEventCoordinates const&, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, int click_count);
 
     MouseEventCoordinates compute_mouse_event_coordinates(CSSPixelPoint visual_viewport_position, CSSPixelPoint viewport_position, Layout::Node const& layout_node) const;
@@ -216,7 +269,7 @@ private:
     // Both drop the latch when what it refers to is gone from the document, so that the event is targeted afresh.
     Layout::Node* validated_wheel_scroll_latch_target_layout_node(Layout::BegunRead const& read, DOM::Document&);
     Layout::Node* validated_latched_wheel_scrolling_box();
-    EventResult dispatch_synthetic_pinch_wheel_event(CSSPixelPoint visual_viewport_position, CSSPixelPoint screen_position, unsigned modifiers, double wheel_delta_y);
+    EventResult dispatch_synthetic_pinch_wheel_event(CSSPixelPoint visual_viewport_position, CSSPixelPoint screen_position, unsigned modifiers, double wheel_delta_y, bool is_cancelable);
 
     enum class PointerEventType : u8 {
         PointerDown,
@@ -243,9 +296,9 @@ private:
         No,
         Yes,
     };
-    PointerCaptureEventsFired process_pending_pointer_capture(Layout::BegunRead const&);
-    void fire_pointer_capture_event(Layout::BegunRead const&, Utf16FlyString const& event_name, DOM::Node& target);
-    void release_pointer_capture_implicitly(Layout::BegunRead const&);
+    PointerCaptureEventsFired process_pending_pointer_capture(Layout::BegunRead const&, PointerState&);
+    void fire_pointer_capture_event(Layout::BegunRead const&, PointerState&, Utf16FlyString const& event_name, DOM::Node& target);
+    void release_pointer_capture_implicitly(Layout::BegunRead const&, PointerState&);
     void track_the_effective_position_of_the_legacy_mouse_pointer(GC::Ptr<DOM::Node>, Optional<DOM::HoverEventData> = {});
     void report_hovered_node_to_client(GC::Ptr<DOM::Node>);
 
@@ -269,6 +322,8 @@ private:
     RefPtr<Painting::ChromeWidget> m_captured_chrome_widget;
 
     GC::Weak<DOM::Node> m_effective_legacy_mouse_pointer_position;
+    PointerType m_effective_legacy_mouse_pointer_type { PointerType::Mouse };
+    GC::Ptr<DOM::Node> m_native_mouse_hover_target;
 
     GC::Weak<DOM::Node> m_last_mousedown_target;
     GC::Weak<DOM::Node> m_mousedown_target;
@@ -279,12 +334,6 @@ private:
 #if defined(AK_OS_MACOS)
     bool m_mousedown_preserved_selection { false };
 #endif
-
-    // https://w3c.github.io/pointerevents/#the-pointerdown-event
-    // The PREVENT MOUSE EVENT flag.
-    // FIXME: This should be per-pointer, of which there can be multiple. Move it once multiple simultaneous pointer
-    //        inputs are supported.
-    bool m_prevent_mouse_event { false };
 
     Optional<CSSPixelPoint> m_mousemove_previous_screen_position;
     Optional<CSSPixelPoint> m_last_known_mouse_visual_viewport_position;
@@ -297,21 +346,9 @@ private:
     unsigned m_last_known_mouse_buttons { 0 };
     unsigned m_last_known_mouse_modifiers { 0 };
 
-    // Where the last pointer event dispatched to the page was, which a pointercancel repeats.
-    struct PointerEventPosition {
-        MouseEventCoordinates coordinates;
-        CSSPixelPoint screen_position;
-    };
-    Optional<PointerEventPosition> m_last_dispatched_pointer_event_position;
-    // The buttons of the last pointerdown, pointermove or pointerup dispatched, which say whether the mouse is in its
-    // active buttons state.
-    unsigned m_buttons_of_last_dispatched_pointer_event { 0 };
-
-    // https://w3c.github.io/pointerevents/#dfn-pending-pointer-capture-target-override
-    GC::Weak<DOM::Element> m_pending_pointer_capture_target_override;
-    // https://w3c.github.io/pointerevents/#dfn-pointer-capture-target-override
-    // The document once the capturing element is removed from it, which lostpointercapture then fires at.
-    GC::Weak<DOM::Node> m_pointer_capture_target_override;
+    // NB: Native mouse dispatch uses this inline state without a map lookup or allocation.
+    PointerState m_mouse_pointer;
+    HashMap<i32, NonnullRefPtr<AdditionalPointerState>> m_additional_pointers;
 
     OwnPtr<AutoScrollHandler> m_auto_scroll_handler;
     OwnPtr<MiddleButtonScrollHandler> m_middle_button_scroll_handler;

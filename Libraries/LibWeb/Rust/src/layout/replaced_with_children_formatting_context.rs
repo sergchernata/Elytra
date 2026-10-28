@@ -41,26 +41,23 @@ pub(super) fn layout_replaced_with_children(
     let wrapper_constraints = run
         .sizing()
         .constraints_for_child_context(run.box_, layout_input.containing_block_constraints);
-    let wrapper_state = run
+    let mut wrapper_cells = run
         .records
-        .create_used_values(&run.callbacks, wrapper, wrapper_constraints);
-    wrapper_state.set_content_inline_size(content_inline_size);
+        .keep_child_for_its_run(&run.callbacks, wrapper, wrapper_constraints);
+    wrapper_cells.set_content_inline_size(content_inline_size);
 
-    let wrapper_result = formatting_context::run_formatting_context(
-        run.purpose,
+    let (wrapper_result, fragment_arrival) = formatting_context::run_formatting_context(
         run.fragments.as_deref(),
-        wrapper_state,
+        wrapper_cells,
         wrapper,
         run.callbacks.in_flow_containing_block(wrapper),
         None,
         formatting_context::FormattingContextType::Block,
-        run.layout_mode,
         run.should_collect_devtools_layout_data,
         run.callbacks,
         geometry::LayoutInput {
             available_space: child_available_space,
             containing_block_constraints: wrapper_constraints,
-            content_box_position_in_bfc_root: None,
             sizing: geometry::RootSizingDirectives {
                 adopt_automatic_content_block_size: true,
                 ..geometry::RootSizingDirectives::default()
@@ -68,18 +65,23 @@ pub(super) fn layout_replaced_with_children(
             participation: geometry::ParticipationInParentFormattingContext::Item,
         },
         None,
-        None,
-    );
+    )
+    .hand_box_back_to(run, wrapper);
     formatting_context::propagate_percentage_block_size_dependency_to_containing_block(
         run.records,
         &run.callbacks,
         wrapper,
         wrapper_result.depends_on_percentage_block_size,
     );
-    formatting_context::place_child(run, wrapper, used_values::FfiCssPixelPoint::default(), None);
+    formatting_context::place_laid_out_child(
+        run,
+        wrapper,
+        used_values::FfiCssPixelPoint::default(),
+        None,
+        fragment_arrival,
+    );
 
     formatting_context::ChildLayoutResult {
-        automatic_content_inline_size: content_inline_size,
         automatic_content_block_size: wrapper_result.automatic_content_block_size,
         baselines: formatting_context::DerivedBaselines::default(),
         ..formatting_context::ChildLayoutResult::default()

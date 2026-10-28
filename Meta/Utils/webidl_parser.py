@@ -35,6 +35,8 @@ ALLOWED_EXTENDED_ATTRIBUTES = frozenset(
         "FIXME",
         "DirectGetter",
         "FlyString",
+        "GenerateFromJSON",
+        "GenerateToJSON",
         "GenerateToValue",
         "Global",
         "HTMLConstructor",

@@ -18,6 +18,7 @@
 #include <LibIPC/Transport.h>
 #include <LibIPC/TransportHandle.h>
 #include <LibRequests/Request.h>
+#include <LibURL/Site.h>
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/Error.h>
@@ -42,6 +43,7 @@
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebContentClient.h>
 #include <LibWebView/WebContentTestClient.h>
+#include <LibWebView/WebDriverBiDi.h>
 #include <LibWebView/WebUI.h>
 #include <LibWebView/WorkerProcessManager.h>
 
@@ -128,6 +130,9 @@ WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, Brow
     : IPC::ConnectionToServer<WebContentClientEndpoint, WebContentServerEndpoint, WebContentClientPageRoutingStub>(*this, move(transport))
     , m_is_private(session.is_private())
     , m_session(session) // Fork hook (Arc profiles): the session it was launched for, not just private-or-not.
+    , m_request_server_site_bindings([this](RequestServerClientConnection& connection, Optional<Utf16String> const& top_level_site) {
+        async_connect_to_request_server(move(connection.handle), connection.client_id, top_level_site);
+    })
     , m_unassigned_initial_page_id(initial_page_id)
     , m_root_navigable_id(root_navigable_id)
     , m_audio_tab_id(allocate_audio_tab_id())
@@ -279,6 +284,8 @@ WebContentPage& WebContentClient::open_page_for_new_top_level_traversable(Web::P
 
     auto& page = open_page(page_id, traversable);
     traversable.active_document().set_host(page);
+    if (auto* bidi = WebDriverBiDi::the())
+        bidi->push_session_state_for_client(*this);
     return page;
 }
 
@@ -457,16 +464,6 @@ void WebContentClient::close_server_if_unused()
 
     if (!m_detached_page_close_timer->is_active())
         m_detached_page_close_timer->start();
-}
-
-void WebContentClient::set_web_ui(RefPtr<WebUI> web_ui)
-{
-    m_web_ui = move(web_ui);
-}
-
-void WebContentClient::web_ui_disconnected(Badge<WebUI>)
-{
-    m_web_ui.clear();
 }
 
 void WebContentClient::destroy_all_compositor_contexts()
@@ -776,10 +773,10 @@ Messages::WebContentClient::DidStartDownloadWithoutRequestResponse WebContentCli
     return Optional<u64> {};
 }
 
-Messages::WebContentClient::DidStartDownloadResponse WebContentClient::did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data)
+Messages::WebContentClient::DidStartDownloadResponse WebContentClient::did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response)
 {
     if (auto* page = this->page(page_id))
-        return page->did_start_download(navigable_id, move(navigation_id), move(url), move(suggested_filename), total_size, request_server_client_id, request_server_request_id, move(initial_data));
+        return page->did_start_download(navigable_id, move(navigation_id), move(url), move(suggested_filename), total_size, request_server_client_id, request_server_request_id, move(initial_data), move(network_response));
 
     return Optional<u64> {};
 }
@@ -830,27 +827,40 @@ Messages::WebContentClient::DidIsKnownHstsHostResponse WebContentClient::did_is_
     return m_session->hsts_store->is_known_hsts_host(domain);
 }
 
-Messages::WebContentClient::DidLoseRequestServerConnectionResponse WebContentClient::did_lose_request_server_connection()
+Messages::WebContentClient::DidLoseRequestServerConnectionResponse WebContentClient::did_lose_request_server_connection(Optional<Utf16String> top_level_site)
 {
-    // The replacement client is on the RequestServer the process was using.
-    RefPtr<RequestServerInstance> instance;
-    if (auto client_id = m_request_server_site_bindings.client_id(); client_id.has_value())
-        instance = RequestServerManager::the().instance_for_client(*client_id);
-    auto connection = instance
-        ? RequestServerManager::the().connect_new_client(*instance, *m_session, RequestServer::SiteBinding::Bound)
-        : connect_new_request_server_client(*m_session, RequestServer::SiteBinding::Bound);
+    bool navigation_authorized = false;
+    if (top_level_site.has_value() && !m_request_server_site_bindings.client_id_for(top_level_site).has_value()) {
+        ViewImplementation::for_each_view([&](ViewImplementation& view) {
+            if (!view.has_traversable())
+                return IterationDecision::Continue;
+            auto& traversable = view.traversable();
+            auto navigation = traversable.uncommitted_navigation();
+            if (navigation && navigation->state.has<CanonicalNavigation::CreatingNavigationParams>()
+                && navigation->worker() && &navigation->worker()->client() == this
+                && URL::Site::serialize_for_partitioning(navigation->url.origin()) == *top_level_site)
+                navigation_authorized = true;
+            if (traversable.client_populates_a_history_entry_for_site(*this, *top_level_site))
+                navigation_authorized = true;
+            return navigation_authorized ? IterationDecision::Break : IterationDecision::Continue;
+        });
+    }
+    if (!m_request_server_site_bindings.client_id_for(top_level_site).has_value() && !navigation_authorized) {
+        did_misbehave("did_lose_request_server_connection"sv, "site has neither an existing client nor an authorized navigation"sv);
+        return OptionalNone {};
+    }
+
+    auto connection = m_request_server_site_bindings.replace_client(top_level_site, navigation_authorized);
     if (connection.is_error()) {
         warnln("Unable to connect a replacement RequestServer client: {}", connection.error());
         return OptionalNone {};
     }
-
-    m_request_server_site_bindings.did_connect(connection.value().client_id);
     return move(connection.value().handle);
 }
 
 Messages::WebContentClient::RequestMediaServerConnectionResponse WebContentClient::request_media_server_connection()
 {
-    auto connection = connect_new_media_server_client(m_media_server_client, [this] { return connect_audio_server_client(); });
+    auto connection = connect_new_media_server_client(m_media_server_client, child_id(), [this] { return connect_audio_server_client(); });
     if (connection.is_error()) {
         warnln("Unable to connect a MediaServer client: {}", connection.error());
         return OptionalNone {};
@@ -880,13 +890,13 @@ ErrorOr<IPC::TransportHandle> WebContentClient::connect_audio_server_client()
 {
     // The server must know of the permission before any client gets its connection.
     TRY(ensure_audio_server_controller());
-    return connect_new_audio_server_client(m_audio_server_client, m_audio_tab_id);
+    return connect_new_audio_server_client(m_audio_server_client, child_id(), m_audio_tab_id);
 }
 
 ErrorOr<void> WebContentClient::ensure_audio_server_controller()
 {
     auto* previous_controller = m_audio_server_client.ptr();
-    TRY(ensure_audio_server_is_running(m_audio_server_client));
+    TRY(ensure_audio_server_is_running(m_audio_server_client, child_id()));
     if (m_audio_server_client.ptr() == previous_controller)
         return {};
     m_audio_server_client->on_capture_requested = [this](u64 tab_id, u64 request_id, ByteString const&) {

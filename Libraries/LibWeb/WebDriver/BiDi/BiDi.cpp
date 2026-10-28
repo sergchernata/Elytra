@@ -20,6 +20,7 @@
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/WebDriver/BiDi/BiDi.h>
 #include <LibWeb/WebDriver/BiDi/BindingsGlue.h>
+#include <LibWeb/WebDriver/BiDi/Network.h>
 #include <LibWeb/WebDriver/BiDi/RemoteValue.h>
 #include <LibWeb/WebDriver/BiDi/Script.h>
 
@@ -64,6 +65,7 @@ void set_session_state(BiDiSessionState session_state)
 
     state() = move(session_state);
     g_is_active = state().is_active;
+    network_session_state_changed();
 
     // NB: The documents that existed before the session started run the console steps from now on.
     if (g_is_active && !was_active)

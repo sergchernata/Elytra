@@ -1,15 +1,15 @@
 name: macOS accessibility tests
 
 # The macOS AX tests need an unlocked GUI (Aqua) login session, and an Accessibility grant for the process tree the
-# runner starts. GH-hosted machines have all that, but take a very long time to build Ladybird. Blacksmith's machines
-# boot screen-locked — so don't have all that — but build Ladybird quickly. So, we re-use the Ladybird we already built
-# on Blacksmith: packing it with Meta/package-macos-test-bundle.py, and uploading that to a (GH-hosted) screen-unlocked
-# machine that doesn't build but instead just runs the tests (which just takes literally 2 minutes or less).
+# runner starts. Blacksmith's macOS machines have both, but a few of them still boot screen-locked — so the AX preflight
+# below fails at once on a locked session. The tests don't build Ladybird themselves. Instead, they re-use the Ladybird
+# the Sanitizer build already built: packed with Meta/package-macos-test-bundle.py, and uploaded to a machine of its own
+# that just runs the tests. That takes a few minutes, so a rerun after a locked boot doesn't wait for a rebuild.
 on:
   workflow_call:
     inputs:
       runner_labels:
-        description: 'JSON array of the labels selecting the runner, e.g. ["macos-26"]'
+        description: 'JSON array of the labels selecting the runner, e.g. ["blacksmith-12vcpu-macos-26"]'
         required: true
         type: string
       artifact_name:
@@ -66,11 +66,11 @@ jobs:
           echo "LADYBIRD_BINARY=${PWD}/Ladybird.app/Contents/MacOS/Ladybird" >> "$GITHUB_ENV"
 
       # Try to wake a display and clear the lock UI. And print the session state before and after — so a remedy that
-      # doesn't work is visible, rather than inferred. (Blacksmith's macOS runners boot with the session screen-locked
-      # and no active displays, which is what breaks the accessibility tests: macOS withholds a window's accessibility
-      # representation while the session is locked — so AXFocusedWindow answers with the application element itself and
-      # no AXWebArea is reachable under it. The window is real — the window server reports one on-screen — and the
-      # engine renders the page fine headlessly. So, the lock is the only thing in the way.)
+      # doesn't work is visible, rather than inferred. (A few of Blacksmith's macOS runners still boot with the session
+      # screen-locked and no active displays, which is what breaks the accessibility tests: macOS withholds a window's
+      # accessibility representation while the session is locked — so AXFocusedWindow answers with the application
+      # element itself and no AXWebArea is reachable under it. The window is real — the window server reports one
+      # on-screen — and the engine renders the page fine headlessly. So, the lock is the only thing in the way.)
       - name: Wake the macOS session for the accessibility tests
         continue-on-error: true
         run: |
@@ -318,6 +318,19 @@ jobs:
               fi
               fail=1
             fi
+            # A screen-locked session passes every check above — but macOS withholds each window's accessibility
+            # representation while the session is locked, so every test would fail. The wake step above tries to clear
+            # the lock. So if the lock's still there, fail here, with an error that names the runner. But if the lock
+            # state can't be read, just warn: The checks above already fail a runner with no GUI session, which is when
+            # CGSessionCopyCurrentDictionary() returns null.
+            locked=$("${py}" -c "from Quartz import CGSessionCopyCurrentDictionary as s; d = s(); print('unknown' if d is None else 'yes' if d.get('CGSSessionScreenIsLocked') else 'no')" 2>/dev/null || echo "error")
+            echo "screen locked         : ${locked}"
+            if [ "${locked}" = "yes" ]; then
+              echo "::error title=AX preflight: session screen-locked::Runner ${RUNNER_NAME} booted with its session screen-locked, and waking it didn't clear the lock. macOS withholds each window's accessibility representation while the session is locked, so the accessibility tests can't run on this runner. Rerunning the job usually lands it on an unlocked runner."
+              fail=1
+            elif [ "${locked}" != "no" ]; then
+              echo "::warning title=AX preflight: lock state unknown::Couldn't read if the session is screen-locked (got '${locked}'), so the accessibility tests run without that check."
+            fi
           else
             echo "::error title=AX preflight: no PyObjC::No python3 with PyObjC found, so the accessibility tests cannot run on this runner."
             fail=1
@@ -326,7 +339,11 @@ jobs:
             echo "AX preflight FAILED: this runner isn't set up to run the macOS accessibility tests (see the annotated errors above)."
             exit 1
           fi
-          echo "AX preflight OK: GUI (Aqua) session and Accessibility access are both present."
+          if [ "${locked}" = "no" ]; then
+            echo "AX preflight OK: GUI (Aqua) session unlocked, and Accessibility access present."
+          else
+            echo "AX preflight OK: GUI (Aqua) session and Accessibility access present, but the lock state is unknown."
+          fi
 
       # When Ladybird never surfaces a populated AXWebArea, every test-class run waits out its full startup timeout. At
       # the 60s default, that's 20 classes times 60s: 1200s. That's past this step's timeout. And unittest only prints

@@ -394,13 +394,10 @@ fn propagate_payload_toward_run_root_space<Payload: PropagatedPayload>(
     callbacks: &LayoutPass<'_>,
 ) {
     while payload.coordinate_space_box() != run_root {
-        let Some(used) = records
-            .used_values_if_owned(payload.coordinate_space_box())
-            .filter(|used| used.has_content_offset.get())
-        else {
+        let Some(placement) = records.placement_of(payload.coordinate_space_box()) else {
             break;
         };
-        payload.translate_by(used.content_offset.get());
+        payload.translate_by(placement.content_offset_in_containing_block);
         let containing_block =
             formatting_context::placement_containing_block(records, callbacks, payload.coordinate_space_box());
         if containing_block.is_invalid() {
@@ -426,46 +423,105 @@ fn previously_committed_fragment_matching(
         })
 }
 
-#[derive(Default)]
-struct CommittedRarePayloads {
-    collapsed_table_borders: Option<std::sync::Arc<table_formatting_context::OwnedCollapsedTableBorders>>,
-    grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
-    flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
-    multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
-    math_paint_data: Option<std::sync::Arc<math_formatting_context::MathPaintData>>,
-    used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
-    svg: CommittedSvgFacts,
-    computed_svg_path: Option<std::sync::Arc<libgfx_rust::path::Path>>,
-    svg_text_character_cells: Option<std::sync::Arc<Vec<svg_formatting_context::FfiSvgTextCharacterCell>>>,
+/// What the layout of a box hands its fragment for painting and the devtools besides its geometry.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct FragmentPayloads {
+    pub(crate) collapsed_table_borders: Option<std::sync::Arc<table_formatting_context::OwnedCollapsedTableBorders>>,
+    pub(crate) grid_layout_data: Option<std::sync::Arc<grid_formatting_context::GridLayoutData>>,
+    pub(crate) flex_layout_data: Option<std::sync::Arc<formatting_context::FlexLayoutData>>,
+    pub(crate) multicol_layout_data: Option<std::sync::Arc<fragmentation::MulticolLayoutData>>,
+    pub(crate) math_paint_data: Option<std::sync::Arc<math_formatting_context::MathPaintData>>,
+    pub(crate) used_grid_tracks: Option<std::sync::Arc<grid_formatting_context::OwnedUsedGridTracks>>,
+    pub(crate) svg: CommittedSvgFacts,
+    pub(crate) computed_svg_path: Option<std::sync::Arc<libgfx_rust::path::Path>>,
+    pub(crate) svg_text_character_cells: Option<std::sync::Arc<Vec<svg_formatting_context::FfiSvgTextCharacterCell>>>,
+    /// For a line-clamp container: whether its contents hold the clamp point, and whether what follows the clamp
+    /// point still counts as scrollable overflow.
+    pub(crate) has_line_clamp_point: bool,
+    pub(crate) clamped_content_is_scrollable_overflow: bool,
+}
+
+impl FragmentPayloads {
+    fn of_fragment(fragment: &Fragment) -> Self {
+        Self {
+            collapsed_table_borders: fragment.collapsed_table_borders.clone(),
+            grid_layout_data: fragment.grid_layout_data.clone(),
+            flex_layout_data: fragment.flex_layout_data.clone(),
+            multicol_layout_data: fragment.multicol_layout_data.clone(),
+            math_paint_data: fragment.math_paint_data.clone(),
+            used_grid_tracks: fragment.used_grid_tracks.clone(),
+            svg: fragment.svg.as_deref().copied().unwrap_or_default(),
+            computed_svg_path: fragment.computed_svg_path.clone(),
+            svg_text_character_cells: fragment.svg_text_character_cells.clone(),
+            has_line_clamp_point: fragment.has_line_clamp_point,
+            clamped_content_is_scrollable_overflow: fragment.clamped_content_is_scrollable_overflow,
+        }
+    }
+}
+
+/// What the fragment of a placed box shows of the box's own layout: its sizes and box sides in the frame of the run that
+/// places it, and its lines.
+#[derive(Clone)]
+pub(crate) struct FragmentGeometry {
+    pub(crate) cells: used_values::RootInputCells,
+    pub(crate) line_data: Option<std::sync::Arc<inline_content::InlineContent>>,
+}
+
+impl FragmentGeometry {
+    pub(crate) fn shows_box_of_fragment(&self, fragment: &Fragment) -> bool {
+        let cells = &self.cells;
+        same_allocation(self.line_data.as_ref(), fragment.line_data.as_ref())
+            && fragment.content_inline_size == cells.content_inline_size
+            && fragment.content_block_size == cells.content_block_size
+            && fragment.margin_left == cells.margin_left
+            && fragment.margin_right == cells.margin_right
+            && fragment.margin_top == cells.margin_top
+            && fragment.margin_bottom == cells.margin_bottom
+            && fragment.border_left == cells.border_left
+            && fragment.border_right == cells.border_right
+            && fragment.border_top == cells.border_top
+            && fragment.border_bottom == cells.border_bottom
+            && fragment.padding_left == cells.padding_left
+            && fragment.padding_right == cells.padding_right
+            && fragment.padding_top == cells.padding_top
+            && fragment.padding_bottom == cells.padding_bottom
+            && fragment.uses_collapsing_borders_model == cells.uses_collapsing_borders_model
+    }
+}
+
+/// The committed fragment `fragment` of `node`, or a fragment of the box's `geometry` around the committed children
+/// where the box is now hidden or shown for line clamping unlike the committed fragment.
+pub(crate) fn committed_fragment_showing_box(
+    callbacks: &LayoutPass<'_>,
+    node: crate::layout::node_data::NodeSlotId,
+    geometry: impl FnOnce() -> FragmentGeometry,
+    fragment_facts: run_records::FragmentFactsDecidedByParent,
+    fragment: std::sync::Arc<Fragment>,
+) -> std::sync::Arc<Fragment> {
+    if fragment_facts.is_invisible_for_line_clamp == fragment.is_invisible_for_line_clamp {
+        return fragment;
+    }
+    snapshot_fragment(
+        callbacks,
+        node,
+        fragment.children.clone(),
+        geometry(),
+        fragment_facts,
+        Some(Box::new(FragmentPayloads::of_fragment(&fragment))),
+    )
 }
 
 fn snapshot_fragment(
     callbacks: &LayoutPass<'_>,
     node: crate::layout::node_data::NodeSlotId,
     children: Vec<FragmentLink>,
-    used: &UsedValues,
+    geometry: FragmentGeometry,
+    fragment_facts: run_records::FragmentFactsDecidedByParent,
+    payloads: Option<Box<FragmentPayloads>>,
 ) -> std::sync::Arc<Fragment> {
     static NEXT_IDENTITY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let line_data = used.finish_line_data(callbacks);
-    let rare_payloads = used
-        .rare_data
-        .get()
-        .map(|cell| {
-            let mut rare = cell.borrow_mut();
-            CommittedRarePayloads {
-                collapsed_table_borders: rare.collapsed_table_borders.take(),
-                grid_layout_data: rare.grid_layout_data.take(),
-                flex_layout_data: rare.flex_layout_data.take(),
-                multicol_layout_data: rare.multicol_layout_data.take(),
-                math_paint_data: rare.math_paint_data.take(),
-                used_grid_tracks: rare.used_grid_tracks.take(),
-                svg: rare.svg,
-                computed_svg_path: rare.computed_svg_path.take(),
-                svg_text_character_cells: rare.svg_text_character_cells.take(),
-            }
-        })
-        .unwrap_or_default();
-    let CommittedRarePayloads {
+    let FragmentGeometry { cells, line_data } = geometry;
+    let FragmentPayloads {
         collapsed_table_borders,
         grid_layout_data,
         flex_layout_data,
@@ -475,29 +531,31 @@ fn snapshot_fragment(
         svg,
         computed_svg_path,
         svg_text_character_cells,
-    } = rare_payloads;
+        has_line_clamp_point,
+        clamped_content_is_scrollable_overflow,
+    } = payloads.map(|payloads| *payloads).unwrap_or_default();
     let mut fragment = Fragment {
         identity: 0,
         node,
-        content_inline_size: used.content_inline_size.get(),
-        content_block_size: used.content_block_size.get(),
-        margin_left: used.margin_left.get(),
-        margin_right: used.margin_right.get(),
-        margin_top: used.margin_top.get(),
-        margin_bottom: used.margin_bottom.get(),
-        border_left: used.border_left.get(),
-        border_right: used.border_right.get(),
-        border_top: used.border_top.get(),
-        border_bottom: used.border_bottom.get(),
-        padding_left: used.padding_left.get(),
-        padding_right: used.padding_right.get(),
-        padding_top: used.padding_top.get(),
-        padding_bottom: used.padding_bottom.get(),
-        uses_collapsing_borders_model: used.uses_collapsing_borders_model.get(),
-        is_collapsed_borders_table_box: used.is_collapsed_borders_table_box.get(),
-        table_column_index: used.table_column_index.get(),
-        table_column_span: used.table_column_span.get(),
-        hidden_by_collapsed_columns: used.hidden_by_collapsed_columns.get(),
+        content_inline_size: cells.content_inline_size,
+        content_block_size: cells.content_block_size,
+        margin_left: cells.margin_left,
+        margin_right: cells.margin_right,
+        margin_top: cells.margin_top,
+        margin_bottom: cells.margin_bottom,
+        border_left: cells.border_left,
+        border_right: cells.border_right,
+        border_top: cells.border_top,
+        border_bottom: cells.border_bottom,
+        padding_left: cells.padding_left,
+        padding_right: cells.padding_right,
+        padding_top: cells.padding_top,
+        padding_bottom: cells.padding_bottom,
+        uses_collapsing_borders_model: cells.uses_collapsing_borders_model,
+        is_collapsed_borders_table_box: cells.is_collapsed_borders_table_box,
+        table_column_index: fragment_facts.table_column_index,
+        table_column_span: fragment_facts.table_column_span,
+        hidden_by_collapsed_columns: fragment_facts.hidden_by_collapsed_columns,
         collapsed_table_borders,
         line_data,
         grid_layout_data,
@@ -508,11 +566,11 @@ fn snapshot_fragment(
         svg: (svg != CommittedSvgFacts::default()).then(|| Box::new(svg)),
         computed_svg_path,
         svg_text_character_cells,
-        has_line_clamp_point: used.has_line_clamp_point.get(),
-        is_invisible_for_line_clamp: used.is_invisible_for_line_clamp.get(),
-        clamped_content_is_scrollable_overflow: used.clamped_content_is_scrollable_overflow.get(),
-        continues_from_previous_fragment: used.continues_from_previous_fragment.get(),
-        continues_in_next_fragment: used.continues_in_next_fragment.get(),
+        has_line_clamp_point,
+        is_invisible_for_line_clamp: fragment_facts.is_invisible_for_line_clamp,
+        clamped_content_is_scrollable_overflow,
+        continues_from_previous_fragment: fragment_facts.continues_from_previous_fragment,
+        continues_in_next_fragment: fragment_facts.continues_in_next_fragment,
         children,
     };
     if !fragment.continues_from_previous_fragment
@@ -545,25 +603,44 @@ pub(crate) struct PlacementData {
 }
 
 impl PlacementData {
-    fn from_record(
-        used: &UsedValues,
+    fn of_box(
+        facts: &run_records::FactsDecidedByParent,
+        abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
         containing_line_box_index: Option<usize>,
         committed_offset: FfiCssPixelPoint,
         frame: geometry::Frame,
     ) -> Self {
-        let rare = used.rare_data.get().map(|cell| cell.borrow());
         Self {
             frame,
             committed_offset,
-            inset_left: used.inset_left.get(),
-            inset_right: used.inset_right.get(),
-            inset_top: used.inset_top.get(),
-            inset_bottom: used.inset_bottom.get(),
+            inset_left: facts.used_insets.left,
+            inset_right: facts.used_insets.right,
+            inset_top: facts.used_insets.top,
+            inset_bottom: facts.used_insets.bottom,
             containing_line_box_index,
-            abspos_layout_inputs: rare.as_ref().and_then(|rare| rare.abspos_layout_inputs),
-            default_scroll_shift: rare.as_ref().and_then(|rare| rare.default_scroll_shift),
-            containing_block: used.placed_in.get(),
+            abspos_layout_inputs,
+            default_scroll_shift: facts.default_scroll_shift,
+            containing_block: facts
+                .placement
+                .map_or(crate::layout::node_data::NodeSlotId::INVALID, |placement| {
+                    placement.containing_block
+                }),
         }
+    }
+
+    /// The placement data of a box `close()` hands on unplaced or placed as it is.
+    fn of_box_as_this_run_left_it(
+        records: &RunRecords,
+        node: crate::layout::node_data::NodeSlotId,
+        frame: geometry::Frame,
+    ) -> Self {
+        Self::of_box(
+            &records.facts_decided_by_parent_of(node),
+            None,
+            None,
+            records.content_offset_or_origin(node),
+            frame,
+        )
     }
 }
 
@@ -592,6 +669,8 @@ pub(crate) struct UnplacedRootFragment {
     pub(crate) propagated_anchor_candidates: Vec<AnchorCandidate>,
     pub(crate) propagated_inline_containing_block_rects: Vec<InlineContainingBlockRect>,
     pub(crate) propagated_abspos_containing_block_info: Vec<AbsposContainingBlockInfoContribution>,
+    /// What the run's layout of its root hands the root's fragment.
+    pub(crate) root_payloads: Option<Box<FragmentPayloads>>,
 }
 
 impl UnplacedRootFragment {
@@ -601,6 +680,29 @@ impl UnplacedRootFragment {
             && self.propagated_anchor_candidates.is_empty()
             && self.propagated_inline_containing_block_rects.is_empty()
             && self.propagated_abspos_containing_block_info.is_empty()
+    }
+}
+
+/// What the layout of a child hands the child's placement: the unplaced root fragment of the child's run, or a
+/// committed fragment the child is placed with as it is.
+#[must_use = "a child's fragments are lost unless its placement takes them"]
+pub(crate) enum ChildFragmentArrival {
+    RunRoot {
+        root: UnplacedRootFragment,
+        reuses_committed_subtree: bool,
+    },
+    CommittedFragment {
+        fragment: std::sync::Arc<Fragment>,
+        reuses_subtree: bool,
+    },
+}
+
+impl ChildFragmentArrival {
+    pub(crate) fn node(&self) -> crate::layout::node_data::NodeSlotId {
+        match self {
+            Self::RunRoot { root, .. } => root.node,
+            Self::CommittedFragment { fragment, .. } => fragment.node,
+        }
     }
 }
 
@@ -747,6 +849,7 @@ struct PendingFragment {
     pending_abspos: Vec<abspos_inputs::PendingAbsposChild>,
     anchor_candidates: Vec<AnchorCandidate>,
     inline_containing_block_rects: Vec<InlineContainingBlockRect>,
+    payloads: Option<Box<FragmentPayloads>>,
 }
 
 impl PendingFragment {
@@ -757,6 +860,7 @@ impl PendingFragment {
             pending_abspos: Vec::new(),
             anchor_candidates: Vec::new(),
             inline_containing_block_rects: Vec::new(),
+            payloads: None,
         }
     }
 }
@@ -771,7 +875,6 @@ pub(crate) struct RunFragmentBuilder {
 #[derive(Default)]
 struct RunFragmentBuilderInner {
     pending_fragments: HashMap<u32, PendingFragment>,
-    child_roots_awaiting_placement: HashMap<u32, UnplacedRootFragment>,
     pending_abspos_at_root: Vec<abspos_inputs::PendingAbsposChild>,
     anchor_candidates_at_root: Vec<AnchorCandidate>,
     inline_containing_block_rects_at_root: Vec<InlineContainingBlockRect>,
@@ -780,51 +883,17 @@ struct RunFragmentBuilderInner {
     abspos_containing_block_info_contributions_received: u64,
     top_scope_links: Vec<FragmentLink>,
     reused_subtree_roots: HashSet<u32>,
-    /// The reused subtree roots whose runs this run took from the cache, whose records hold their committed fragments
-    /// until placement.
-    reused_subtree_roots_holding_fragments: Vec<crate::layout::node_data::NodeSlotId>,
+    /// What the layouts of children the run laid out but never placed handed their placements, which close() links at
+    /// the top of the run's fragments.
+    children_left_unplaced: Vec<ChildFragmentArrival>,
+    /// What the run's layout of its root hands the root's fragment.
+    root_payloads: Option<Box<FragmentPayloads>>,
 }
 
 impl RunFragmentBuilderInner {
     fn receive_abspos_containing_block_info(&mut self, contributions: Vec<AbsposContainingBlockInfoContribution>) {
         self.abspos_containing_block_info_contributions_received += contributions.len() as u64;
         self.abspos_containing_block_info_contributions.extend(contributions);
-    }
-}
-
-/// The committed fragment a run holds in the record of a box it sized from it, for the box's placement to attach as it
-/// is, and whether the box roots a reused subtree.
-pub(crate) struct HeldCommittedFragment {
-    fragment: std::sync::Arc<Fragment>,
-    reuses_subtree: bool,
-}
-
-/// A record's held committed fragment, if any.
-#[derive(Default)]
-pub(crate) struct HeldCommittedFragmentCell(std::cell::Cell<Option<HeldCommittedFragment>>);
-
-impl HeldCommittedFragmentCell {
-    fn hold(&self, fragment: std::sync::Arc<Fragment>, reuses_subtree: bool) {
-        self.0.set(Some(HeldCommittedFragment {
-            fragment,
-            reuses_subtree,
-        }));
-    }
-
-    pub(crate) fn take(&self) -> Option<HeldCommittedFragment> {
-        self.0.take()
-    }
-}
-
-impl std::fmt::Debug for HeldCommittedFragmentCell {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let held = self.0.take();
-        let result = formatter
-            .debug_struct("HeldCommittedFragmentCell")
-            .field("holds", &held.is_some())
-            .finish();
-        self.0.set(held);
-        result
     }
 }
 
@@ -1051,9 +1120,7 @@ impl RunFragmentBuilder {
             let containing_block = entry.containing_block();
             !containing_block.is_invalid()
                 && (self.is_entry_accumulator || containing_block != self.root_node)
-                && records
-                    .used_values_if_owned(containing_block)
-                    .is_some_and(|containing_block_used| containing_block_used.has_content_offset.get())
+                && records.is_placed(containing_block)
         };
         let mut taken: Vec<abspos_inputs::PendingAbsposChild> = inner
             .pending_abspos_at_root
@@ -1078,17 +1145,21 @@ impl RunFragmentBuilder {
         taken
     }
 
-    pub(crate) fn hold_unplaced_root(&self, root: UnplacedRootFragment) {
-        let slot = root.node.slot_index();
-        let mut inner = self.inner.borrow_mut();
-        inner
-            .reused_subtree_roots
-            .extend(root.reused_subtree_roots.iter().copied());
-        let previous = inner.child_roots_awaiting_placement.insert(slot, root);
+    /// Keeps what the layout of a child the run laid out but does not place handed its placement.
+    pub(crate) fn leave_child_unplaced(&self, arrival: ChildFragmentArrival) {
         debug_assert!(
-            previous.is_none(),
-            "a child run's root was handed over twice before placement"
+            !self.left_child_unplaced(arrival.node()),
+            "a child was left unplaced twice"
         );
+        self.inner.borrow_mut().children_left_unplaced.push(arrival);
+    }
+
+    pub(crate) fn left_child_unplaced(&self, node: crate::layout::node_data::NodeSlotId) -> bool {
+        self.inner
+            .borrow()
+            .children_left_unplaced
+            .iter()
+            .any(|arrival| arrival.node() == node)
     }
 
     pub(crate) fn adopt_fragmentainer_root(
@@ -1127,88 +1198,106 @@ impl RunFragmentBuilder {
         inner.receive_abspos_containing_block_info(root.propagated_abspos_containing_block_info);
     }
 
-    pub(crate) fn note_reused_subtree_root(&self, node: crate::layout::node_data::NodeSlotId) {
-        self.inner.borrow_mut().reused_subtree_roots.insert(node.slot_index());
-    }
-
-    pub(crate) fn clear_reused_subtree_root(&self, node: crate::layout::node_data::NodeSlotId, used: &UsedValues) {
-        self.inner.borrow_mut().reused_subtree_roots.remove(&node.slot_index());
-        used.held_committed_fragment.take();
-    }
-
-    /// Notes that the subtree of `node`, whose run this run took from the cache, is reused with its committed fragment,
-    /// which its placement attaches as it is.
-    pub(crate) fn hold_reused_committed_fragment(
+    /// Takes in the unplaced root of the run that laid out `node`, which is being placed, so that its fragment is built
+    /// around the root's descendants.
+    pub(crate) fn take_in_child_root_at_placement(
         &self,
         node: crate::layout::node_data::NodeSlotId,
-        used: &UsedValues,
-        fragment: std::sync::Arc<Fragment>,
-    ) {
-        let mut inner = self.inner.borrow_mut();
-        inner.reused_subtree_roots.insert(node.slot_index());
-        inner.reused_subtree_roots_holding_fragments.push(node);
-        used.held_committed_fragment.hold(fragment, true);
-    }
-
-    /// Notes that the empty box `node`, sized from its committed fragment, is placed with that fragment as it is. Commit
-    /// keeps a childless box that holds its committed fragment, so the box is no reused subtree root.
-    pub(crate) fn hold_committed_fragment_of_empty_box(&self, used: &UsedValues, fragment: std::sync::Arc<Fragment>) {
-        used.held_committed_fragment.hold(fragment, false);
-    }
-
-    /// The committed fragment held in the record `used` of the box `node`, and whether the box roots a reused subtree.
-    /// A box the run hid for line clamping after holding the fragment gets a fragment of its record around the
-    /// committed children instead.
-    pub(crate) fn take_reused_committed_fragment(
-        &self,
+        root: UnplacedRootFragment,
+        reuses_committed_subtree: bool,
         callbacks: &LayoutPass<'_>,
-        node: crate::layout::node_data::NodeSlotId,
-        used: &UsedValues,
-    ) -> Option<(std::sync::Arc<Fragment>, bool)> {
-        let held = used.held_committed_fragment.take()?;
-        let fragment = if used.is_invisible_for_line_clamp.get() == held.fragment.is_invisible_for_line_clamp {
-            held.fragment
-        } else {
-            snapshot_fragment(callbacks, node, held.fragment.children.clone(), used)
-        };
-        Some((fragment, held.reuses_subtree))
-    }
-
-    pub(crate) fn discard_unplaced_subtree(&self, node: crate::layout::node_data::NodeSlotId, used: &UsedValues) {
-        used.held_committed_fragment.take();
-        let mut inner = self.inner.borrow_mut();
-        let slot = node.slot_index();
-        if let Some(root) = inner.child_roots_awaiting_placement.remove(&slot) {
-            for reused_subtree_root in root.reused_subtree_roots {
-                inner.reused_subtree_roots.remove(&reused_subtree_root);
+    ) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .reused_subtree_roots
+                .extend(root.reused_subtree_roots.iter().copied());
+            if reuses_committed_subtree {
+                inner.reused_subtree_roots.insert(node.slot_index());
+            } else {
+                inner.reused_subtree_roots.remove(&node.slot_index());
             }
         }
-        inner.reused_subtree_roots.remove(&slot);
-        inner.pending_fragments.remove(&slot);
+        self.merge_child_root_into_pending_fragment(node, root, callbacks);
     }
 
-    pub(crate) fn normalize_arrivals_for_placement(
+    /// Opens the fragment of `node`, which is being placed without fragments handed to it, so that the fragments of
+    /// its absolutely positioned descendants laid out at its placement go inside it.
+    pub(crate) fn open_fragment_of_placed_box(&self, node: crate::layout::node_data::NodeSlotId) {
+        self.inner
+            .borrow_mut()
+            .pending_fragments
+            .entry(node.slot_index())
+            .or_insert_with(|| PendingFragment::new(node));
+    }
+
+    /// Drops the fragments laid out inside `node`. What the box's own layout handed its fragment stays for the box,
+    /// which may still be placed.
+    pub(crate) fn discard_unplaced_subtree(
         &self,
         node: crate::layout::node_data::NodeSlotId,
+        fragment_arrival: Option<ChildFragmentArrival>,
+    ) {
+        debug_assert!(!self.left_child_unplaced(node), "a child left unplaced is discarded");
+        let arrived_payloads = fragment_arrival.and_then(|arrival| match arrival {
+            ChildFragmentArrival::RunRoot { root, .. } => root.root_payloads,
+            ChildFragmentArrival::CommittedFragment { fragment, .. } => {
+                Some(Box::new(FragmentPayloads::of_fragment(&fragment)))
+            }
+        });
+        let mut inner = self.inner.borrow_mut();
+        let slot = node.slot_index();
+        let mut payloads_of_box = arrived_payloads;
+        inner.reused_subtree_roots.remove(&slot);
+        if let Some(pending_fragment) = inner.pending_fragments.remove(&slot) {
+            payloads_of_box = payloads_of_box.or(pending_fragment.payloads);
+        }
+        if payloads_of_box.is_some() {
+            inner.pending_fragments.insert(
+                slot,
+                PendingFragment {
+                    payloads: payloads_of_box,
+                    ..PendingFragment::new(node)
+                },
+            );
+        }
+    }
+
+    /// Hands what the layout of `node` produced besides its geometry to the box's fragment.
+    pub(crate) fn update_fragment_payloads_of(
+        &self,
+        node: crate::layout::node_data::NodeSlotId,
+        update: impl FnOnce(&mut FragmentPayloads),
+    ) {
+        let mut inner = self.inner.borrow_mut();
+        let payloads = if node == self.root_node && !self.is_entry_accumulator {
+            &mut inner.root_payloads
+        } else {
+            &mut inner
+                .pending_fragments
+                .entry(node.slot_index())
+                .or_insert_with(|| PendingFragment::new(node))
+                .payloads
+        };
+        update(payloads.get_or_insert_with(Default::default));
+    }
+
+    fn merge_child_root_into_pending_fragment(
+        &self,
+        node: crate::layout::node_data::NodeSlotId,
+        root: UnplacedRootFragment,
         callbacks: &LayoutPass<'_>,
     ) {
         let mut inner = self.inner.borrow_mut();
         let slot = node.slot_index();
-        let root = inner.child_roots_awaiting_placement.remove(&slot);
         let pending_fragment = inner
             .pending_fragments
             .entry(slot)
             .or_insert_with(|| PendingFragment::new(node));
-        let Some(root) = root else {
-            return;
-        };
-        debug_assert!(
-            root.node == node,
-            "a held unplaced root was keyed under a different box"
-        );
+        debug_assert!(root.node == node, "a box took in the root of another box's run");
         debug_assert!(
             pending_fragment.children.is_empty() || root.scoped_descendants.is_empty(),
-            "a held unplaced root and an open pending fragment both carry children for slot {slot}"
+            "a child run's root and an open pending fragment both carry children for slot {slot}"
         );
         if pending_fragment.children.is_empty() {
             pending_fragment.children = root.scoped_descendants;
@@ -1227,6 +1316,7 @@ impl RunFragmentBuilder {
         pending_fragment
             .inline_containing_block_rects
             .extend(root.propagated_inline_containing_block_rects);
+        pending_fragment.payloads = root.root_payloads;
         inner.receive_abspos_containing_block_info(root.propagated_abspos_containing_block_info);
     }
 
@@ -1236,48 +1326,53 @@ impl RunFragmentBuilder {
         callbacks: &LayoutPass<'_>,
         node: crate::layout::node_data::NodeSlotId,
         containing_block: Option<crate::layout::node_data::NodeSlotId>,
-        used: &UsedValues,
+        geometry: FragmentGeometry,
+        facts: run_records::FactsDecidedByParent,
+        abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
         containing_block_is_sealed: bool,
         containing_line_box_index: Option<usize>,
         committed_offset: FfiCssPixelPoint,
         own_anchor_candidate_border_box_rect: Option<CssPixelRect>,
     ) -> PlacedFragment {
+        let placement = facts.placement.expect("a box is placed before its fragment is built");
         let mut inner = self.inner.borrow_mut();
         let slot = node.slot_index();
-        debug_assert!(
-            !inner.child_roots_awaiting_placement.contains_key(&slot),
-            "a box was placed without normalizing its held unplaced root (slot {slot})"
-        );
         let PendingFragment {
             node: _,
             children,
             pending_abspos: pending_abspos_from_placed_box,
             anchor_candidates: anchor_candidates_from_placed_box,
             inline_containing_block_rects: inline_containing_block_rects_from_placed_box,
+            payloads,
         } = inner
             .pending_fragments
             .remove(&slot)
             .unwrap_or_else(|| PendingFragment::new(node));
-        let fragment = snapshot_fragment(callbacks, node, children, used);
+        let content_size = (geometry.cells.content_inline_size, geometry.cells.content_block_size);
+        let fragment = snapshot_fragment(callbacks, node, children, geometry, facts.fragment_facts, payloads);
         let link = link_fragment(
             fragment.clone(),
-            PlacementData::from_record(used, containing_line_box_index, committed_offset, callbacks.frame),
+            PlacementData::of_box(
+                &facts,
+                abspos_layout_inputs,
+                containing_line_box_index,
+                committed_offset,
+                callbacks.frame,
+            ),
         );
         self.attach(&mut inner, link, containing_block, containing_block_is_sealed);
         let exports_payloads = !pending_abspos_from_placed_box.is_empty()
             || !anchor_candidates_from_placed_box.is_empty()
             || !inline_containing_block_rects_from_placed_box.is_empty()
             || own_anchor_candidate_border_box_rect.is_some();
-        let content_offset = used.content_offset.get();
+        let content_offset = placement.content_offset_in_containing_block;
         let frames = exports_payloads
             .then(|| {
                 let own = formatting_context::frame_established_by(callbacks, node);
                 (own != callbacks.frame).then(|| PlacedBoxFrames {
                     own,
                     containing_block: callbacks.frame,
-                    physical_content_size: callbacks
-                        .frame
-                        .size_to_physical(used.content_inline_size.get(), used.content_block_size.get()),
+                    physical_content_size: callbacks.frame.size_to_physical(content_size.0, content_size.1),
                 })
             })
             .flatten();
@@ -1342,21 +1437,32 @@ impl RunFragmentBuilder {
         fragment: std::sync::Arc<Fragment>,
         reuses_subtree: bool,
         containing_block: Option<crate::layout::node_data::NodeSlotId>,
-        used: &UsedValues,
+        facts: run_records::FactsDecidedByParent,
+        abspos_layout_inputs: Option<abspos_inputs::AbsposLayoutInputs>,
         containing_block_is_sealed: bool,
         containing_line_box_index: Option<usize>,
         committed_offset: FfiCssPixelPoint,
         frame: geometry::Frame,
     ) {
+        assert!(
+            facts.placement.is_some(),
+            "a box is placed before its fragment is attached"
+        );
         let mut inner = self.inner.borrow_mut();
         let slot = node.slot_index();
         debug_assert!(
-            !inner.child_roots_awaiting_placement.contains_key(&slot) && !inner.pending_fragments.contains_key(&slot),
+            !inner.pending_fragments.contains_key(&slot),
             "a reused subtree's box has fragments of its own in this run (slot {slot})"
         );
         let link = link_fragment(
             fragment,
-            PlacementData::from_record(used, containing_line_box_index, committed_offset, frame),
+            PlacementData::of_box(
+                &facts,
+                abspos_layout_inputs,
+                containing_line_box_index,
+                committed_offset,
+                frame,
+            ),
         );
         self.attach(&mut inner, link, containing_block, containing_block_is_sealed);
         if reuses_subtree {
@@ -1441,36 +1547,68 @@ impl RunFragmentBuilder {
             if pending_fragment.children.is_empty() {
                 continue;
             }
-            let used = records.used_values(pending_fragment.node);
             inner.top_scope_links.push(link_fragment(
-                snapshot_fragment(callbacks, pending_fragment.node, pending_fragment.children, used),
-                PlacementData::from_record(used, None, used.content_offset.get(), callbacks.frame),
+                snapshot_fragment(
+                    callbacks,
+                    pending_fragment.node,
+                    pending_fragment.children,
+                    records.fragment_geometry_of(pending_fragment.node, callbacks),
+                    records.facts_decided_by_parent_of(pending_fragment.node).fragment_facts,
+                    pending_fragment.payloads,
+                ),
+                PlacementData::of_box_as_this_run_left_it(records, pending_fragment.node, callbacks.frame),
             ));
         }
-        // NB: A reused subtree root its run never placed has no children of its own in this run, as an empty held
+        // NB: A reused subtree root its run never placed has no children of its own in this run, as an empty child run
         //     root has, and closes the same way.
         // An empty box that was never placed has no fragment in this run.
-        let held_nodes = std::mem::take(&mut inner.reused_subtree_roots_holding_fragments);
-        for node in held_nodes {
-            let used = records.used_values(node);
-            if !used
-                .held_committed_fragment
-                .take()
-                .is_some_and(|held| held.reuses_subtree)
-            {
-                continue;
+        let mut child_run_roots_left_unplaced = Vec::new();
+        for arrival in std::mem::take(&mut inner.children_left_unplaced) {
+            match arrival {
+                ChildFragmentArrival::CommittedFragment {
+                    fragment,
+                    reuses_subtree: true,
+                } => {
+                    let node = fragment.node;
+                    inner.reused_subtree_roots.insert(node.slot_index());
+                    inner.top_scope_links.push(link_fragment(
+                        snapshot_fragment(
+                            callbacks,
+                            node,
+                            Vec::new(),
+                            records.fragment_geometry_of(node, callbacks),
+                            records.facts_decided_by_parent_of(node).fragment_facts,
+                            Some(Box::new(FragmentPayloads::of_fragment(&fragment))),
+                        ),
+                        PlacementData::of_box_as_this_run_left_it(records, node, callbacks.frame),
+                    ));
+                }
+                ChildFragmentArrival::CommittedFragment {
+                    reuses_subtree: false, ..
+                } => {}
+                ChildFragmentArrival::RunRoot {
+                    root,
+                    reuses_committed_subtree,
+                } => child_run_roots_left_unplaced.push((root, reuses_committed_subtree)),
+            }
+        }
+        for (root, reuses_committed_subtree) in child_run_roots_left_unplaced {
+            inner
+                .reused_subtree_roots
+                .extend(root.reused_subtree_roots.iter().copied());
+            if reuses_committed_subtree {
+                inner.reused_subtree_roots.insert(root.node.slot_index());
             }
             inner.top_scope_links.push(link_fragment(
-                snapshot_fragment(callbacks, node, Vec::new(), used),
-                PlacementData::from_record(used, None, used.content_offset.get(), callbacks.frame),
-            ));
-        }
-        let child_roots_awaiting_placement = std::mem::take(&mut inner.child_roots_awaiting_placement);
-        for (_, root) in child_roots_awaiting_placement {
-            let used = records.used_values(root.node);
-            inner.top_scope_links.push(link_fragment(
-                snapshot_fragment(callbacks, root.node, root.scoped_descendants, used),
-                PlacementData::from_record(used, None, used.content_offset.get(), callbacks.frame),
+                snapshot_fragment(
+                    callbacks,
+                    root.node,
+                    root.scoped_descendants,
+                    records.fragment_geometry_of(root.node, callbacks),
+                    records.facts_decided_by_parent_of(root.node).fragment_facts,
+                    root.root_payloads,
+                ),
+                PlacementData::of_box_as_this_run_left_it(records, root.node, callbacks.frame),
             ));
         }
         for entry in &mut propagated_pending_abspos {
@@ -1480,9 +1618,7 @@ impl RunFragmentBuilder {
                 debug_assert!(
                     containing_block.is_invalid()
                         || containing_block == self.root_node
-                        || records
-                            .used_values_if_owned(containing_block)
-                            .is_none_or(|containing_block_used| !containing_block_used.has_content_offset.get()),
+                        || !records.is_placed(containing_block),
                     "a drainable abspos registration survived its containing block's run (slot {})",
                     entry.child_box.slot_index()
                 );
@@ -1503,6 +1639,7 @@ impl RunFragmentBuilder {
             propagated_anchor_candidates,
             propagated_inline_containing_block_rects,
             propagated_abspos_containing_block_info,
+            root_payloads: inner.root_payloads,
         }
     }
 }

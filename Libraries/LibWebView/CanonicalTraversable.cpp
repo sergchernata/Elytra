@@ -9,6 +9,7 @@
 #include <AK/StringBuilder.h>
 #include <AK/TemporaryChange.h>
 #include <LibCore/EventLoop.h>
+#include <LibURL/Site.h>
 #include <LibWebCommon/WebView/SiteIsolation.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/CanonicalBrowsingContext.h>
@@ -399,6 +400,8 @@ void CanonicalTraversable::release_page_if_unused(NonnullRefPtr<WebContentPage> 
         return;
     if (page_hosts_any(page))
         return;
+    if (auto* bidi = WebDriverBiDi::the())
+        bidi->push_session_state_for_client(page->client());
     // A page left hosting none of the tab's documents goes on representing the tab to a process holding part of
     // another tab of its group, whose documents can hold the tab's WindowProxies.
     if (page->client().holds_part_of_a_tab_in_the_group_of(*this)) {
@@ -438,6 +441,8 @@ void CanonicalTraversable::set_page_standing_in_for_lost_document(Badge<ViewImpl
 {
     did_lose_active_document();
     m_page_standing_in_for_lost_document = move(page);
+    if (auto* bidi = WebDriverBiDi::the())
+        bidi->push_session_state_for_client(m_page_standing_in_for_lost_document->client());
 }
 
 void CanonicalTraversable::did_activate_document_in(Badge<CanonicalNavigable>, WebContentPage& host)
@@ -1435,13 +1440,7 @@ void CanonicalTraversable::continue_history_navigation_population(HistoryOperati
         endpoint->async_continue_history_navigation_population(operation_id, changing_navigable->target_entry_descriptor(), operation->algorithm->navigation_type(),
             changing_navigable->navigable().ongoing_navigation().has<CanonicalNavigable::Traversal>(), Web::HTML::HistoryNavigationPopulation { loader.request(), loader.take_result() });
     };
-    if (auto client_id = endpoint->client().request_server_site_bindings().client_id(); client_id.has_value()) {
-        if (auto request_server = RequestServerManager::the().instance_for_client(*client_id)) {
-            changing_navigable.population_loader->move_response_body_to(*request_server, move(finish_handoff));
-            return;
-        }
-    }
-    finish_handoff(false);
+    changing_navigable.population_loader->move_response_body_to(endpoint->client().request_server_site_bindings(), move(finish_handoff));
 }
 
 bool CanonicalTraversable::run_changing_navigable_history_step_job(ApplyHistoryStep& run, ChangingNavigable& changing_navigable)
@@ -1457,7 +1456,7 @@ bool CanonicalTraversable::run_changing_navigable_history_step_job(ApplyHistoryS
         if (!operation.parameters.has<Web::ReloadHistoryOperationParameters>()
             && changing_navigable.target_entry->document_state->document.ptr() != &navigable.active_document()) {
             if (auto view = this->view(); view.has_value())
-                view->reset_blocked_request_count();
+                view->reset_blocked_resources();
         }
         if (operation.is_browser_traversal()) {
             if (auto callback = move(operation.browser_traversal().on_ready))
@@ -1786,6 +1785,23 @@ bool CanonicalTraversable::is_handing_navigable_to_another_page(CanonicalNavigab
             && changing_navigable->target_document_id != changing_navigable->displayed_document->id()
             && changing_job_endpoint(*changing_navigable) != navigable.active_document().host()) {
             return true;
+        }
+    }
+    return false;
+}
+
+bool CanonicalTraversable::client_populates_a_history_entry_for_site(WebContentClient const& client, Utf16String const& site) const
+{
+    for (auto const& [operation_id, operation] : m_history_operations) {
+        if (!operation->algorithm)
+            continue;
+        for (auto const& changing_navigable : operation->algorithm->changing_navigables()) {
+            if (!changing_navigable->has_pending_job() || !changing_navigable->navigable().is_top_level_traversable())
+                continue;
+            auto endpoint = changing_job_endpoint(*changing_navigable);
+            if (&endpoint->client() == &client
+                && URL::Site::serialize_for_partitioning(changing_navigable->target_entry->url.origin()) == site)
+                return true;
         }
     }
     return false;

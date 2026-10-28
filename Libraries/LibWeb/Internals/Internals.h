@@ -8,6 +8,7 @@
 
 #include <LibCompositing/Scrolling/AsyncScrollTree.h>
 #include <LibCompositing/Scrolling/AsyncScrollingState.h>
+#include <LibGC/Root.h>
 #include <LibWeb/Bindings/Internals.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Export.h>
@@ -97,8 +98,10 @@ public:
 
     void send_text(HTML::HTMLElement&, Utf16String const&, WebIDL::UnsignedShort modifiers);
     void send_text_through_ui_process(Utf16String const&);
+    void send_key_through_ui_process(Utf16String const& key_name);
     void grant_transient_activation();
     void click_through_ui_process(double x, double y, GC::Ref<WebIDL::Promise>);
+    void perform_actions(Utf16String const&, GC::Ref<WebIDL::Promise>);
     void mouse_event_through_ui_process(Bindings::MouseEventThroughUIProcessType, double x, double y, Bindings::MouseEventThroughUIProcessOptions const&, GC::Ref<WebIDL::Promise>);
     void wheel_through_ui_process(double x, double y, double delta_x, double delta_y, bool precise, Bindings::ScrollGesturePhase, Bindings::WheelTicks const&, GC::Ref<WebIDL::Promise>);
     void send_key(HTML::HTMLElement&, Utf16String const&, WebIDL::UnsignedShort modifiers, WebIDL::UnsignedLong repeat_count);
@@ -108,9 +111,9 @@ public:
     void commit_text();
 
     // Low-level mouse primitives
-    void mouse_down(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
-    void mouse_up(double x, double y, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers);
-    void mouse_move(double x, double y, WebIDL::UnsignedShort modifiers);
+    void mouse_down(double x, double y, WebIDL::UnsignedShort click_count, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers, Optional<WebIDL::UnsignedShort> buttons = {});
+    void mouse_up(double x, double y, WebIDL::UnsignedShort button, WebIDL::UnsignedShort modifiers, WebIDL::UnsignedShort buttons = 0);
+    void mouse_move(double x, double y, WebIDL::UnsignedShort modifiers, WebIDL::UnsignedShort buttons = 0);
     void mouse_leave();
     void mouse_cancel();
 
@@ -121,6 +124,7 @@ public:
     void wheel(double x, double y, double delta_x, double delta_y, bool precise, Bindings::ScrollGesturePhase, Bindings::WheelTicks const&, GC::Ref<WebIDL::Promise>);
     GC::Ref<JS::Object> compositor_scroll_state(GC::Ptr<DOM::Element> scroller);
     void pinch(double x, double y, double scale_delta, WebIDL::UnsignedShort modifiers);
+    void pinch_through_ui_process(double x, double y, double scale_delta);
     void reset_zoom();
 
     Utf16String current_cursor();
@@ -260,6 +264,7 @@ public:
     void set_manual_rendering_opportunities(bool enabled);
     void inject_rendering_opportunity(double frame_time_ms);
     Utf16String frame_scheduler_state() const;
+    void synchronize_compositor();
     void hold_next_frame(Utf16String const& hold);
     Utf16String last_frame_presented_by(DOM::Document&);
     void inject_clock_tick(double frame_time_ms, Optional<double> viewport_scroll_y);
@@ -334,6 +339,9 @@ private:
 
     UIEvents::MouseButton button_from_unsigned_short(WebIDL::UnsignedShort button);
 
+    GC::Root<JS::Cell> m_actions_executor;
+    bool m_actions_running { false };
+    Optional<Utf16String> m_pending_action_test_result;
     Vector<GC::Ref<InternalGamepad>> m_gamepads;
 };
 

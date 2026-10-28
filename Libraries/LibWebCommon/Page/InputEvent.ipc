@@ -36,6 +36,12 @@ enum Web::ScrollGesturePhase : u8 {
 }
 
 [ExistingCpp]
+struct Web::WheelGestureMark {
+    bool continues_gesture;
+    bool lasts_until_fingers_lift;
+}
+
+[ExistingCpp]
 struct Web::KeyEvent {
     Web::KeyEvent::Type type;
     Web::UIEvents::KeyCode key;
@@ -47,6 +53,33 @@ struct Web::KeyEvent {
     u64 id;
     Vector<Web::TextEditingCommand> editing_commands;
     bool native_editing_binding_resolved;
+}
+
+[ExistingCpp]
+enum Web::PointerType : u8 {
+    Mouse,
+    Pen,
+    Touch,
+}
+
+[ExistingCpp]
+struct Web::PointerProperties {
+    i32 pointer_id;
+    Web::PointerType pointer_type;
+    [Finite] double width;
+    [Finite] double height;
+    [Finite] double pressure;
+    [Finite] double tangential_pressure;
+    i32 tilt_x;
+    i32 tilt_y;
+    i32 twist;
+    [Finite] double altitude_angle;
+    [Finite] double azimuth_angle;
+}
+
+[ExistingCpp, Accessors]
+struct Web::PointerInputData {
+    Optional<Web::PointerProperties> properties;
 }
 
 [ExistingCpp]
@@ -67,6 +100,8 @@ struct Web::MouseEvent {
     bool async_scroll_performed_default_action;
     u64 id;
     Optional<Web::ScrollbarDraggedByCompositor> scrollbar_dragged_by_compositor;
+    Web::PointerInputData pointer_data;
+    Optional<Web::WheelGestureMark> wheel_gesture_mark;
 }
 
 [ExistingCpp]
@@ -74,5 +109,6 @@ struct Web::PinchEvent {
     Web::DevicePixelPoint position;
     Web::UIEvents::KeyModifier modifiers;
     [Finite] double scale_delta;
+    bool async_zoom_performed_default_action;
     u64 id;
 }

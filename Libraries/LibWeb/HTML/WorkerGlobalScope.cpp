@@ -213,11 +213,20 @@ void WorkerGlobalScope::initialize_policy_container(GC::Ref<Fetch::Infrastructur
     // 2. Otherwise, set workerGlobalScope's policy container to the result of creating a policy container from a fetch
     //    response given response and environment.
     m_policy_container = create_a_policy_container_from_a_fetch_response(response, environment);
+
+    // https://w3c.github.io/webappsec-upgrade-insecure-requests/#nesting
+    // AD-HOC: Upgrade Insecure Requests has a worker inherit the insecure requests policy of its inherited responsible
+    //         browsing context, which HTML no longer has. It inherits that of owner set[0]'s relevant settings object,
+    //         which is outside settings, here instead. The clone in step 1 holds it already.
+    auto const& owner_serialized_policy_container = m_owner_set.first().visit([](auto const& owner) -> SerializedPolicyContainer const& {
+        return owner.relevant_settings_object_policy_container;
+    });
+    m_policy_container->inherit_insecure_requests_policy(owner_serialized_policy_container.insecure_requests_policy, owner_serialized_policy_container.upgrade_insecure_navigations_set);
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#check-a-global-object's-embedder-policy
-// NB: response is only used for violation reports, which are not queued.
-bool WorkerGlobalScope::check_embedder_policy(EnvironmentSettingsObject const& owner) const
+// NB: response is only used for violation reports, which are not queued. owner is given as its embedder policy.
+bool WorkerGlobalScope::check_embedder_policy(EmbedderPolicy const& owner_policy) const
 {
     // 1. If workerGlobalScope is not a DedicatedWorkerGlobalScope object, then return true.
     if (!is<DedicatedWorkerGlobalScope>(*this))
@@ -229,7 +238,6 @@ bool WorkerGlobalScope::check_embedder_policy(EnvironmentSettingsObject const& o
     auto const& policy = policy_container()->embedder_policy;
 
     // 3. Let ownerPolicy be owner's policy container's embedder policy.
-    auto const& owner_policy = owner.policy_container()->embedder_policy;
 
     // FIXME: 4. If ownerPolicy's report-only value is compatible with cross-origin isolation and policy's value is
     //           not, then queue a cross-origin embedder policy inheritance violation with response, "worker

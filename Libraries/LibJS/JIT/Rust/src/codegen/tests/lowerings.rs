@@ -252,6 +252,7 @@ fn marker_runtime() -> RuntimeInfo {
         O::ToInt32,
         O::ToObject,
         O::ToLength,
+        O::ToPrimitiveWithStringHint,
     ] {
         set(opcode, marker_scalar as *const () as u64);
     }
@@ -678,6 +679,13 @@ fn unary_operations() {
         } else {
             MARKER
         };
+        let to_primitive = if (value >> 48) as u16 == value::OBJECT_TAG {
+            MARKER
+        } else if value == value::EMPTY {
+            value::UNDEFINED
+        } else {
+            value
+        };
         let (dst, src) = (r(5), argument(0));
         for (instruction, expected) in [
             (
@@ -714,6 +722,7 @@ fn unary_operations() {
             ),
             (Instruction::ToObject { dst, value: src }, to_object),
             (Instruction::ToLength { dst, value: src }, to_length),
+            (Instruction::ToPrimitiveWithStringHint { dst, value: src }, to_primitive),
         ] {
             let (result, _) = run_instruction_with(feedback, instruction.clone(), &[value, value::UNDEFINED]);
             assert_eq!(
@@ -1326,11 +1335,11 @@ fn fake_object_layout() -> RuntimeLayout {
         property_lookup_cache_entry_size: 64,
         property_lookup_cache_entry_key: 48,
         property_lookup_cache_keyed_generic: 3,
-        property_lookup_cache_entry_from_shape: 16,
+        property_lookup_cache_entry_new_shape: 16,
         property_lookup_cache_megamorphic_tag: 2,
         property_lookup_cache_megamorphic_primary_entries: 64,
-        property_lookup_cache_megamorphic_secondary_entries: 64 + 64 * 64,
-        property_lookup_cache_megamorphic_index_bits: 6,
+        property_lookup_cache_megamorphic_secondary_entries: 64 + 16 * 64,
+        property_lookup_cache_megamorphic_index_bits: 4,
         property_lookup_cache_megamorphic_hash_multiplier: 0x9e37_79b9,
         try_get_by_id_cache: fake_try_get_by_id_cache as *const () as u64,
         try_put_by_id_cache: fake_try_put_by_id_cache as *const () as u64,
@@ -2868,8 +2877,7 @@ impl FakeCachedObject {
     /// `new_shape`, for property `offset`.
     fn set_add_entry(&mut self, new_shape: &[u64], offset: u32) {
         self.set_entry(1, offset, false);
-        self.entry[2] = self.shape.as_ptr() as u64;
-        self.entry[3] = new_shape.as_ptr() as u64;
+        self.entry[2] = new_shape.as_ptr() as u64;
     }
 
     fn run(&self, instruction: Instruction, arguments: &[u64]) -> (JitResult, u64) {
@@ -3217,7 +3225,7 @@ fn put_by_id_adds_properties_through_property_caches() {
     }
     // So are other shapes, generations, invalid prototype chains, missing
     // new shapes, and objects whose storage would have to grow.
-    fake.entry[2] = 8;
+    fake.entry[3] = 8;
     assert_eq!(add(&mut fake, FLAG_IS_EXTENSIBLE), 1);
     fake.set_add_entry(&new_shape, 2);
     fake.entry[1] = 6;
@@ -3230,7 +3238,7 @@ fn put_by_id_adds_properties_through_property_caches() {
     std::hint::black_box(&validity);
     assert_eq!(add(&mut fake, FLAG_IS_EXTENSIBLE), 0);
     fake.entry[5] = 0;
-    fake.entry[3] = 0;
+    fake.entry[2] = 0;
     assert_eq!(add(&mut fake, FLAG_IS_EXTENSIBLE), 1);
     fake.set_add_entry(&new_shape, 2);
     fake.properties[0] = 2;
@@ -3256,7 +3264,7 @@ fn put_by_id_adds_properties_through_property_caches() {
 /// megamorphic_primary_index()` and `megamorphic_secondary_index()`.
 fn megamorphic_indices(shape: u64, key: u64) -> (usize, usize) {
     let hash = ((shape ^ key) as u32).wrapping_mul(0x9e37_79b9);
-    ((hash >> 26) as usize, ((hash >> 20) & 63) as usize)
+    ((hash >> 28) as usize, ((hash >> 24) & 15) as usize)
 }
 
 #[test]
@@ -3269,7 +3277,7 @@ fn get_by_id_through_megamorphic_property_caches() {
         let shape = fake.shape.as_ptr() as u64;
         let (primary_index, secondary_index) = megamorphic_indices(shape, 0);
         // The most recently used entry, then the primary and the secondary table.
-        let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 64)];
+        let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 16)];
         let entry_at = |data: &mut Vec<u64>, index: usize, offset: u32| {
             let entry = &mut data[index * ENTRY_WORDS..(index + 1) * ENTRY_WORDS];
             entry[0] = 2 | u64::from(offset) << 32;
@@ -3277,7 +3285,7 @@ fn get_by_id_through_megamorphic_property_caches() {
             entry[3] = shape;
         };
         let primary = 1 + primary_index;
-        let secondary = 1 + 64 + secondary_index;
+        let secondary = 1 + 16 + secondary_index;
         data[3] = 8;
         fake.caches[1] = data.as_ptr() as u64 | 2;
         // Not in either table: the probe, then the slow path.
@@ -4076,9 +4084,9 @@ fn get_by_value_through_megamorphic_property_caches() {
         let key = u64::from(STRING_TAG) << 48 | 0x5000;
         let other_key = u64::from(STRING_TAG) << 48 | 0x6000;
         let (primary_index, secondary_index) = megamorphic_indices(shape, key);
-        let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 64)];
+        let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 16)];
         let primary = 1 + primary_index;
-        let secondary = 1 + 64 + secondary_index;
+        let secondary = 1 + 16 + secondary_index;
         let entry = &mut data[secondary * ENTRY_WORDS..(secondary + 1) * ENTRY_WORDS];
         entry[0] = 2 | 1 << 32;
         entry[1] = 5;
@@ -4225,7 +4233,7 @@ fn get_by_id_of_strings_through_megamorphic_property_caches() {
     let shape = string_prototype.shape.as_ptr() as u64;
     // An entry in the primary table, which the lookup finds after the most
     // recently used entry missed.
-    let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 64)];
+    let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 16)];
     let primary = 1 + megamorphic_indices(shape, 0).0;
     data[3] = 8;
     data[primary * ENTRY_WORDS] = 2 | 1 << 32;
@@ -4262,13 +4270,13 @@ fn keyed_accesses_of_missing_and_added_properties_through_property_caches() {
     let key = u64::from(STRING_TAG) << 48 | 0x5000;
     let other_key = u64::from(STRING_TAG) << 48 | 0x6000;
     // A megamorphic cache whose most recently used entry is the one tested.
-    let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 64)];
+    let mut data = vec![0u64; ENTRY_WORDS * (1 + 2 * 16)];
     fake.caches[1] = data.as_ptr() as u64 | 2;
-    let set_entry = |data: &mut Vec<u64>, entry_type: u64, offset: u64, from_shape: u64, shape: u64| {
+    let set_entry = |data: &mut Vec<u64>, entry_type: u64, offset: u64, new_shape: u64, shape: u64| {
         data[..ENTRY_WORDS].fill(0);
         data[0] = entry_type | offset << 32;
         data[1] = 5 | 1 << 40;
-        data[2] = from_shape;
+        data[2] = new_shape;
         data[3] = shape;
         data[6] = key;
     };
@@ -4322,7 +4330,7 @@ fn keyed_accesses_of_missing_and_added_properties_through_property_caches() {
     let mut new_shape = vec![0u64; 12];
     new_shape[10] = 3 | 5 << 32;
     let new_shape_address = new_shape.as_ptr() as u64;
-    set_entry(&mut data, 1, 2, shape, new_shape_address);
+    set_entry(&mut data, 1, 2, new_shape_address, shape);
     assert_eq!(put(&fake, other_key, value::TRUE), 1);
     assert_eq!(put(&fake, key, value::TRUE), 0);
     assert_eq!(fake.object[6], new_shape_address);

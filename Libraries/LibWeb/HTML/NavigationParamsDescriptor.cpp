@@ -11,6 +11,7 @@
 #include <LibRequests/RequestClient.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Fetching/FetchedDataReceiver.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
@@ -25,6 +26,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/Streams/ReadableStream.h>
+#include <LibWeb/WebDriver/BiDi/Network.h>
 #include <LibWeb/WebIDL/Promise.h>
 
 namespace Web::HTML {
@@ -33,8 +35,11 @@ static SerializedPolicyContainer serialize_request_policy_container(Fetch::Infra
 {
     return request.policy_container().visit(
         [&request](Fetch::Infrastructure::Request::PolicyContainer) {
-            VERIFY(request.client());
-            return request.client()->policy_container()->serialize();
+            auto client = Fetch::Fetching::resolve_fetch_client(request);
+            VERIFY(client.has_value());
+            return client->visit(
+                [](GC::Ref<EnvironmentSettingsObject> const& settings_object) { return settings_object->policy_container()->serialize(); },
+                [](NonnullRefPtr<RemoteEnvironmentSettings const> const& settings) { return settings->settings.policy_container; });
         },
         [](NonnullRefPtr<PolicyContainer const> const& policy_container) {
             return policy_container->serialize();
@@ -46,7 +51,7 @@ static NavigationRequestDescriptor create_navigation_request_descriptor(Fetch::I
     return {
         .url_list = request.url_list(),
         .method = request.method(),
-        .client_is_null = !request.client(),
+        .client_is_null = !request.client().has_value(),
         .referrer = request.referrer(),
         .referrer_policy = request.referrer_policy(),
         .policy_container = serialize_request_policy_container(request),
@@ -64,7 +69,7 @@ static Optional<ByteBuffer> copy_body_source(Fetch::Infrastructure::Body const& 
     return {};
 }
 
-static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch::Infrastructure::Response const& response)
+static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch::Infrastructure::Response const& response, Fetch::Infrastructure::Request const* request, Fetch::Infrastructure::FetchTimingInfo const* timing_info)
 {
     Vector<HTTP::Header> headers;
     headers.ensure_capacity(response.header_list()->headers().size());
@@ -76,6 +81,7 @@ static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch:
         body = NavigationResponseBodyHandle {
             .request_server_client_id = request->client_id,
             .request_server_request_id = request->request_id,
+            .request_server_top_level_site = {},
         };
     }
 
@@ -84,6 +90,7 @@ static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch:
             body = body_bytes.release_value();
     }
 
+    auto network_response = request && timing_info && response.request_server_request().has_value() ? WebDriver::BiDi::network_response_for_navigation(*request, *timing_info, response) : Optional<JsonObject> {};
     return {
         .url_list = response.url_list(),
         .status = response.status(),
@@ -95,6 +102,7 @@ static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch:
         .navigation_timing_allow_values_list = response.navigation_timing_allow_values_list(),
         .redirect_taint = response.redirect_taint(),
         .body = move(body),
+        .webdriver_bidi_network_response = network_response.has_value() ? JsonValue(network_response.release_value()) : JsonValue {},
     };
 }
 
@@ -164,7 +172,7 @@ static NavigationParamsDescriptor create_navigation_params_descriptor(Navigation
         .id = params.id,
         .navigable_id = params.navigable->id(),
         .request = move(request),
-        .response = create_navigation_response_descriptor(*params.response),
+        .response = create_navigation_response_descriptor(*params.response, params.request.ptr(), params.fetch_controller ? params.fetch_controller->timing_info().ptr() : params.fetch_timing_info.ptr()),
         .fetch_timing_info = move(fetch_timing_info),
         .coop_enforcement_result = params.coop_enforcement_result,
         .reserved_environment = move(reserved_environment),
@@ -226,16 +234,16 @@ void create_navigation_params_descriptor(JS::Realm& realm, NavigationParamsVaria
         GC::Ref { realm.global_object() });
 }
 
-static GC::Ptr<Fetch::Infrastructure::Request> create_navigation_request_from_descriptor(JS::Realm& realm, LocalNavigable& navigable, Optional<NavigationRequestDescriptor> const& descriptor)
+static RefPtr<Fetch::Infrastructure::Request> create_navigation_request_from_descriptor(LocalNavigable& navigable, Optional<NavigationRequestDescriptor> const& descriptor)
 {
     if (!descriptor.has_value())
         return nullptr;
 
-    auto request = Fetch::Infrastructure::Request::create(realm.vm());
+    auto request = Fetch::Infrastructure::Request::create();
     request->set_url_list(descriptor->url_list);
     request->set_method(descriptor->method);
     if (!descriptor->client_is_null)
-        request->set_client(&navigable.active_document()->relevant_settings_object());
+        request->set_client(navigable.active_document()->relevant_settings_object().address());
     request->set_referrer(descriptor->referrer);
     request->set_referrer_policy(descriptor->referrer_policy);
     request->set_policy_container(create_a_policy_container_from_serialized_policy_container(descriptor->policy_container));
@@ -246,14 +254,19 @@ static GC::Ptr<Fetch::Infrastructure::Request> create_navigation_request_from_de
     return request;
 }
 
-static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::Realm& realm, NavigationResponseBodyHandle handle, Fetch::Infrastructure::Response& response, RefPtr<Fetch::Infrastructure::FetchTimingInfo> timing_info)
+static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::Realm& realm, LocalNavigable& navigable, NavigationResponseBodyHandle handle, Fetch::Infrastructure::Response& response, RefPtr<Fetch::Infrastructure::FetchTimingInfo> timing_info, Optional<JsonObject> network_response, RefPtr<NavigationResponseNetworkEventState> network_response_state)
 {
-    if (!ResourceLoader::is_initialized() || !ResourceLoader::the().request_client())
+    if (!ResourceLoader::is_initialized())
+        return {};
+
+    // The UI process moved the response to the RequestServer for the handle's site.
+    auto request_client = ResourceLoader::the().request_client_for_top_level_site(handle.request_server_top_level_site);
+    if (!request_client)
         return {};
 
     // Preserve the original RequestServer identity while WebContent decides whether this response will become a
     // document or a download. A download is adopted by the UI process using that identity.
-    auto request = ResourceLoader::the().request_client()->adopt_request(
+    auto request = request_client->adopt_request(
         handle.request_server_client_id,
         handle.request_server_request_id,
         Requests::RequestClient::TransferLease::Yes);
@@ -281,6 +294,9 @@ static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::R
     auto receiver_root = GC::make_root(receiver);
     auto cross_origin_isolated_capability = Bindings::principal_host_defined_environment_settings_object(realm).cross_origin_isolated_capability();
 
+    auto observed_navigable = network_response.has_value() ? GC::Weak<LocalNavigable> { navigable } : GC::Weak<LocalNavigable> {};
+
+    // NB: receiver_root traces response. Observing its navigable must not keep the navigable alive.
     request->set_unbuffered_request_callbacks(
         [](NonnullRefPtr<HTTP::HeaderList>, Optional<u32>, Optional<String> const&, Optional<Core::ImmutableBytes>, Optional<u64>, Requests::CacheState) { },
         [receiver_root, &realm](Requests::ResponseData data) {
@@ -289,7 +305,7 @@ static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::R
         [receiver_root](Core::ImmutableBytes data) {
             receiver_root->set_cached_response_body(move(data));
         },
-        [receiver_root, stream = GC::make_root(stream), body = GC::make_root(body), timing_info, cross_origin_isolated_capability, &realm](u64, Requests::RequestTimingInfo const& request_timing_info, Optional<Requests::NetworkError> network_error) {
+        [receiver_root, stream = GC::make_root(stream), body = GC::make_root(body), response = GC::Ptr { &response }, observed_navigable = move(observed_navigable), timing_info, network_response = move(network_response), network_response_state = move(network_response_state), cross_origin_isolated_capability, &realm](u64, Requests::RequestTimingInfo const& request_timing_info, Optional<Requests::NetworkError> network_error) {
             TemporaryExecutionContext execution_context { realm, TemporaryExecutionContext::CallbacksEnabled::Yes };
             if (!network_error.has_value()) {
                 // AD-HOC: Nothing reports timing for a navigation fetch, so record the network phases and end time here
@@ -298,10 +314,21 @@ static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::R
                     timing_info->update_final_timings(request_timing_info, cross_origin_isolated_capability);
                     timing_info->set_end_time(HighResolutionTime::unsafe_shared_current_time());
                 }
+                auto body_info = response->body_info();
+                body_info.encoded_size = max(request_timing_info.encoded_body_size, 0);
+                response->set_body_info(move(body_info));
                 receiver_root->handle_network_data(realm, Requests::ResponseData::from_bytes({}), Fetch::Fetching::FetchedDataReceiver::NetworkState::Complete);
+                if (network_response.has_value() && observed_navigable && network_response_state->owner == NavigationResponseNetworkEventState::Owner::Renderer) {
+                    network_response_state->owner = NavigationResponseNetworkEventState::Owner::Completed;
+                    WebDriver::BiDi::network_navigation_response_finished(*observed_navigable, *network_response, *response, timing_info);
+                }
                 return;
             }
 
+            if (network_response.has_value() && observed_navigable && network_response_state->owner == NavigationResponseNetworkEventState::Owner::Renderer) {
+                network_response_state->owner = NavigationResponseNetworkEventState::Owner::Completed;
+                WebDriver::BiDi::network_navigation_response_finished(*observed_navigable, *network_response, *response, timing_info, "Transferred navigation response failed"sv);
+            }
             body->set_sniff_bytes_failed();
             if (stream->is_readable())
                 stream->error(JS::TypeError::create(realm, "Transferred navigation response failed"_utf16));
@@ -315,7 +342,7 @@ static GC::Ptr<Fetch::Infrastructure::Body> adopt_navigation_response_body(JS::R
     return body;
 }
 
-static ErrorOr<GC::Ref<Fetch::Infrastructure::Response>> create_navigation_response_from_descriptor(JS::Realm& realm, NavigationResponseDescriptor descriptor, RefPtr<Fetch::Infrastructure::FetchTimingInfo> timing_info)
+static ErrorOr<GC::Ref<Fetch::Infrastructure::Response>> create_navigation_response_from_descriptor(JS::Realm& realm, LocalNavigable& navigable, NavigationResponseDescriptor descriptor, RefPtr<Fetch::Infrastructure::FetchTimingInfo> timing_info, RefPtr<NavigationResponseNetworkEventState> network_response_state)
 {
     auto response = descriptor.network_error_message.has_value()
         ? Fetch::Infrastructure::Response::network_error(realm.vm(), move(*descriptor.network_error_message))
@@ -332,7 +359,7 @@ static ErrorOr<GC::Ref<Fetch::Infrastructure::Response>> create_navigation_respo
     if (descriptor.body.has<ByteBuffer>()) {
         response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, descriptor.body.get<ByteBuffer>().bytes()));
     } else if (descriptor.body.has<NavigationResponseBodyHandle>()) {
-        auto body = adopt_navigation_response_body(realm, descriptor.body.get<NavigationResponseBodyHandle>(), response, timing_info);
+        auto body = adopt_navigation_response_body(realm, navigable, descriptor.body.get<NavigationResponseBodyHandle>(), response, timing_info, descriptor.webdriver_bidi_network_response.is_object() ? Optional<JsonObject>(descriptor.webdriver_bidi_network_response.as_object()) : Optional<JsonObject> {}, move(network_response_state));
         if (!body)
             return Error::from_string_literal("Unable to adopt transferred navigation response body");
         response->set_body(body);
@@ -361,11 +388,15 @@ ErrorOr<NavigationParamsVariant> create_navigation_params_from_descriptor(JS::Re
 
     auto params = descriptor.get<NavigationParamsDescriptor>();
     VERIFY(params.navigable_id == navigable.id());
-    auto request = create_navigation_request_from_descriptor(realm, navigable, params.request);
+    auto request = create_navigation_request_from_descriptor(navigable, params.request);
     RefPtr<Fetch::Infrastructure::FetchTimingInfo> fetch_timing_info;
     if (params.fetch_timing_info.has_value())
         fetch_timing_info = create_navigation_fetch_timing_info_from_descriptor(*params.fetch_timing_info);
-    auto response = TRY(create_navigation_response_from_descriptor(realm, move(params.response), fetch_timing_info));
+    auto network_response = params.response.webdriver_bidi_network_response;
+    RefPtr<NavigationResponseNetworkEventState> network_response_state;
+    if (network_response.is_object())
+        network_response_state = adopt_ref(*new NavigationResponseNetworkEventState);
+    auto response = TRY(create_navigation_response_from_descriptor(realm, navigable, move(params.response), fetch_timing_info, network_response_state));
     GC::Ptr<Environment> reserved_environment;
     if (params.reserved_environment.has_value()) {
         reserved_environment = Environment::create(
@@ -394,6 +425,8 @@ ErrorOr<NavigationParamsVariant> create_navigation_params_from_descriptor(JS::Re
         move(params.about_base_url),
         params.user_involvement);
     navigation_params->fetch_timing_info = fetch_timing_info;
+    navigation_params->webdriver_bidi_network_response = move(network_response);
+    navigation_params->webdriver_bidi_network_response_state = move(network_response_state);
     navigation_params->agent_cluster_id = params.agent_cluster_id;
     navigation_params->agent_cluster_cross_origin_isolation_mode = params.agent_cluster_cross_origin_isolation_mode;
     navigation_params->new_browsing_context_group_id = params.new_browsing_context_group_id;

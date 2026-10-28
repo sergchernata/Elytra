@@ -157,6 +157,15 @@ fn discard_whitespace(values: &[ComponentValue], position: &mut usize) {
     }
 }
 
+// https://drafts.css-houdini.org/css-properties-values-api/#consume-data-type-name
+// NB: Data type names are consumed as literal code points, unlike custom identifiers, which allow escapes.
+fn data_type_name(value: &ComponentValue) -> Option<&[u16]> {
+    if value.original_source_text.iter().any(|unit| unit == u16::from(b'\\')) {
+        return None;
+    }
+    value.ident()
+}
+
 fn parse_single_component(
     values: &[ComponentValue],
     position: &mut usize,
@@ -179,7 +188,7 @@ fn parse_single_component(
 
     if values.get(*position).is_some_and(|value| value.is_delim(b'<')) {
         *position += 1;
-        let name = values.get(*position).and_then(ComponentValue::ident);
+        let name = values.get(*position).and_then(data_type_name);
         *position += usize::from(name.is_some());
         if let Some(name) = name
             && values.get(*position).is_some_and(|value| value.is_delim(b'>'))
@@ -205,7 +214,7 @@ fn parse_component(
     if values.get(*position).is_some_and(|value| value.is_delim(b'<'))
         && values
             .get(*position + 1)
-            .and_then(ComponentValue::ident)
+            .and_then(data_type_name)
             .is_some_and(|name| equals_ascii(name, b"transform-list"))
         && values.get(*position + 2).is_some_and(|value| value.is_delim(b'>'))
     {
@@ -401,7 +410,7 @@ pub(crate) fn parse_with_syntax_component_values(
     original_source: Option<&[u16]>,
 ) -> Option<StyleValueData> {
     if matches!(syntax, SyntaxNode::Universal) {
-        if !declaration_value_is_valid(values) {
+        if !values.is_empty() && !declaration_value_is_valid(values) {
             return None;
         }
 
@@ -456,6 +465,24 @@ pub extern "C" fn rust_syntax_is_universal(syntax: &SyntaxNode) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_syntax_is_single_component(syntax: &SyntaxNode) -> bool {
     is_single_syntax_component(syntax)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_syntax_value_is_list(syntax: &SyntaxNode, value: &StyleValueData) -> bool {
+    match syntax {
+        SyntaxNode::Multiplier { .. } => true,
+        SyntaxNode::Alternatives(alternatives) => {
+            // NB: Select the same first matching alternative as parsing. A transform-list is one Typed OM value,
+            //     whereas a multiplier on transform-function produces multiple values.
+            let source = crate::css::serialize::serialize_style_value_to_utf16(value);
+            let context = ParseContext::default();
+            alternatives
+                .iter()
+                .find(|alternative| parse_with_syntax(&context, &source, alternative).is_some())
+                .is_some_and(|alternative| matches!(alternative, SyntaxNode::Multiplier { .. }))
+        }
+        _ => false,
+    }
 }
 
 #[unsafe(no_mangle)]

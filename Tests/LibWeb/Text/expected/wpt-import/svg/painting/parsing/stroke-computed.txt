@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	Property stroke value 'none'
+Pass	Property stroke value 'rgb(12, 34, 56)'
+Pass	Property stroke value 'url("https://example.com/")'
+Pass	Property stroke value 'url("https://example.com/") none'
+Pass	Property stroke value 'url("https://example.com/") rgb(12, 34, 56)'
+Pass	url values are made absolute

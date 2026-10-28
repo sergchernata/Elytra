@@ -139,13 +139,19 @@ impl FunctionInfo {
 const MEMORY32_MAX_PAGES: u64 = 1 << 16;
 const MEMORY64_MAX_PAGES: u64 = 1 << 48;
 
-/// The most locals a function may have, its parameters included, as the JS API's implementation limits say. Every
-/// local takes a slot of the function's machine stack frame, so this bounds the frame size a module can ask for.
-const MAX_FUNCTION_LOCALS: usize = 50_000;
+// https://webassembly.github.io/spec/js-api/#limits
 
-/// The most supertypes a type may have above it, as the JS API's implementation limits say. Runtime types hold all of
-/// their supertypes, and subtype checks walk them.
+// The maximum depth of a defined subtype hierarchy is 63 (where a type defined with no supertype has depth 0).
 const MAX_SUBTYPING_DEPTH: u32 = 63;
+
+// The maximum number of parameters to any function or block is 1,000.
+const MAX_FUNCTION_PARAMS: usize = 1_000;
+
+// The maximum number of return values for any function or block is 1,000.
+const MAX_FUNCTION_RESULTS: usize = 1_000;
+
+// The maximum number of locals declared in a function, including implicitly declared as parameters, is 50,000.
+const MAX_FUNCTION_LOCALS: usize = 50_000;
 
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(Error::invalid(message))
@@ -2206,6 +2212,12 @@ fn validate_types(module: &Module, identities: &mut Vec<u32>) -> Result<()> {
             };
             match &sub_type.composite {
                 CompositeType::Func(function) => {
+                    if function.params.len() > MAX_FUNCTION_PARAMS {
+                        return invalid("too many parameters");
+                    }
+                    if function.results.len() > MAX_FUNCTION_RESULTS {
+                        return invalid("too many results");
+                    }
                     function
                         .params
                         .iter()
@@ -2449,7 +2461,7 @@ pub fn validate(module: &mut Module) -> Result<()> {
             catch_clauses: validator.catch_clauses.into_boxed_slice(),
             local_count: validator.locals.len() as u32 + validator.exception_local_count,
             exception_local_count: validator.exception_local_count,
-            max_stack_slots: validator.max_slot_height,
+            max_stack_slots: validator.max_slot_height.max(slots_of(&function.results)),
         });
     }
     module.function_infos = infos;

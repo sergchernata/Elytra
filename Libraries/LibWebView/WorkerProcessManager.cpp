@@ -8,6 +8,7 @@
 #include <LibCore/EventLoop.h>
 #include <LibCore/Timer.h>
 #include <LibIPC/File.h>
+#include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/CanonicalEnvironmentSettingsObject.h>
 #include <LibWebView/CanonicalNavigable.h>
@@ -213,24 +214,10 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
                 client->request_server_site_bindings().bind_sites_of(web_worker_owner.client->request_server_site_bindings());
             });
 
-        // The worker's requests go through the RequestServer of its owner's site.
-        auto request_server_instance = [&]() -> RefPtr<RequestServerInstance> {
-            Optional<int> owner_client_id = owner.client.visit(
-                [&](WebContentOwner const& web_content_owner) { return web_content_owner.client ? web_content_owner.client->request_server_site_bindings().client_id() : Optional<int> {}; },
-                [&](WebWorkerOwner const& web_worker_owner) { return web_worker_owner.client->request_server_site_bindings().client_id(); });
-            if (owner_client_id.has_value()) {
-                if (auto instance = RequestServerManager::the().instance_for_client(*owner_client_id))
-                    return instance;
-            }
-            return nullptr;
-        }();
-        if (!request_server_instance)
-            request_server_instance = TRY(RequestServerManager::the().browser_instance(*session));
-        auto request_server_connection = TRY(RequestServerManager::the().connect_new_client(*request_server_instance, *session, RequestServer::SiteBinding::Bound));
         auto image_decoder = TRY(launch_image_decoder_process());
 
-        client->request_server_site_bindings().did_connect(request_server_connection.client_id);
-        client->async_connect_to_request_server(move(request_server_connection.handle), request_server_connection.client_id);
+        // The worker's requests go through the RequestServers of its owner's sites.
+        TRY(client->request_server_site_bindings().connect(*session));
         client->async_set_site_compatibility_data(Application::the().site_compatibility_data());
         // The User-Agent string, the navigator compatibility mode, and the preferred languages live in this process.
         // Pages get them through their view; a worker gets the same values here, so its navigator never contradicts
@@ -268,6 +255,21 @@ Web::HTML::WorkerAgentId WorkerProcessManager::start_worker_agent(Owner owner, O
     //     settings it is created for, too.
     auto inside_settings = make<CanonicalWorkerEnvironmentSettingsObject>(move(origin), outside_settings->top_level_origin(), has_cross_site_ancestor, Web::HTML::EnvironmentId::generate());
     auto environment_id = inside_settings->id();
+
+    // NB: The task manager lists the worker's process with the process that started it, and once that one is gone,
+    //     with the site of the worker's origin.
+    if (auto process = Application::process_manager().find_child(client->child_id()); process.has_value()) {
+        owner.client.visit(
+            [&](WebContentOwner const& web_content_owner) {
+                if (web_content_owner.client)
+                    process->set_owner_child_id(web_content_owner.client->child_id());
+            },
+            [&](WebWorkerOwner const& web_worker_owner) {
+                process->set_owner_child_id(web_worker_owner.client->child_id());
+            });
+        if (auto const& worker_origin = inside_settings->origin(); !worker_origin.is_opaque() && !worker_origin.is_file_origin())
+            process->set_site_url(URL::Parser::basic_parse(worker_origin.serialize()));
+    }
 
     // NB: A worker's process reads local files as its owner's does. A worker of a file origin that local file content
     //     starts is local file content too.
@@ -455,25 +457,6 @@ void WorkerProcessManager::for_each_request_server_site_bindings(Function<Iterat
     }
 }
 
-ErrorOr<void> WorkerProcessManager::reconnect_to_request_server(RequestServerInstance& instance, Function<bool(RequestServerSiteBindings const&)> should_reconnect)
-{
-    for (auto& entry : m_agents) {
-        auto& agent = entry.value;
-        if (!agent.client->is_open() || !should_reconnect(agent.client->request_server_site_bindings()))
-            continue;
-
-        // A worker whose session is gone has nothing left to fetch for.
-        auto session = agent.client->session();
-        if (!session)
-            continue;
-
-        auto request_server_connection = TRY(RequestServerManager::the().connect_new_client(instance, *session, RequestServer::SiteBinding::Bound));
-        agent.client->request_server_site_bindings().did_connect(request_server_connection.client_id);
-        agent.client->async_connect_to_request_server(move(request_server_connection.handle), request_server_connection.client_id);
-    }
-    return {};
-}
-
 ErrorOr<void> WorkerProcessManager::simulate_request_server_connection_loss_for_testing(WebContentClient& owner, Web::PageId page_id)
 {
     auto is_owned_by_page = [&](WorkerAgent const& agent) {
@@ -491,18 +474,17 @@ ErrorOr<void> WorkerProcessManager::simulate_request_server_connection_loss_for_
     }
 
     for (auto& client : clients) {
-        auto session = client->session();
-        VERIFY(session);
-        RefPtr<RequestServerInstance> instance;
-        if (auto client_id = client->request_server_site_bindings().client_id(); client_id.has_value())
-            instance = RequestServerManager::the().instance_for_client(*client_id);
-        if (!instance)
-            instance = TRY(RequestServerManager::the().browser_instance(*session));
-        auto request_server_connection = TRY(RequestServerManager::the().connect_new_client(*instance, *session, RequestServer::SiteBinding::Bound));
-        client->request_server_site_bindings().did_connect(request_server_connection.client_id);
-        auto response = client->send_sync_but_allow_failure<Messages::WebWorkerServer::SimulateRequestServerConnectionLossAndReconnectForTesting>(move(request_server_connection.handle), request_server_connection.client_id);
-        if (!response)
-            return Error::from_string_literal("WebWorker disconnected while reconnecting to RequestServer");
+        auto& bindings = client->request_server_site_bindings();
+        Vector<Optional<Utf16String>> top_level_sites { OptionalNone {} };
+        for (auto& top_level_site : bindings.top_level_sites())
+            top_level_sites.append(move(top_level_site));
+
+        for (auto const& top_level_site : top_level_sites) {
+            auto request_server_connection = TRY(bindings.replace_client(top_level_site));
+            auto response = client->send_sync_but_allow_failure<Messages::WebWorkerServer::SimulateRequestServerConnectionLossAndReconnectForTesting>(move(request_server_connection.handle), request_server_connection.client_id, top_level_site);
+            if (!response)
+                return Error::from_string_literal("WebWorker disconnected while reconnecting to RequestServer");
+        }
     }
 
     return {};

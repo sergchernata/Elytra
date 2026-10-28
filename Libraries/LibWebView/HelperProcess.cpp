@@ -12,6 +12,7 @@
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
 #include <LibSandbox/ConnectBroker.h>
+#include <LibURL/Parser.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/AudioServerControlClient.h>
 #include <LibWebView/CompositorClient.h>
@@ -300,6 +301,20 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
     return client.release_nonnull();
 }
 
+// Launches a server that works for the given process alone, so that the server is listed with it.
+template<typename ClientType>
+static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process_for(u64 owner_child_id, StringView server_name, Vector<ByteString> arguments)
+{
+    RefPtr<ClientType> client;
+    TRY(launch_helper_process(server_name, move(arguments), [&](Core::ProcessSpawnOptions const& options, bool capture_output) -> ErrorOr<WebView::Process> {
+        auto [process, new_client] = TRY(WebView::Process::spawn<ClientType>(WebView::process_type_from_name(server_name), options, capture_output));
+        process.set_owner_child_id(owner_child_id);
+        client = move(new_client);
+        return move(process);
+    }));
+    return client.release_nonnull();
+}
+
 // Gives a new process its one connection to the font service. This is the first message it gets, so that every font
 // question it asks, from any thread, can go out on that connection.
 template<typename ClientType>
@@ -434,7 +449,7 @@ void connect_to_image_decoder(WebWorkerClient& client, ImageDecoderConnection de
     connect_client_to_image_decoder(client, move(decoder));
 }
 
-ErrorOr<NonnullRefPtr<AudioServerControlClient>> launch_audio_server_process()
+ErrorOr<NonnullRefPtr<AudioServerControlClient>> launch_audio_server_process(u64 owner_child_id)
 {
     auto const& browser_options = WebView::Application::browser_options();
 
@@ -448,10 +463,10 @@ ErrorOr<NonnullRefPtr<AudioServerControlClient>> launch_audio_server_process()
         arguments.append(server.value());
     }
 
-    return launch_server_process<AudioServerControlClient>("AudioServer"sv, arguments);
+    return launch_server_process_for<AudioServerControlClient>(owner_child_id, "AudioServer"sv, arguments);
 }
 
-ErrorOr<NonnullRefPtr<MediaClient::Client>> launch_media_server_process()
+ErrorOr<NonnullRefPtr<MediaClient::Client>> launch_media_server_process(u64 owner_child_id)
 {
     auto const& browser_options = WebView::Application::browser_options();
 
@@ -463,12 +478,12 @@ ErrorOr<NonnullRefPtr<MediaClient::Client>> launch_media_server_process()
         arguments.append(server.value());
     }
 
-    return launch_server_process<MediaClient::Client>("MediaServer"sv, arguments);
+    return launch_server_process_for<MediaClient::Client>(owner_child_id, "MediaServer"sv, arguments);
 }
 
 static NeverDestroyed<Vector<WeakPtr<VideoDecoderServerControlClient>>> s_video_decoder_servers;
 
-ErrorOr<NonnullRefPtr<VideoDecoderServerControlClient>> launch_video_decoder_server_process(Optional<Gfx::GpuDeviceIdentity> const& gpu_device_identity)
+ErrorOr<NonnullRefPtr<VideoDecoderServerControlClient>> launch_video_decoder_server_process(u64 owner_child_id, Optional<Gfx::GpuDeviceIdentity> const& gpu_device_identity)
 {
     auto const& browser_options = WebView::Application::browser_options();
 
@@ -486,7 +501,7 @@ ErrorOr<NonnullRefPtr<VideoDecoderServerControlClient>> launch_video_decoder_ser
         arguments.append(server.value());
     }
 
-    auto server = TRY(launch_server_process<VideoDecoderServerControlClient>("VideoDecoderServer"sv, arguments));
+    auto server = TRY(launch_server_process_for<VideoDecoderServerControlClient>(owner_child_id, "VideoDecoderServer"sv, arguments));
     s_video_decoder_servers->remove_all_matching([](auto const& weak_server) { return !weak_server; });
     s_video_decoder_servers->append(server->make_weak_ptr<VideoDecoderServerControlClient>());
     return server;
@@ -595,7 +610,7 @@ void apply_dns_settings(Requests::RequestControlClient& client)
         });
 }
 
-ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_process(ByteString const& cache_path, Optional<Utf16String> const& site, HTTPDiskCacheMode http_disk_cache_mode)
+ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_process(ByteString const& cache_path, Optional<Utf16String> const& site, bool sites_have_their_own, HTTPDiskCacheMode http_disk_cache_mode)
 {
     auto const& browser_options = Application::browser_options();
     auto const& request_server_options = Application::request_server_options();
@@ -608,6 +623,8 @@ ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_pro
     if (site.has_value()) {
         arguments.append("--site"sv);
         arguments.append(site->to_byte_string());
+    } else if (sites_have_their_own) {
+        arguments.append("--sites-have-their-own"sv);
     }
 
     if (browser_options.disable_sandbox == DisableSandbox::Yes)
@@ -637,7 +654,17 @@ ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_pro
     if (request_server_options.resource_substitution_map_path.has_value())
         arguments.append(ByteString::formatted("--resource-map={}", *request_server_options.resource_substitution_map_path));
 
-    auto client = TRY(launch_server_process<Requests::RequestControlClient>("RequestServer"sv, move(arguments)));
+    if (Application::web_content_options().is_test_mode == IsTestMode::Yes)
+        arguments.append("--test-mode"sv);
+
+    RefPtr<Requests::RequestControlClient> client;
+    TRY(launch_helper_process("RequestServer"sv, move(arguments), [&](Core::ProcessSpawnOptions const& options, bool capture_output) -> ErrorOr<Process> {
+        auto [process, new_client] = TRY(Process::spawn<Requests::RequestControlClient>(ProcessType::RequestServer, options, capture_output));
+        if (site.has_value())
+            process.set_site_url(URL::Parser::basic_parse(*site));
+        client = move(new_client);
+        return move(process);
+    }));
 
     auto const& browsing_data_settings = Application::settings().browsing_data_settings();
     client->async_set_disk_cache_settings(browsing_data_settings.disk_cache_settings);
@@ -645,7 +672,7 @@ ErrorOr<NonnullRefPtr<Requests::RequestControlClient>> launch_request_server_pro
     if (!Application::settings().dns_settings().has<SystemDNS>())
         apply_dns_settings(*client);
 
-    return client;
+    return client.release_nonnull();
 }
 
 ErrorOr<RequestServerClientConnection> connect_new_request_server_client(BrowsingSession& session, RequestServer::SiteBinding site_binding)
@@ -660,16 +687,16 @@ u64 allocate_audio_tab_id()
     return s_next_audio_tab_id++;
 }
 
-ErrorOr<void> ensure_audio_server_is_running(RefPtr<AudioServerControlClient>& controller)
+ErrorOr<void> ensure_audio_server_is_running(RefPtr<AudioServerControlClient>& controller, u64 owner_child_id)
 {
     if (!controller || !controller->is_open())
-        controller = TRY(launch_audio_server_process());
+        controller = TRY(launch_audio_server_process(owner_child_id));
     return {};
 }
 
-ErrorOr<IPC::TransportHandle> connect_new_audio_server_client(RefPtr<AudioServerControlClient>& controller, u64 audio_tab_id)
+ErrorOr<IPC::TransportHandle> connect_new_audio_server_client(RefPtr<AudioServerControlClient>& controller, u64 owner_child_id, u64 audio_tab_id)
 {
-    TRY(ensure_audio_server_is_running(controller));
+    TRY(ensure_audio_server_is_running(controller, owner_child_id));
 
     auto response = controller->send_sync_but_allow_failure<Messages::AudioServerControl::ConnectNewClient>(audio_tab_id);
     if (!response || !response->handle().has_value())
@@ -685,10 +712,10 @@ struct VideoDecoderServerHolder : public RefCounted<VideoDecoderServerHolder> {
 
 }
 
-static ErrorOr<IPC::TransportHandle> connect_new_video_decoder_server_client(RefPtr<VideoDecoderServerControlClient>& controller, Optional<Gfx::GpuDeviceIdentity> const& gpu_device_identity)
+static ErrorOr<IPC::TransportHandle> connect_new_video_decoder_server_client(RefPtr<VideoDecoderServerControlClient>& controller, u64 owner_child_id, Optional<Gfx::GpuDeviceIdentity> const& gpu_device_identity)
 {
     if (!controller || !controller->is_open())
-        controller = TRY(launch_video_decoder_server_process(gpu_device_identity));
+        controller = TRY(launch_video_decoder_server_process(owner_child_id, gpu_device_identity));
 
     auto response = controller->send_sync_but_allow_failure<Messages::VideoDecoderServerControl::ConnectNewClient>();
     if (!response || !response->handle().has_value())
@@ -696,16 +723,16 @@ static ErrorOr<IPC::TransportHandle> connect_new_video_decoder_server_client(Ref
     return response->take_handle().release_value();
 }
 
-ErrorOr<MediaServerClientConnection> connect_new_media_server_client(RefPtr<MediaClient::Client>& controller, Function<ErrorOr<IPC::TransportHandle>()> connect_audio_server)
+ErrorOr<MediaServerClientConnection> connect_new_media_server_client(RefPtr<MediaClient::Client>& controller, u64 owner_child_id, Function<ErrorOr<IPC::TransportHandle>()> connect_audio_server)
 {
     if (!controller || !controller->is_open()) {
-        controller = TRY(launch_media_server_process());
+        controller = TRY(launch_media_server_process(owner_child_id));
         controller->on_request_audio_server_connection = move(connect_audio_server);
         // Each MediaServer has a VideoDecoderServer of its own, which lives as long as the controller holding it. The
         // server is launched once the Compositor has named the GPU that hardware decoders must output to.
-        controller->on_request_video_decoder_server_connection = [video_decoder_server = make_ref_counted<VideoDecoderServerHolder>()](auto answer) {
-            Application::the().when_compositor_gpu_device_identity_is_known([video_decoder_server, answer = move(answer)](auto const& gpu_device_identity) {
-                answer(connect_new_video_decoder_server_client(video_decoder_server->controller, gpu_device_identity));
+        controller->on_request_video_decoder_server_connection = [video_decoder_server = make_ref_counted<VideoDecoderServerHolder>(), owner_child_id](auto answer) {
+            Application::the().when_compositor_gpu_device_identity_is_known([video_decoder_server, owner_child_id, answer = move(answer)](auto const& gpu_device_identity) {
+                answer(connect_new_video_decoder_server_client(video_decoder_server->controller, owner_child_id, gpu_device_identity));
             });
         };
     }

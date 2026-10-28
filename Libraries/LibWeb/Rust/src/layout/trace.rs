@@ -5,7 +5,7 @@
  */
 
 use super::LayoutNodeArena;
-use super::formatting_context::{FormattingContextType, LayoutMode, LayoutPurpose};
+use super::formatting_context::FormattingContextType;
 use super::layout_node_arena::IntrinsicSizeCacheKind;
 use super::node_data::{NodeFlag, NodeKind, NodeSlotId};
 use crate::render_state::DocumentHost;
@@ -166,11 +166,10 @@ impl LayoutTrace {
         drop(self.scope("", Some(node), || " REUSE IN-FLOW SUBTREE".into()));
     }
 
-    /// An intrinsic size of `node` that the measurement cache holds. `detail` says how the cache gave it, if not
-    /// from an entry for that size.
-    pub(super) fn intrinsic_size_hit(&self, node: NodeSlotId, kind: IntrinsicSizeCacheKind, detail: &'static str) {
+    /// An intrinsic size of `node` that the measurement cache holds.
+    pub(super) fn intrinsic_size_hit(&self, node: NodeSlotId, kind: IntrinsicSizeCacheKind) {
         drop(self.scope("", Some(node), || {
-            format!(" MEASURE {} (cache=hit){detail}", intrinsic_size_name(kind))
+            format!(" MEASURE {} (cache=hit)", intrinsic_size_name(kind))
         }));
     }
 
@@ -181,28 +180,10 @@ impl LayoutTrace {
         })
     }
 
-    /// A measurement of the content of the table cell `cell` that the table cell measurement cache holds.
-    pub(super) fn table_cell_measurement_hit(&self, cell: NodeSlotId) {
-        drop(self.scope("", Some(cell), || " MEASURE CELL (cache=hit)".into()));
-    }
-
-    /// A measurement of the content of the table cell `cell` that the table cell measurement cache does not hold. The
-    /// work that measures it nests under it.
-    pub(super) fn table_cell_measurement_miss(&self, cell: NodeSlotId) -> Option<Scope<'_>> {
-        self.scope("", Some(cell), || " MEASURE CELL (cache=miss)".into())
-    }
-
-    /// An inline formatting context in `node` that gives its intrinsic inline size from its items, without line boxes.
-    pub(super) fn inline_size_from_items(&self, node: NodeSlotId) {
-        drop(self.scope("", Some(node), || " INLINE SIZE FROM ITEMS".into()));
-    }
-
     pub(super) fn run(
         &self,
         root: NodeSlotId,
         fc_type: FormattingContextType,
-        purpose: LayoutPurpose,
-        mode: LayoutMode,
         action: impl FnOnce() -> &'static str,
     ) -> Option<Scope<'_>> {
         self.scope("", Some(root), || {
@@ -215,15 +196,8 @@ impl LayoutTrace {
                 FormattingContextType::Math => "math",
                 FormattingContextType::ReplacedWithChildren => "replaced-with-children",
                 FormattingContextType::InternalReplaced => "internal-replaced",
-                FormattingContextType::InternalDummy => "internal-dummy",
             };
-            let measurement = match (purpose.is_measurement(), mode) {
-                (false, LayoutMode::Normal) => "",
-                (false, LayoutMode::IntrinsicSizing) => " (intrinsic)",
-                (true, LayoutMode::Normal) => " (measurement)",
-                (true, LayoutMode::IntrinsicSizing) => " (measurement, intrinsic)",
-            };
-            format!("/{context}{measurement} {}", action())
+            format!("/{context} {}", action())
         })
     }
 }
@@ -232,7 +206,6 @@ fn intrinsic_size_name(kind: IntrinsicSizeCacheKind) -> &'static str {
     match kind {
         IntrinsicSizeCacheKind::MinContentInline => "min-content inline",
         IntrinsicSizeCacheKind::MaxContentInline => "max-content inline",
-        IntrinsicSizeCacheKind::MinContentBlock => "min-content block",
         IntrinsicSizeCacheKind::MaxContentBlock => "max-content block",
     }
 }
@@ -378,16 +351,10 @@ mod tests {
                 let miss = trace
                     .intrinsic_size_miss(NodeSlotId::new(1, 1), IntrinsicSizeCacheKind::MaxContentInline)
                     .unwrap();
-                trace.inline_size_from_items(NodeSlotId::new(2, 1));
+                drop(trace.intrinsic_size_miss(NodeSlotId::new(2, 1), IntrinsicSizeCacheKind::MaxContentInline));
                 miss.append(" FROM ITEMS");
             }
-            trace.intrinsic_size_hit(
-                NodeSlotId::new(1, 1),
-                IntrinsicSizeCacheKind::MinContentInline,
-                " FROM MAX-CONTENT",
-            );
-            drop(trace.table_cell_measurement_miss(NodeSlotId::new(3, 1)));
-            trace.table_cell_measurement_hit(NodeSlotId::new(3, 1));
+            trace.intrinsic_size_hit(NodeSlotId::new(1, 1), IntrinsicSizeCacheKind::MinContentInline);
         }
         // The owners are not named, so each line starts with the indentation and the space before the event.
         assert_eq!(
@@ -395,10 +362,8 @@ mod tests {
             concat!(
                 "layout FULL\n",
                 "   MEASURE max-content inline (cache=miss) FROM ITEMS\n",
-                "     INLINE SIZE FROM ITEMS\n",
-                "   MEASURE min-content inline (cache=hit) FROM MAX-CONTENT\n",
-                "   MEASURE CELL (cache=miss)\n",
-                "   MEASURE CELL (cache=hit)\n",
+                "     MEASURE max-content inline (cache=miss)\n",
+                "   MEASURE min-content inline (cache=hit)\n",
             )
         );
     }
@@ -435,13 +400,11 @@ mod tests {
 
         arena.layout_trace.begin();
         arena.begin_active_layout_pass();
-        drop(arena.layout_trace.run(
-            owner.slot,
-            FormattingContextType::Block,
-            LayoutPurpose::Commit,
-            LayoutMode::Normal,
-            || "RUN",
-        ));
+        drop(
+            arena
+                .layout_trace
+                .run(owner.slot, FormattingContextType::Block, || "RUN"),
+        );
         assert!(arena.leave_active_layout_pass());
         let names = arena
             .layout_trace

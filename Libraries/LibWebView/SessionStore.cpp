@@ -26,6 +26,7 @@ static constexpr u32 SESSIONS_SCHEMA_PINNED_TABS_VERSION = 5u;
 static constexpr u32 SESSIONS_SCHEMA_SESSION_LIFECYCLE_VERSION = 6u;
 static constexpr u32 SESSIONS_SCHEMA_LAUNCH_RESTORE_VERSION = 7u;
 static constexpr u32 SESSIONS_SCHEMA_WINDOW_GEOMETRY_VERSION = 8u;
+static constexpr u32 SESSIONS_SCHEMA_UPGRADE_INSECURE_REQUESTS_VERSION = 9u;
 
 // After this many unclean exits in a row, launch restore stops, so a session that crashes the browser doesn't restore
 // into the same crash every time.
@@ -272,6 +273,22 @@ ErrorOr<Database::MigrationOutcome> SessionStore::PersistedStorage::migrate_sche
                 ALTER TABLE Sessions ADD COLUMN width INTEGER;
                 ALTER TABLE Sessions ADD COLUMN height INTEGER;
                 ALTER TABLE Sessions ADD COLUMN maximized INTEGER NOT NULL DEFAULT 0;
+            )#"sv,
+        },
+        {
+            .version = SESSIONS_SCHEMA_UPGRADE_INSECURE_REQUESTS_VERSION,
+            .sql = R"#(
+                ALTER TABLE SessionPolicyContainers ADD COLUMN insecure_requests_policy INTEGER NOT NULL DEFAULT 0;
+
+                CREATE TABLE IF NOT EXISTS SessionUpgradeInsecureNavigations (
+                    container_id INTEGER NOT NULL REFERENCES SessionPolicyContainers(id) ON DELETE CASCADE,
+                    tuple_ordinal INTEGER NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS SessionUpgradeInsecureNavigationsByContainerIndex
+                ON SessionUpgradeInsecureNavigations(container_id, tuple_ordinal);
             )#"sv,
         },
     });
@@ -577,14 +594,13 @@ void SessionStore::TransientStorage::append_closed_unit(ClosedUnit unit)
     m_closed_units.insert(insertion_index, move(unit));
 }
 
-SessionStore::ClosedUnit const* SessionStore::TransientStorage::last_closed_unit() const
+Optional<SessionStore::ClosedUnit> SessionStore::TransientStorage::take_closed_unit(SessionWindowId unit_id)
 {
-    return m_closed_units.is_empty() ? nullptr : &m_closed_units.last();
-}
-
-SessionStore::ClosedUnit SessionStore::TransientStorage::take_last_closed_unit()
-{
-    return m_closed_units.take_last();
+    for (size_t i = 0; i < m_closed_units.size(); ++i) {
+        if (m_closed_units[i].session_id == unit_id)
+            return m_closed_units.take(i);
+    }
+    return {};
 }
 
 void SessionStore::TransientStorage::prune_closed_units(UnitKind kind, u32 max_units)
@@ -1389,7 +1405,9 @@ static bool serialized_policy_containers_match(Web::HTML::SerializedPolicyContai
     return serialized_policies_match(a.csp_list, b.csp_list)
         && embedder_policies_match(a.embedder_policy, b.embedder_policy)
         && a.referrer_policy == b.referrer_policy
-        && a.force_load_at_top == b.force_load_at_top;
+        && a.force_load_at_top == b.force_load_at_top
+        && a.insecure_requests_policy == b.insecure_requests_policy
+        && a.upgrade_insecure_navigations_set.tuples() == b.upgrade_insecure_navigations_set.tuples();
 }
 
 static bool history_policy_containers_match(Variant<Web::HTML::SerializedPolicyContainer, Web::HTML::DocumentStateClient> const& a, Variant<Web::HTML::SerializedPolicyContainer, Web::HTML::DocumentStateClient> const& b)
@@ -1986,6 +2004,9 @@ ErrorOr<void> SessionStore::tab_closed(TabClosed closed)
         return {};
     };
 
+    if (closed.keep_for_reopening == KeepForReopening::No)
+        return discard_without_undo();
+
     auto close_sequence = m_close_sequence_allocator.allocate();
     if (close_sequence.is_error()) {
         auto result = discard_without_undo();
@@ -2220,8 +2241,37 @@ Optional<SessionHistorySnapshot> SessionStore::load_tab_history(SessionTabId tab
 
 ErrorOr<Optional<ClosedSessionUnit>> SessionStore::take_most_recently_closed()
 {
-    auto const* unit = m_transient_storage.last_closed_unit();
-    if (!unit)
+    auto const& closed_units = m_transient_storage.closed_units();
+    if (closed_units.is_empty())
+        return Optional<ClosedSessionUnit> {};
+    return take_closed_unit(closed_units.last().session_id);
+}
+
+Vector<RecentlyClosedSessionUnit> SessionStore::recently_closed_units(size_t limit) const
+{
+    Vector<RecentlyClosedSessionUnit> units;
+    auto const& closed_units = m_transient_storage.closed_units();
+    for (size_t i = closed_units.size(); i > 0 && units.size() < limit; --i) {
+        auto const& unit = closed_units[i - 1];
+        if (unit.tabs.is_empty())
+            continue;
+        auto active_tab_index = clamp(unit.active_tab_index, 0, index_as_i64(unit.tabs.size() - 1));
+        units.append({
+            .id = unit.session_id,
+            .active_url = unit.tabs[active_tab_index].active_url,
+            .tab_count = unit.tabs.size(),
+            .was_window = unit.kind == UnitKind::ClosedWindow,
+            .from_startup_recovery = unit.origin == ClosedSessionUnit::Origin::StartupRecovery,
+            .closed_at = unit.closed_time,
+        });
+    }
+    return units;
+}
+
+ErrorOr<Optional<ClosedSessionUnit>> SessionStore::take_closed_unit(SessionWindowId unit_id)
+{
+    auto unit = m_transient_storage.closed_units().first_matching([&](auto const& unit) { return unit.session_id == unit_id; });
+    if (!unit.has_value())
         return Optional<ClosedSessionUnit> {};
 
     ClosedSessionUnit result {
@@ -2235,10 +2285,10 @@ ErrorOr<Optional<ClosedSessionUnit>> SessionStore::take_most_recently_closed()
     };
 
     if (m_persisted_storage.has_value()) {
-        result.tabs = TRY(m_persisted_storage->take_closed_unit(unit->session_id));
-        (void)m_transient_storage.take_last_closed_unit();
+        result.tabs = TRY(m_persisted_storage->take_closed_unit(unit_id));
+        (void)m_transient_storage.take_closed_unit(unit_id);
     } else {
-        auto taken = m_transient_storage.take_last_closed_unit();
+        auto taken = m_transient_storage.take_closed_unit(unit_id).release_value();
         for (auto& tab : taken.tabs)
             result.tabs.append({ .active_url = move(tab.active_url), .history = move(tab.history), .pinned = tab.pinned });
     }

@@ -69,6 +69,9 @@ pub struct InheritedBoxValues {
     pub content_visibility: u8,
     pub image_rendering: u8,
     pub text_orientation: u8,
+    /// https://drafts.csswg.org/css-viewport/#effective-zoom
+    /// The bits of the effective zoom, as an `f32`.
+    pub effective_zoom_bits: u32,
 }
 
 impl ComputedStyleValueHandle {
@@ -335,6 +338,7 @@ impl_content_hash_by_field!(InheritedBoxValues {
     content_visibility,
     image_rendering,
     text_orientation,
+    effective_zoom_bits,
 });
 // The anchor-inset wrappers are pure derivatives of the anchor-inset fields, so payload equality
 // excludes them and the hash follows it field for field.
@@ -455,6 +459,8 @@ impl_computed_payload_clone_and_eq!(AlignmentValues {
     justify_content,
     justify_items,
     justify_self,
+    align_items_overflow,
+    justify_items_overflow,
     align_self_overflow,
     justify_self_overflow,
     column_gap,
@@ -1075,6 +1081,7 @@ impl_computed_payload_clone_and_eq!(GridValues {
     grid_column_end_style_value,
     grid_row_start_style_value,
     grid_row_end_style_value,
+    fit_tolerance_style_value,
 });
 
 macro_rules! impl_retained_grid_list {
@@ -1187,6 +1194,7 @@ impl GridValues {
             grid_column_end_style_value: ComputedStyleValueHandle::empty(),
             grid_row_start_style_value: ComputedStyleValueHandle::empty(),
             grid_row_end_style_value: ComputedStyleValueHandle::empty(),
+            fit_tolerance_style_value: ComputedStyleValueHandle::empty(),
         }
     }
 
@@ -2505,6 +2513,9 @@ impl StyleGroupMasks {
         //     element's own color.
         masks[index(crate::css::property_metadata::property_id::COLOR)] |=
             1 << crate::css::table_group_builder::group_index::INHERITED_UI;
+        // NB: The box group holds the used containment flags implied by hidden content visibility.
+        masks[index(crate::css::property_metadata::property_id::CONTENT_VISIBILITY)] |=
+            1 << crate::css::table_group_builder::group_index::BOX;
         Self { masks, output_masks }
     }
 
@@ -2807,6 +2818,7 @@ pub(crate) fn build_inherited_box_group(
     content_visibility: &RetainedStyleValueData,
     image_rendering: &RetainedStyleValueData,
     text_orientation: &RetainedStyleValueData,
+    effective_zoom: f32,
     parent: Option<GroupPayloadRef<'_>>,
 ) -> *const c_void {
     use crate::css::style_value::StyleValueData;
@@ -2827,6 +2839,7 @@ pub(crate) fn build_inherited_box_group(
         ),
         image_rendering: keyword_code(image_rendering, crate::css::style_compute::keyword_to_image_rendering),
         text_orientation: keyword_code(text_orientation, crate::css::style_compute::keyword_to_text_orientation),
+        effective_zoom_bits: effective_zoom.to_bits(),
     };
 
     share_or_publish_group_payload::<InheritedBoxValues>(group_index, built, parent)
@@ -2986,6 +2999,8 @@ impl AlignmentValues {
             justify_content: justify_content::FLEX_START,
             justify_items: justify_items::LEGACY,
             justify_self: justify_self::AUTO,
+            align_items_overflow: crate::css::computed_value_types::OVERFLOW_ALIGNMENT_DEFAULT,
+            justify_items_overflow: crate::css::computed_value_types::OVERFLOW_ALIGNMENT_DEFAULT,
             align_self_overflow: crate::css::computed_value_types::OVERFLOW_ALIGNMENT_DEFAULT,
             justify_self_overflow: crate::css::computed_value_types::OVERFLOW_ALIGNMENT_DEFAULT,
             column_gap: ComputedGap {
@@ -3925,6 +3940,8 @@ pub(crate) fn rust_build_alignment_group(
             justify_content: alignment_code(justify_content, css_enums::keyword_to_justify_content, true, k::NORMAL)?,
             justify_items: alignment_code(justify_items, css_enums::keyword_to_justify_items, false, k::LEGACY)?,
             justify_self: alignment_code(justify_self, css_enums::keyword_to_justify_self, false, k::AUTO)?,
+            align_items_overflow: alignment_overflow(align_items),
+            justify_items_overflow: alignment_overflow(justify_items),
             align_self_overflow: alignment_overflow(align_self),
             justify_self_overflow: alignment_overflow(justify_self),
             column_gap: ComputedGap::from_data(column_gap),
@@ -4228,7 +4245,13 @@ impl InheritedBoxValues {
             content_visibility: content_visibility::VISIBLE,
             image_rendering: image_rendering::AUTO,
             text_orientation: text_orientation::MIXED,
+            effective_zoom_bits: 1.0f32.to_bits(),
         }
+    }
+
+    /// https://drafts.csswg.org/css-viewport/#effective-zoom
+    pub(crate) fn effective_zoom(&self) -> f32 {
+        f32::from_bits(self.effective_zoom_bits)
     }
 }
 
@@ -4299,8 +4322,10 @@ pub(crate) fn copy_fieldset_content_alignment(source: &AlignmentValues, target: 
     target.flex_wrap = source.flex_wrap;
     target.align_content = source.align_content;
     target.align_items = source.align_items;
+    target.align_items_overflow = source.align_items_overflow;
     target.justify_content = source.justify_content;
     target.justify_items = source.justify_items;
+    target.justify_items_overflow = source.justify_items_overflow;
     target.row_gap = source.row_gap.clone();
     target.column_gap = source.column_gap.clone();
 }

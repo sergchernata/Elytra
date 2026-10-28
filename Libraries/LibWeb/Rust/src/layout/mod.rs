@@ -67,17 +67,18 @@ pub(crate) mod viewport_propagation;
 
 use crate::css::style::fast_hash::FastMap as HashMap;
 use crate::css::style::fast_hash::FastSet as HashSet;
+use crate::layout::layout_node_arena::FirstLineMaxContent;
 use crate::layout::layout_node_arena::IntrinsicBlockSizeMeasurement;
 use crate::layout::layout_node_arena::IntrinsicInlineSizeMeasurement;
+use crate::layout::layout_node_arena::IntrinsicMeasurement;
+use crate::layout::layout_node_arena::IntrinsicMeasurementDependencies;
 use crate::layout::layout_node_arena::IntrinsicSizeCacheKey;
 use crate::layout::layout_node_arena::IntrinsicSizeCacheKind;
 pub(crate) use crate::layout::layout_node_arena::MainThreadFfiEntry as ArenaMainThreadFfiEntry;
 pub(crate) use crate::layout::layout_node_arena::{
     HostStyle, LayoutNodeArena, LiveRow, PublishedBoundRows, RowsVersion, SLOTS_PER_CHUNK, SampleKind, StyleRelayout,
 };
-use crate::layout::layout_node_arena::{TableCellMeasurement, TableCellMeasurementKey};
 use crate::layout::node_data::AncestorFact;
-pub use crate::layout::node_data::FfiReplacedContentFacts;
 pub use crate::layout::node_data::FfiStylePayloads;
 use crate::layout::node_data::NodeData;
 use crate::layout::node_data::NodeFlag;
@@ -85,7 +86,7 @@ use crate::layout::node_data::NodeKind;
 use crate::layout::node_data::NodeSlotId;
 pub(crate) use abspos_inputs::{AbsposAlignment, StaticPositionAlignment};
 pub(crate) use formatting_context::{
-    ChildLayoutOutcome, DerivedBaselines, FfiLayoutHostCallbacks, FormattingContextRun, LayoutMode, Node, SizingAxis,
+    ChildLayoutOutcome, DerivedBaselines, FfiLayoutHostCallbacks, FormattingContextRun, Node, SizingAxis,
     SizingProperty,
 };
 pub(crate) use fragment_tree::FragmentLink;
@@ -110,4 +111,4 @@ pub(crate) use style_values::StyleValues;
 pub(crate) use tree_builder::build_keeps_box;
 pub(crate) use update_layout::MainThreadFfiEntry as UpdateMainThreadFfiEntry;
 pub(crate) use update_layout::{ClockRound, ClockRoundDeclined, FlownRound, SealedRound};
-pub(crate) use used_values::{FfiCssPixelPoint, FfiCssPixelRect, FfiCssPixelSize, SizeConstraint, UsedValues};
+pub(crate) use used_values::{BoxMetricCells, FfiCssPixelPoint, FfiCssPixelRect, FfiCssPixelSize, UsedValues};

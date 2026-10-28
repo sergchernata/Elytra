@@ -15,37 +15,34 @@ namespace Compositor {
 
 class AsyncScrollUpdateOutbox {
 public:
-    // Offsets handed to WebContent that no snapshot of its has incorporated yet; the compositor keeps
-    // reapplying them over the main-thread state that arrives in the meantime.
-    struct UnreconciledScrollOffset {
-        u64 sequence { 0 };
-        Web::AsyncScrollNodeStableID stable_node_id;
-        Gfx::FloatPoint compositor_scroll_offset;
-    };
-
     Compositing::AsyncScrollOperationID allocate_operation_id() { return ++m_last_allocated_operation_id; }
     void complete_operation(Compositing::AsyncScrollOperationID operation_id) { m_completed_operation_ids.append(operation_id); }
     void note_operation_taken_over_by_user_input(Compositing::AsyncScrollOperationID operation_id) { m_operation_ids_taken_over_by_user_input.append(operation_id); }
     void record_scroll_offsets(ReadonlySpan<Compositing::AsyncScrollOffset>);
     void record_started_user_scroll(Compositing::StartedUserScroll started_user_scroll) { m_started_user_scrolls.append(move(started_user_scroll)); }
-    void note_user_scroll_gesture_ended() { m_user_scroll_gesture_ended = true; }
+    void note_user_scroll_gesture_ended(ReadonlySpan<Web::AsyncScrollNodeStableID>);
+    void note_scroll_request_applied(Compositing::AppliedScrollRequest applied_scroll_request) { m_applied_scroll_requests.append(applied_scroll_request); }
 
-    bool has_updates(bool user_scroll_gesture_in_progress) const;
-    Compositing::PendingAsyncScrollUpdates take_updates(bool user_scroll_gesture_in_progress);
+    // What the compositor holds on to, published whenever it changes.
+    struct UserScrollGestureState {
+        Vector<Web::AsyncScrollNodeStableID> boxes_in_user_scroll_gesture;
+        Optional<Web::AsyncScrollNodeStableID> wheel_latched_scroller;
 
-    ReadonlySpan<UnreconciledScrollOffset> unreconciled_scroll_offsets() const { return m_unreconciled_scroll_offsets; }
-    void retire_scroll_offsets_adopted_by(u64 adopted_sequence);
+        bool operator==(UserScrollGestureState const&) const = default;
+    };
+    bool has_updates(UserScrollGestureState const&) const;
+    Compositing::PendingAsyncScrollUpdates take_updates(UserScrollGestureState);
 
 private:
     Vector<Compositing::AsyncScrollOffset> m_pending_scroll_offsets;
-    Vector<UnreconciledScrollOffset> m_unreconciled_scroll_offsets;
     u64 m_last_publication_sequence { 0 };
     Compositing::AsyncScrollOperationID m_last_allocated_operation_id { 0 };
     Vector<Compositing::AsyncScrollOperationID> m_completed_operation_ids;
     Vector<Compositing::AsyncScrollOperationID> m_operation_ids_taken_over_by_user_input;
     Vector<Compositing::StartedUserScroll> m_started_user_scrolls;
-    bool m_user_scroll_gesture_ended { false };
-    bool m_published_user_scroll_gesture_in_progress { false };
+    Vector<Compositing::AppliedScrollRequest> m_applied_scroll_requests;
+    Vector<Web::AsyncScrollNodeStableID> m_boxes_whose_user_scroll_gesture_ended;
+    UserScrollGestureState m_published_user_scroll_gesture_state;
 };
 
 }

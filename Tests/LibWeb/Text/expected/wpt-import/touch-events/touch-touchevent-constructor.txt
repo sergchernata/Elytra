@@ -1,0 +1,10 @@
+Harness status: OK
+
+Found 5 tests
+
+5 Pass
+Pass	Touch constructor with insufficient properties
+Pass	Touch constructor with non-EventTarget target
+Pass	Touch constructor exists and creates a Touch object with minimum properties
+Pass	Touch constructor exists and creates a Touch object with requested properties
+Pass	TouchEvent constructor exists and creates a TouchEvent object with requested properties
