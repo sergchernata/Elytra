@@ -216,6 +216,7 @@ private:
     void the_ladybird_menu_button_opens_its_menu();
     void nothing_lines_the_top_of_the_page();
     void the_sidebar_toggle_matches_the_toolbar_buttons();
+    QString toggle_level_mismatch(BrowserWindow&);
     void the_lists_edge_lines_run_from_the_window_edge_to_the_page();
     void the_sidebar_toggle_stays_put_and_the_window_buttons_hide_with_the_sidebar();
     void little_arc_opens_a_page_and_moves_it_into_a_space();
@@ -1905,6 +1906,45 @@ void SelfTest::nothing_lines_the_top_of_the_page()
 }
 
 // The sidebar's toggle is drawn as big as the toolbar's back and reload buttons beside it, in a button of their size.
+// Empty when the window's sidebar toggle is drawn level with its toolbar's reload icon (within a point); otherwise
+// where each is.
+QString SelfTest::toggle_level_mismatch(BrowserWindow& win)
+{
+    auto* sidebar = ArcSidebar::for_window(win);
+    QToolButton* reload = nullptr;
+    if (auto* tab = win.current_tab(); tab && tab->toolbar_container()) {
+        for (auto* button : tab->toolbar_container()->findChildren<QToolButton*>()) {
+            if (button->isVisible() && button->defaultAction() && (button->defaultAction()->text() == "Reload" || button->defaultAction()->text() == "Reload Page"))
+                reload = button;
+        }
+    }
+    if (!sidebar || !reload || !sidebar->m_sidebar_toggle->isVisible())
+        return "no toggle or reload button";
+    auto image = win.grab().toImage();
+    auto ratio = image.devicePixelRatio();
+    auto ink_center_y = [&](QWidget& button) {
+        auto origin = button.mapTo(&win, QPoint(0, 0));
+        auto background = image.pixelColor(qRound((origin.x() + 1) * ratio), qRound((origin.y() + 1) * ratio));
+        int top = -1;
+        int bottom = -1;
+        for (int y = qRound(origin.y() * ratio); y < qRound((origin.y() + button.height()) * ratio); ++y) {
+            for (int x = qRound(origin.x() * ratio); x < qRound((origin.x() + button.width()) * ratio); ++x) {
+                if (qAbs(image.pixelColor(x, y).lightness() - background.lightness()) > 40) {
+                    if (top < 0)
+                        top = y;
+                    bottom = y;
+                }
+            }
+        }
+        return top < 0 ? -100.0 : (top + bottom + 1) / 2.0 / ratio;
+    };
+    auto toggle_y = ink_center_y(*sidebar->m_sidebar_toggle);
+    auto reload_y = ink_center_y(*reload);
+    if (qAbs(toggle_y - reload_y) <= 1)
+        return {};
+    return QString("toggle %1, reload %2").arg(toggle_y).arg(reload_y);
+}
+
 void SelfTest::the_sidebar_toggle_matches_the_toolbar_buttons()
 {
     QToolButton* back = nullptr;
@@ -1971,6 +2011,50 @@ void SelfTest::the_sidebar_toggle_matches_the_toolbar_buttons()
     auto reload_color = ink_color(*reload);
     auto difference = qAbs(toggle_color.red() - reload_color.red()) + qAbs(toggle_color.green() - reload_color.green()) + qAbs(toggle_color.blue() - reload_color.blue());
     check(difference <= 15, "and in their color", toggle_color.name() + " vs " + reload_color.name());
+
+    // It stays level through whatever moves the window's chrome around.
+    auto still_level = [&](char const* name) {
+        settle(900);
+        auto mismatch = toggle_level_mismatch(window());
+        check(mismatch.isEmpty(), name, mismatch);
+    };
+    window().resize(window().width() - 120, window().height() - 60);
+    still_level("after the window is resized");
+    window().resize(window().width() + 120, window().height() + 60);
+    ArcSidebar::toggle_sidebar();
+    settle(900);
+    ArcSidebar::toggle_sidebar();
+    still_level("after the sidebar hides and shows again");
+    s().switch_to_space(m_beta);
+    settle(600);
+    s().switch_to_space(m_alpha);
+    still_level("after switching spaces");
+    // The toolbar moving on its own (as the window settles its layout at launch) takes the toggle with it.
+    if (auto* container = window().current_tab() ? window().current_tab()->toolbar_container() : nullptr; container && container->layout()) {
+        auto margins = container->layout()->contentsMargins();
+        container->layout()->setContentsMargins(margins + QMargins(0, 4, 0, 0));
+        container->setFixedHeight(container->height() + 4);
+        still_level("after the toolbar moves down");
+        container->setMinimumHeight(0);
+        container->setMaximumHeight(QWIDGETSIZE_MAX);
+        container->layout()->setContentsMargins(margins);
+        still_level("and back up");
+    }
+    window().showFullScreen();
+    settle(1500);
+    window().showNormal();
+    settle(1500);
+    still_level("after full screen and back");
+
+    // So is a new window's, from the start.
+    QPointer<BrowserWindow> fresh = &Application::the().new_window({ URL::about_blank() }, Application::the().configuration_for_new_window());
+    settle(1500);
+    if (fresh) {
+        auto mismatch = toggle_level_mismatch(*fresh);
+        check(mismatch.isEmpty(), "a new window's toggle is level with its toolbar's icons", mismatch);
+        fresh->close();
+        settle(400);
+    }
 }
 
 static QList<BrowserWindow*> little_arcs()

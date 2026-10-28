@@ -3213,6 +3213,13 @@ void ArcSidebar::apply_toolbar_inset(bool new_tabs_only)
             toolbar->setProperty("arc_inset_watched", true);
             toolbar->installEventFilter(this);
         }
+        // The toggle lines up with the toolbar's icons, so it follows the toolbar wherever it moves.
+        for (auto* widget : { toolbar, static_cast<QWidget*>(container) }) {
+            if (!widget->property("arc_toggle_watched").toBool()) {
+                widget->setProperty("arc_toggle_watched", true);
+                widget->installEventFilter(this);
+            }
+        }
         inset_toolbar(*toolbar);
         install_address_bar(*toolbar);
         tab->setProperty(done_key.constData(), true);
@@ -3241,6 +3248,25 @@ void ArcSidebar::place_window_controls(QPoint panel_origin, bool match_native)
     auto diameter = m_traffic_lights->diameter();
     m_traffic_lights->move(qRound(first_center.x() - 1 - diameter / 2.0), qRound(first_center.y() - m_traffic_lights->height() / 2.0));
     m_sidebar_toggle->move(m_traffic_lights->geometry().right() + 12, qRound(first_center.y() + toggle_offset_from_window_buttons() - m_sidebar_toggle->height() / 2.0));
+}
+
+// Once the current events are handled (a layout moves the toolbar a step at a time), the toggle is put level with the
+// toolbar's icons again.
+void ArcSidebar::schedule_toggle_realign()
+{
+    if (m_toggle_realign_scheduled)
+        return;
+    m_toggle_realign_scheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        m_toggle_realign_scheduled = false;
+        if (!m_window || !m_mode_set || m_active_transition != Transition::None || m_pending_transition != Transition::None)
+            return;
+        if (m_mode == Mode::Docked && m_panel->parentWidget() == this) {
+            place_window_controls(mapTo(m_window, QPoint(0, 0)), true);
+        } else if (m_window_toggle && m_window_toggle->isVisible()) {
+            m_window_toggle->setGeometry(current_toggle_rect());
+        }
+    });
 }
 
 qreal ArcSidebar::toggle_offset_from_window_buttons() const
@@ -4027,6 +4053,8 @@ bool ArcSidebar::eventFilter(QObject* watched, QEvent* event)
         finish_inline_rename(false);
         return true;
     }
+    if ((event->type() == QEvent::Move || event->type() == QEvent::Resize || event->type() == QEvent::Show) && watched->property("arc_toggle_watched").toBool())
+        schedule_toggle_realign();
     if ((event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show) && watched->property("arc_inset_watched").toBool()) {
         inset_toolbar(*static_cast<QWidget*>(watched));
         if (event->type() == QEvent::Show)

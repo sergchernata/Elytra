@@ -224,6 +224,7 @@ private:
     QRect docked_toggle_rect() const;
     // How far below the window buttons' center the toolbar's buttons are centered; the toggle lines up with them.
     qreal toggle_offset_from_window_buttons() const;
+    void schedule_toggle_realign();
     QRect collapsed_toggle_rect() const;
     QRect current_toggle_rect() const;
     bool window_toggle_shown() const;
@@ -333,6 +334,7 @@ private:
     class SymbolButton* m_sidebar_toggle { nullptr };
     qreal m_transition_progress { 0 };
     mutable Optional<QRect> m_docked_toggle_rect_cache;
+    bool m_toggle_realign_scheduled { false };
     class SymbolButton* m_window_toggle { nullptr }; // The toggle while the sidebar is hidden: see current_toggle_rect().
     QTimer* m_reveal_timer { nullptr };
     QTimer* m_retract_timer { nullptr };
