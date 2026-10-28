@@ -754,9 +754,15 @@ void SelfTest::a_link_dropped_on_favorites_goes_where_the_gap_opens()
     QMimeData mime;
     mime.setUrls({ QUrl("http://localhost:1/dropped-favorite") });
     auto at = QPointF(grid->slot_rect(1).center());
-    QDragEnterEvent enter(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    // Qt 6.12 takes the drag's position as a QPointF (the QPoint form is deprecated); earlier ones only as a QPoint.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+    auto drag_at = at;
+#else
+    auto drag_at = at.toPoint();
+#endif
+    QDragEnterEvent enter(drag_at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(grid, &enter);
-    QDragMoveEvent move(at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QDragMoveEvent move(drag_at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(grid, &move);
     settle(FavoritesGrid::MOVE_MS + 150);
     check(tiles[0]->geometry() == grid->slot_rect(0) && tiles[1]->geometry() == grid->slot_rect(2),
