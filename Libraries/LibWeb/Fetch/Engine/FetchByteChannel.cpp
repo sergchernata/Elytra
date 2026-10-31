@@ -8,14 +8,13 @@
 
 namespace Web::Fetch::Engine {
 
-NonnullRefPtr<FetchByteChannel> FetchByteChannel::create(Watermarks watermarks, NonnullRefPtr<FetchByteChannelConsumerSink> consumer_sink, NonnullRefPtr<FetchByteChannelProducerSink> producer_sink)
+NonnullRefPtr<FetchByteChannel> FetchByteChannel::create(Watermarks watermarks, NonnullRefPtr<FetchByteChannelProducerSink> producer_sink)
 {
-    return adopt_ref(*new FetchByteChannel(watermarks, move(consumer_sink), move(producer_sink)));
+    return adopt_ref(*new FetchByteChannel(watermarks, move(producer_sink)));
 }
 
-FetchByteChannel::FetchByteChannel(Watermarks watermarks, NonnullRefPtr<FetchByteChannelConsumerSink> consumer_sink, NonnullRefPtr<FetchByteChannelProducerSink> producer_sink)
+FetchByteChannel::FetchByteChannel(Watermarks watermarks, NonnullRefPtr<FetchByteChannelProducerSink> producer_sink)
     : m_watermarks(watermarks)
-    , m_consumer_sink(move(consumer_sink))
     , m_producer_sink(move(producer_sink))
     , m_outstanding_transport_credit(watermarks.high)
 {
@@ -41,12 +40,51 @@ void FetchByteChannelProducerSink::misbehaved(StringView reason)
     VERIFY_NOT_REACHED();
 }
 
-void FetchByteChannel::wake_armed_waiter_locked(PendingNotifications& notifications)
+bool FetchByteChannel::is_due_locked(WakeOn const& wake_on) const
 {
-    if (!m_waiter_armed)
+    if (!m_state.has<Open>())
+        return true;
+    return wake_on.visit(
+        [&](BufferedAtLeast const& buffered_at_least) { return m_buffered_byte_count >= buffered_at_least.byte_count; },
+        [](EndOnly) { return false; },
+        [&](PrefixOf const& prefix_of) { return m_buffered_byte_count >= prefix_of.byte_count; });
+}
+
+void FetchByteChannel::wake_due_waiters_locked(PendingNotifications& notifications)
+{
+    m_armed_waiters.remove_all_matching([&](ArmedWaiter const& waiter) {
+        if (!is_due_locked(waiter.wake_on))
+            return false;
+        keep_prefix_locked(waiter.ticket, waiter.wake_on);
+        notifications.append(Wake { waiter.ticket });
+        return true;
+    });
+}
+
+// A cancelled or transferred channel keeps nothing, so take_prefix() finds no prefix for it.
+void FetchByteChannel::keep_prefix_locked(WakeTicket ticket, WakeOn const& wake_on)
+{
+    auto const* prefix_of = wake_on.get_pointer<PrefixOf>();
+    if (!prefix_of || m_state.has<ConsumerCancelled>() || m_state.has<Transferred>())
         return;
-    m_waiter_armed = false;
-    notifications.append(Wake { m_armed_ticket });
+
+    ByteBuffer prefix;
+    auto append_up_to_limit = [&](ReadonlyBytes bytes) {
+        auto length = min<u64>(bytes.size(), prefix_of->byte_count - prefix.size());
+        prefix.append(bytes.trim(static_cast<size_t>(length)));
+    };
+    for (auto const& chunk : m_chunks) {
+        if (prefix.size() == prefix_of->byte_count)
+            break;
+        append_up_to_limit(chunk.bytes());
+    }
+    if (prefix.size() < prefix_of->byte_count)
+        append_up_to_limit(m_copied_tail.bytes());
+
+    TakeResult kept { .taken = {}, .state = m_state, .buffered_byte_count = m_buffered_byte_count };
+    if (!prefix.is_empty())
+        kept.taken.append(Core::ImmutableBytes::adopt(move(prefix)));
+    m_kept_prefixes.append({ ticket, move(kept) });
 }
 
 FetchByteChannel::WriteResult FetchByteChannel::write(Core::ImmutableBytes bytes)
@@ -72,7 +110,8 @@ FetchByteChannel::WriteResult FetchByteChannel::write_bytes(Variant<Core::Immuta
         if (m_transport_ended) {
             notifications.append(Misbehaved { "The transport delivered after ending the body"sv });
         } else if (!m_state.has<Open>()) {
-            // The consumer cancelled and the transport has not heard yet.
+            // Before the transport ends the body, a write after a cancellation or a transfer is rejected without a
+            // misbehaved() report.
         } else if (size > m_outstanding_transport_credit) {
             notifications.append(Misbehaved { "The transport delivered more than it was granted"sv });
         } else {
@@ -91,7 +130,7 @@ FetchByteChannel::WriteResult FetchByteChannel::write_bytes(Variant<Core::Immuta
                 //     to suspend the ongoing fetch.
                 // Spent credit is the suspension: the transport delivers only what it was granted.
                 m_outstanding_transport_credit -= size;
-                wake_armed_waiter_locked(notifications);
+                wake_due_waiters_locked(notifications);
             }
         }
     }
@@ -117,9 +156,10 @@ FetchByteChannel::TerminateResult FetchByteChannel::terminate_locked(State termi
         m_chunks.clear();
         m_copied_tail.clear();
         m_buffered_byte_count = 0;
+        m_whole_body.clear();
     }
     m_state = move(terminal_state);
-    wake_armed_waiter_locked(notifications);
+    wake_due_waiters_locked(notifications);
     return TerminateResult::Terminated;
 }
 
@@ -157,19 +197,34 @@ FetchByteChannel::TerminateResult FetchByteChannel::error(Errored errored)
     return result;
 }
 
+void FetchByteChannel::keep_whole_body(Core::ImmutableBytes whole_body)
+{
+    MutexLocker locker { m_mutex };
+    if (m_state.has<Open>() && !m_whole_body.has_value())
+        m_whole_body = move(whole_body);
+}
+
+Optional<Core::ImmutableBytes> FetchByteChannel::whole_body() const
+{
+    MutexLocker locker { m_mutex };
+    return m_whole_body;
+}
+
 FetchByteChannel::TerminateResult FetchByteChannel::cancel()
 {
     PendingNotifications notifications;
     auto result = TerminateResult::AlreadyTerminated;
     {
         MutexLocker locker { m_mutex };
+        m_kept_prefixes.clear();
         // A Closed channel keeps its undrained buffer, which a Streams cancellation may still discard.
         if (m_state.has<Open>() || (m_state.has<Closed>() && m_buffered_byte_count > 0)) {
             m_state = ConsumerCancelled {};
             m_chunks.clear();
             m_copied_tail.clear();
             m_buffered_byte_count = 0;
-            wake_armed_waiter_locked(notifications);
+            m_whole_body.clear();
+            wake_due_waiters_locked(notifications);
             if (!m_transport_ended)
                 notifications.append(ConsumerCancelledNotice {});
             result = TerminateResult::Terminated;
@@ -177,6 +232,27 @@ FetchByteChannel::TerminateResult FetchByteChannel::cancel()
     }
     dispatch(notifications);
     return result;
+}
+
+Vector<Core::ImmutableBytes> FetchByteChannel::transfer_out()
+{
+    PendingNotifications notifications;
+    Vector<Core::ImmutableBytes> undrained_bytes;
+    {
+        MutexLocker locker { m_mutex };
+        m_kept_prefixes.clear();
+        if (!m_state.has<Open>() && !m_state.has<Closed>())
+            return {};
+
+        seal_copied_tail_locked();
+        undrained_bytes = move(m_chunks);
+        m_buffered_byte_count = 0;
+        m_whole_body.clear();
+        m_state = Transferred {};
+        wake_due_waiters_locked(notifications);
+    }
+    dispatch(notifications);
+    return undrained_bytes;
 }
 
 // This implements the buffer-draining half of the pullAlgorithm in HTTP-network fetch.
@@ -219,6 +295,12 @@ FetchByteChannel::TakeResult FetchByteChannel::take_locked(u64 limit, PendingNot
     return result;
 }
 
+void FetchByteChannel::attach_consumer(NonnullRefPtr<FetchByteChannelConsumerSink> consumer_sink)
+{
+    VERIFY(!m_consumer_sink);
+    m_consumer_sink = move(consumer_sink);
+}
+
 FetchByteChannel::TakeResult FetchByteChannel::take_up_to(u64 limit)
 {
     PendingNotifications notifications;
@@ -236,23 +318,63 @@ FetchByteChannel::TakeResult FetchByteChannel::take_all()
     return take_up_to(NumericLimits<u64>::max());
 }
 
-WakeTicket FetchByteChannel::arm_waiter()
+FetchByteChannel::TakeResult FetchByteChannel::peek_up_to(u64 limit)
 {
+    MutexLocker locker { m_mutex };
+    seal_copied_tail_locked();
+
+    TakeResult result;
+    u64 remaining = limit;
+    for (auto const& chunk : m_chunks) {
+        if (remaining == 0)
+            break;
+        auto length = static_cast<size_t>(min<u64>(chunk.size(), remaining));
+        result.taken.append(chunk.slice(0, length));
+        remaining -= length;
+    }
+    result.state = m_state;
+    result.buffered_byte_count = m_buffered_byte_count;
+    return result;
+}
+
+WakeTicket FetchByteChannel::arm_waiter(WakeOn wake_on)
+{
+    VERIFY(m_consumer_sink);
+    wake_on.visit(
+        [](BufferedAtLeast const& buffered_at_least) { VERIFY(buffered_at_least.byte_count > 0); },
+        [](EndOnly) { },
+        [](PrefixOf const& prefix_of) { VERIFY(prefix_of.byte_count > 0); });
+
     PendingNotifications notifications;
     WakeTicket ticket { 0 };
     {
         MutexLocker locker { m_mutex };
-        VERIFY(!m_waiter_armed);
         ticket = WakeTicket { m_next_ticket++ };
-        if (!m_state.has<Open>() || m_buffered_byte_count > 0) {
+        if (is_due_locked(wake_on)) {
+            keep_prefix_locked(ticket, wake_on);
             notifications.append(Wake { ticket });
         } else {
-            m_waiter_armed = true;
-            m_armed_ticket = ticket;
+            m_armed_waiters.append({ ticket, move(wake_on) });
         }
     }
     dispatch(notifications);
     return ticket;
+}
+
+Optional<FetchByteChannel::TakeResult> FetchByteChannel::take_prefix(WakeTicket ticket)
+{
+    MutexLocker locker { m_mutex };
+    auto index = m_kept_prefixes.find_first_index_if([&](KeptPrefix const& kept) { return kept.ticket == ticket; });
+    if (!index.has_value())
+        return {};
+    return m_kept_prefixes.take(*index).prefix;
+}
+
+void FetchByteChannel::disarm_waiter(WakeTicket ticket)
+{
+    MutexLocker locker { m_mutex };
+    m_armed_waiters.remove_first_matching([&](ArmedWaiter const& waiter) { return waiter.ticket == ticket; });
+    m_kept_prefixes.remove_first_matching([&](KeptPrefix const& kept) { return kept.ticket == ticket; });
 }
 
 }

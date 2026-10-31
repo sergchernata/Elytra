@@ -93,6 +93,7 @@
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLSlotElement.h>
+#include <LibWeb/HTML/HTMLVideoElement.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/Layout/LayoutRustBridge.h>
@@ -157,7 +158,7 @@ static RustDeclarationBlock const& declaration_of_rule(CSSRule const& rule)
 
 StyleComputer::StyleComputer(DOM::Document& document)
     : m_document(document)
-    , m_default_font_metrics(16, Platform::FontPlugin::the().default_font(16)->pixel_metrics(), InitialValues::line_height())
+    , m_default_font_metrics(16, Platform::FontPlugin::the().default_font(16)->pixel_metrics(), normal_line_height(Platform::FontPlugin::the().default_font(16)->pixel_metrics()))
     , m_root_element_font_metrics(m_default_font_metrics)
     , m_style_engine(this)
 {
@@ -1098,17 +1099,44 @@ void StyleComputer::compose_installed_engine_record(Layout::BegunRead const& rea
     context.publish();
 }
 
-static void collect_dimension_attribute(Vector<StyleProperty>& properties, DOM::Element const& element, Utf16FlyString const& attribute_name, CSS::PropertyID property_id)
+static Optional<double> collect_dimension_attribute(Vector<StyleProperty>& properties, DOM::Element const& element, Utf16FlyString const& attribute_name, CSS::PropertyID property_id)
 {
     auto attribute = element.attribute(attribute_name);
     if (!attribute.has_value())
-        return;
+        return {};
 
-    auto parsed_value = HTML::parse_dimension_value(*attribute);
+    double unclamped_value;
+    auto parsed_value = HTML::parse_dimension_value(*attribute, unclamped_value);
     if (!parsed_value)
+        return {};
+
+    properties.append({ .property_id = property_id, .value = *parsed_value });
+    // NB: The ratio uses the parsed number, rather than the clamped layout dimension. Values beyond the numeric
+    //     representation's range cannot form a finite ratio hint, but keep their ordinary dimension mapping.
+    if (!parsed_value->is_length() || !__builtin_isfinite(unclamped_value))
+        return {};
+    return unclamped_value;
+}
+
+// https://html.spec.whatwg.org/multipage/rendering.html#map-to-the-aspect-ratio-property-(using-dimension-rules)
+static void collect_aspect_ratio_from_dimension_values(Vector<StyleProperty>& properties, Optional<double> width, Optional<double> height)
+{
+    // if element has both attributes w and h, and parsing those attributes' values using the rules for parsing
+    // dimension values doesn't generate an error or return a percentage for either,
+    if (!width.has_value() || !height.has_value())
         return;
 
-    properties.append({ .property_id = property_id, .value = parsed_value.release_nonnull() });
+    // then the user agent is expected to use the parsed dimensions as a presentational hint for the 'aspect-ratio'
+    // property of the form auto w / h.
+    auto aspect_ratio = CSS::StyleValueList::create(
+        CSS::StyleValueVector {
+            CSS::KeywordStyleValue::create(CSS::Keyword::Auto),
+            CSS::RatioStyleValue::create(
+                CSS::NumberStyleValue::create(*width),
+                CSS::NumberStyleValue::create(*height)),
+        },
+        CSS::StyleValueList::Separator::Space);
+    properties.append({ .property_id = CSS::PropertyID::AspectRatio, .value = aspect_ratio });
 }
 
 // The whole transition step for an element's record, run once the record is installed.
@@ -1811,8 +1839,14 @@ Vector<StyleProperty> StyleComputer::collect_presentational_hint_properties(DOM:
         auto const& dimension_source = is<HTML::HTMLImageElement>(element)
             ? static_cast<HTML::HTMLImageElement const&>(element).dimension_attribute_source()
             : element;
-        collect_dimension_attribute(properties, dimension_source, HTML::AttributeNames::width, CSS::PropertyID::Width);
-        collect_dimension_attribute(properties, dimension_source, HTML::AttributeNames::height, CSS::PropertyID::Height);
+        auto width = collect_dimension_attribute(properties, dimension_source, HTML::AttributeNames::width, CSS::PropertyID::Width);
+        auto height = collect_dimension_attribute(properties, dimension_source, HTML::AttributeNames::height, CSS::PropertyID::Height);
+
+        // The width and height attributes map to the aspect-ratio property (using dimension rules) on img and video
+        // elements, and input elements with a type attribute in the Image Button state.
+        // NB: An input element only supports dimension attributes in the Image Button state.
+        if (is<HTML::HTMLImageElement>(element) || is<HTML::HTMLVideoElement>(element) || is<HTML::HTMLInputElement>(element))
+            collect_aspect_ratio_from_dimension_values(properties, width, height);
     }
     HashTable<CSS::PropertyID> seen_properties;
     for (size_t i = properties.size(); i > 0; --i) {
@@ -1977,6 +2011,7 @@ ComputationContext StyleComputer::make_computation_context_for_property(Layout::
             : Length::ResolutionContext::for_document(m_document);
         length_resolution_context.subject_inline_axis_is_horizontal = subject_inline_axis_is_horizontal;
         length_resolution_context.subject_element = abstract_element.has_value() ? &abstract_element->element() : nullptr;
+        length_resolution_context.subject_is_pseudo_element = abstract_element.has_value() && abstract_element->pseudo_element().has_value();
 
         return {
             .length_resolution_context = length_resolution_context,
@@ -1989,7 +2024,7 @@ ComputationContext StyleComputer::make_computation_context_for_property(Layout::
         auto line_height_font_metrics = Length::FontMetrics {
             style.font_size(),
             style.first_available_computed_font(document().font_computer())->pixel_metrics(),
-            inheritance_parent.has_value() && inheritance_parent->has_style() ? inheritance_parent->computed_style()->line_height() : InitialValues::line_height()
+            inheritance_parent.has_value() && inheritance_parent->has_style() ? inheritance_parent->computed_style()->line_height() : normal_line_height(document().font_computer().initial_font().pixel_metrics())
         };
 
         return {
@@ -2004,6 +2039,7 @@ ComputationContext StyleComputer::make_computation_context_for_property(Layout::
                     ? style.font_metrics_depend_on_viewport_metrics()
                     : m_root_element_font_metrics_depend_on_viewport_metrics,
                 .subject_inline_axis_is_horizontal = subject_inline_axis_is_horizontal,
+                .subject_is_pseudo_element = abstract_element.has_value() && abstract_element->pseudo_element().has_value(),
                 .subject_element = abstract_element.has_value() ? &abstract_element->element() : nullptr,
             },
             .abstract_element = abstract_element
@@ -2023,6 +2059,7 @@ ComputationContext StyleComputer::make_computation_context_for_property(Layout::
                 .font_metrics_depend_on_viewport_metrics = style.font_metrics_depend_on_viewport_metrics(),
                 .root_font_metrics_depend_on_viewport_metrics = is_document_element ? style.font_metrics_depend_on_viewport_metrics() : m_root_element_font_metrics_depend_on_viewport_metrics,
                 .subject_inline_axis_is_horizontal = subject_inline_axis_is_horizontal,
+                .subject_is_pseudo_element = abstract_element.has_value() && abstract_element->pseudo_element().has_value(),
                 .subject_element = abstract_element.has_value() ? &abstract_element->element() : nullptr,
             },
             .abstract_element = abstract_element,

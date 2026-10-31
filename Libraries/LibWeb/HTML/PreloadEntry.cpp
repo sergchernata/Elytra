@@ -24,7 +24,6 @@ GC::Ref<PreloadEntry> PreloadEntry::create()
 void PreloadEntry::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(response);
     visitor.visit(on_response_available);
     visitor.visit(controller);
 }
@@ -61,7 +60,7 @@ bool consume_a_preloaded_resource(
     Fetch::Infrastructure::Request::Mode mode,
     Fetch::Infrastructure::Request::CredentialsMode credentials_mode,
     Utf16View integrity_metadata,
-    GC::Ref<GC::Function<void(GC::Ref<Fetch::Infrastructure::Response>)>> on_response_available,
+    GC::Ref<GC::Function<void(NonnullRefPtr<Fetch::Infrastructure::Response>)>> on_response_available,
     Fetch::Engine::BodyIntent consumer_body_intent,
     bool& preload_reports_timing)
 {
@@ -94,8 +93,8 @@ bool consume_a_preloaded_resource(
     (void)integrity_metadata;
 
     // AD-HOC: A sync XHR consumer, whose event loop is paused while it's blocked, can't park on an in-flight entry whose
-    //         fetch's response has already arrived: Its delivery and processing are already queued against the event
-    //         loop, beyond the reach of step 9's re-targeting, so they can't hand the response over. Return false, so
+    //         fetch's response has already arrived: Its processing may already be queued against the event loop,
+    //         beyond the reach of step 9's re-targeting, so it could not hand the response over. Return false, so
     //         the consumer fetches on its own (as Blink/WebKit have every sync request do; see step 9), and leave the
     //         entry in the map: The preload completes once the loop resumes.
     if (!entry->response && consumer_body_intent == Fetch::Engine::BodyIntent::SyncAccumulate && entry->controller
@@ -127,12 +126,8 @@ bool consume_a_preloaded_resource(
         //         in-flight preload (XMLHttpRequestMainThread::FindPreload, FetchPreloader::AsyncConsume); Blink never
         //         reuses a resource for a sync request (Resource::CanReuse), and WebKit's sync load bypasses its cache
         //         and preloads (DocumentThreadableLoader::loadRequest).
-        if (consumer_body_intent == Fetch::Engine::BodyIntent::SyncAccumulate && entry->controller) {
-            if (auto fetch_params = entry->controller->fetch_params()) {
-                fetch_params->set_task_destination(ParallelQueue::create());
-                fetch_params->set_algorithms(fetch_params->algorithms()->with_body_intent(consumer_body_intent));
-            }
-        }
+        if (consumer_body_intent == Fetch::Engine::BodyIntent::SyncAccumulate && entry->controller)
+            entry->controller->retarget(ParallelQueue::create(), consumer_body_intent);
     }
     // 10. Otherwise, call onResponseAvailable with entry's response.
     else {

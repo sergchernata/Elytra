@@ -116,6 +116,20 @@ impl RootFontInputs {
     }
 }
 
+/// What a subtree does to the generated-content state that the boxes after it read.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SubtreeGeneratedContentEffects {
+    /// A `counter-reset` names a counter. The counter it creates reaches only the following siblings of the element
+    /// that resets it, and their descendants.
+    pub(crate) resets_counters: bool,
+    /// A `counter-increment` or `counter-set` names a counter, or a list item below the root increments `list-item`.
+    /// The counter can be one that an ancestor or an earlier box created, and that boxes outside the subtree read. An
+    /// inserted `<li>` itself has the DOM renumber the list it joins.
+    pub(crate) increments_or_sets_counters: bool,
+    /// A `content` opens or closes a quote. The walk stops once it finds one.
+    pub(crate) opens_or_closes_quotes: bool,
+}
+
 impl RetainedState {
     pub(super) fn pseudo_element_style_is_deferred(&self, kind: tree::PseudoElementKind) -> bool {
         u32::from(kind.0) < u64::BITS && self.deferred_pseudo_elements & (1 << kind.0) != 0
@@ -3049,36 +3063,39 @@ impl RetainedState {
         self.pseudo_style_mask(node).unwrap_or(0)
     }
 
-    /// Whether the style record answers for a counter or a quote: the two things whose state runs
-    /// along the whole tree rather than staying inside one box.
-    fn style_record_affects_generated_content_state(&self, style_record: Option<computed::FinalStyleRecordID>) -> bool {
-        self.published_style_record_view(style_record)
-            .is_some_and(crate::css::computed_value_views::ComputedValuesView::affects_generated_content_state)
-    }
-
-    /// Whether the node or any of its DOM descendants styles a counter or a quote, itself or
-    /// through a `::before`, `::after` or `::marker`. Inserting such a subtree renumbers what
-    /// follows it, so the layout tree build has to rebuild rather than splice it in.
+    /// What the node and its DOM descendants do to the two pieces of generated-content state that run
+    /// along the whole tree rather than staying inside one box, themselves or through a `::before`,
+    /// `::after` or `::marker`. Inserting such a subtree can change what the boxes after it show.
     #[must_use]
-    pub fn subtree_affects_generated_content_state(&self, node: StyleNodeID) -> bool {
-        let mut pending = vec![node];
+    pub(crate) fn subtree_generated_content_effects(&self, root: StyleNodeID) -> SubtreeGeneratedContentEffects {
+        let mut effects = SubtreeGeneratedContentEffects::default();
+        let mut pending = vec![root];
         while let Some(node) = pending.pop() {
-            if node.element_index().is_some()
-                && (self
-                    .style_record_affects_generated_content_state(self.computed_group_sets.assigned_style_record(node))
-                    || [pseudo_kind::BEFORE, pseudo_kind::AFTER, pseudo_kind::MARKER]
-                        .into_iter()
-                        .any(|kind| {
-                            self.style_record_affects_generated_content_state(
-                                self.computed_group_sets.pseudo_style_record(node, kind),
-                            )
-                        }))
-            {
-                return true;
+            if node.element_index().is_some() {
+                let records = [
+                    self.computed_group_sets.assigned_style_record(node),
+                    self.computed_group_sets.pseudo_style_record(node, pseudo_kind::BEFORE),
+                    self.computed_group_sets.pseudo_style_record(node, pseudo_kind::AFTER),
+                    self.computed_group_sets.pseudo_style_record(node, pseudo_kind::MARKER),
+                ];
+                for (index, record) in records.into_iter().enumerate() {
+                    let Some(view) = self.published_style_record_view(record) else {
+                        continue;
+                    };
+                    let is_root_element = index == 0 && node == root;
+                    effects.resets_counters |= !view.counter_reset().is_empty();
+                    effects.increments_or_sets_counters |= !view.counter_increment().is_empty()
+                        || !view.counter_set().is_empty()
+                        || (view.display().is_list_item() && !is_root_element);
+                    effects.opens_or_closes_quotes |= view.content_opens_or_closes_quotes();
+                }
+                if effects.opens_or_closes_quotes {
+                    return effects;
+                }
             }
             pending.extend(self.tree.dom_children(node));
         }
-        false
+        effects
     }
 
     /// Whether the node's published style holds a `::first-letter` record. The tree build asks a
@@ -4163,7 +4180,10 @@ impl RetainedState {
     }
 
     pub(crate) fn begin_style_record_view_epoch(&mut self) {
-        self.computed_group_sets.begin_style_record_view_epoch();
+        self.style_record_view_epoch_depth = self
+            .style_record_view_epoch_depth
+            .checked_add(1)
+            .expect("style-record view epoch depth overflow");
     }
 
     /// Publishes how many identities each catalog has minted. These count the sharing partition
@@ -4379,7 +4399,12 @@ impl StyleEngine {
 
     /// Reclaims the unreachable computed records, if they are due and nothing views them, and answers whether it did.
     pub(super) fn reclaim_unreachable_computed_records(&mut self) -> bool {
-        let Some(retention) = self.retained.computed_group_sets.reclaim_unreachable_if_needed() else {
+        let records_are_viewed = self.retained.style_record_view_epoch_depth != 0;
+        let Some(retention) = self
+            .retained
+            .computed_group_sets
+            .reclaim_unreachable_if_needed(records_are_viewed)
+        else {
             return false;
         };
         self.retained
@@ -5424,25 +5449,17 @@ mod tests {
 
         let inherited_name = ak::Utf16FlyString::from_utf16(&"--inherited".encode_utf16().collect::<Vec<_>>());
         let own_name = ak::Utf16FlyString::from_utf16(&"--own".encode_utf16().collect::<Vec<_>>());
-        let make_store = |parent: Option<Arc<CustomPropertyStore>>, name: &ak::Utf16FlyString, text: &str, value| {
+        let make_store = |parent: Option<Arc<CustomPropertyStore>>, name: &ak::Utf16FlyString, value| {
             let value = RetainedStyleValueData::from_owned(StyleValueData::Number { value });
             // SAFETY: The parent is null or retained by this test, and both the name and value
             //         remain live while cascaded_child retains them.
             unsafe {
-                CustomPropertyStore::cascaded_child(
-                    parent,
-                    vec![(
-                        name.raw_identity(),
-                        text.encode_utf16().collect::<Vec<_>>().into(),
-                        false,
-                        value.pointer().cast(),
-                    )],
-                )
+                CustomPropertyStore::cascaded_child(parent, vec![(name.raw_identity(), false, value.pointer().cast())])
             }
         };
-        let old_parent = make_store(None, &inherited_name, "--inherited", 1.0);
-        let new_parent = make_store(None, &inherited_name, "--inherited", 2.0);
-        let own = make_store(Some(old_parent.clone()), &own_name, "--own", 42.0);
+        let old_parent = make_store(None, &inherited_name, 1.0);
+        let new_parent = make_store(None, &inherited_name, 2.0);
+        let own = make_store(Some(old_parent.clone()), &own_name, 42.0);
         let mut engine = StyleEngine::new();
         let mut raw_nodes = [0; 3];
         engine.allocate_style_nodes(&mut raw_nodes);
@@ -5991,7 +6008,11 @@ mod tests {
 
 impl StyleEngine {
     pub(crate) fn end_style_record_view_epoch(&mut self) {
-        self.retained.computed_group_sets.end_style_record_view_epoch();
+        assert!(
+            self.retained.style_record_view_epoch_depth > 0,
+            "style-record view epoch underflow"
+        );
+        self.retained.style_record_view_epoch_depth -= 1;
         self.reclaim_unreachable_computed_records();
     }
 }

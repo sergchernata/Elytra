@@ -88,6 +88,14 @@ impl CommitNotifications {
             .filter_map(|message| StyleNodeID::from_raw(message.style_node))
     }
 
+    /// Whether a length the committed layout resolved reads a size container that had no box, whose queries the host
+    /// evaluates once a layout gives it one.
+    pub(crate) fn awaits_container_query_evaluation(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.kind == FfiCommitMessageKind::ContainerQueryEvaluationNeededAfterLayout)
+    }
+
     /// Tells the host of the resets and messages of the commit, which it answers synchronously, while no mutable arena
     /// borrow is active.
     pub(crate) fn notify_host(
@@ -174,11 +182,11 @@ fn commit_subtree(
         );
     }
     if !reuses_committed_subtree {
-        paintables.arena().note_subtree_committed_anew(node);
-        paintables.arena().forget_committed_out_of_flow_facts(node);
+        paintables.arena_mut().note_subtree_committed_anew(node);
+        paintables.arena_mut().forget_committed_out_of_flow_facts(node);
     }
     if let Some(inputs) = entry.and_then(|link| link.abspos_layout_inputs.as_ref()) {
-        paintables.arena().note_committed_out_of_flow_box(node, inputs);
+        paintables.arena_mut().note_committed_out_of_flow_box(node, inputs);
         paintables
             .arena_mut()
             .set_position_option_in_use(node, inputs.position_option);
@@ -253,13 +261,13 @@ fn commit_subtree(
         paintables.schedule_scrollable_overflow_recalculation(node);
     }
 
-    paintables.arena().gather_layout_style_snapshot_geometry(node);
+    paintables.arena_mut().gather_layout_style_snapshot_geometry(node);
 
     paintables.stamp_containing_block(node, entry);
     if reuses_committed_subtree {
         return;
     }
-    paintables.arena().refresh_paint_order_inputs(node);
+    paintables.arena_mut().refresh_paint_order_inputs(node);
 
     let mut child = paintables.arena().data(node).first_child.get();
     while !child.is_invalid() {
@@ -331,7 +339,7 @@ pub(crate) fn commit_replacing(
             ));
         }
     }
-    paintables.arena().publish_layout_style_snapshot_commit();
+    paintables.arena_mut().publish_layout_style_snapshot_commit();
     CommitNotifications {
         row_resets: paintables.take_row_reset_notifications(),
         messages,

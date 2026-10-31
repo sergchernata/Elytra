@@ -151,6 +151,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         expect(&work->records() == &default_session && &default_session.records() == &default_session, "tab restore is shared with the default session"sv);
         expect(work->history_store.ptr() != default_session.history_store.ptr() && work->history_store.ptr() != side->history_store.ptr(), "a profile has its own history"sv);
         expect(work->favicon_store.ptr() != default_session.favicon_store.ptr(), "and its own favicons"sv);
+        expect(work->permission_manager && work->permission_manager.ptr() != default_session.permission_manager.ptr()
+                && work->permission_manager.ptr() != side->permission_manager.ptr(),
+            "and its own site permissions"sv);
         expect(work->history_database_directory == work_directory, "kept in the profile's folder"sv);
 
         work->history_store->record_visit(history_url(), "Work only"_string);

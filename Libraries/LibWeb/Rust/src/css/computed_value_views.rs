@@ -421,6 +421,7 @@ scalar_accessors! {
         clear: u8 => clear,
         box_sizing: u8 => box_sizing,
         field_sizing: u8 => field_sizing,
+        baseline_source: u8 => baseline_source,
         overflow_x: u8 => overflow_x,
         overflow_y: u8 => overflow_y,
         text_overflow: u8 => text_overflow,
@@ -516,6 +517,8 @@ scalar_accessors! {
         order: i32 => order,
         align_items: u8 => align_items,
         align_self: u8 => align_self,
+        align_items_is_last_baseline: bool => align_items_is_last_baseline,
+        align_self_is_last_baseline: bool => align_self_is_last_baseline,
         align_content: u8 => align_content,
         justify_content: u8 => justify_content,
         justify_items: u8 => justify_items,
@@ -669,16 +672,12 @@ impl<'a> ComputedValuesView<'a> {
     /// Whether the style can move the generated-content state a later sibling reads: any counter
     /// it touches, or a quote its content opens or closes.
     pub(crate) fn affects_generated_content_state(self) -> bool {
-        let content = self.content();
-        let names_counters =
-            |handle: &ComputedStyleValueHandle| !matches!(handle.data(), None | Some(StyleValueData::Keyword { .. }));
-        if names_counters(&content.counter_increment)
-            || names_counters(&content.counter_reset)
-            || names_counters(&content.counter_set)
-        {
-            return true;
-        }
-        let Some(StyleValueData::Content { content, .. }) = content.content.data() else {
+        !self.counter_properties_are_none() || self.content_opens_or_closes_quotes()
+    }
+
+    /// Whether `content` opens or closes a quote, which moves the quote depth that every quote after it reads.
+    pub(crate) fn content_opens_or_closes_quotes(self) -> bool {
+        let Some(StyleValueData::Content { content, .. }) = self.content().content.data() else {
             return false;
         };
         let Some(StyleValueData::ValueList { values, .. }) = content.optional_data() else {
@@ -1070,6 +1069,10 @@ impl<'a> ComputedValuesView<'a> {
 
     pub(crate) fn overflow_wrap(self) -> u8 {
         self.inherited_text().overflow_wrap
+    }
+
+    pub(crate) fn text_wrap_style(self) -> u8 {
+        self.inherited_text().text_wrap_style
     }
 
     pub(crate) fn text_indent(self) -> LengthPercentageRef<'a> {

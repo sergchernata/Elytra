@@ -59,12 +59,41 @@ struct GpuBackingStore {
 };
 #endif
 
+static Vector<u64>& presentation_drm_format_modifiers()
+{
+    static Vector<u64> modifiers;
+    return modifiers;
+}
+
+void BackingStoreManager::set_presentation_drm_format_modifiers(Vector<u64> modifiers)
+{
+    presentation_drm_format_modifiers() = move(modifiers);
+}
+
 #ifdef USE_VULKAN_DMABUF_IMAGES
+// A presentation on another GPU can only import a linear layout. On ours, the driver picks a layout that suits it among
+// those the presentation can import, which matters to GPUs such as NVIDIA's that cannot render to a linear one at all.
+static Vector<u64> shared_backing_store_drm_format_modifiers(Gfx::VulkanContext const& vulkan_context)
+{
+    if (!vulkan_context.is_preferred_device)
+        return { DRM_FORMAT_MOD_LINEAR };
+
+    auto modifiers = Gfx::renderable_drm_format_modifiers(vulkan_context, VK_FORMAT_B8G8R8A8_UNORM);
+    // NB: The presentation can still show frames that it cannot import, after the view reads them back.
+    auto const& importable_modifiers = presentation_drm_format_modifiers();
+    if (any_of(modifiers, [&](u64 modifier) { return importable_modifiers.contains_slow(modifier); }))
+        modifiers.remove_all_matching([&](u64 modifier) { return !importable_modifiers.contains_slow(modifier); });
+    // NB: A linear layout is the slowest to paint into, so it is only used when there is nothing else.
+    if (any_of(modifiers, [](u64 modifier) { return modifier != DRM_FORMAT_MOD_LINEAR; }))
+        modifiers.remove_all_matching([](u64 modifier) { return modifier == DRM_FORMAT_MOD_LINEAR; });
+    return modifiers;
+}
+
 static ErrorOr<GpuBackingStore> create_shared_gpu_backing_store(Gfx::IntSize size, Gfx::SkiaBackendContext& skia_backend_context)
 {
     auto const& vulkan_context = skia_backend_context.vulkan_context();
-    static constexpr Array<u64, 1> linear_modifiers = { DRM_FORMAT_MOD_LINEAR };
-    auto image = TRY(Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, linear_modifiers.span()));
+    auto const modifiers = shared_backing_store_drm_format_modifiers(vulkan_context);
+    auto image = TRY(Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, modifiers.span()));
     auto shared_image = Gfx::duplicate_shared_image(*image);
 
     return GpuBackingStore {
@@ -173,7 +202,11 @@ Optional<BackingStoreManager::Publication> BackingStoreManager::allocate_backing
         for (size_t i = 0; i < buffer_count; ++i) {
             auto backing_store = create_shared_gpu_backing_store(allocation.size, *skia_backend_context);
             if (backing_store.is_error()) {
-                dbgln("Failed to allocate shared GPU backing store ({}), falling back to shareable bitmaps", backing_store.error());
+                static bool reported_failure = false;
+                if (!reported_failure) {
+                    dbgln("Failed to allocate shared GPU backing store ({}), falling back to shareable bitmaps", backing_store.error());
+                    reported_failure = true;
+                }
                 allocation_succeeded = false;
                 break;
             }

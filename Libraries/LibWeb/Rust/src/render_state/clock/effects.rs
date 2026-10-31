@@ -426,10 +426,14 @@ impl Lane {
 
     /// The record the host installed in the box `row`, which a tick may show a sample in meanwhile.
     fn host_record(&self, state: &RenderState, row: NodeSlotId) -> u64 {
-        self.ticked.iter().find(|(ticked, _)| *ticked == row).map_or_else(
-            || state.arena.arena().node_style_record(row),
-            |(_, host_style)| host_style.record(),
-        )
+        self.host_record_in(state.arena.arena(), row)
+    }
+
+    fn host_record_in(&self, arena: &LayoutNodeArena, row: NodeSlotId) -> u64 {
+        self.ticked
+            .iter()
+            .find(|(ticked, _)| *ticked == row)
+            .map_or_else(|| arena.node_style_record(row), |(_, host_style)| host_style.record())
     }
 
     /// Shows `sample`, of the effects of the element `node` names, which animate `properties`, in its box `row`, with
@@ -450,7 +454,7 @@ impl Lane {
         let damage = node.map_or(0, |node| {
             engine.element_record_damage(node, false, shown, sample.record)
         }) | engine.sampled_properties_damage(shown, sample.record, properties);
-        let arena = state.arena.arena();
+        let arena = state.arena.arena_mut();
         let host_style = arena.install_sample_beside_anonymous_boxes(row, sample, StyleRelayout::ByDamage(damage));
         // The box shows what the sample of transitions the hover started animates of what the compositor animates, in
         // place of the compositor. The compositor runs the host's animations as the ticks sample them, and on once the
@@ -524,7 +528,7 @@ impl Lane {
                 self.compose_pseudo_element_samples(state, &samples, overlay, bounds, &mut pseudo_element_samples);
         }
         // The anonymous boxes below a box show what they inherit of its sample beside it, as the host reinherits them.
-        let arena = state.arena.arena();
+        let arena = state.arena.arena_mut();
         let mut anonymous: SmallVec<[(NodeSlotId, DerivedStyleRecord, &[u16]); 2]> = SmallVec::new();
         let mut takes = composed.is_ok();
         let box_samples = samples
@@ -544,7 +548,7 @@ impl Lane {
             }
             takes = arena.takes_sample_beside_anonymous_boxes(row, kind)
                 && arena
-                    .anonymous_child_samples(row, &sample, |child| self.host_record(state, child))
+                    .anonymous_child_samples(row, &sample, |arena, child| self.host_record_in(arena, child))
                     .map(|children| {
                         anonymous.extend(children.into_iter().map(|(child, sample)| (child, sample, properties)));
                     })
@@ -804,7 +808,7 @@ impl Lane {
                 let damage = state
                     .engine_mut()
                     .sampled_properties_damage(shown, host_style.record(), properties);
-                let arena = state.arena.arena();
+                let arena = state.arena.arena_mut();
                 arena.restore_host_style(row, host_style, StyleRelayout::ByDamage(damage));
                 arena.note_style_visual_context_moves(row, damage);
                 arena.push_paint_damage_for_repaint(row, PaintDamage::ALL_PRODUCERS);
@@ -874,18 +878,19 @@ pub(super) fn ended_compositor_animation_kinds(
 /// Stops the compositor animations of the box of the element `transitions` restyle that drive what the host's
 /// transitions the step ended animated, which the host published for them: the frames of the lane show the step's
 /// style in their place.
-pub(super) fn stop_ended_compositor_animations(arena: &LayoutNodeArena, transitions: &HoverTransitions) {
+pub(super) fn stop_ended_compositor_animations(arena: &mut LayoutNodeArena, transitions: &HoverTransitions) {
     let Some(ended) = ended_compositor_animation_kinds(transitions).filter(|ended| !ended.is_empty()) else {
         return;
     };
-    stop_compositor_animations(arena, arena.bound_row(transitions.node), &ended);
+    let row = arena.bound_row(transitions.node);
+    stop_compositor_animations(arena, row, &ended);
 }
 
 /// Stops the compositor animations of the box of the element of `row`, a hover's row, that drive what the row moves: the
 /// frames of the lane show the record it installs in their place.
 pub(super) fn stop_compositor_animations_a_row_moves(
     engine: &StyleEngine,
-    arena: &LayoutNodeArena,
+    arena: &mut LayoutNodeArena,
     row: &FfiStyleDelta,
 ) {
     use crate::css::property_metadata::property_id as prop;
@@ -917,18 +922,19 @@ pub(super) fn stop_compositor_animations_a_row_moves(
             kinds.push(kind);
         }
     }
-    stop_compositor_animations(arena, arena.bound_row(node), &kinds);
+    let row = arena.bound_row(node);
+    stop_compositor_animations(arena, row, &kinds);
 }
 
 /// Stops the compositor animations of the box `row` of the `kinds`, which the host published: the frames of the lane
 /// show what the lane gave the box in their place, which an animation the compositor runs on, or holds at its end
 /// until the host publishes again, would hide.
-fn stop_compositor_animations(arena: &LayoutNodeArena, row: NodeSlotId, kinds: &[FfiVisualAnimationTargetKind]) {
+fn stop_compositor_animations(arena: &mut LayoutNodeArena, row: NodeSlotId, kinds: &[FfiVisualAnimationTargetKind]) {
     if row.is_invalid() || kinds.is_empty() {
         return;
     }
     let nodes = arena.box_animation_nodes(row);
-    let mut paint_state = arena.paint_state().borrow_mut();
+    let paint_state = arena.paint_state_mut();
     let Some(tree) = paint_state.visual_context.tree.as_mut() else {
         return;
     };

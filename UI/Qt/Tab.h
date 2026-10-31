@@ -13,8 +13,8 @@
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <AK/kmalloc.h>
+#include <LibAudio/Audibility.h>
 #include <LibWakeLock/DisplaySleepInhibitor.h>
-#include <LibWebCommon/HTML/AudioPlayState.h>
 #include <LibWebCommon/Page/PageId.h>
 #include <LibWebCommon/Page/ScreenWakeLockState.h>
 #include <LibWebView/FileDownloader.h>
@@ -23,6 +23,7 @@
 #include <UI/Qt/BookmarksBar.h>
 #include <UI/Qt/FindInPageWidget.h>
 #include <UI/Qt/LocationEdit.h>
+#include <UI/Qt/PermissionPromptPopover.h>
 #include <UI/Qt/WebContentView.h>
 
 #include <QBoxLayout>
@@ -208,6 +209,7 @@ public:
     void update_downloads_button();
     void show_private_session_popover();
     void show_site_settings_popover();
+    void refresh_site_settings_popover();
     void show_zoom_popover();
     void show_bookmark_popover();
     void close_popovers();
@@ -220,7 +222,7 @@ public slots:
 signals:
     void title_changed(int id, QString const&);
     void favicon_changed(int id, QIcon const&);
-    void audio_play_state_changed(int id, Web::HTML::AudioPlayState);
+    void audibility_changed(int id, Audio::Audibility);
     void loading_changed();
     void loaded();
 
@@ -233,6 +235,7 @@ private:
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void hideEvent(QHideEvent*) override;
     virtual void paintEvent(QPaintEvent*) override; // Fork hook (Arc)
+    virtual void showEvent(QShowEvent*) override;
     virtual bool event(QEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
 
@@ -248,6 +251,7 @@ private:
     void position_downloads_popover();
     void position_private_session_popover();
     void hide_hover_label();
+    QImage render_hover_text(QString const&) const;
     void set_loading(bool);
     void update_tab_icon();
     int tab_index();
@@ -284,6 +288,8 @@ private:
     QPointer<DownloadsPopover> m_downloads_popover;
     QPointer<MessagePopover> m_private_session_popover;
     QPointer<SiteSettingsPopover> m_site_settings_popover;
+    // The site the open popover shows, which its changes apply to whatever the tab shows by then.
+    Optional<URL::Origin> m_site_settings_popover_origin;
     QTimer* m_content_blocking_update_timer { nullptr };
     QPointer<Popover> m_zoom_popover;
     QPointer<BookmarkPopover> m_bookmark_popover;
@@ -299,6 +305,11 @@ private:
     Optional<u64> m_report_review_navigation_listener;
     bool m_has_loaded_report_review_page { false };
     HyperlinkLabel* m_hover_label { nullptr };
+    // The address of the hovered link, which shows over the bottom corner of the page that the pointer is not over.
+    QString m_hover_text;
+    bool m_hover_text_is_on_right { false };
+    // Where the hover text shows over the page, in the view, when the view can stack it above the page itself.
+    QRect m_hover_text_rect_over_page;
     QIcon m_favicon;
     QMargins m_page_inset; // Fork hook (Arc)
     bool m_is_loading { false };
@@ -334,12 +345,7 @@ private:
     QPointer<QColorDialog> m_color_picker_dialog;
     QPointer<QFileDialog> m_file_picker_dialog;
     QPointer<QMessageBox> m_external_url_confirmation_dialog;
-    // Requests the same dialog would answer wait on the one open, so a page cannot stack dialogs by asking again.
-    struct PendingPermissionRequests {
-        QPointer<MessagePopover> popover;
-        Vector<Function<void(bool granted)>> on_decided;
-    };
-    HashMap<String, PendingPermissionRequests> m_pending_permission_requests;
+    PermissionPromptQueue m_permission_prompts;
 
     bool m_suppress_javascript_dialogs_until_navigation { false };
     // The dialogs the current document has shown, and whether the user stopped it from showing more.

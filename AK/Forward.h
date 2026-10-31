@@ -28,13 +28,11 @@ class Utf16StringData;
 enum class TrailingCodePointTransformation : u8;
 
 class AtomicRefCountedBase;
-class BigEndianInputBitStream;
 class BigEndianOutputBitStream;
 class Bitmap;
 class ByteString;
 class ByteStringImpl;
 class CircularBuffer;
-class ConstrainedStream;
 class CountingStream;
 class Duration;
 class Error;
@@ -45,9 +43,6 @@ class JsonArray;
 class JsonObject;
 class JsonValue;
 class LexicalPath;
-class LittleEndianInputBitStream;
-class LittleEndianOutputBitStream;
-class SearchableCircularBuffer;
 class SeekableStream;
 class StackInfo;
 class Stream;
@@ -99,6 +94,9 @@ class CircularQueue;
 
 template<typename T>
 struct Traits;
+
+template<typename T>
+struct SharedMemoryCodec;
 
 template<typename T, typename TraitsForT = Traits<T>, bool IsOrdered = false>
 class HashTable;
@@ -178,7 +176,6 @@ using AK::Atomic;
 using AK::AtomicRefCounted;
 using AK::AtomicRefCountedBase;
 using AK::Badge;
-using AK::BigEndianInputBitStream;
 using AK::BigEndianOutputBitStream;
 using AK::Bitmap;
 using AK::ByteBuffer;
@@ -186,7 +183,6 @@ using AK::Bytes;
 using AK::ByteString;
 using AK::CircularBuffer;
 using AK::CircularQueue;
-using AK::ConstrainedStream;
 using AK::CountingStream;
 using AK::DoublyLinkedList;
 using AK::Error;
@@ -206,15 +202,12 @@ using AK::JsonObject;
 using AK::JsonObjectSerializer;
 using AK::JsonValue;
 using AK::LexicalPath;
-using AK::LittleEndianInputBitStream;
-using AK::LittleEndianOutputBitStream;
 using AK::NonnullOwnPtr;
 using AK::NonnullRefPtr;
 using AK::Optional;
 using AK::OwnPtr;
 using AK::ReadonlyBytes;
 using AK::RefPtr;
-using AK::SearchableCircularBuffer;
 using AK::SeekableStream;
 using AK::SinglyLinkedList;
 using AK::Span;

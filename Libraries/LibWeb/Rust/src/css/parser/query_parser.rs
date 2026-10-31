@@ -21,7 +21,7 @@ use crate::css::parser::value_parser::{
     parse_ratio_value_with_context, parse_resolution_from_stream,
 };
 use crate::css::property_metadata::property_id_from_name;
-use crate::css::selector_operations::contains_unknown_webkit;
+use crate::css::selector_operations::contains_unsupported_selector;
 use crate::css::selector_parser::{SelectorParsingMode, SelectorType, parse_selector_list};
 use crate::css::serialize::{StringUnits, TextSink, serialize_an_identifier, serialize_component_values_to_utf16};
 use crate::css::style_compute::{FfiLengthResolutionContext, LENGTH_UNIT_NAMES, px_length_unit};
@@ -1025,10 +1025,7 @@ where
 
 fn single_ident(values: &[ComponentValue]) -> Option<ParserString> {
     let values = trim_whitespace(values);
-    (values.len() == 1)
-        .then(|| values[0].ident())
-        .flatten()
-        .map(|name| ParserString::from(name.to_vec().into_boxed_slice()))
+    (values.len() == 1).then(|| values[0].ident_string()).flatten().cloned()
 }
 
 fn looks_like_supports_declaration(values: &[ComponentValue]) -> bool {
@@ -1064,8 +1061,6 @@ pub(crate) fn supports_feature_matches(
     match kind {
         SupportsFeatureKind::Declaration => supports_declaration_matches(context, value),
         SupportsFeatureKind::Selector => {
-            // NB: Mirrors the selector acceptance of the C++ supports evaluator that this series
-            //     removed from Libraries/LibWeb/CSS/Parser/RustQueryParsing.cpp.
             let Ok(selectors) = parse_selector_list(
                 value,
                 declared_namespaces,
@@ -1074,7 +1069,7 @@ pub(crate) fn supports_feature_matches(
             ) else {
                 return false;
             };
-            selectors.len() == 1 && !contains_unknown_webkit(&selectors[0])
+            selectors.len() == 1 && !contains_unsupported_selector(&selectors[0])
         }
         SupportsFeatureKind::FontTech => font_tech_name_is_supported(value),
         SupportsFeatureKind::FontFormat => font_format_is_supported(value),
@@ -1214,13 +1209,11 @@ fn parse_style_range_value(values: &[ComponentValue]) -> Option<StyleRangeValue>
         return None;
     }
     if let [value] = values
-        && let Some(name) = value.ident()
+        && let Some(name) = value.ident_string()
         && name.len() > 2
         && name.starts_with(&[u16::from(b'-'), u16::from(b'-')])
     {
-        return Some(StyleRangeValue::Property(ParserString::from(
-            name.to_vec().into_boxed_slice(),
-        )));
+        return Some(StyleRangeValue::Property(name.clone()));
     }
     Some(StyleRangeValue::Components(values.to_vec()))
 }
@@ -3270,6 +3263,79 @@ mod tests {
             SupportsFeatureKind::Selector,
             &utf16("missing|a")
         ));
+    }
+
+    #[test]
+    fn supports_rejects_contextual_pseudo_elements() {
+        let value_context = FfiValueParsingContext {
+            kind: FfiValueParsingContextKind::Property,
+            value: 0,
+            secondary_value: 0,
+            name: Default::default(),
+        };
+        let context = media_value_parse_context(&value_context);
+        let selectors = [
+            ":is(::before)",
+            ":where(.ok, ::after)",
+            ":is(.ok, :unknown)",
+            ":not(::before)",
+            ":not(:is(::before))",
+            ":has(::before)",
+            ":has(:is(::before))",
+            ":nth-child(2n of ::before)",
+            ":nth-last-child(2n of :is(::before))",
+            ":host(::before)",
+            ":host(:is(::before))",
+            "::slotted(::before)",
+            "::slotted(:where(.ok, ::before))",
+            ":is(::slotted(.ok))",
+            "::-webkit-unknown",
+        ];
+        let wrongly_supported: Vec<_> = selectors
+            .into_iter()
+            .filter(|source| {
+                let units: Vec<_> = source.encode_utf16().collect();
+                supports_feature_matches(&context, &[], SupportsFeatureKind::Selector, &units)
+            })
+            .collect();
+        assert!(
+            wrongly_supported.is_empty(),
+            "incorrectly supported: {wrongly_supported:?}"
+        );
+    }
+
+    #[test]
+    fn supports_valid_pseudo_elements_and_real_nested_selectors() {
+        let value_context = FfiValueParsingContext {
+            kind: FfiValueParsingContextKind::Property,
+            value: 0,
+            secondary_value: 0,
+            name: Default::default(),
+        };
+        let context = media_value_parse_context(&value_context);
+        for source in [
+            "::before",
+            "div::after",
+            "::part(foo)",
+            "::slotted(.ok)",
+            "::slotted(:is(.ok, :hover))",
+            ":is(.ok, :hover)",
+            ":where(:not(.bad), :has(.child))",
+            ":nth-child(2n of :is(.ok, .other))",
+            ":host(:is(.ok, .other))",
+        ] {
+            let units: Vec<_> = source.encode_utf16().collect();
+            assert!(
+                supports_feature_matches(&context, &[], SupportsFeatureKind::Selector, &units),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn supports_validation_does_not_change_forgiving_stylesheet_parsing() {
+        let units: Vec<_> = ":is(.ok, ::before)".encode_utf16().collect();
+        assert!(parse_selector_list(&units, &[], SelectorType::Standalone, SelectorParsingMode::Standard).is_ok());
     }
 
     #[test]

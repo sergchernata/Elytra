@@ -35,7 +35,6 @@ set(EXTENSION_RESOURCES
 list(TRANSFORM EXTENSION_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/extensions/")
 
 set(SITE_COMPATIBILITY_RESOURCES
-    aljazeera.com.json
     cnn.com.json
     nytimes.com.json
 )
@@ -72,6 +71,7 @@ set(ABOUT_SETTINGS_RESOURCES
     privacy.js
     search.js
     services.js
+    site-permissions.js
     startup.js
     tabs.js
 )

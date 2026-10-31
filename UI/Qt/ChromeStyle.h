@@ -26,6 +26,12 @@ constexpr inline int LOCATION_EDIT_CORNER_RADIUS = 7;
 constexpr inline int LOADING_RING_PERIOD_MS = 900;
 // Before the site responds, the ring turns more slowly, at half opacity.
 constexpr inline int LOADING_RING_WAITING_PERIOD_MS = 1600;
+enum class LoadingRingSize : u8 {
+    // 20 px, reaching 2 px past a tab's favicon slot.
+    Favicon,
+    // 23 px, filling a toolbar button.
+    ToolbarButton,
+};
 enum class LoadingPhase : u8 {
     WaitingForResponse,
     Receiving,
@@ -69,6 +75,14 @@ QColor chrome_muted_text(QPalette const&);
 QFont chrome_title_font(QFont);
 
 QString style_sheet_color(QColor const&);
+
+// The panel outline painted over the panel, for a panel that cannot be partly clear.
+QColor opaque_panel_edge();
+
+// Whether the widget's window shows only the pixels it paints opaque, so that its edges are painted opaque and without
+// antialiasing.
+bool shows_opaque_pixels_only(QWidget const&);
+
 QString application_style_sheet(QPalette const&);
 QString toolbar_container_style_sheet(QPalette const&);
 QString menu_bar_style_sheet(QPalette const&);
@@ -87,6 +101,7 @@ QString autocomplete_popup_style_sheet(QPalette const&);
 QString downloads_popover_style_sheet(QPalette const&);
 QString message_popover_style_sheet(QPalette const&);
 QString site_settings_popover_style_sheet(QPalette const&);
+QString permission_prompt_style_sheet(QPalette const&);
 QString all_tabs_popover_style_sheet(QPalette const&);
 QString bookmark_popover_style_sheet(QPalette const&);
 QString zoom_popover_style_sheet(QPalette const&);
@@ -114,7 +129,7 @@ Optional<ControlFrameColors> control_frame_colors(QAbstractButton const&, Contro
 void paint_control_frame(QPainter&, QAbstractButton const&, ControlFrameStyle = ControlFrameStyle::InteractionOnly);
 void paint_focus_ring(QPainter&, QRectF const&, qreal radius);
 
-void paint_loading_ring(QPainter&, QPalette const&, QPointF center, LoadingPhase = LoadingPhase::Receiving);
+void paint_loading_ring(QPainter&, QPalette const&, QPointF center, LoadingRingSize, LoadingPhase = LoadingPhase::Receiving);
 // The loading ring's track, with an arc for the progress made, from 0 to 1, clockwise from twelve o'clock.
 void paint_progress_ring(QPainter&, QPalette const&, QPointF center, double progress);
 

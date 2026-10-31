@@ -98,10 +98,6 @@
 #    cmakedefine01 ICO_DEBUG
 #endif
 
-#ifndef IDB_DEBUG
-#    cmakedefine01 IDB_DEBUG
-#endif
-
 #ifndef IDL_DEBUG
 #    cmakedefine01 IDL_DEBUG
 #endif
@@ -198,10 +194,6 @@
 #    cmakedefine01 RESOURCE_DEBUG
 #endif
 
-#ifndef SHARED_QUEUE_DEBUG
-#    cmakedefine01 SHARED_QUEUE_DEBUG
-#endif
-
 #ifndef SPAM_DEBUG
 #    cmakedefine01 SPAM_DEBUG
 #endif
@@ -280,10 +272,6 @@
 
 #ifndef WEB_WORKER_DEBUG
 #    cmakedefine01 WEB_WORKER_DEBUG
-#endif
-
-#ifndef WEBP_DEBUG
-#    cmakedefine01 WEBP_DEBUG
 #endif
 
 #ifndef XML_PARSER_DEBUG

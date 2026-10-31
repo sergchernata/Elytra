@@ -781,6 +781,32 @@ public:
     HTML::FocusTrigger last_focus_trigger() const { return m_last_focus_trigger; }
     void set_last_focus_trigger(HTML::FocusTrigger trigger) { m_last_focus_trigger = trigger; }
 
+    // Whether the user last moved focus with a pointing device and hasn't used the keyboard since. Focus that a script
+    // moves leaves this alone, since this decides whether that focus is indicated.
+    bool last_user_focus_was_by_pointer() const { return m_last_user_focus_was_by_pointer; }
+    void set_last_user_focus_was_by_pointer(bool value) { m_last_user_focus_was_by_pointer = value; }
+
+    // Using the keyboard clears last_user_focus_was_by_pointer(), which can change whether the focused element matches
+    // :focus-visible without focus moving.
+    void note_keyboard_interaction();
+
+    // The focusVisible option of the focus() call that last moved focus here, if it had one, for the element it focused.
+    // Any other focus move here clears it, and it never applies to another element this document's focus moves to.
+    Optional<bool> requested_focus_visibility_for(Node const& node) const
+    {
+        if (m_focus_visibility_request_target.ptr() != &node)
+            return {};
+        return m_requested_focus_visibility;
+    }
+    void set_requested_focus_visibility(GC::Ptr<Node> target, Optional<bool> value)
+    {
+        m_focus_visibility_request_target = value.has_value() ? target : nullptr;
+        m_requested_focus_visibility = value.value_or(false);
+    }
+
+    // A focus() call with a focusVisible option on the element that already has focus applies the option to it.
+    void request_focus_visibility_for_focused_element(bool focus_visible);
+
     Element const* active_element() const;
     void set_active_element(GC::Ptr<Element>);
 
@@ -789,6 +815,7 @@ public:
 
     Vector<GC::Ref<Element>>& autofocus_candidates() { return m_autofocus_candidates; }
     bool autofocus_processed_flag() const { return m_autofocus_processed_flag; }
+    void set_autofocus_processed_flag(bool value) { m_autofocus_processed_flag = value; }
     void flush_autofocus_candidates();
 
     Element const* accessibility_focus_target() const { return m_accessibility_focus_target.ptr(); }
@@ -841,6 +868,9 @@ public:
 
     bool ready_for_post_load_tasks() const { return m_ready_for_post_load_tasks; }
     void set_ready_for_post_load_tasks(bool ready);
+
+    // NB: Whether this document has yet to fire its load event, including for contents written after document.open().
+    bool load_event_still_needed() const { return !m_ready_for_post_load_tasks || m_opened_contents_still_loading; }
 
     // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#print-when-loaded
     bool print_when_loaded() const { return m_print_when_loaded; }
@@ -962,6 +992,8 @@ public:
 
     bool has_focus_for_bindings() const;
     bool has_focus() const;
+
+    bool is_fully_active_descendant_of_a_top_level_traversable_with_user_attention() const;
 
     bool allow_focus() const;
 
@@ -1267,6 +1299,7 @@ public:
     RefPtr<HTML::SessionHistoryEntry> latest_entry() const { return m_latest_entry; }
     void set_latest_entry(RefPtr<HTML::SessionHistoryEntry>);
 
+    void subtree_was_moved(Badge<DOM::Node>, DOM::Node& subtree, DOM::Node& old_root);
     void element_id_changed(Badge<DOM::Element>, GC::Ref<DOM::Element> element, Optional<Utf16FlyString> old_id);
     void element_with_id_was_added(Badge<DOM::Element>, GC::Ref<DOM::Element> element);
     void element_with_id_was_removed(Badge<DOM::Element>, GC::Ref<DOM::Element> element);
@@ -1436,7 +1469,7 @@ public:
     GC::RootVector<GC::Ref<DOM::Element>> named_elements_with_name(Utf16FlyString const&) const;
     static bool is_named_element_with_name(Element const&, Utf16FlyString const&);
 
-    void gather_active_observations_at_depth(size_t depth);
+    void gather_active_observations_at_depth(size_t depth, u64 rendering_update_serial);
     [[nodiscard]] size_t broadcast_active_resize_observations(Layout::BegunRead const& read);
     [[nodiscard]] bool has_active_resize_observations();
     [[nodiscard]] bool has_skipped_resize_observations();
@@ -1636,7 +1669,12 @@ public:
 
     // https://w3c.github.io/editing/docs/execCommand/#state-override
     Optional<bool> command_state_override(Utf16FlyString const& command) const { return m_command_state_override.get(command); }
-    void set_command_state_override(Utf16FlyString const& command, bool state) { m_command_state_override.set(command, state); }
+    OrderedHashMap<Utf16FlyString, bool> const& command_state_overrides() const { return m_command_state_override; }
+    void set_command_state_override(Utf16FlyString const& command, bool state)
+    {
+        m_command_state_override.remove(command);
+        m_command_state_override.set(command, state);
+    }
     void clear_command_state_override(Utf16FlyString const& command) { m_command_state_override.remove(command); }
     void reset_command_state_overrides() { m_command_state_override.clear(); }
 
@@ -1948,6 +1986,12 @@ private:
     GC::Ptr<Node> m_sequential_focus_navigation_starting_point;
 
     HTML::FocusTrigger m_last_focus_trigger { HTML::FocusTrigger::Other };
+    bool m_last_user_focus_was_by_pointer { false };
+    GC::Ptr<Node> m_focus_visibility_request_target;
+    bool m_requested_focus_visibility { false };
+
+    bool focused_element_indicates_focus() const;
+    void publish_focus_visibility_change(bool indicated_focus_before);
 
     GC::Ptr<Element> m_active_element;
     GC::Ptr<Element> m_target_element;
@@ -1976,6 +2020,7 @@ private:
     Optional<Utf16String> m_encoding;
 
     bool m_ready_for_post_load_tasks { false };
+    bool m_opened_contents_still_loading { false };
     bool m_print_when_loaded { false };
 
     GC::Ptr<DOMImplementation> m_implementation;
@@ -2131,9 +2176,9 @@ private:
     // https://html.spec.whatwg.org/multipage/dom.html#concept-document-navigation-id
     Optional<Utf16String> m_navigation_id;
 
-    // AD-HOC: The main resource fetch is not part of the document's subresource fetch group, so retain its controller
-    //         separately while the navigation fetch is ongoing.
-    GC::Ptr<Fetch::Infrastructure::FetchController> m_ongoing_navigation_fetch_controller;
+    // AD-HOC: The main resource fetch is not part of the document's subresource fetch group, so retain its controller,
+    //         or the network transport of a body adopted without one, separately while the navigation fetch is ongoing.
+    Variant<Empty, GC::Ref<Fetch::Infrastructure::FetchController>, NonnullRefPtr<Fetch::Engine::NetworkTransportHandle>> m_ongoing_navigation_fetch;
 
     // https://html.spec.whatwg.org/multipage/origin.html#active-sandboxing-flag-set
     HTML::SandboxingFlagSet m_active_sandboxing_flag_set;
@@ -2406,7 +2451,7 @@ private:
     bool m_css_styling_flag { false };
 
     // https://w3c.github.io/editing/docs/execCommand/#state-override
-    HashMap<Utf16FlyString, bool> m_command_state_override;
+    OrderedHashMap<Utf16FlyString, bool> m_command_state_override;
 
     // https://w3c.github.io/editing/docs/execCommand/#value-override
     HashMap<Utf16FlyString, Utf16String> m_command_value_override;

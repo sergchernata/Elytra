@@ -13,7 +13,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/Parser/HTMLEncodingDetection.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
@@ -28,12 +28,12 @@ static Utf16String utf16_string_from_standardized_encoding_label(StringView labe
     return Utf16String::from_ascii_without_validation(label.bytes());
 }
 
-GC::Ref<IncrementalDocumentParser> IncrementalDocumentParser::create(GC::Ref<DOM::Document> document, Fetch::Infrastructure::Response const& response, GC::Ptr<DOM::Document> container_document)
+GC::Ref<IncrementalDocumentParser> IncrementalDocumentParser::create(GC::Ref<DOM::Document> document, Fetch::Infrastructure::ResponseView const& response, GC::Ptr<DOM::Document> container_document)
 {
     return GC::Heap::the().allocate<IncrementalDocumentParser>(document, response, container_document);
 }
 
-IncrementalDocumentParser::IncrementalDocumentParser(GC::Ref<DOM::Document> document, Fetch::Infrastructure::Response const& response, GC::Ptr<DOM::Document> container_document)
+IncrementalDocumentParser::IncrementalDocumentParser(GC::Ref<DOM::Document> document, Fetch::Infrastructure::ResponseView const& response, GC::Ptr<DOM::Document> container_document)
     : m_document(document)
     , m_container_document(container_document)
     , m_body(response.body())
@@ -62,7 +62,7 @@ void IncrementalDocumentParser::start()
     // FIXME: The spec allows starting the parse after 500 ms or 1024 bytes, whichever comes first.
     // We only honor the byte threshold.
     auto parser = GC::Ref { *this };
-    m_body->wait_for_sniff_bytes(GC::create_function(GC::Heap::the(), [parser](Web::Fetch::Infrastructure::FetchBody::SniffBytes sniff_bytes) {
+    m_body->wait_for_sniff_bytes(GC::create_function(GC::Heap::the(), [parser](Web::Fetch::Infrastructure::Body::SniffBytes sniff_bytes) {
         // A failed response initializes the parser too.
         parser->initialize_parser(sniff_bytes.bytes);
     }));

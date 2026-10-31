@@ -109,9 +109,10 @@ public:
     };
     KeyboardScrollSnapshot keyboard_scroll_snapshot() const;
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
+    void cancel_keyboard_activation();
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
-    EventResult handle_pinch_event(CSSPixelPoint, unsigned modifiers, double scale_delta, bool async_zoom_performed_default_action);
+    EventResult handle_pinch_event(CSSPixelPoint, PinchEvent const&, Optional<RemoteInputEventTarget>* remote_target);
     [[nodiscard]] EventResult perform_paste_action();
     EventResult perform_paste_action(NonnullRefPtr<HTML::DragDataStore> const&);
 
@@ -157,6 +158,7 @@ private:
     int page_scroll_distance_for_key_input() const;
 
     EventResult fire_keyboard_event(Utf16FlyString const& event_name, HTML::LocalNavigable&, UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat, Optional<u32> key_code = {});
+    EventResult handle_keyboard_activation(Utf16FlyString const& event_name, UIEvents::KeyCode, u32 modifiers, DOM::Node& target, bool cancelled, bool repeat);
     [[nodiscard]] EventResult fire_text_input_event(HTML::LocalNavigable&, Utf16String const& data);
     [[nodiscard]] EventResult input_event(Utf16FlyString const& event_name, Utf16FlyString const& input_type, HTML::LocalNavigable&, Variant<u32, Utf16String> code_point_or_string, GC::Ptr<DOM::StaticRange> deletion_range = nullptr);
 
@@ -229,6 +231,7 @@ private:
         Compositing::RustFFI::NodeSlotId hit_node;
         NonnullRefPtr<Layout::NodeArena> arena;
         RefPtr<Painting::ChromeWidget> chrome_widget;
+        bool is_scrollbar { false };
         DOM::NodeIdentity node;
         Optional<int> index_in_node;
         bool is_text_fragment { false };
@@ -269,7 +272,7 @@ private:
     // Both drop the latch when what it refers to is gone from the document, so that the event is targeted afresh.
     Layout::Node* validated_wheel_scroll_latch_target_layout_node(Layout::BegunRead const& read, DOM::Document&);
     Layout::Node* validated_latched_wheel_scrolling_box();
-    EventResult dispatch_synthetic_pinch_wheel_event(CSSPixelPoint visual_viewport_position, CSSPixelPoint screen_position, unsigned modifiers, double wheel_delta_y, bool is_cancelable);
+    EventResult dispatch_synthetic_pinch_wheel_event(CSSPixelPoint visual_viewport_position, CSSPixelPoint screen_position, unsigned modifiers, double wheel_delta_y, bool is_cancelable, Optional<RemoteInputEventTarget>* remote_target);
 
     enum class PointerEventType : u8 {
         PointerDown,
@@ -281,7 +284,6 @@ private:
         RunDefaultActions,
         CancelledByPage,
         MouseEventPrevented,
-        SwallowedByChromeWidget,
     };
     struct DispatchedPointerEvent {
         PointerEventDispatchResult result;
@@ -302,8 +304,7 @@ private:
     void track_the_effective_position_of_the_legacy_mouse_pointer(GC::Ptr<DOM::Node>, Optional<DOM::HoverEventData> = {});
     void report_hovered_node_to_client(GC::Ptr<DOM::Node>);
 
-    bool dispatch_chrome_widget_pointer_event(RefPtr<Painting::ChromeWidget>, Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position);
-    void update_hovered_chrome_widget(RefPtr<Painting::ChromeWidget>);
+    void dispatch_chrome_widget_pointer_event(RefPtr<Painting::ChromeWidget>, Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position);
     void update_nested_navigable_under_pointer(GC::Ptr<HTML::LocalNavigable>);
 
     void update_cursor(Layout::BegunRead const& read, Layout::Node const*, GC::Ptr<DOM::Node> host_element, RefPtr<Painting::ChromeWidget>, bool hit_text_fragment = false);
@@ -318,7 +319,6 @@ private:
     InputEventsTarget* m_mouse_selection_target { nullptr };
     GC::Ptr<DOM::Range> m_selection_origin;
 
-    RefPtr<Painting::ChromeWidget> m_hovered_chrome_widget;
     RefPtr<Painting::ChromeWidget> m_captured_chrome_widget;
 
     GC::Weak<DOM::Node> m_effective_legacy_mouse_pointer_position;
@@ -354,6 +354,7 @@ private:
     OwnPtr<MiddleButtonScrollHandler> m_middle_button_scroll_handler;
     NonnullOwnPtr<DragAndDropEventHandler> m_drag_and_drop_event_handler;
 
+    GC::Weak<DOM::Element> m_keyboard_activation_target;
     Optional<UIEvents::KeyCode> m_held_scroll_key;
     OwnPtr<HTML::UserScrollGestureHold> m_scroll_key_gesture_hold;
 

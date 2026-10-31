@@ -139,11 +139,12 @@
 #include <LibWeb/Editing/SpellCheckController.h>
 #include <LibWeb/Editing/SpellingMarkers.h>
 #include <LibWeb/Editing/WritingSuggestionController.h>
+#include <LibWeb/Fetch/Engine/NetworkTransportHandle.h>
 #include <LibWeb/Fetch/Fetching/Checks.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/FetchRecord.h>
 #include <LibWeb/Fetch/Infrastructure/FetchTimingInfo.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/FileAPI/BlobURLStore.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/BeforeUnloadEvent.h>
@@ -247,6 +248,7 @@
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/ResizeObserver/ResizeObserverEntry.h>
+#include <LibWeb/SVG/SMILAnimation.h>
 #include <LibWeb/SVG/SMILTimeContainer.h>
 #include <LibWeb/SVG/SVGAnimateMotionElement.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
@@ -404,12 +406,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     }
     // 7. Otherwise:
     else {
-        // FIXME: 1. Let oacHeader be the result of getting a structured field value given `Origin-Agent-Cluster` and "item" from response's header list.
-
-        // FIXME: 2. Let requestsOAC be true if oacHeader is not null and oacHeader[0] is the boolean true; otherwise false.
-        [[maybe_unused]] auto requests_oac = false;
-
-        // FIXME: 3. If navigationParams's reserved environment is a non-secure context, then set requestsOAC to false.
+        // NB: The UI process performs steps 1 through 4 and passes the selected agent cluster's properties.
 
         // 4. Let agent be the result of obtaining a similar-origin window agent given navigationParams's origin, browsingContext's group, and requestsOAC.
         // NB: The UI process obtains the agent, and names its agent cluster.
@@ -457,11 +454,14 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
             agent_cluster_cross_origin_isolation_mode);
     }
 
+    // NB: The UI process selects the window's agent even when an initial about:blank Window is reused.
+    as<HTML::WindowEnvironmentSettingsObject>(HTML::relevant_settings_object(*window)).set_agent_cluster_is_origin_keyed(navigation_params.agent_cluster_is_origin_keyed || navigation_params.origin.is_opaque() || navigation_params.agent_cluster_cross_origin_isolation_mode != HTML::CrossOriginIsolationMode::None);
+
     // AD-HOC: The fetch controller is only available in the process that ran the navigation fetch. Navigation params
     //         rebuilt from a descriptor carry the fetch's timing info directly.
     RefPtr<Fetch::Infrastructure::FetchTimingInfo> navigation_fetch_timing_info = navigation_params.fetch_timing_info;
     if (navigation_params.fetch_controller)
-        navigation_fetch_timing_info = navigation_params.fetch_controller->timing_info();
+        navigation_fetch_timing_info = navigation_params.fetch_controller->full_timing_info();
 
     // 8. Let loadTimingInfo be a new document load timing info with its navigation start time set to navigationParams's response's timing info's start time.
     DOM::DocumentLoadTimingInfo load_timing_info;
@@ -602,7 +602,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
 
             // - navigation TAO check given navigationParams's response and navigationParams's origin returns success,
             may_expose_redirect_count = (!request.client().has_value() || request_has_eligible_referrer)
-                && Fetch::Fetching::navigation_tao_check(*navigation_params.response, navigation_params.origin);
+                && Fetch::Fetching::navigation_tao_check(navigation_params.response->record(), navigation_params.origin);
         }
 
         // then set redirectCount to navigationParams's request's redirect count.
@@ -640,10 +640,9 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
             navigation_params.response->status());
     }
 
-    // AD-HOC: Retain the navigation fetch controller so aborting the document can cancel the main resource after
-    //         response commitment. Navigation fetches are not included in the document's subresource fetch group.
-    if (navigation_params.fetch_controller)
-        document->m_ongoing_navigation_fetch_controller = navigation_params.fetch_controller;
+    // AD-HOC: Retain the navigation's fetch controller, or an adopted body's transport, so aborting the document
+    //         cancels its main resource, which is not in its fetch group.
+    document->m_ongoing_navigation_fetch = navigation_params.body_delivery();
 
     // 17. If navigationParams's response has a `Refresh` header, then:
     if (auto maybe_refresh = navigation_params.response->header_list()->get("Refresh"sv); maybe_refresh.has_value()) {
@@ -826,9 +825,8 @@ Layout::NodeArena& Document::layout_node_arena()
         Layout::RustFFI::document_host_set_layout_update_host_callbacks(m_layout_node_arena->host(), layout_update_host_callbacks());
         Layout::RustFFI::FfiStyleRecordHostCallbacks style_record_host_callbacks {
             .context = this,
-            .shell_style_changed = [](void*, void* shell, u64 record, void const* payloads, bool derived, bool attach_resources) {
-                as<Layout::NodeWithStyle>(*static_cast<Layout::Node*>(shell)).refresh_style_from_arena(CSS::StyleRecordID { record }, payloads, derived, attach_resources);
-            },
+            .shell_style_changed = [](void*, void* shell, u64 record, void const* payloads, bool derived, bool attach_resources) { as<Layout::NodeWithStyle>(*static_cast<Layout::Node*>(shell)).refresh_style_from_arena(CSS::StyleRecordID { record }, payloads, derived, attach_resources); },
+            .shell_style_damaged = [](void*, void* shell, u32 damage) { Painting::repaint_after_style_change(*static_cast<Layout::Node*>(shell), CSS::decode_style_invalidation(damage)); },
         };
         Layout::RustFFI::document_host_set_style_record_host_callbacks(m_layout_node_arena->host(), style_record_host_callbacks);
         m_layout_node_arena->start_reporting_box_presence({});
@@ -982,6 +980,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_focused_area);
     visitor.visit(m_sequential_focus_navigation_starting_point);
     visitor.visit(m_active_element);
+    visitor.visit(m_focus_visibility_request_target);
     visitor.visit(m_target_element);
     visitor.visit(m_autofocus_candidates);
     visitor.visit(m_accessibility_focus_target);
@@ -995,7 +994,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_pending_parsing_blocking_svg_script);
     visitor.visit(m_history);
     visitor.visit(m_html_parser_end_state);
-    visitor.visit(m_ongoing_navigation_fetch_controller);
+    visitor.visit(m_ongoing_navigation_fetch);
     visitor.visit(m_navigation_timing_entry);
     visitor.visit(m_style_computer);
     visitor.visit(m_font_computer);
@@ -1503,7 +1502,14 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<Utf16String> const&, Opti
     // INTEROP: The HTML Standard says the document open steps do not affect whether a Document is ready for post-load
     //          tasks. Blink and WebKit reset their corresponding frame load-completion state, while Gecko marks the
     //          document loader as opened but not loaded. Reset our load gating flag for the replacement contents too.
-    set_ready_for_post_load_tasks(false);
+    //          Blink only treats document.open() as part of a load when the parent document still has to fire
+    //          its load event, so keep the flag when the container's document has already fired its load event:
+    //          nothing waits on the replacement contents then, and a later load of an ancestor must not wait on
+    //          them either. The replacement contents still fire a load event of their own, so a document that is
+    //          reopened in turn below them is part of their load.
+    if (auto container_document = this->container_document(); !container_document || container_document->load_event_still_needed())
+        set_ready_for_post_load_tasks(false);
+    m_opened_contents_still_loading = true;
 
     // INTEROP: The HTML Standard does not reset the page showing flag in the document open steps. Browsers allow a
     //          completed Document to be reopened and complete loading again, so mark the replaced contents as no longer
@@ -4159,6 +4165,8 @@ void Document::set_focused_area(GC::Ptr<Node> node, InvalidateFocusPseudoClasses
         return;
 
     page().invalidate_compositor_keyboard_scroll_state_for_document(*this);
+    if (auto navigable = this->navigable())
+        navigable->event_handler().cancel_keyboard_activation();
     if (node)
         m_sequential_focus_navigation_starting_point = nullptr;
 
@@ -4192,6 +4200,37 @@ void Document::set_focused_area(GC::Ptr<Node> node, InvalidateFocusPseudoClasses
         spell_check_controller().did_focus(m_focused_area);
     if (m_writing_suggestion_controller)
         m_writing_suggestion_controller->did_focus(m_focused_area);
+}
+
+void Document::note_keyboard_interaction()
+{
+    if (!m_last_user_focus_was_by_pointer)
+        return;
+    auto indicated_focus = focused_element_indicates_focus();
+    m_last_user_focus_was_by_pointer = false;
+    publish_focus_visibility_change(indicated_focus);
+}
+
+void Document::request_focus_visibility_for_focused_element(bool focus_visible)
+{
+    auto indicated_focus = focused_element_indicates_focus();
+    set_requested_focus_visibility(m_focused_area, focus_visible);
+    publish_focus_visibility_change(indicated_focus);
+}
+
+bool Document::focused_element_indicates_focus() const
+{
+    auto const* focused_element = as_if<Element>(m_focused_area.ptr());
+    return focused_element && focused_element->should_indicate_focus();
+}
+
+// The focused element's :focus-visible can change without focus moving, so the style engine has to hear the new state
+// from the element rather than from a focus move.
+void Document::publish_focus_visibility_change(bool indicated_focus_before)
+{
+    auto* focused_element = as_if<Element>(m_focused_area.ptr());
+    if (focused_element && focused_element->should_indicate_focus() != indicated_focus_before)
+        CSS::record_element_state_changed(*focused_element, CSS::PseudoClass::FocusVisible, !indicated_focus_before);
 }
 
 Element const* Document::active_element() const
@@ -4658,6 +4697,11 @@ void Document::dispatch_events_for_transition(GC::Ref<CSS::CSSTransition> transi
 // https://www.w3.org/TR/css-animations-2/#event-dispatch
 void Document::dispatch_events_for_animation_if_necessary(GC::Ref<Animations::Animation> animation)
 {
+    if (animation->is_smil_animation()) {
+        as<SVG::SMILAnimation>(*animation).animation_element().queue_time_events_if_necessary();
+        return;
+    }
+
     if (animation->is_css_transition()) {
         dispatch_events_for_transition(as<CSS::CSSTransition>(*animation));
         return;
@@ -4708,11 +4752,14 @@ void Document::dispatch_events_for_animation_if_necessary(GC::Ref<Animations::An
         }
         event_init.animation = css_animation;
 
+        auto event = CSS::AnimationEvent::create(
+            name,
+            event_init,
+            HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(owning_element->element())));
+        event->set_is_trusted(true);
+
         append_pending_animation_event({
-            .event = CSS::AnimationEvent::create(
-                name,
-                event_init,
-                HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(owning_element->element()))),
+            .event = event,
             .animation = css_animation,
             .target = owning_element->element(),
             .scheduled_event_time = timeline && timeline->can_convert_a_timeline_time_to_an_origin_relative_time()
@@ -5263,7 +5310,7 @@ void Document::schedule_svg_referenced_motion_path_update(SVG::SVGAnimateMotionE
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#completely-finish-loading
 void Document::completely_finish_loading()
 {
-    m_ongoing_navigation_fetch_controller = nullptr;
+    m_ongoing_navigation_fetch = Empty {};
 
     // 2. Set document's completely loaded time to the current time.
     // AD-HOC: Set this unconditionally, even if the document has no navigable yet.
@@ -5830,6 +5877,14 @@ bool Document::has_focus() const
     return false;
 }
 
+// https://html.spec.whatwg.org/multipage/interaction.html#fully-active-descendant-of-a-top-level-traversable-with-user-attention
+bool Document::is_fully_active_descendant_of_a_top_level_traversable_with_user_attention() const
+{
+    // A Document d is a fully active descendant of a top-level traversable with user attention when d is fully active
+    // and d's node navigable's top-level traversable has user attention.
+    return is_fully_active() && page().top_level_traversable_has_user_attention();
+}
+
 // https://html.spec.whatwg.org/multipage/interaction.html#allow-focus-steps
 bool Document::allow_focus() const
 {
@@ -6084,6 +6139,7 @@ void Document::set_ready_for_post_load_tasks(bool ready)
 {
     m_ready_for_post_load_tasks = ready;
     if (ready) {
+        m_opened_contents_still_loading = false;
         if (auto navigable = this->navigable()) {
             if (auto container = navigable->container())
                 container->document().schedule_html_parser_end_check();
@@ -6573,10 +6629,12 @@ void Document::destroy()
             auto& child_navigable = *navigable_container->content_navigable();
             page().client().page_did_destroy_child_frame(child_navigable.id());
             child_navigable.set_has_been_destroyed();
-            if (auto* local_child_navigable = as_if<HTML::LocalNavigable>(child_navigable))
+            if (auto* local_child_navigable = as_if<HTML::LocalNavigable>(child_navigable)) {
                 local_child_navigable->remove_from_all_local_navigables();
-            else
+            } else {
+                page().discard_provisional_navigable(child_navigable.id());
                 as<HTML::RemoteNavigable>(child_navigable).remove_from_all_remote_navigables();
+            }
         }
     }
 
@@ -6724,7 +6782,9 @@ void Document::abort()
     //    If this resulted in any instances of the fetch algorithm being canceled
     //    or any queued tasks or any network data getting discarded,
     //    then make document unsalvageable given document and "fetch".
-    bool canceled_fetch = false;
+    bool canceled_fetch = HTML::stop_body_delivery(m_ongoing_navigation_fetch);
+    m_ongoing_navigation_fetch = Empty {};
+
     auto cancel_fetch = [&](GC::Ptr<Fetch::Infrastructure::FetchController> controller) {
         if (!controller || controller->state() != Fetch::Infrastructure::FetchController::State::Ongoing)
             return;
@@ -6732,14 +6792,21 @@ void Document::abort()
         canceled_fetch = true;
     };
 
-    cancel_fetch(m_ongoing_navigation_fetch_controller);
-    m_ongoing_navigation_fetch_controller = nullptr;
-
     // AD-HOC: The fetch group belongs to the document's Window. Once the Window is associated with another document,
     //         as when the initial about:blank document is replaced, its fetches are not in the context of this document.
     if (auto window = this->window(); window && window->associated_document_if_any().ptr() == this) {
         for (auto& fetch_record : relevant_settings_object().fetch_group())
             cancel_fetch(fetch_record.fetch_controller());
+
+        for (auto& controller : HTML::relevant_agent(*this).fetch_controller_registry.controllers()) {
+            if (!controller->task_destination().is_for_document(*this))
+                continue;
+            // AD-HOC: A keepalive fetch without a fetch record, such as a violation report, outlives the document, as
+            //         terminating a fetch group leaves its keepalive fetches running.
+            if (controller->is_keepalive())
+                continue;
+            cancel_fetch(controller.ptr());
+        }
     }
 
     if (canceled_fetch)
@@ -6769,6 +6836,12 @@ void Document::abort()
 
         // 3. Make document unsalvageable given document and "parser-aborted".
         make_unsalvageable("parser-aborted"_utf16);
+    }
+
+    // NB: Stopped fetches discard their completion tasks, so their elements cannot release rendering themselves.
+    while (!m_render_blocking_elements.is_empty()) {
+        auto element = *m_render_blocking_elements.begin();
+        element->unblock_rendering();
     }
 }
 
@@ -7404,6 +7477,8 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
     };
 
     for (auto& observer : intersection_observers) {
+        observer->remove_dead_observation_targets();
+
         auto intersection_root_node = observer->intersection_root_node();
         // NB: The root and the targets may each be in another document than this one, and their boxes are reads of
         //     the render state of their own documents.
@@ -7431,7 +7506,11 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
         // 2. For each target in observer’s internal [[ObservationTargets]] slot, processed in the same order that
         //    observe() was called on each target:
         for (auto& observed_target : observer->observation_targets()) {
-            auto& target = observed_target.target;
+            // NB: A collection during this loop can clear a target that the pruning above kept.
+            auto maybe_target = observed_target.target.ptr();
+            if (!maybe_target)
+                continue;
+            GC::Ref<Element> target = *maybe_target;
             // 1. Let:
             // thresholdIndex be 0.
             size_t threshold_index = 0;
@@ -7757,14 +7836,19 @@ void Document::shared_declarative_refresh_steps(Utf16View input, GC::Ptr<HTML::H
     //   flag set, then navigate document's node navigable to urlRecord using document, with historyHandling set to
     //   "replace".
     m_active_refresh_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(time), [this, has_meta_element = !!meta_element, url_record = move(url_record)]() {
-        if (has_meta_element && has_flag(active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedAutomaticFeatures))
-            return;
+        // AD-HOC: Navigate from a task, so that the refresh comes after the tasks that "completely finish loading"
+        //         queued, such as the one that fires the load event at the container, as the refresh is due only
+        //         after the document has completely loaded.
+        HTML::queue_global_task(HTML::Task::Source::DOMManipulation, relevant_global_object(*this), GC::create_function(heap(), [document = GC::Ref { *this }, has_meta_element, url_record] {
+            if (has_meta_element && has_flag(document->active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedAutomaticFeatures))
+                return;
 
-        auto navigable = this->navigable();
-        if (!navigable || navigable->has_been_destroyed())
-            return;
+            auto navigable = document->navigable();
+            if (!navigable || navigable->has_been_destroyed())
+                return;
 
-        MUST(navigable->navigate({ .url = url_record, .source_document = *this, .history_handling = HTML::NavigationHistoryBehavior::Replace }));
+            MUST(navigable->navigate({ .url = url_record, .source_document = document, .history_handling = HTML::NavigationHistoryBehavior::Replace }));
+        }));
     });
 
     // For the purposes of the previous paragraph, a refresh is said to have come due as soon as the later of the
@@ -8528,9 +8612,12 @@ void Document::update_compositor_animations(Layout::BegunRead const& read)
         if (root->is_element())
             index_shadow_including_element_ancestors(*root, elements_with_intersection_observation_descendants);
         for (auto const& observation : observer.observation_targets()) {
-            index_shadow_including_element_ancestors(observation.target, elements_with_intersection_observation_descendants);
+            auto target = observation.target.ptr();
+            if (!target)
+                continue;
+            index_shadow_including_element_ancestors(*target, elements_with_intersection_observation_descendants);
             if (observer.track_visibility())
-                index_shadow_including_element_ancestors(observation.target, elements_with_visibility_observation_descendants);
+                index_shadow_including_element_ancestors(*target, elements_with_visibility_observation_descendants);
         }
     }
 
@@ -8766,15 +8853,18 @@ void Document::update_compositor_animations(Layout::BegunRead const& read)
                 return true;
             bool subtree_is_clipped_outside_root = transform_subtree_is_clipped_outside(animated_target, observer.root_intersection_rectangle(read));
             for (auto const& observation : observer.observation_targets()) {
-                if (!animated_target.is_shadow_including_inclusive_ancestor_of(*observation.target) || subtree_is_clipped_outside_root)
+                auto target = observation.target.ptr();
+                if (!target)
+                    continue;
+                if (!animated_target.is_shadow_including_inclusive_ancestor_of(*target) || subtree_is_clipped_outside_root)
                     continue;
                 if (only_translates_horizontally && ancestor_transform_can_map_horizontal_motion_to_vertical(animated_target, *root)) {
                     requires_main_thread_sampling = true;
                     return true;
                 }
-                if (only_translates_horizontally && !observation_has_another_transform_animation(animated_target, *observation.target, effect)) {
-                    auto const& target_rect = observation_target_rect_cache.ensure(observation.target, [&] {
-                        return observation.target->bounding_client_rect_assuming_layout_clean();
+                if (only_translates_horizontally && !observation_has_another_transform_animation(animated_target, *target, effect)) {
+                    auto const& target_rect = observation_target_rect_cache.ensure(target, [&] {
+                        return target->bounding_client_rect_assuming_layout_clean();
                     });
                     auto root_rect = observer.root_intersection_rectangle(read);
                     bool vertical_bands_are_disjoint = target_rect.bottom() < root_rect.top() || target_rect.top() > root_rect.bottom();
@@ -9494,12 +9584,83 @@ static void insert_in_tree_order(Vector<GC::Ref<DOM::Element>>& elements, DOM::E
     }
 
     auto index = elements.find_first_index_if([&](auto& existing_element) {
-        return existing_element->compare_document_position(element) & Node::DOCUMENT_POSITION_FOLLOWING;
+        return element.compare_document_position(existing_element) & Node::DOCUMENT_POSITION_FOLLOWING;
     });
     if (index.has_value())
         elements.insert(index.value(), element);
     else
         elements.append(element);
+}
+
+void Document::subtree_was_moved(Badge<DOM::Node>, DOM::Node& subtree, DOM::Node& old_root)
+{
+    if (!subtree.is_connected())
+        return;
+
+    auto& new_root = subtree.root();
+    bool moved_ids = false;
+    bool named_elements_changed = false;
+    GC::RootVector<GC::Ref<Element>> moved_named_elements;
+    subtree.for_each_shadow_including_inclusive_descendant([&](Node& node) {
+        auto* element = as_if<Element>(node);
+        if (!element)
+            return TraversalDecision::Continue;
+
+        auto id = element->id();
+        auto name = element->name();
+        if (!id.has_value() && !name.has_value())
+            return TraversalDecision::Continue;
+
+        auto& scope_root = element->root();
+        if (id.has_value()) {
+            // NB: Descendants in a nested shadow tree keep their original tree scope.
+            auto& previous_root = &scope_root == &new_root ? old_root : scope_root;
+            if (&previous_root != &scope_root) {
+                if (auto* shadow_root = as_if<ShadowRoot>(previous_root))
+                    shadow_root->element_by_id().remove(*id, *element);
+                else
+                    element_by_id().remove(*id, *element);
+            }
+            element->document_or_shadow_root_element_by_id_map().add(*id, *element);
+            moved_ids = true;
+        }
+
+        if (m_potentially_named_elements.remove_first_matching([&](auto& existing) { return existing.ptr() == element; }))
+            named_elements_changed = true;
+        if (scope_root.is_document()
+            && ((name.has_value() && is_potentially_named_element(*element))
+                || (id.has_value() && is_potentially_named_element_by_id(*element)))) {
+            moved_named_elements.append(*element);
+        }
+        return TraversalDecision::Continue;
+    });
+
+    // NB: Remove every moved entry before reinserting any of them, so stale positions of later descendants cannot
+    //     affect where earlier descendants are inserted.
+    for (auto& element : moved_named_elements) {
+        insert_in_tree_order(m_potentially_named_elements, element);
+        named_elements_changed = true;
+    }
+
+    if (named_elements_changed)
+        did_add_supported_property_name();
+
+    // NB: Form owners and SVG references must observe all of the subtree's IDs in their final scopes and order.
+    for (auto* form_associated_element : m_form_associated_elements_with_form_attribute) {
+        auto& element = form_associated_element->form_associated_element_to_html_element();
+        // NB: An ID-less control can gain a form owner when it enters a different tree scope. Descendants in a nested
+        //     shadow tree keep their scope, so only ordinary descendants need this additional reset.
+        if (moved_ids || (&old_root != &new_root && subtree.is_inclusive_ancestor_of(element)))
+            form_associated_element->element_with_id_was_added_or_removed({});
+    }
+    if (moved_ids) {
+        note_svg_paint_resources_changed();
+        subtree.for_each_shadow_including_inclusive_descendant([&](Node& node) {
+            if (auto* element = as_if<Element>(node); element && element->id().has_value())
+                republish_svg_patterns_inheriting_from(*element->id());
+            return TraversalDecision::Continue;
+        });
+    }
 }
 
 void Document::element_id_changed(Badge<DOM::Element>, GC::Ref<DOM::Element> element, Optional<Utf16FlyString> old_id)
@@ -9870,7 +10031,7 @@ static size_t calculate_depth_for_node(Node const& node)
 }
 
 // https://drafts.csswg.org/resize-observer-1/#gather-active-observations-h
-void Document::gather_active_observations_at_depth(size_t depth)
+void Document::gather_active_observations_at_depth(size_t depth, u64 rendering_update_serial)
 {
     // 1. Let depth be the depth passed in.
 
@@ -9890,6 +10051,10 @@ void Document::gather_active_observations_at_depth(size_t depth)
 
         // 2. For each observation in observer.[[observationTargets]] run this step:
         for (auto& observation : observer->observation_targets()) {
+            // NB: An observation made beside a rendering update in flight is gathered by the rendering updates after it.
+            if (observation->first_rendering_update_to_gather() > rendering_update_serial)
+                continue;
+
             // 1. If observation.isActive() is true
             if (observation->is_active()) {
                 auto target = observation->target();
@@ -10389,10 +10554,6 @@ bool Document::is_render_blocked() const
     auto now = HighResolutionTime::current_high_resolution_time(relevant_global_object(*this));
     if (now > max_time_to_block_rendering_in_ms)
         return false;
-
-    // AD-HOC: Consider pending CSS @import rules as render-blocking
-    if (!m_pending_css_import_rules.is_empty())
-        return true;
 
     if (!m_render_blocking_elements.is_empty())
         return true;
@@ -11334,7 +11495,7 @@ Optional<Painting::HitTestResult> Document::hit_test(Layout::BegunRead const& re
     //    the transforms that apply to the descendants of the viewport, return the associated element and terminate
     //    these steps.
     auto result = query->list().hit_test(read, position, *query);
-    if (result.has_value() && (result->chrome_widget || result->dom_node()))
+    if (result.has_value() && (result->chrome_widget || result->is_scrollbar || result->dom_node()))
         return result;
 
     // 3. If the document has a root element, return the root element and terminate these steps.
@@ -12028,7 +12189,7 @@ Vector<URL::Origin> Document::internal_ancestor_origin_objects_list_creation_ste
         masked = true;
 
     // 9. Otherwise, if referrerPolicy is "same-origin" and parentDoc's origin is not same origin with document's origin, then set masked to true.
-    else if (referrer_policy == ReferrerPolicy::ReferrerPolicy::SameOrigin && parent_doc->origin().is_same_origin(origin()))
+    else if (referrer_policy == ReferrerPolicy::ReferrerPolicy::SameOrigin && !parent_doc->origin().is_same_origin(origin()))
         masked = true;
 
     // 10. If masked is true, then append a new opaque origin to output.
@@ -12384,7 +12545,7 @@ static WebIDL::ExceptionOr<Utf16String> document_write_compliant_string(DOM::Doc
             HTML::relevant_global_object(document),
             string.to_string(),
             sink,
-            "script"_utf16));
+            TrustedTypes::Script.view()));
         string.clear();
         string.append(new_string);
     }

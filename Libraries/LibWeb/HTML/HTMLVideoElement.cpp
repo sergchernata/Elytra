@@ -22,7 +22,7 @@
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/HTML/AudioTrackList.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLVideoElement.h>
@@ -323,10 +323,8 @@ WebIDL::ExceptionOr<void> HTMLVideoElement::determine_element_poster_frame(Optio
             return;
         }
 
-        if (response->type() == Fetch::Infrastructure::Response::Type::Opaque || response->type() == Fetch::Infrastructure::Response::Type::OpaqueRedirect) {
-            auto& filtered_response = static_cast<Fetch::Infrastructure::FilteredResponse&>(*response);
-            response = filtered_response.internal_response();
-        }
+        if (response->type() == Fetch::Infrastructure::Response::Type::Opaque || response->type() == Fetch::Infrastructure::Response::Type::OpaqueRedirect)
+            response = response->unsafe_response();
 
         if (!response->body()) {
             finalize(self, nullptr);
@@ -606,6 +604,12 @@ void HTMLVideoElement::run_the_video_frame_request_callbacks(HighResolutionTime:
     ScopeGuard request_rendering_update_for_pending_callbacks = [&] {
         request_rendering_update_for_video_frame_callbacks();
     };
+
+    // AD-HOC: The playback state change that updates the ready state may arrive after the presented frame changes,
+    //         and createImageBitmap() requires at least HAVE_CURRENT_DATA. Don't let a callback run until it can
+    //         capture a frame.
+    if (ready_state() < ReadyState::HaveCurrentData)
+        return;
 
     // 2. Let metadata be the VideoFrameCallbackMetadata dictionary built from video's latest presented frame.
     // AD-HOC: The frame stays held until the rendering update has run its animation frame callbacks, so that the

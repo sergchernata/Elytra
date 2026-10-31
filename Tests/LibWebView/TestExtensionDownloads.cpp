@@ -197,7 +197,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         // whenever it likes.
         {
             auto directory = ByteString::formatted("{}/downloads-open", harness.directory);
-            MUST(FileSystem::copy_file_or_directory(directory, fixture("downloads"sv), FileSystem::RecursionMode::Allowed));
+            MUST(copy_recursively(directory, fixture("downloads"sv)));
             auto manifest_path = ByteString::formatted("{}/manifest.json", directory);
             auto manifest = MUST(MUST(Core::File::open(manifest_path, Core::File::OpenMode::Read))->read_until_eof());
             auto with_open = StringView { manifest }.replace("\"permissions\": [\"downloads\""sv, "\"permissions\": [\"downloads.open\", \"downloads\""sv, ReplaceMode::FirstOnly);

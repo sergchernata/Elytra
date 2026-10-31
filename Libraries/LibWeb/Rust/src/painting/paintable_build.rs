@@ -106,12 +106,12 @@ impl<'a> PaintableCommit<'a> {
         self.arena
     }
 
-    pub(crate) fn discard_absolute_rects_memoized_during_commit(&self) {
-        self.arena().clear_absolute_rect_memo();
+    pub(crate) fn discard_absolute_rects_memoized_during_commit(&mut self) {
+        self.arena_mut().clear_absolute_rect_memo();
     }
 
-    pub(crate) fn begin_commit(&self) {
-        self.arena().clear_absolute_rect_memo();
+    pub(crate) fn begin_commit(&mut self) {
+        self.arena_mut().clear_absolute_rect_memo();
     }
 
     pub(crate) fn prepare_node(
@@ -134,7 +134,7 @@ impl<'a> PaintableCommit<'a> {
         let row_existed_before_this_commit = self.arena().paintable_rows().paintable_row_is_populated(node);
         let previous_offset = row_existed_before_this_commit.then(|| self.arena().live_paintable_data(node).offset);
         if !wants_paintable {
-            self.arena().clear_committed_fragment_link(node);
+            self.arena_mut().clear_committed_fragment_link(node);
             if row_existed_before_this_commit {
                 let reset = {
                     let arena = self.arena();
@@ -166,15 +166,15 @@ impl<'a> PaintableCommit<'a> {
             };
         }
         if !has_used_values {
-            self.arena().clear_committed_fragment_link(node);
+            self.arena_mut().clear_committed_fragment_link(node);
             // Fragmented inlines get their painted pieces from the enclosing line root.
             let inline_paint_changed = enclosing_line_root_changes.inline_content_changed
                 || (enclosing_line_root_changes.fragment_changed && has_descendant_dependent_paint(self.arena(), node));
             if row_existed_before_this_commit && inline_paint_changed {
-                self.arena().push_paint_damage(node, PaintDamage::ALL_PRODUCERS);
+                self.arena_mut().push_paint_damage(node, PaintDamage::ALL_PRODUCERS);
             }
             if row_existed_before_this_commit && enclosing_line_root_changes.fragment_changed {
-                self.arena()
+                self.arena_mut()
                     .note_visual_context_box_dirty(node, VisualContextBoxDirtyKind::InlineGeometryChanged);
             }
         }
@@ -192,12 +192,12 @@ impl<'a> PaintableCommit<'a> {
                 // A recommitted viewport row starts its paint state over: the scroll registry is
                 // dropped here and rebuilt by the next tree update, while the host resets its
                 // snapshot from the row reset notification.
-                arena.paint_state().borrow_mut().visual_context.clear_scroll_state();
+                arena.paint_state_mut().visual_context.clear_scroll_state();
             }
         } else {
             arena.populate_paintable_row(node);
             if node_kind == NodeKind::Viewport {
-                arena.paint_state().borrow_mut().reset_visual_context_state();
+                arena.paint_state_mut().reset_visual_context_state();
             }
             arena.note_visual_context_box_dirty(node, VisualContextBoxDirtyKind::NewRow);
         }
@@ -289,7 +289,7 @@ impl<'a> PaintableCommit<'a> {
             });
         if old_content_size != new_content_size {
             if self.arena().data(node).kind.get() == NodeKind::Viewport {
-                self.arena().set_needs_full_scrollable_overflow_recalculation();
+                self.arena_mut().set_needs_full_scrollable_overflow_recalculation();
             }
             assert!(
                 !reuses_committed_subtree || old_content_inline_size == Some(fragment.content_inline_size),
@@ -301,7 +301,7 @@ impl<'a> PaintableCommit<'a> {
         // Inserted, removed or reordered children change which scopes this row's plans list,
         // independently of where the children were placed.
         if !child_sequence_unchanged {
-            self.arena().push_paint_damage(node, PaintDamage::ORDER);
+            self.arena_mut().push_paint_damage(node, PaintDamage::ORDER);
         }
         let painted_geometry_lives_in_enclosing_line_root = {
             let data = self.arena().data(node);
@@ -346,13 +346,13 @@ impl<'a> PaintableCommit<'a> {
         if !paint_offset_unchanged {
             damage |= PaintDamage::MOVED;
         }
-        self.arena().push_paint_damage(node, damage);
+        self.arena_mut().push_paint_damage(node, damage);
         if !offset_unchanged {
-            self.arena()
+            self.arena_mut()
                 .note_visual_context_box_dirty(node, VisualContextBoxDirtyKind::MovedWithDescendants);
         }
         if !fragment_content_unchanged {
-            self.arena()
+            self.arena_mut()
                 .note_visual_context_box_dirty(node, VisualContextBoxDirtyKind::RecommittedInPlace);
         }
         if !fragment_content_unchanged || !self.arena().committed_side_data(node).overflow_valid_across_recommits {
@@ -371,12 +371,10 @@ impl<'a> PaintableCommit<'a> {
             data.content_size = new_content_size;
             data.offset = new_offset;
         }
-        self.arena().set_committed_fragment_link(
-            node,
-            link.clone(),
-            self.arena()
-                .epoch_of_geometry_laid_out_in_this_pass(self.arena().data(node)),
-        );
+        // A layout pass bumps no epoch, so its geometry is laid out against the epoch the node has now.
+        let epoch_of_laid_out_geometry = self.arena().data(node).fragment_cache_epoch;
+        self.arena_mut()
+            .set_committed_fragment_link(node, link.clone(), Some(epoch_of_laid_out_geometry));
         ReplacedCommittedFragmentLink {
             content_size_change,
             line_root_changes: LineRootChanges {
@@ -441,7 +439,7 @@ impl<'a> PaintableCommit<'a> {
             return;
         }
         {
-            let mut side = self.arena().committed_side_data_mut(slot);
+            let mut side = self.arena_mut().committed_side_data_mut(slot);
             side.containing_block_fragment = containing_block_fragment;
             side.box_fragments = (!later_fragments.is_empty()).then(|| {
                 std::sync::Arc::new(
@@ -458,9 +456,9 @@ impl<'a> PaintableCommit<'a> {
         if geometry_unchanged {
             return;
         }
-        self.arena()
+        self.arena_mut()
             .push_paint_damage(slot, PaintDamage::ALL_PRODUCERS | PaintDamage::MOVED);
-        self.arena().note_visual_context_box_dirty(
+        self.arena_mut().note_visual_context_box_dirty(
             slot,
             if moved {
                 VisualContextBoxDirtyKind::MovedWithDescendants
@@ -472,7 +470,7 @@ impl<'a> PaintableCommit<'a> {
     }
 
     pub(crate) fn set_line_data(
-        &self,
+        &mut self,
         slot: NodeSlotId,
         line_data: &std::sync::Arc<crate::layout::inline_content::InlineContent>,
         previous_fragmented_content: Option<std::sync::Arc<crate::layout::inline_content::InlineContent>>,
@@ -496,12 +494,12 @@ impl<'a> PaintableCommit<'a> {
             }
             (true, !previous.has_same_item_order(line_data))
         });
-        self.arena().committed_side_data_mut(slot).inline_content = Some(line_data.clone());
+        self.arena_mut().committed_side_data_mut(slot).inline_content = Some(line_data.clone());
         if item_order_changed {
-            self.arena().push_paint_damage(slot, PaintDamage::ORDER);
+            self.arena_mut().push_paint_damage(slot, PaintDamage::ORDER);
         }
         if has_pieces {
-            self.arena().note_line_root_needs_fragment_ownership(slot);
+            self.arena_mut().note_line_root_needs_fragment_ownership(slot);
         }
         LineDataChange {
             has_pieces,
@@ -517,15 +515,13 @@ impl<'a> PaintableCommit<'a> {
             if !self.overflow_invalidated_boxes.insert(node) {
                 break;
             }
-            let arena = self.arena();
+            let is_full_layout = self.is_full_layout;
+            let arena = self.arena_mut();
             if arena.paintable_row_is_populated(node) {
-                arena.paintable_rows().clear_cached_overflow_data(node);
+                arena.paintable_rows_mut().clear_cached_overflow_data(node);
                 // Commit queues are consumed immediately and are bounded by the committed tree.
-                if self.is_full_layout && !arena.needs_full_scrollable_overflow_recalculation.get() {
-                    arena
-                        .boxes_needing_scrollable_overflow_recalculation
-                        .borrow_mut()
-                        .push(node);
+                if is_full_layout && !arena.needs_full_scrollable_overflow_recalculation {
+                    arena.boxes_needing_scrollable_overflow_recalculation.push(node);
                 }
             }
             node = arena.containing_block_by_walking_ancestors(node);

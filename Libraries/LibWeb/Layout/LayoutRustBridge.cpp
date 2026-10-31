@@ -14,6 +14,7 @@
 #include <LibUnicode/CharacterTypes.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Display.h>
+#include <LibWeb/CSS/InstalledStyle.h>
 #include <LibWeb/CSS/LengthBox.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
@@ -143,11 +144,9 @@ static CSS::StyleAtomID svg_style_reference_fragment_atom(DOM::Element& element,
 // The four resources `mask`, `clip-path`, `fill` and `stroke` name. Read from the record's group payloads rather than
 // through a materialized view: this runs for every SVG graphics element whose style record is replaced, and pinning a
 // record to look at four properties is most of the cost of looking at them.
-static Array<CSS::StyleAtomID, 4> svg_style_reference_atoms(DOM::Element& element)
+static Array<Optional<CSS::URL>, 4> svg_style_reference_urls(void const* record_payloads)
 {
-    if (!is<SVG::SVGGraphicsElement>(element))
-        return {};
-    auto const* payloads = static_cast<void const* const*>(element.style_record_payloads());
+    auto const* payloads = static_cast<void const* const*>(record_payloads);
     if (!payloads)
         return {};
     auto const* mask_payload = static_cast<CSS::ComputedValues::MaskValues const*>(payloads[CSS::ComputedValues::MaskValues::style_group_index]);
@@ -155,11 +154,44 @@ static Array<CSS::StyleAtomID, 4> svg_style_reference_atoms(DOM::Element& elemen
     if (!mask_payload || !svg_payload)
         return {};
     return {
-        svg_style_reference_fragment_atom(element, mask_payload->mask_url_value()),
-        svg_style_reference_fragment_atom(element, mask_payload->clip_path_value()),
-        svg_style_reference_fragment_atom(element, svg_payload->fill_url_value()),
-        svg_style_reference_fragment_atom(element, svg_payload->stroke_url_value()),
+        mask_payload->mask_url_value(),
+        mask_payload->clip_path_value(),
+        svg_payload->fill_url_value(),
+        svg_payload->stroke_url_value(),
     };
+}
+
+static Array<CSS::StyleAtomID, 4> svg_style_reference_atoms(DOM::Element& element)
+{
+    if (!is<SVG::SVGGraphicsElement>(element))
+        return {};
+    auto urls = svg_style_reference_urls(element.style_record_payloads());
+    return {
+        svg_style_reference_fragment_atom(element, urls[0]),
+        svg_style_reference_fragment_atom(element, urls[1]),
+        svg_style_reference_fragment_atom(element, urls[2]),
+        svg_style_reference_fragment_atom(element, urls[3]),
+    };
+}
+
+bool svg_style_references_differ(CSS::InstalledStyle const& old_style, CSS::InstalledStyle const& new_style)
+{
+    auto const* old_payloads = static_cast<void const* const*>(old_style.payloads());
+    auto const* new_payloads = static_cast<void const* const*>(new_style.payloads());
+    if (old_payloads && new_payloads
+        && old_payloads[CSS::ComputedValues::MaskValues::style_group_index] == new_payloads[CSS::ComputedValues::MaskValues::style_group_index]
+        && old_payloads[CSS::ComputedValues::InheritedSVGValues::style_group_index] == new_payloads[CSS::ComputedValues::InheritedSVGValues::style_group_index])
+        return false;
+
+    auto old_urls = svg_style_reference_urls(old_payloads);
+    auto new_urls = svg_style_reference_urls(new_payloads);
+    for (size_t i = 0; i < old_urls.size(); ++i) {
+        if (old_urls[i].has_value() != new_urls[i].has_value())
+            return true;
+        if (old_urls[i].has_value() && old_urls[i]->url() != new_urls[i]->url())
+            return true;
+    }
+    return false;
 }
 
 RustFFI::FfiSvgAttributeFacts svg_geometry_facts(DOM::Element const& element)
@@ -537,28 +569,6 @@ void register_layout_host(NodeArena& arena, DOM::Document& document)
                 commit_messages.append(*read, messages[index]);
             // The pass that produced them reads back what they change before it ends.
             commit_messages.apply(*read); },
-        .container_length_bases = [](void* document_pointer, u32 style_node) -> RustFFI::FfiContainerLengthBases {
-            auto& document = *static_cast<DOM::Document*>(document_pointer);
-            auto element = document.style_computer().element_for_style_node(style_node);
-            VERIFY(element);
-            auto context = CSS::Length::ResolutionContext::for_element(DOM::AbstractElement { *element });
-            // Layout writes nothing on the DOM side: the marks these lengths make reach the document as commit
-            // messages, once the layout that resolved them is committed.
-            CSS::Length::DeferredContainerQueryMarks marks;
-            context.defer_container_query_marks(marks);
-            auto width = CSS::Length(100, CSS::LengthUnit::Cqw).to_px_without_rounding(context);
-            auto height = CSS::Length(100, CSS::LengthUnit::Cqh).to_px_without_rounding(context);
-            auto style_node_of = [](GC::Ptr<DOM::Element const> container) -> u32 {
-                return container ? container->style_node_id().value() : 0;
-            };
-            return {
-                .width = width,
-                .height = height,
-                .width_query_container = style_node_of(marks.width_query_container),
-                .height_query_container = style_node_of(marks.height_query_container),
-                .width_query_container_awaits_layout = marks.width_query_container_awaits_layout,
-                .height_query_container_awaits_layout = marks.height_query_container_awaits_layout,
-            }; },
         .take_built_scroll_containers = [](void* context, BegunRead const* read, RustFFI::FfiBuiltScrollContainer const* built, size_t count) {
             auto& document = *static_cast<DOM::Document*>(context);
             for (auto const& scroll_container : ReadonlySpan<RustFFI::FfiBuiltScrollContainer> { built, count })

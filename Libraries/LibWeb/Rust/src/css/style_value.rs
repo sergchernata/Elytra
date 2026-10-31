@@ -15,9 +15,15 @@ use crate::css::ffi_support::OwnedArc;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::css::css_tokenizer::{ParserSource, ParserTokenKind, SourcePosition, TokenizerInput};
+use crate::css::css_tokenizer::{
+    ParserSource, ParserTokenKind, SourcePosition, TextDetacher, TokenizerInput,
+    trim_component_value_boundary_whitespace,
+};
 use crate::css::parser::component_value::{
     ComponentKind, ComponentSerializationMode, ComponentValue, ComponentValueList, ComponentValueSlice,
+};
+use crate::css::serialize::{
+    original_component_values_source, serialize_component_values_to_utf16, trim_ascii_whitespace_start,
 };
 
 pub(crate) use crate::css::css_string::{CssString, CssStringList};
@@ -40,6 +46,7 @@ impl RetainedComponentValueList {
         let values = values.into();
         let token_count = values.token_count;
         let mut values = values.into_vec().into_boxed_slice();
+        TextDetacher::detach(|detacher| values.iter_mut().for_each(|value| value.detach(detacher)));
         let result = Self {
             pointer: values.as_mut_ptr().cast(),
             length: values.len(),
@@ -324,10 +331,41 @@ impl Clone for RetainedComponentValueList {
 }
 
 impl PartialEq for RetainedComponentValueList {
-    fn eq(&self, _other: &Self) -> bool {
-        // The retained tree is a parsing/serialization cache. Unresolved value identity is
-        // defined by the source and comparison text fields, as it was before this cache existed.
-        true
+    fn eq(&self, other: &Self) -> bool {
+        fn components_equal(first: &[ComponentValue], second: &[ComponentValue]) -> bool {
+            first.len() == second.len()
+                && first
+                    .iter()
+                    .zip(second)
+                    .all(|(first, second)| match (&first.kind, &second.kind) {
+                        (ComponentKind::Token(first), ComponentKind::Token(second)) => first == second,
+                        (
+                            ComponentKind::Function {
+                                name: first_name,
+                                values: first,
+                            },
+                            ComponentKind::Function {
+                                name: second_name,
+                                values: second,
+                            },
+                        ) => first_name == second_name && components_equal(first, second),
+                        (
+                            ComponentKind::SimpleBlock {
+                                opening: first_opening,
+                                values: first,
+                            },
+                            ComponentKind::SimpleBlock {
+                                opening: second_opening,
+                                values: second,
+                            },
+                        ) => first_opening == second_opening && components_equal(first, second),
+                        _ => false,
+                    })
+        }
+
+        // Parsing retained components depends on their token kinds, even when their normalized
+        // serialization is identical. Source text and positions do not affect this comparison.
+        components_equal(self.as_slice(), other.as_slice())
     }
 }
 
@@ -540,6 +578,31 @@ impl RetainedStyleValueDataList {
         let pointer = Box::into_raw(slice) as *mut RetainedStyleValueData;
         Self { pointer, length }
     }
+}
+
+/// Preserve matrix-only literal angles only while their canonical argument is unchanged.
+/// All other slots come from the newly mapped values, so lengths and rotation axes cannot become stale.
+pub(crate) fn map_transform_matrix_values(
+    previous: &[RetainedStyleValueData],
+    values: &[RetainedStyleValueData],
+    matrix_values: &[RetainedStyleValueData],
+) -> RetainedStyleValueDataList {
+    let mut mapped = Vec::new();
+    for (index, matrix_value) in matrix_values.iter().enumerate() {
+        let (Some(previous), Some(value)) = (previous.get(index), values.get(index)) else {
+            continue;
+        };
+        if matches!(matrix_value.data(), StyleValueData::Angle { .. })
+            && previous.data() == value.data()
+            && matrix_value.data() != value.data()
+        {
+            if mapped.is_empty() {
+                mapped = values.to_vec();
+            }
+            mapped[index] = matrix_value.clone_retained();
+        }
+    }
+    RetainedStyleValueDataList::from_retained_values(mapped)
 }
 
 impl Clone for RetainedStyleValueDataList {
@@ -2045,6 +2108,7 @@ pub enum StyleValueData {
     Easing {
         kind: u8,
         step_position: u8,
+        is_keyword: bool,
         linear_stops: RetainedLinearEasingStopList,
         x1: RetainedStyleValueData,
         y1: RetainedStyleValueData,
@@ -2137,14 +2201,11 @@ pub enum StyleValueData {
         scheme_codes: RetainedByteList,
         only: bool,
     },
-    /// An unresolved value containing arbitrary substitution functions, kept as its retained
-    /// source text, an optional normalized comparison text (empty when absent), the presence
-    /// flags of each substitution function, the attr-taint flag, and an optional parsed value
-    /// cached for an attr()-tainted registered custom property.
+    /// An unresolved value with retained source text and components, flags for substitution functions,
+    /// attr taint, and an optional parsed value cached for an attr()-tainted registered custom property.
     Unresolved {
         components: RetainedComponentValueList,
         source_text: CssString,
-        value_comparison_text: CssString,
         presence_attr: bool,
         presence_dashed_function: bool,
         presence_env: bool,
@@ -2191,6 +2252,9 @@ pub enum StyleValueData {
         property: u16,
         transform_function: u8,
         values: RetainedStyleValueDataList,
+        /// Matrix-only arguments preserving literal angle precision across canonicalization.
+        /// Empty when the canonical arguments lower to the same matrix inputs.
+        matrix_values: RetainedStyleValueDataList,
     },
     /// A shorthand property value: the shorthand id, its longhand ids (both C++
     /// `enum class PropertyID : u16`, opaque to Rust) and their values.
@@ -2802,8 +2866,10 @@ impl StyleValueData {
                 y2,
                 number_of_intervals,
                 step_position,
+                is_keyword,
             } => {
                 hasher.write_u8(*kind);
+                write_bool(hasher, *is_keyword);
                 hasher.write_usize(linear_stops.as_slice().len());
                 for stop in linear_stops.as_slice() {
                     write_value(hasher, &stop.output);
@@ -2936,7 +3002,6 @@ impl StyleValueData {
             Self::Unresolved {
                 components: _,
                 source_text,
-                value_comparison_text,
                 presence_attr,
                 presence_dashed_function,
                 presence_env,
@@ -2947,7 +3012,6 @@ impl StyleValueData {
                 parsed_value: _,
             } => {
                 hash_string_units(hasher, TokenizerInput::from(source_text));
-                hash_string_units(hasher, TokenizerInput::from(value_comparison_text));
                 write_bool(hasher, *presence_attr);
                 write_bool(hasher, *presence_dashed_function);
                 write_bool(hasher, *presence_env);
@@ -3003,10 +3067,12 @@ impl StyleValueData {
                 property,
                 transform_function,
                 values,
+                matrix_values,
             } => {
                 hasher.write_u16(*property);
                 hasher.write_u8(*transform_function);
                 write_values(hasher, values);
+                write_values(hasher, matrix_values);
             }
             Self::Shorthand {
                 shorthand_property,
@@ -3298,6 +3364,7 @@ pub unsafe extern "C" fn rust_style_value_create_transformation(
         property,
         transform_function,
         values: unsafe { RetainedStyleValueDataList::from_retained_pointers(values, length) },
+        matrix_values: crate::css::style_value::RetainedStyleValueDataList::from_retained_values(Vec::new()),
     }))
 }
 
@@ -3322,8 +3389,8 @@ pub extern "C" fn rust_style_value_create_display(raw: u32) -> *const StyleValue
     Arc::into_raw(Arc::new(StyleValueData::Display { raw }))
 }
 
-/// Creates an unresolved value from borrowed token source. Rust derives the source and comparison
-/// strings according to the requested SourceTextMode and retains the component tree.
+/// Creates an unresolved value from borrowed token source, deriving its source text according to
+/// the requested SourceTextMode and retaining the component tree.
 ///
 /// Takes ownership of one strong reference to `parsed_value` when it is non-null.
 #[unsafe(no_mangle)]
@@ -3331,10 +3398,6 @@ pub unsafe extern "C" fn rust_style_value_create_unresolved_from_source(
     token_source_ascii_units: *const u8,
     token_source_code_units: *const u16,
     token_source_length: usize,
-    has_original_source_text: bool,
-    original_source_text_ascii_units: *const u8,
-    original_source_text_code_units: *const u16,
-    original_source_text_length: usize,
     source_text_mode: u8,
     presence_attr: bool,
     presence_dashed_function: bool,
@@ -3353,57 +3416,26 @@ pub unsafe extern "C" fn rust_style_value_create_unresolved_from_source(
         crate::css::css_tokenizer::tokenize_for_parser(token_source),
     )
     .unwrap_or_default();
-    let normalized = crate::css::serialize::serialize_component_values_to_utf16(
-        &components,
-        crate::css::parser::component_value::ComponentSerializationMode::Normalized,
-    );
-    let (source_text, value_comparison_text) = if has_original_source_text {
-        let original_source_text = unsafe {
-            TokenizerInput::from_raw_parts(
-                original_source_text_ascii_units,
-                original_source_text_code_units,
-                original_source_text_length,
-            )
-        }
-        .unwrap_or_default();
-        let mut source_text = Vec::with_capacity(original_source_text.len());
-        original_source_text.append_to(&mut source_text);
-        (
-            crate::css::serialize::trim_ascii_whitespace(&source_text).to_vec(),
-            crate::css::serialize::trim_ascii_whitespace(&normalized).to_vec(),
-        )
-    } else {
-        let source_text = match source_text_mode {
-            0 | 1 => crate::css::serialize::serialize_component_values_to_utf16(
-                &components,
-                crate::css::parser::component_value::ComponentSerializationMode::PreserveNumericSource,
-            ),
-            2 => crate::css::serialize::original_component_values_source(&components)
-                .unwrap_or_else(|| normalized.clone()),
-            _ => unreachable!("unknown unresolved source text mode"),
-        };
-        let source_text = if source_text_mode == 0 {
-            crate::css::serialize::trim_ascii_whitespace(&source_text)
-        } else if source_text_mode == 1 {
-            crate::css::serialize::trim_ascii_whitespace_start(&source_text)
-        } else {
-            &source_text
-        };
-        (source_text.to_vec(), Vec::new())
+    let normalized = serialize_component_values_to_utf16(&components, ComponentSerializationMode::Normalized);
+    let source_text = match source_text_mode {
+        0 | 1 => serialize_component_values_to_utf16(&components, ComponentSerializationMode::PreserveNumericSource),
+        2 => original_component_values_source(&components).unwrap_or(normalized),
+        _ => unreachable!("unknown unresolved source text mode"),
     };
-    let component_source = if value_comparison_text.is_empty() {
+    let source_text = if source_text_mode == 0 {
+        trim_component_value_boundary_whitespace(&source_text)
+    } else if source_text_mode == 1 {
+        trim_ascii_whitespace_start(&source_text)
+    } else {
         &source_text
-    } else {
-        &value_comparison_text
     };
-    let components = RetainedComponentValueList::from_source(component_source);
+    let components = RetainedComponentValueList::from_source(source_text);
     if presence_attr {
         crate::css::parser::arbitrary_substitution::note_attr_names_read_by(components.as_slice());
     }
     Arc::into_raw(Arc::new(StyleValueData::Unresolved {
         components,
-        source_text: CssString::from_utf16(&source_text),
-        value_comparison_text: CssString::from_utf16(&value_comparison_text),
+        source_text: CssString::from_utf16(source_text),
         presence_attr,
         presence_dashed_function,
         presence_env,
@@ -3720,6 +3752,24 @@ fn hash_string_units(hasher: &mut crate::css::style::fast_hash::FastHasher, unit
 #[cfg(test)]
 mod equality_tests {
     use super::*;
+    use crate::css::css_tokenizer::tokenize_for_parser;
+    use crate::css::parser::component_value::consume_a_list_of_component_values;
+    use crate::css::parser::value_parser::unresolved_value;
+
+    fn unresolved(source: &str) -> StyleValueData {
+        let values = consume_a_list_of_component_values(tokenize_for_parser(source.as_bytes())).unwrap();
+        let serialized = serialize_component_values_to_utf16(&values, ComponentSerializationMode::Normalized);
+        unresolved_value(&serialized, values, Default::default())
+    }
+
+    #[test]
+    fn unresolved_equality_preserves_numeric_token_types() {
+        for (first, second) in [("1", "1.0"), ("1", "1e0"), ("f(1)", "f(1.0)"), ("[1]", "[1.0]")] {
+            let first = unresolved(first);
+            let second = unresolved(second);
+            assert!(!style_values_equal(&first, &second));
+        }
+    }
 
     #[test]
     fn text_hashes_alike_in_either_spelling() {

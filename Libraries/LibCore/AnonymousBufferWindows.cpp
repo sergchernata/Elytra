@@ -55,9 +55,8 @@ ErrorOr<NonnullRefPtr<AnonymousBufferImpl>> AnonymousBufferImpl::create(int fd, 
     return adopt_ref(*new AnonymousBufferImpl(fd, size, ptr));
 }
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::create_with_size(size_t size, Sealability)
+ErrorOr<AnonymousBuffer> AnonymousBuffer::create_with_size(size_t size)
 {
-    // FIXME: Support sealability on Windows.
     auto impl = TRY(AnonymousBufferImpl::create(size));
     return AnonymousBuffer(move(impl));
 }
@@ -68,12 +67,12 @@ ErrorOr<AnonymousBuffer> AnonymousBuffer::create_from_anon_fd(int fd, size_t siz
     return AnonymousBuffer(move(impl));
 }
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(Sealability sealability) const
+ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot() const
 {
-    return snapshot(0, size(), sealability);
+    return snapshot(0, size());
 }
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size, Sealability sealability) const
+ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size) const
 {
     if (!is_valid())
         return Error::from_string_literal("Cannot snapshot an invalid anonymous buffer");
@@ -81,7 +80,7 @@ ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size, S
     if (offset > this->size() || size > this->size() - offset)
         return Error::from_string_literal("Anonymous buffer snapshot range is out of bounds");
 
-    auto copy = TRY(create_with_size(size, sealability));
+    auto copy = TRY(create_with_size(size));
     bytes().slice(offset, size).copy_to({ copy.data<u8>(), copy.size() });
     return copy;
 }
@@ -94,6 +93,14 @@ ErrorOr<void> AnonymousBuffer::validate_backing_size() const
     // MapViewOfFile refuses a view that extends past the section, so the mapping AnonymousBufferImpl::create made
     // already proved the section covers the size.
     return {};
+}
+
+void AnonymousBuffer::populate_for_reading() const
+{
+    if (!is_valid() || size() == 0)
+        return;
+    WIN32_MEMORY_RANGE_ENTRY range { const_cast<void*>(m_impl->data()), size() };
+    (void)PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
 }
 
 }

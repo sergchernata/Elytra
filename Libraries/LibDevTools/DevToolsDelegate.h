@@ -153,6 +153,14 @@ public:
     using OnResolvedURLReceived = Function<void(ErrorOr<String>)>;
     virtual void resolve_dom_node_url(TabDescription const&, Optional<Web::UniqueNodeID>, String const&, OnResolvedURLReceived) const { }
 
+    struct ConsoleInputCompletion {
+        // No matches at all, rather than an empty list, means the input doesn't end in a name to complete.
+        Optional<Vector<String>> matches;
+        String match_prop;
+    };
+    using OnConsoleInputCompleted = Function<void(ErrorOr<ConsoleInputCompletion>)>;
+    virtual void complete_console_input(TabDescription const&, String const&, OnConsoleInputCompleted on_complete) const { on_complete(ConsoleInputCompletion {}); }
+
     using OnStyleSheetsReceived = Function<void(ErrorOr<Vector<Web::CSS::StyleSheetIdentifier>>)>;
     using OnStyleSheetSourceReceived = Function<void(Web::CSS::StyleSheetIdentifier const&, Utf16String)>;
     virtual void retrieve_style_sheets(TabDescription const&, OnStyleSheetsReceived) const { }
@@ -185,10 +193,10 @@ public:
     virtual void remove_debugger_breakpoint(TabDescription const&, WebView::DebuggerBreakpointLocation, OnDebuggerBreakpointOperationComplete) const { }
     virtual void retrieve_debugger_environments(TabDescription const&, u64, OnDebuggerEnvironmentsReceived) const { }
     virtual void evaluate_javascript_in_debugger_frame(TabDescription const&, u64, String const&, OnDebuggerEvaluationComplete) const { }
-    virtual void retrieve_debugger_object_properties(TabDescription const&, u64, OnDebuggerObjectPropertiesReceived) const { }
+    virtual void retrieve_debugger_object_properties(TabDescription const&, u64, WebView::DebuggerObjectScope, OnDebuggerObjectPropertiesReceived) const { }
     virtual void retrieve_debugger_source_positions(TabDescription const&, Web::HTML::ScriptRegistryIdentifier, OnDebuggerSourcePositionsReceived) const { }
 
-    using OnScriptEvaluationComplete = Function<void(ErrorOr<JsonValue>)>;
+    using OnScriptEvaluationComplete = Function<void(ErrorOr<WebView::DebuggerValue>)>;
     virtual void evaluate_javascript(TabDescription const&, String const&, OnScriptEvaluationComplete) const { }
 
     using OnConsoleMessage = Function<void(WebView::ConsoleOutput)>;
@@ -234,6 +242,10 @@ public:
     using OnNavigationFinished = Function<void(String url, String title)>;
     virtual void listen_for_navigation_events(TabDescription const&, OnNavigationStarted, OnNavigationFinished) const { }
     virtual void stop_listening_for_navigation_events(TabDescription const&) const { }
+
+    using OnInspectElementRequest = Function<void(Web::UniqueNodeID)>;
+    virtual void listen_for_inspect_element_requests(TabDescription const&, OnInspectElementRequest) const { }
+    virtual void stop_listening_for_inspect_element_requests(TabDescription const&) const { }
 
     virtual void did_connect_devtools_client(TabDescription const&) const { }
     virtual void did_disconnect_devtools_client(TabDescription const&) const { }

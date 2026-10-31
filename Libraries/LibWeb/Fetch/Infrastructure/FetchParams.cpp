@@ -4,31 +4,30 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGC/Heap.h>
-#include <LibJS/Runtime/VM.h>
 #include <LibWeb/Fetch/Infrastructure/FetchParams.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 
 namespace Web::Fetch::Infrastructure {
 
-GC_DEFINE_ALLOCATOR(FetchParams);
-
-FetchParams::FetchParams(NonnullRefPtr<Request> request, GC::Ref<FetchAlgorithms const> algorithms, GC::Ref<FetchController> controller, NonnullRefPtr<FetchTimingInfo> timing_info, NonnullRefPtr<LoaderConfigSnapshot const> loader_config)
+FetchParams::FetchParams(NonnullRefPtr<Request> request, GC::Ref<FetchAlgorithms const> algorithms, FetchController& controller, NonnullRefPtr<FetchTimingInfo> timing_info, NonnullRefPtr<LoaderConfigSnapshot const> loader_config)
     : m_request(move(request))
-    , m_algorithms(algorithms)
-    , m_controller(controller)
+    , m_controller_token(controller.token())
+    , m_controller_registry(controller.registry())
+    , m_control_block(controller.control_block())
     , m_timing_info(move(timing_info))
     , m_loader_config(move(loader_config))
 {
-    m_controller->set_fetch_params({}, *this);
+    controller.set_algorithms({}, algorithms);
+    controller.set_original_fetch_params({}, *this);
 }
 
 FetchParams::FetchParams(FetchParams const& params)
-    : m_request(params.m_request)
-    , m_algorithms(params.m_algorithms)
-    , m_task_destination(params.m_task_destination)
+    : RefCounted()
+    , m_request(params.m_request)
     , m_cross_origin_isolated_capability(params.m_cross_origin_isolated_capability)
-    , m_controller(params.m_controller)
+    , m_controller_token(params.m_controller_token)
+    , m_controller_registry(params.m_controller_registry)
+    , m_control_block(params.m_control_block)
     , m_timing_info(params.m_timing_info)
     , m_preloaded_response_candidate(params.m_preloaded_response_candidate)
     , m_has_response_body_transfer_lease(params.m_has_response_body_transfer_lease)
@@ -37,38 +36,37 @@ FetchParams::FetchParams(FetchParams const& params)
 {
 }
 
-GC::Ref<FetchParams> FetchParams::create(NonnullRefPtr<Request> request, GC::Ref<FetchAlgorithms const> algorithms, NonnullRefPtr<FetchTimingInfo> timing_info, NonnullRefPtr<LoaderConfigSnapshot const> loader_config)
+NonnullRefPtr<FetchParams> FetchParams::create(FetchController& controller, NonnullRefPtr<Request> request, GC::Ref<FetchAlgorithms const> algorithms, NonnullRefPtr<FetchTimingInfo> timing_info, NonnullRefPtr<LoaderConfigSnapshot const> loader_config)
 {
-    auto controller = Infrastructure::FetchController::create();
-    return GC::Heap::the().allocate<FetchParams>(move(request), algorithms, controller, move(timing_info), move(loader_config));
+    return adopt_ref(*new FetchParams(move(request), algorithms, controller, move(timing_info), move(loader_config)));
 }
 
-GC::Ref<FetchParams> FetchParams::copy(FetchParams const& params)
+NonnullRefPtr<FetchParams> FetchParams::copy(FetchParams const& params)
 {
-    return GC::Heap::the().allocate<FetchParams>(params);
+    return adopt_ref(*new FetchParams(params));
 }
 
-void FetchParams::visit_edges(JS::Cell::Visitor& visitor)
+GC::Ref<FetchController> FetchParams::controller() const
 {
-    Base::visit_edges(visitor);
-    visitor.visit(m_algorithms);
-    visitor.visit(m_controller);
-    visitor.visit(m_task_destination);
-    visitor.visit(m_preloaded_response_candidate);
+    VERIFY(m_controller_registry);
+    auto controller = m_controller_registry->find(m_controller_token);
+    VERIFY(controller);
+    return *controller;
 }
 
 // https://fetch.spec.whatwg.org/#fetch-params-aborted
 bool FetchParams::is_aborted() const
 {
     // A fetch params fetchParams is aborted if its controller’s state is "aborted".
-    return m_controller->state() == FetchController::State::Aborted;
+    return m_control_block->state() == FetchControlBlock::State::Aborted;
 }
 
 // https://fetch.spec.whatwg.org/#fetch-params-canceled
 bool FetchParams::is_canceled() const
 {
     // A fetch params fetchParams is canceled if its controller’s state is "aborted" or "terminated".
-    return m_controller->state() == FetchController::State::Aborted || m_controller->state() == FetchController::State::Terminated;
+    auto state = m_control_block->state();
+    return state == FetchControlBlock::State::Aborted || state == FetchControlBlock::State::Terminated;
 }
 
 }

@@ -92,6 +92,8 @@ pub(crate) struct LayoutStyle {
     changed: bool,
 }
 
+const _: () = assert!(group_index::COUNT == crate::layout::node_data::STYLE_GROUP_COUNT);
+
 impl Drop for LayoutStyle {
     fn drop(&mut self) {
         for (index, payload) in self.payloads.iter().copied().enumerate() {
@@ -109,7 +111,7 @@ impl Drop for LayoutStyle {
 }
 
 impl LayoutStyle {
-    pub(crate) fn from_record(engine: &StyleEngine, record: u64) -> Self {
+    pub(crate) fn from_record(engine: &super::RetainedState, record: u64) -> Self {
         let view = engine
             .style_record_view(record)
             .expect("layout style record must be live");
@@ -213,6 +215,12 @@ impl LayoutStyle {
         !self.changed
     }
 
+    /// The group payloads of this style, for a row's style reads to see in place of its record's, as a record's
+    /// payloads are named. They address the style where it is, so the caller keeps it in place while reads see them.
+    pub(crate) fn payloads_for_style_reads(&self) -> crate::layout::node_data::StylePayloadsRef {
+        crate::layout::node_data::StylePayloadsRef::new(self.payloads.as_ptr().cast())
+    }
+
     /// Builds the payloads of `groups` again from `table`, a longhand table holding the style's computed values with
     /// some of them replaced.
     /// The values `animated_overlay` samples over the table win over it where they do over the style's own table.
@@ -306,6 +314,7 @@ impl LayoutStyle {
             target.has_z_index = box_values.has_z_index;
             target.z_index = box_values.z_index;
             target.vertical_align = box_values.vertical_align.clone();
+            target.baseline_source = box_values.baseline_source;
         });
         let misc_reset = source.group::<MiscResetValues>();
         self.edit::<MiscResetValues>(|target| {
@@ -385,6 +394,7 @@ impl LayoutStyle {
             target.has_z_index = initial.has_z_index;
             target.z_index = initial.z_index;
             target.vertical_align = initial.vertical_align.clone();
+            target.baseline_source = initial.baseline_source;
         });
         self.copy_table_properties(&defaults);
     }

@@ -153,6 +153,7 @@ public:
     void register_environment_settings_object(Badge<EnvironmentSettingsObject>, EnvironmentSettingsObject&);
     void unregister_environment_settings_object(Badge<EnvironmentSettingsObject>, EnvironmentSettingsObject&);
     GC::Ptr<EnvironmentSettingsObject> environment_settings_object_at(EnvironmentSettingsObjectAddress) const;
+    GC::Ptr<EnvironmentSettingsObject> environment_settings_object_with_id(EnvironmentId const&) const;
 
     double compute_deadline() const;
 
@@ -185,6 +186,9 @@ public:
     bool lays_out_rendering_update_in_flight() const;
     // Runs the steps of the rendering update whose style transaction flies, which take the transaction in.
     void finish_rendering_update_in_flight();
+    // The serial number of the first rendering update that may gather a resize observation of `document` made now. A
+    // task beside a rendering update whose style and layout of the document have yet to run comes after the whole of it.
+    u64 first_rendering_update_to_gather_resize_observations_of(DOM::Document const&) const;
     // A rendering task that would find a rendering update not yet finished keeps its place in the queue until the update
     // has finished, rather than wait for it. One that finds a frame still in flight runs beside it.
     bool holds_rendering_opportunity() const;
@@ -216,12 +220,15 @@ private:
         UpToDate,
         AsItFlew,
     };
-    void update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM::Document>> const& docs, double frame_timestamp, u64 update_serial, TakenLayout = TakenLayout::UpToDate);
+    struct RenderingUpdateInFlight;
+    // `update_in_flight` is the rendering update whose steps go on, if it flew.
+    void update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM::Document>> const& docs, double frame_timestamp, u64 update_serial, TakenLayout = TakenLayout::UpToDate, RenderingUpdateInFlight const* update_in_flight = nullptr);
     void update_whether_font_face_sets_are_pending_on_the_environment(Vector<GC::Root<DOM::Document>> const& docs, TakenLayout);
     void finish_rendering_update(double update_start_time);
     void resume_rendering_update_in_flight();
     void finish_ended_rendering_update_in_flight();
     bool finish_ended_rendering_update_as_its_layout_flew();
+    void note_script_ran_beside_rendering_update_in_flight();
     // Goes on with the rendering update in flight where it has landed, and presents the recordings that have landed.
     void take_finished_frames_in();
     bool let_layout_of_rendering_update_fly();
@@ -287,7 +294,6 @@ private:
     bool m_holds_next_frame_for_testing { false };
     bool m_holds_next_layout_for_testing { false };
 
-    struct RenderingUpdateInFlight;
     OwnPtr<RenderingUpdateInFlight> m_rendering_update_in_flight;
     // The serial number of the last rendering update that began: the lanes an update takes in wait for its own plan,
     // not for that of an update before it.

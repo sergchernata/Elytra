@@ -32,6 +32,7 @@
 #include <LibWeb/HTML/CustomElements/CustomElementRegistry.h>
 #include <LibWeb/HTML/ElementInternals.h>
 #include <LibWeb/HTML/EventHandler.h>
+#include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
 #include <LibWeb/HTML/HTMLBRElement.h>
 #include <LibWeb/HTML/HTMLBaseElement.h>
@@ -89,6 +90,9 @@ struct HTMLElement::RareData final
     // https://html.spec.whatwg.org/multipage/popover.html#popover-close-watcher
     GC::Ptr<CloseWatcher> popover_close_watcher;
 
+    // https://html.spec.whatwg.org/multipage/interactive-elements.html#previously-focused-element
+    GC::Ptr<DOM::Node> previously_focused_element;
+
     Optional<Utf16FlyString> opened_in_popover_mode;
 };
 
@@ -100,6 +104,7 @@ void HTMLElement::RareData::visit_edges(Cell::Visitor& visitor)
     visitor.visit(attached_internals);
     visitor.visit(popover_trigger);
     visitor.visit(popover_close_watcher);
+    visitor.visit(previously_focused_element);
 }
 
 OwnPtr<DOM::Node::RareData> HTMLElement::create_rare_data() const
@@ -1132,7 +1137,7 @@ void HTMLElement::attribute_changed(Utf16FlyString const& name, Optional<Utf16St
             MUST(hide_popover(FocusPreviousElement::Yes, FireEvents::Yes, ThrowExceptions::No, IgnoreDomState::Yes, nullptr));
     }();
 
-    if (is_form_associated_element()) {
+    if (!namespace_.has_value() && is_form_associated_element()) {
         form_node_attribute_changed(name, value);
         form_associated_element_attribute_changed(name, old_value, value, namespace_);
         if (name == HTML::AttributeNames::disabled) {
@@ -1204,7 +1209,7 @@ void HTMLElement::inserted()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fire-a-synthetic-pointer-event
-bool HTMLElement::fire_a_synthetic_pointer_event(Utf16FlyString const& type, DOM::Element& target, bool not_trusted)
+bool HTMLElement::fire_a_synthetic_pointer_event(Utf16FlyString const& type, DOM::Element& target, NotTrusted not_trusted, u32 modifiers)
 {
     // 1. Let event be the result of creating an event using PointerEvent.
     // 2. Initialize event's type attribute to e.
@@ -1214,7 +1219,14 @@ bool HTMLElement::fire_a_synthetic_pointer_event(Utf16FlyString const& type, DOM
     //     https://w3c.github.io/pointerevents/#click-auxclick-and-contextmenu
     UIEvents::PointerEventOptions options;
     options.pointer_id = -1;
-    auto event = UIEvents::PointerEvent::create(event_name, move(options), 0, 0, 0, 0, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(*this)));
+    options.ctrl_key = modifiers & UIEvents::Mod_Ctrl;
+    options.shift_key = modifiers & UIEvents::Mod_Shift;
+    options.alt_key = modifiers & UIEvents::Mod_Alt;
+    options.meta_key = modifiers & UIEvents::Mod_Super;
+    if (auto browsing_context = target.document().browsing_context())
+        options.view = browsing_context->window_proxy();
+    auto event = UIEvents::PointerEvent::create(event_name, move(options), 0, 0, 0, 0, HighResolutionTime::current_high_resolution_time(HTML::relevant_global_object(target)));
+    event->set_is_trusted(true);
 
     // 3. Initialize event's bubbles and cancelable attributes to true.
     event->set_bubbles(true);
@@ -1224,14 +1236,15 @@ bool HTMLElement::fire_a_synthetic_pointer_event(Utf16FlyString const& type, DOM
     event->set_composed(true);
 
     // 5. If the not trusted flag is set, initialize event's isTrusted attribute to false.
-    if (not_trusted) {
+    if (not_trusted == NotTrusted::Yes) {
         event->set_is_trusted(false);
     }
 
-    // FIXME: 6. Initialize event's ctrlKey, shiftKey, altKey, and metaKey attributes according to the current state
-    //           of the key input device, if any (false for any keys that are not available).
+    // 6. Initialize event's ctrlKey, shiftKey, altKey, and metaKey attributes according to the current state
+    //    of the key input device, if any (false for any keys that are not available).
 
-    // FIXME: 7. Initialize event's view attribute to target's node document's Window object, if any, and null otherwise.
+    // 7. Initialize event's view attribute to target's node document's Window object, if any, and null otherwise.
+    // NB: These attributes are initialized through options when creating the event above.
 
     // FIXME: 8. event's getModifierState() method is to return values appropriately describing the current state of the key input device.
 
@@ -1332,7 +1345,7 @@ void HTMLElement::click()
     m_click_in_progress = true;
 
     // 4. Fire a synthetic pointer event named click at this element, with the not trusted flag set.
-    fire_a_synthetic_pointer_event(HTML::EventNames::click, *this, true);
+    fire_a_synthetic_pointer_event(HTML::EventNames::click, *this, NotTrusted::Yes);
 
     // 5. Unset this element's click in progress flag.
     m_click_in_progress = false;
@@ -1840,7 +1853,9 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
             return {};
         }
 
-        // FIXME: 4. If the result of running topmost auto or hint popover on document is null, then set shouldRestoreFocus to true.
+        // 4. If the result of running topmost auto or hint popover on document is null, then set shouldRestoreFocus to true.
+        if (!document.topmost_auto_or_hint_popover())
+            should_restore_focus = FocusPreviousElement::Yes;
 
         // 5. If stackToAppendTo is "auto":
         if (stack_to_append_to == StackToAppendTo::Auto) {
@@ -1888,8 +1903,13 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
         rare_data.popover_close_watcher = CloseWatcher::establish(*document.window(), move(get_enabled_state));
         rare_data.popover_close_watcher->add_event_listener_without_options(HTML::EventNames::close, DOM::IDLEventListener::create(close_callback));
     }
-    // FIXME: 19. Set element's previously focused element to null.
-    // FIXME: 20. Let originallyFocusedElement be document's focused area of the document's DOM anchor.
+    // 19. Set element's previously focused element to null.
+    rare_data.previously_focused_element = nullptr;
+    // 20. Let originallyFocusedElement be document's focused area of the document's DOM anchor.
+    auto originally_focused_element = document.focused_area();
+    // NB: A null focused area represents viewport focus.
+    if (!originally_focused_element)
+        originally_focused_element = &document;
     // 21. Add an element to the top layer given element.
     document.add_an_element_to_the_top_layer(*this);
     // 22. Set element's popover visibility state to showing.
@@ -1897,8 +1917,11 @@ WebIDL::ExceptionOr<void> HTMLElement::show_popover(ThrowExceptions throw_except
     // 23. Set element's popover trigger to source.
     rare_data.popover_trigger = source;
     // FIXME: 24. Set element's implicit anchor element to source.
-    // FIXME: 25. Run the popover focusing steps given element.
-    // FIXME: 26. If shouldRestoreFocus is true and element's popover attribute is not in the No Popover state, then set element's previously focused element to originallyFocusedElement.
+    // 25. Run the popover focusing steps given element.
+    run_popover_focusing_steps(*this);
+    // 26. If shouldRestoreFocus is true and element's popover attribute is not in the No Popover state, then set element's previously focused element to originallyFocusedElement.
+    if (should_restore_focus == FocusPreviousElement::Yes && popover().has_value())
+        rare_data.previously_focused_element = originally_focused_element;
     // 27. Queue a popover toggle event task given element, "closed", "open", and source.
     queue_a_popover_toggle_event_task("closed"_utf16_fly_string, "open"_utf16_fly_string, source);
     // 28. Run cleanupShowingFlag.
@@ -2034,11 +2057,21 @@ WebIDL::ExceptionOr<void> HTMLElement::hide_popover(FocusPreviousElement focus_p
     if (fire_events == FireEvents::Yes)
         queue_a_popover_toggle_event_task("open"_utf16_fly_string, "closed"_utf16_fly_string, source);
 
-    // FIXME: 15. Let previouslyFocusedElement be element's previously focused element.
+    // 15. Let previouslyFocusedElement be element's previously focused element.
+    auto previously_focused_element = rare_data.previously_focused_element;
 
-    // FIXME: 16. If previouslyFocusedElement is not null, then:
-    // FIXME: 16.1. Set element's previously focused element to null.
-    // FIXME: 16.2. If focusPreviousElement is true and document's focused area of the document's DOM anchor is a shadow-including inclusive descendant of element, then run the focusing steps for previouslyFocusedElement; the viewport should not be scrolled by doing this step.
+    // 16. If previouslyFocusedElement is not null, then:
+    if (previously_focused_element) {
+        // 1. Set element's previously focused element to null.
+        rare_data.previously_focused_element = nullptr;
+
+        // 2. If focusPreviousElement is true and document's focused area of the document's DOM anchor is a
+        //    shadow-including inclusive descendant of element, then run the focusing steps for
+        //    previouslyFocusedElement; the viewport should not be scrolled by doing this step.
+        auto focused_element = document.focused_area();
+        if (focus_previous_element == FocusPreviousElement::Yes && focused_element && focused_element->is_shadow_including_inclusive_descendant_of(*this))
+            run_focusing_steps(previously_focused_element, nullptr, FocusTrigger::Other, ScrollIntoView::No);
+    }
 
     // 17. Run cleanupSteps.
     cleanup_steps();
@@ -2551,9 +2584,7 @@ void HTMLElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor
 {
     Element::removed_from(is_subtree_root, old_ancestor, old_root);
 
-    // FIXME: 1. Let document be removedNode's node document.
-    // FIXME: 2. If document's focused area is removedNode, then set document's focused area to document's viewport,
-    //   and set document's relevant global object's navigation API's focus changed during ongoing navigation to false.
+    // NB: Node::removed_from() performs steps 1 and 2, which fix up focus for all namespaces.
 
     // 3. If removedNode is an element whose namespace is the HTML namespace, and this standard defines HTML element
     //    removing steps for removedNode's local name, then run the corresponding HTML element removing steps given

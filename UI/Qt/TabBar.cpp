@@ -139,13 +139,11 @@ static constexpr int TAB_CARD_SHAPE_TOP_INSET = 0;
 static constexpr int TAB_CARD_SHAPE_BOTTOM_INSET = 1;
 // The sidebar's tab bar leaves this much room above its first tab and below its last.
 static constexpr int VERTICAL_TAB_BAR_END_ROOM = 2;
-// A horizontal tab's card holds its contents, and is what lights up when the tab is hovered. It is inset from the tab on
-// every side.
+// A horizontal tab's card holds its contents. It is inset from the tab on every side.
 static constexpr qreal HORIZONTAL_TAB_CARD_SHAPE_HORIZONTAL_INSET = 3;
 // NB: The card is as low in the tab as the selected tab's body is, so the contents of both share the strip's line.
 static constexpr int HORIZONTAL_TAB_CARD_SHAPE_TOP_INSET = 5;
 static constexpr int HORIZONTAL_TAB_CARD_SHAPE_BOTTOM_INSET = 1;
-static constexpr qreal HORIZONTAL_TAB_CARD_RADIUS = 6;
 // The selected tab fills its whole tab, with rounded top corners, and joins the toolbar with an inverted curve at the
 // foot of each side.
 static constexpr qreal HORIZONTAL_SELECTED_TAB_RADIUS = 8;
@@ -183,9 +181,8 @@ static constexpr int HORIZONTAL_TAB_STRIP_DRAG_SPACE = 44;
 // The new tab button's slot starts this far after the last tab, not counting the last tab's room for its foot, which
 // puts its fill 8 px after the tab, just clear of a selected tab's foot.
 static constexpr int HORIZONTAL_NEW_TAB_BUTTON_GAP = 7;
-// NB: With the room at the strip's end and the first tab's inset and padding, this keeps the first favicon 28 px from
-//     the Ladybird button.
-static constexpr int LADYBIRD_BUTTON_TRAILING_GAP = 16;
+// The Ladybird button keeps 24 px clear to the first tab's straight side after it. That tab's foot reaches into the gap.
+static constexpr int LADYBIRD_BUTTON_TRAILING_GAP = 24;
 // In the open sidebar, the Ladybird button sits just before the sidebar's toggle, and the toggle a little further from
 // the page than the tabs below it.
 // NB: The gap matches the toolbar's spacing, so the two keep their distance as they move between the sidebar's header
@@ -353,6 +350,24 @@ static QPainterPath horizontal_selected_tab_path(QRectF const& body)
     path.arcTo(QRectF(right - (2 * top_radius), body.top(), 2 * top_radius, 2 * top_radius), 90, -90);
     path.lineTo(right, body.bottom() - flare);
     path.arcTo(QRectF(right, body.bottom() - (2 * flare), 2 * flare, 2 * flare), 180, 90);
+    return path;
+}
+
+// The hovered horizontal tab's outline: the selected tab's body, with its rounded top corners but without its feet.
+static QPainterPath horizontal_hovered_tab_path(QRectF const& body)
+{
+    auto top_radius = HORIZONTAL_SELECTED_TAB_RADIUS;
+    auto left = body.left();
+    auto right = body.right();
+
+    QPainterPath path;
+    path.moveTo(left, body.bottom());
+    path.lineTo(left, body.top() + top_radius);
+    path.arcTo(QRectF(left, body.top(), 2 * top_radius, 2 * top_radius), 180, -90);
+    path.lineTo(right - top_radius, body.top());
+    path.arcTo(QRectF(right - (2 * top_radius), body.top(), 2 * top_radius, 2 * top_radius), 90, -90);
+    path.lineTo(right, body.bottom());
+    path.closeSubpath();
     return path;
 }
 
@@ -1105,8 +1120,9 @@ bool TabBar::event(QEvent* event)
             auto* tab = m_tab_widget ? m_tab_widget->tab(hovered_tab) : nullptr;
             if (tab && m_tabs_with_cut_titles.contains(tab)) {
                 auto text = tabText(hovered_tab);
-                if (auto host = tab->view().url().serialized_host(); !host.is_empty())
-                    text = qformatted("{}\n{}", ak_string_from_qstring(text), host);
+                // A URL without a host (about:blank, e.g.) has no site to show.
+                if (auto url = tab->view().url(); url.host().has_value() && !url.serialized_host().is_empty())
+                    text = qformatted("{}\n{}", ak_string_from_qstring(text), url.serialized_host());
                 QToolTip::showText(help_event->globalPos(), text, this, tabRect(hovered_tab));
                 event->accept();
                 return true;
@@ -1163,6 +1179,30 @@ void TabBar::paintEvent(QPaintEvent*)
         painter.restore();
     }
 
+    if (!is_vertical) {
+        // NB: The hovered tabs are filled before any tab is painted, so a selected tab's foot is drawn over the hovered
+        //     tab beside it.
+        auto paint_hover_shape = [&](int index) {
+            if (index < 0 || index >= count() || index == dragged_index)
+                return;
+            auto hover_progress = hover_progress_of(index);
+            if (hover_progress <= 0.0 || selection_of(index) >= 1.0)
+                return;
+            auto tab_rect = shifted_tab_rect(index);
+            if (!tab_rect.isValid() || tab_rect.right() < 0 || tab_rect.left() > width())
+                return;
+            auto body_rect = horizontal_selected_tab_body_rect(QRectF(tab_rect), horizontal_tab_end_room(index));
+            if (body_rect.width() < 2 * HORIZONTAL_SELECTED_TAB_RADIUS)
+                return;
+            painter.setBrush(tab_hover_surface(Theme::chrome_palette(*this), hover_progress));
+            painter.setPen(Qt::NoPen);
+            painter.drawPath(horizontal_hovered_tab_path(body_rect));
+        };
+        paint_hover_shape(m_hover_animation_tab_index);
+        if (m_hovered_tab_index != m_hover_animation_tab_index)
+            paint_hover_shape(m_hovered_tab_index);
+    }
+
     auto previously_selected_index = m_previously_selected_tab && m_tab_widget ? m_tab_widget->index_of(m_previously_selected_tab) : -1;
     for (int index = 0; index < count(); ++index) {
         // The tab being dragged follows the cursor as the drag's image, leaving a gap where it would be dropped.
@@ -1211,8 +1251,6 @@ void TabBar::paintEvent(QPaintEvent*)
             selection = 0.0;
         if (!is_vertical && selection > 0.0)
             tab_path = horizontal_selected_tab_path(horizontal_body_rect);
-        else if (!is_vertical)
-            tab_path.addRoundedRect(shape_rect, HORIZONTAL_TAB_CARD_RADIUS, HORIZONTAL_TAB_CARD_RADIUS);
         auto vertical_tab_radius = is_collapsed_vertical ? COLLAPSED_VERTICAL_TAB_RADIUS : VERTICAL_TAB_RADIUS;
         if (is_vertical)
             tab_path.addRoundedRect(shape_rect, vertical_tab_radius, vertical_tab_radius);
@@ -1239,18 +1277,15 @@ void TabBar::paintEvent(QPaintEvent*)
             }
         }
 
-        if (selection < 1.0 && is_hovered) {
-            QPainterPath hover_path;
-            if (!is_vertical)
-                hover_path.addRoundedRect(shape_rect, HORIZONTAL_TAB_CARD_RADIUS, HORIZONTAL_TAB_CARD_RADIUS);
-            else
-                hover_path = tab_path;
+        // NB: The hovered horizontal tabs were filled before any tab was painted.
+        if (selection < 1.0 && is_hovered && is_vertical) {
             painter.setBrush(tab_hover_surface(Theme::chrome_palette(*this), hover_progress));
             painter.setPen(Qt::NoPen);
-            painter.drawPath(hover_path);
+            painter.drawPath(tab_path);
         } else if (selection < 1.0 && is_vertical && !is_collapsed_vertical && is_pinned_tile) {
-            // The pinned tiles at the top of the sidebar are always filled, so they read as a grid of buttons.
-            painter.setBrush(tab_hover_surface(Theme::chrome_palette(*this), 1.0));
+            // The pinned tiles at the top of the sidebar are always filled, so they read as a grid of buttons. The fill
+            // fades as they move into the collapsed sidebar's column, where they are not.
+            painter.setBrush(tab_hover_surface(Theme::chrome_palette(*this), 1.0 - region.collapsedness));
             painter.setPen(Qt::NoPen);
             painter.drawPath(tab_path);
         }
@@ -1277,7 +1312,7 @@ void TabBar::paintEvent(QPaintEvent*)
             if (ring_opacity > 0) {
                 painter.save();
                 painter.setOpacity(ring_opacity);
-                ChromeStyle::paint_loading_ring(painter, Theme::chrome_palette(*this), QRectF(icon_rect).center(), tab_for_index && tab_for_index->is_waiting_for_response() ? ChromeStyle::LoadingPhase::WaitingForResponse : ChromeStyle::LoadingPhase::Receiving);
+                ChromeStyle::paint_loading_ring(painter, Theme::chrome_palette(*this), QRectF(icon_rect).center(), ChromeStyle::LoadingRingSize::Favicon, tab_for_index && tab_for_index->is_waiting_for_response() ? ChromeStyle::LoadingPhase::WaitingForResponse : ChromeStyle::LoadingPhase::Receiving);
                 painter.restore();
             }
             // NB: The fallback globe is drawn on a chrome icon's larger canvas, with room around it, so it is painted at
@@ -2637,7 +2672,17 @@ TabBar::PinnedRegion TabBar::pinned_region_for(int pinned_count) const
     }
 
     auto rows = (region.count + region.columns - 1) / region.columns;
-    region.height = (rows * VERTICAL_TAB_HEIGHT) + PINNED_TABS_SEPARATOR_HEIGHT;
+    // NB: The sidebar keeps its open layout while it closes, and takes it at once as it opens, so the tiles move
+    //     between their grid at the open sidebar's width and the column at the collapsed sidebar's width as it toggles.
+    //     A tile that followed the sidebar's width on the way would grow before it shrinks.
+    if (pinned_tabs_are_tiles() && m_tab_widget && m_tab_widget->vertical_tabs_are_toggling()) {
+        region.collapsedness = m_tab_widget->vertical_tabs_toggle_collapsedness();
+        region.tile_width = m_tab_widget->vertical_tabs_toggle_open_tab_width() / region.columns;
+        region.collapsed_row_width = m_tab_widget->vertical_tabs_toggle_collapsed_tab_width();
+        region.height = qRound(((rows + ((region.count - rows) * region.collapsedness)) * VERTICAL_TAB_HEIGHT)) + PINNED_TABS_SEPARATOR_HEIGHT;
+    } else {
+        region.height = (rows * VERTICAL_TAB_HEIGHT) + PINNED_TABS_SEPARATOR_HEIGHT;
+    }
     region.scrolls = region.height > height() / 2;
     return region;
 }
@@ -2663,8 +2708,13 @@ QRect TabBar::vertical_tab_rect(int index, PinnedRegion const& region) const
     if (index < region.count) {
         auto row = index / region.columns;
         auto column = index % region.columns;
-        auto top = VERTICAL_TAB_BAR_END_ROOM + (row * VERTICAL_TAB_HEIGHT) - (region.scrolls ? m_scroll_offset : 0);
-        return { vertical_tabs_left() + (column * region.tile_width), top, region.tile_width, VERTICAL_TAB_HEIGHT };
+        auto scroll_offset = region.scrolls ? m_scroll_offset : 0;
+        QRect tile { vertical_tabs_left() + (column * region.tile_width), VERTICAL_TAB_BAR_END_ROOM + (row * VERTICAL_TAB_HEIGHT) - scroll_offset, region.tile_width, VERTICAL_TAB_HEIGHT };
+        if (region.collapsedness <= 0)
+            return tile;
+        QRect row_in_column { vertical_tabs_left(), VERTICAL_TAB_BAR_END_ROOM + (index * VERTICAL_TAB_HEIGHT) - scroll_offset, region.collapsed_row_width, VERTICAL_TAB_HEIGHT };
+        auto mix = [&](int a, int b) { return qRound(a + ((b - a) * region.collapsedness)); };
+        return { mix(tile.left(), row_in_column.left()), mix(tile.top(), row_in_column.top()), mix(tile.width(), row_in_column.width()), VERTICAL_TAB_HEIGHT };
     }
 
     auto unpinned_index = index - region.count;
@@ -2698,6 +2748,15 @@ int TabBar::tab_index_at(QPoint const& position) const
     if (pinned_y < region.height) {
         if (pinned_y >= region.height - PINNED_TABS_SEPARATOR_HEIGHT)
             return -1;
+        // NB: Tiles on their way between the grid and the column are found by where they are drawn. Where they overlap,
+        //     the later tile is drawn on top, so it is found first.
+        if (region.collapsedness > 0) {
+            for (int index = region.count - 1; index >= 0; --index) {
+                if (vertical_tab_rect(index, region).contains(position))
+                    return index;
+            }
+            return -1;
+        }
         auto x = position.x() - vertical_tabs_left();
         if (x < 0 || x >= region.columns * region.tile_width)
             return -1;
@@ -3272,12 +3331,14 @@ void TabWidget::insert_tab(int index, Tab* widget, QString const& label)
         widget->view().installEventFilter(this);
         widget->bookmarks_bar().installEventFilter(this);
     } else {
-        // A tab that hasn't loaded gets the filters for its view and bookmarks bar once it has them.
-        auto install_event_filters = [this, widget] {
+        // A tab that hasn't loaded gets the filters for its view and bookmarks bar once it has them, and the collapsed
+        // sidebar's buttons once it has a toolbar to hold them.
+        auto did_load = [this, widget] {
             widget->view().installEventFilter(this);
             widget->bookmarks_bar().installEventFilter(this);
+            place_collapsed_sidebar_buttons();
         };
-        connect(widget, &Tab::loaded, this, install_event_filters, Qt::SingleShotConnection);
+        connect(widget, &Tab::loaded, this, did_load, Qt::SingleShotConnection);
     }
 
     m_stacked_widget->insertWidget(index, widget);
@@ -3510,6 +3571,8 @@ void TabWidget::set_vertical_tabs_expanded(bool expanded)
             m_vertical_tabs_toggle_progress = value.toReal();
             m_vertical_tab_bar_column->update();
             update_tab_layout();
+            // NB: The pinned tiles move with the toggle, even on a step that leaves the tabs' width as it was.
+            m_tab_bar->refresh_tab_layout();
             float_sidebar_buttons_while_toggling();
             slide_page_with_toggling_sidebar();
             update_vertical_tabs_content_overlay();
@@ -3535,7 +3598,7 @@ void TabWidget::set_vertical_tabs_expanded(bool expanded)
 void TabWidget::float_sidebar_buttons_while_toggling()
 {
     auto* current = as_if<Tab>(m_stacked_widget->currentWidget());
-    auto floats = m_vertical_tabs_toggling && !vertical_tabs_are_on_right() && current;
+    auto floats = m_vertical_tabs_toggling && !vertical_tabs_are_on_right() && current && current->is_loaded();
     if (!floats) {
         for (auto* image : { m_floating_ladybird_button, m_floating_sidebar_toggle }) {
             if (image)
@@ -4309,11 +4372,12 @@ void TabWidget::place_collapsed_sidebar_buttons()
     // Fork hook (Arc): the hidden Arc sidebar leaves its own toggle at the window's edge; upstream's buttons stay out.
     auto collapsed = m_tab_bar_visible && m_tab_bar->tab_layout() != TabLayout::Horizontal && !m_vertical_tabs_expanded && !m_vertical_sidebar_widget;
     auto* current = as_if<Tab>(m_stacked_widget->currentWidget());
+    // A tab that hasn't loaded has no toolbar yet, so there's no slot of its own to hide or to fill.
     for (int index = 0; index < m_stacked_widget->count(); ++index) {
-        if (auto* tab = this->tab(index); tab && (tab != current || !collapsed))
+        if (auto* tab = this->tab(index); tab && tab->is_loaded() && (tab != current || !collapsed))
             tab->toolbar_sidebar_slot().hide();
     }
-    if (!current || !collapsed)
+    if (!current || !current->is_loaded() || !collapsed)
         return;
 
     auto& slot = current->toolbar_sidebar_slot();
@@ -4472,8 +4536,26 @@ void TabWidget::place_toolbar_over_page_column()
     auto position = m_page_column->mapTo(this, QPoint());
     m_toolbar_container->setGeometry(position.x(), position.y(), m_page_column->width(), m_toolbar_placeholder->height());
     m_toolbar_container->stackUnder(m_vertical_tab_bar_column);
+
+    // Reparenting the page column when switching tab layouts can put its placeholder above the toolbar.
+    if (m_page_column->parentWidget() == this)
+        m_page_column->stackUnder(m_toolbar_container);
+
     if (m_vertical_tabs_content_separator->isVisible())
         m_vertical_tabs_content_separator->raise();
+}
+
+// The width of the vertical tabs where the opening or closing sidebar is open, and where it is collapsed.
+int TabWidget::vertical_tabs_toggle_open_tab_width() const
+{
+    auto sidebar_width = m_vertical_tabs_collapse_pending ? m_vertical_tabs_toggle_from_width : m_vertical_tabs_toggle_to_width;
+    return max(0, sidebar_width - vertical_tabs_horizontal_margin_width(m_tab_bar->tab_layout()));
+}
+
+int TabWidget::vertical_tabs_toggle_collapsed_tab_width() const
+{
+    auto sidebar_width = m_vertical_tabs_collapse_pending ? m_vertical_tabs_toggle_to_width : m_vertical_tabs_toggle_from_width;
+    return max(0, sidebar_width - vertical_tabs_horizontal_margin_width(m_tab_bar->tab_layout()));
 }
 
 int TabWidget::current_vertical_tabs_width() const

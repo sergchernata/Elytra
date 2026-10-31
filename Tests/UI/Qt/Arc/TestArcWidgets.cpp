@@ -736,6 +736,9 @@ struct SlideWindow {
         pixmap.fill(OLD_SPACE);
         return pixmap;
     }
+
+    // The old space, the same in either tint (these tests don't tint the chrome).
+    SpaceSlide::Pictures old_pictures() const { return { old_picture(), old_picture() }; }
 };
 
 QImage frame_of(QWidget& slide)
@@ -783,7 +786,7 @@ struct SlideRun {
 SlideRun run_slide(SlideWindow& window, int direction)
 {
     SlideRun run;
-    QPointer<SpaceSlide> slide = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), direction);
+    QPointer<SpaceSlide> slide = SpaceSlide::start(window.window, window.window.rect(), window.old_pictures(), {}, {}, direction);
     QObject::connect(slide, &SpaceSlide::finished, [&run] { ++run.finished_signals; });
     qreal last = 0;
     QElapsedTimer timer;
@@ -809,7 +812,7 @@ SlideRun run_slide(SlideWindow& window, int direction)
 TEST_CASE(space_slide_shows_only_the_old_space_until_the_new_one_is_pictured)
 {
     SlideWindow window;
-    auto* slide = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), 1);
+    auto* slide = SpaceSlide::start(window.window, window.window.rect(), window.old_pictures(), {}, {}, 1);
     // Before its picture of the new space is taken, the old one covers it all: no half-built new space shows.
     EXPECT(frame_is_two_pictures_side_by_side(frame_of(*slide), 0, 1));
     EXPECT(slide->progress() == 0);
@@ -853,10 +856,10 @@ TEST_CASE(space_slide_takes_about_its_duration)
 TEST_CASE(starting_a_space_slide_ends_the_running_one)
 {
     SlideWindow window;
-    QPointer<SpaceSlide> first = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), 1);
+    QPointer<SpaceSlide> first = SpaceSlide::start(window.window, window.window.rect(), window.old_pictures(), {}, {}, 1);
     int first_finished = 0;
     QObject::connect(first, &SpaceSlide::finished, [&] { ++first_finished; });
-    auto* second = SpaceSlide::start(window.window, window.window.rect(), window.old_picture(), -1);
+    auto* second = SpaceSlide::start(window.window, window.window.rect(), window.old_pictures(), {}, {}, -1);
     EXPECT_EQ(first_finished, 1);
     EXPECT(!first || !first->is_running());
     EXPECT_EQ(SpaceSlide::running_in(window.window), second);

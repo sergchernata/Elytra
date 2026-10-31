@@ -41,6 +41,9 @@
   "-webkit-appearance": {
     "legacy-alias-for": "appearance"
   },
+  "-webkit-backface-visibility": {
+    "legacy-alias-for": "backface-visibility"
+  },
   "-webkit-background-clip": {
     "legacy-alias-for": "background-clip"
   },
@@ -529,6 +532,7 @@
     "needs-layout-node-for-resolved-value": true,
     "__comment": "FIXME: List `filter-value-list` as a valid-type once it's generically supported.",
     "multiplicity": "list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "none"
@@ -752,6 +756,8 @@
     ]
   },
   "baseline-source": {
+    "style-group": "BoxValues",
+    "affects-layout": true,
     "animation-type": "discrete",
     "inherited": false,
     "initial": "auto",
@@ -1887,6 +1893,7 @@
     "inherited": false,
     "initial": "none",
     "multiplicity": "list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "never",
     "valid-types": [
       "custom-ident ![none,and,not,or]"
@@ -2321,6 +2328,7 @@
     "needs-layout-node-for-resolved-value": true,
     "__comment": "FIXME: List `filter-value-list` as a valid-type once it's generically supported.",
     "multiplicity": "list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "cascaded-value",
     "valid-identifiers": [
       "none"
@@ -2587,6 +2595,18 @@
     "requires-computation": "cascaded-value",
     "valid-types": [
       "font-style"
+    ]
+  },
+  "font-synthesis": {
+    "initial": "weight style small-caps position",
+    "longhands": [
+      "font-synthesis-position",
+      "font-synthesis-small-caps",
+      "font-synthesis-style",
+      "font-synthesis-weight"
+    ],
+    "valid-types": [
+      "string"
     ]
   },
   "font-synthesis-position": {
@@ -4563,6 +4583,7 @@
     "inherited": true,
     "initial": "auto",
     "multiplicity": "list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "never",
     "valid-types": [
       "string"
@@ -5643,6 +5664,7 @@
     "inherited": false,
     "initial": "all",
     "multiplicity": "coordinating-list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "never",
     "valid-types": [
       "custom-ident ![none]"
@@ -5895,6 +5917,7 @@
     "inherited": false,
     "initial": "auto",
     "multiplicity": "list",
+    "typed-om-multiplicity": "single",
     "requires-computation": "never",
     "valid-types": [
       "custom-ident ![all,auto,contents,none,scroll-position,will-change]"

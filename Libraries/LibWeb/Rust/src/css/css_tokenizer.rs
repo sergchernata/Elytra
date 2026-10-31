@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+use ak::Utf16FlyString;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::ffi::c_void;
 use std::ops::Range;
 #[cfg(test)]
 use std::ptr;
 use std::sync::Arc;
+
+use crate::css::serialize::trim_ascii_whitespace_start;
 
 const REPLACEMENT_CHARACTER: u32 = 0xFFFD;
 const TOKENIZER_EOF: u32 = u32::MAX;
@@ -272,9 +276,10 @@ fn filter_code_points(input: TokenizerInput<'_>) -> FilteredTokenizerInput<'_> {
         last_was_carriage_return = false;
     }
 
-    // NB: The former C++ RustTokenizer::normalize_input() did not flush a
-    // trailing carriage return. Keep that observable behavior while moving
-    // filtering across the FFI boundary.
+    if last_was_carriage_return {
+        output.push(u16::from(b'\n'));
+    }
+
     FilteredTokenizerInput::Owned(output)
 }
 
@@ -322,15 +327,41 @@ impl<'a> From<&'a Vec<u16>> for TokenizerInput<'a> {
 pub(crate) enum ParserString {
     Inline(SmallVec<[u16; 16]>),
     Owned(Box<[u16]>),
-    Shared { storage: Arc<[u16]>, range: Range<usize> },
+    Shared {
+        storage: Arc<[u16]>,
+        range: Range<usize>,
+    },
+    Interned {
+        storage: Arc<[u16]>,
+        range: Range<usize>,
+        value: Utf16FlyString,
+    },
     Pending(Range<usize>),
 }
 
 impl ParserString {
+    fn intern(&mut self) {
+        let value = Utf16FlyString::from_utf16(self);
+        let original = std::mem::replace(self, Self::Inline(SmallVec::new()));
+        let (storage, range) = match original {
+            Self::Shared { storage, range } => (storage, range),
+            string => (string.as_ref().into(), 0..string.len()),
+        };
+        *self = Self::Interned { storage, range, value };
+    }
+
+    pub(crate) fn fly_string(&self) -> Cow<'_, Utf16FlyString> {
+        match self {
+            Self::Interned { value, .. } => Cow::Borrowed(value),
+            _ => Cow::Owned(Utf16FlyString::from_utf16(self)),
+        }
+    }
+
     /// Moves the string out of the storage it shares with the other strings of its tokens (see `TextDetacher`).
     pub(crate) fn detach(&mut self, detacher: &mut TextDetacher) {
-        if let Self::Shared { storage, range } = self {
-            detacher.string(storage, range);
+        match self {
+            Self::Shared { storage, range } | Self::Interned { storage, range, .. } => detacher.string(storage, range),
+            _ => {}
         }
     }
 
@@ -350,7 +381,7 @@ impl AsRef<[u16]> for ParserString {
         match self {
             Self::Inline(value) => value,
             Self::Owned(value) => value,
-            Self::Shared { storage, range } => &storage[range.clone()],
+            Self::Shared { storage, range } | Self::Interned { storage, range, .. } => &storage[range.clone()],
             Self::Pending(_) => unreachable!(),
         }
     }
@@ -366,7 +397,10 @@ impl std::ops::Deref for ParserString {
 
 impl PartialEq for ParserString {
     fn eq(&self, other: &Self) -> bool {
-        self.as_ref() == other.as_ref()
+        match (self, other) {
+            (Self::Interned { value: a, .. }, Self::Interned { value: b, .. }) => a == b,
+            _ => self.as_ref() == other.as_ref(),
+        }
     }
 }
 
@@ -430,6 +464,9 @@ impl ParserTokenKind {
         if let Some(string) = self.string_mut() {
             string.finish_shared(storage, offset);
         }
+        if let Self::Ident(name) = self {
+            name.intern();
+        }
     }
 
     fn string_mut(&mut self) -> Option<&mut ParserString> {
@@ -484,11 +521,16 @@ impl SourceStorage {
             Self::Utf16(units) => TokenizerInput::Utf16(units),
         }
     }
+
+    fn len(&self) -> usize {
+        self.as_input().len()
+    }
 }
 
 /// Moves the text that values outliving their parse keep out of the storage they share with the rest of the sheet, so
 /// that keeping them does not keep the whole sheet's text alive. The values are walked twice: once to find the span of
-/// each storage they keep, and once to point them into one copy of that span.
+/// each storage they keep, and once to point them into one copy of that span (or the storage itself, when they keep all
+/// of it).
 #[derive(Default)]
 pub(crate) struct TextDetacher {
     sources: DetachedSpans<SourceStorage>,
@@ -504,13 +546,21 @@ impl TextDetacher {
         let mut detacher = Self::default();
         walk(&mut detacher);
         for (storage, span, copy) in &mut detacher.sources {
-            *copy = Some(Arc::new(match storage.as_ref() {
-                SourceStorage::Ascii(units) => SourceStorage::Ascii(units[span.clone()].into()),
-                SourceStorage::Utf16(units) => SourceStorage::Utf16(units[span.clone()].into()),
-            }));
+            *copy = Some(if *span == (0..storage.len()) {
+                Arc::clone(storage)
+            } else {
+                Arc::new(match storage.as_ref() {
+                    SourceStorage::Ascii(units) => SourceStorage::Ascii(units[span.clone()].into()),
+                    SourceStorage::Utf16(units) => SourceStorage::Utf16(units[span.clone()].into()),
+                })
+            });
         }
         for (storage, span, copy) in &mut detacher.strings {
-            *copy = Some(storage[span.clone()].into());
+            *copy = Some(if *span == (0..storage.len()) {
+                Arc::clone(storage)
+            } else {
+                storage[span.clone()].into()
+            });
         }
         walk(&mut detacher);
     }
@@ -664,7 +714,11 @@ fn tokenize_for_parser_without_source_internal<'a>(input: impl Into<TokenizerInp
         }
         let string = |value: &TokenString| ParserString::Inline(value.clone());
         let kind = match &token.token_type {
-            TokenType::Ident { value } => ParserTokenKind::Ident(string(value)),
+            TokenType::Ident { value } => {
+                let mut name = string(value);
+                name.intern();
+                ParserTokenKind::Ident(name)
+            }
             TokenType::Function { name } => ParserTokenKind::Function(string(name)),
             TokenType::AtKeyword { name } => ParserTokenKind::AtKeyword(string(name)),
             TokenType::Hash { hash_type, value } => ParserTokenKind::Hash {
@@ -908,6 +962,63 @@ where
 {
     let filtered_input = filter_code_points(input);
     Tokenizer::new(filtered_input.as_input()).tokenize(callback);
+}
+
+pub(crate) fn trim_component_value_boundary_whitespace(source: &[u16]) -> &[u16] {
+    let source = trim_ascii_whitespace_start(source);
+    let is_ascii_whitespace = |unit: &u16| matches!(*unit, 0x09 | 0x0a | 0x0c | 0x0d | 0x20);
+    if !source.last().is_some_and(is_ascii_whitespace) {
+        return source;
+    }
+
+    let mut source_end = source.len();
+    let code_points = filter_code_points(source.into());
+    let input = code_points.as_input();
+    let mut tokenizer = Tokenizer::new(input);
+    let mut expected_closings = SmallVec::<[CssTokenType; 8]>::new();
+    let mut trailing_whitespace_length = 0;
+    let mut follows_backslash = false;
+
+    loop {
+        let token = tokenizer.next_token();
+        let token_type = token.as_syntax_ffi().token_type;
+        match token_type {
+            CssTokenType::EndOfFile => break,
+            CssTokenType::Function | CssTokenType::OpenParen => expected_closings.push(CssTokenType::CloseParen),
+            CssTokenType::OpenSquare => expected_closings.push(CssTokenType::CloseSquare),
+            CssTokenType::OpenCurly => expected_closings.push(CssTokenType::CloseCurly),
+            token_type if expected_closings.last() == Some(&token_type) => {
+                expected_closings.pop();
+            }
+            _ => {}
+        }
+        // Comments are emitted as whitespace tokens whose source starts with '/'.
+        if token_type == CssTokenType::Whitespace
+            && is_whitespace(u32::from(input.code_unit_at(token.original_source_range.start)))
+        {
+            trailing_whitespace_length += token.original_source_range.len();
+        } else {
+            trailing_whitespace_length = 0;
+            follows_backslash = matches!(token.token_type, TokenType::Delim { value } if value == u32::from(b'\\'));
+        }
+    }
+
+    // Whitespace inside an unclosed function or block belongs to that component value.
+    if !expected_closings.is_empty() {
+        return &source[..source_end];
+    }
+
+    // Token source lengths count CRLF as a single code point after input preprocessing.
+    for _ in 0..trailing_whitespace_length {
+        let is_crlf = source[..source_end].ends_with(&[0x0d, 0x0a]);
+        source_end -= if is_crlf { 2 } else { 1 };
+    }
+
+    if follows_backslash {
+        // Preserve the newline required to serialize a U+005C delimiter.
+        source_end += 1;
+    }
+    &source[..source_end]
 }
 
 struct Tokenizer<'a> {
@@ -2334,13 +2445,13 @@ mod tests {
     }
 
     #[test]
-    fn filtering_preserves_trailing_carriage_return_oracle_behavior() {
+    fn filtering_converts_a_trailing_carriage_return_to_a_newline() {
         let FilteredTokenizerInput::Owned(filtered) =
             filter_code_points(TokenizerInput::Utf16(&[b'a' as u16, b'\r' as u16]))
         else {
             panic!("a carriage return should require filtering");
         };
-        assert_eq!(filtered, vec![b'a' as u16]);
+        assert_eq!(filtered, vec![b'a' as u16, b'\n' as u16]);
     }
 
     #[test]

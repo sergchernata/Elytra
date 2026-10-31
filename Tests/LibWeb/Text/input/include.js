@@ -60,6 +60,16 @@ async function waitForCondition(condition, attempts = 600, interval = 25) {
     return true;
 }
 
+// Each round runs in a task of its own, so that pending tasks can drop their references and the objects that WeakRefs
+// kept alive for an earlier job are released.
+async function collectGarbageUntilCleared(weakRefs, rounds = 100) {
+    for (let round = 0; round < rounds; ++round) {
+        await timeout(0);
+        await internals.gcAsync();
+        if (weakRefs.every(weakRef => weakRef.deref() === undefined)) return;
+    }
+}
+
 async function setSystemVisibilityState(state) {
     // Tests assume that the document reflects the UI process's system visibility state and that
     // no previous visibility state change is still pending.
@@ -257,6 +267,16 @@ class HTTPTestServer {
     recordedRequestHeadersURL(echoURL) {
         return `${this.baseURL}/recorded-request-headers${new URL(echoURL).pathname}`;
     }
+    // Resolves once the echo server has seen a request for echoURL, query included.
+    async waitForRequest(echoURL) {
+        const url = new URL(echoURL);
+        const recordedURL = `${this.baseURL}/recorded-request-headers${url.pathname}${url.search}`;
+        for (;;) {
+            const response = await fetch(recordedURL).catch(() => null);
+            if (response?.ok) return;
+            await timeout(10);
+        }
+    }
     getStaticURL(path) {
         return `${this.baseURL}/static/${path}`;
     }
@@ -298,7 +318,7 @@ function uniqueLocalhostHostname(prefix) {
     return `${prefix}-${uniqueID()}.localhost`;
 }
 
-// Per-call unique loopback host whose origin is not potentially trustworthy.
+// Per-call unique loopback host whose http: origin is not potentially trustworthy.
 function uniqueTestHostname(prefix) {
     return `${prefix}-${uniqueID()}.test`;
 }

@@ -7,6 +7,7 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibWeb/Bindings/Permissions.h>
+#include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/DOM/Document.h>
@@ -23,12 +24,42 @@
 
 namespace Web::PermissionsAPI {
 
+static Optional<Web::Permissions::PermissionName> permission_name_from(Utf16View name)
+{
+    if (name == "geolocation"_utf16)
+        return Web::Permissions::PermissionName::Geolocation;
+    if (name == "microphone"_utf16)
+        return Web::Permissions::PermissionName::Microphone;
+    return {};
+}
+
 bool is_permission_supported(Utf16View name)
 {
-    if (name == "geolocation"_utf16) {
-        return true;
+    return permission_name_from(name).has_value();
+}
+
+static Optional<PermissionsPolicy::PolicyControlledFeature> policy_controlled_feature_for(Web::Permissions::PermissionName name)
+{
+    switch (name) {
+    case Web::Permissions::PermissionName::Geolocation:
+        return PermissionsPolicy::PolicyControlledFeature::Geolocation;
+    case Web::Permissions::PermissionName::Microphone:
+        return PermissionsPolicy::PolicyControlledFeature::Microphone;
     }
-    return false;
+    VERIFY_NOT_REACHED();
+}
+
+static PermissionState permission_state_from(Web::Permissions::EffectiveState state)
+{
+    switch (state) {
+    case Web::Permissions::EffectiveState::Granted:
+        return PermissionState::Granted;
+    case Web::Permissions::EffectiveState::Denied:
+        return PermissionState::Denied;
+    case Web::Permissions::EffectiveState::Prompt:
+        return PermissionState::Prompt;
+    }
+    VERIFY_NOT_REACHED();
 }
 
 // Steps 6 and 7 of https://w3c.github.io/permissions/#dfn-request-permission-to-use
@@ -49,36 +80,6 @@ static void store_permission_decision(PermissionDescriptor const& descriptor, HT
 }
 
 // https://w3c.github.io/permissions/#dfn-request-permission-to-use
-PermissionState request_permission(PermissionDescriptor const& descriptor)
-{
-    // 1. Let current state be the descriptor's permission state.
-    auto current_state = permission_state(descriptor);
-
-    // 2. If current state is not "prompt", return current state and abort these steps.
-    if (current_state != PermissionState::Prompt)
-        return current_state;
-
-    // FIXME: 3. Ask the user for express permission for the calling algorithm to use the powerful feature described by descriptor.
-
-    // 4. If the user gives express permission to use the powerful feature, set current state to "granted"; otherwise to "denied".
-    // The user's interaction may provide new information about the user's intent for the origin.
-    if (descriptor.name == "geolocation"_utf16 || HTML::Window::in_test_mode()) {
-        current_state = PermissionState::Granted;
-    } else {
-        current_state = PermissionState::Denied;
-    }
-
-    // 5. Let settings be the current settings object.
-    // 6. Let key be the result of generating a permission key for descriptor with settings's top-level origin and settings's origin.
-    // 7. Queue a task on the current settings object's responsible event loop to set a permission store entry with descriptor, key, and current state.
-    // NB: store_permission_decision() carries out steps 6 and 7 for both request algorithms.
-    store_permission_decision(descriptor, HTML::current_settings_object(), current_state);
-
-    // 8. Return current state.
-    return current_state;
-}
-
-// https://w3c.github.io/permissions/#dfn-request-permission-to-use
 void request_permission_with_user_prompt(PermissionDescriptor const& descriptor, HTML::EnvironmentSettingsObject& settings, PermissionDecisionCallback on_decided)
 {
     // 1. Let current state be the descriptor's permission state.
@@ -90,35 +91,36 @@ void request_permission_with_user_prompt(PermissionDescriptor const& descriptor,
         return;
     }
 
-    auto settle = GC::create_function(GC::Heap::the(), [descriptor, settings = GC::Ref(settings), on_decided](bool granted) {
+    // 3. Ask the user for express permission for the calling algorithm to use the powerful feature described by descriptor.
+    // NB: Only windows have a page to ask through; a worker's request is denied.
+    auto* window = HTML::window_from_global_object(settings.global_object());
+    if (!window) {
+        on_decided->function()(PermissionState::Denied);
+        return;
+    }
+
+    auto settle = GC::create_function(GC::Heap::the(), [descriptor, settings = GC::Ref(settings), on_decided](Web::Permissions::EffectiveState answer) {
         // 4. If the user gives express permission to use the powerful feature, set current state to "granted"; otherwise to "denied".
-        auto current_state = granted ? PermissionState::Granted : PermissionState::Denied;
+        //    The user's interaction may provide new information about the user's intent for the origin.
+        // AD-HOC: A prompt the user dismisses or ignores leaves the permission at "prompt", rather than storing "denied";
+        //         only the calling algorithm sees "denied" then, so the site may ask again.
+        auto current_state = answer == Web::Permissions::EffectiveState::Granted ? PermissionState::Granted : PermissionState::Denied;
 
         // 5. Let settings be the current settings object.
         // NB: The user's answer arrives outside any script, so the requester's settings object was captured instead.
         // 6. Let key be the result of generating a permission key for descriptor with settings's top-level origin and settings's origin.
         // 7. Queue a task on the current settings object's responsible event loop to set a permission store entry with descriptor, key, and current state.
-        // NB: store_permission_decision() carries out steps 6 and 7 for both request algorithms.
-        store_permission_decision(descriptor, settings, current_state);
+        // NB: The UI process stores the user's answer, and sends the snapshot that reflects it ahead of the answer itself.
+        //     It can't key an answer for an opaque top-level origin (a file: page's), so that answer is kept here, for
+        //     as long as the origin lives.
+        if (settings->top_level_origin->is_opaque() && answer != Web::Permissions::EffectiveState::Prompt)
+            store_permission_decision(descriptor, settings, current_state);
 
         // 8. Return current state.
         on_decided->function()(current_state);
     });
 
-    // Tests have no user to ask, so they are granted as the synchronous path grants them.
-    if (HTML::Window::in_test_mode()) {
-        settle->function()(true);
-        return;
-    }
-
-    // 3. Ask the user for express permission for the calling algorithm to use the powerful feature described by descriptor.
-    // Only windows have a page to ask through; a worker's request is denied.
-    auto* window = HTML::window_from_global_object(settings.global_object());
-    if (!window) {
-        settle->function()(false);
-        return;
-    }
-    window->page().request_permission(descriptor.name, settle);
+    window->page().request_permission(window->associated_document().id(), descriptor.name, settle);
 }
 
 // https://w3c.github.io/permissions/#dfn-permission-state
@@ -131,12 +133,17 @@ PermissionState permission_state(PermissionDescriptor descriptor, Optional<HTML:
     if (!HTML::is_secure_context(settings_object))
         return PermissionState::Denied;
 
-    // FIXME: 3. Let feature be descriptor's name.
+    // 3. Let feature be descriptor's name.
+    auto feature = permission_name_from(descriptor.name);
 
-    // FIXME: 4. If there exists a policy-controlled feature for feature and settings' relevant global object has an associated Document run the following step:
-    if (false) {
+    // 4. If there exists a policy-controlled feature for feature and settings' relevant global object has an associated Document run the following step:
+    if (auto* window = HTML::window_from_global_object(settings_object.global_object()); feature.has_value() && window) {
         // 1. Let document be settings' relevant global object's associated Document.
+        auto& document = window->associated_document();
+
         // 2. If document is not allowed to use feature, return "denied".
+        if (!document.is_allowed_to_use_feature(*policy_controlled_feature_for(*feature)))
+            return PermissionState::Denied;
     }
 
     // 5. Let key be the result of generating a permission key for descriptor with settings's top-level origin and settings's origin.
@@ -151,7 +158,10 @@ PermissionState permission_state(PermissionDescriptor descriptor, Optional<HTML:
         return entry.release_value().state;
 
     // 8. Return the PermissionState enum value that represents the permission state of feature, taking into account any permission state constraints for descriptor's name.
-    return PermissionState::Prompt;
+    if (!feature.has_value())
+        return PermissionState::Prompt;
+    auto& page = Bindings::principal_host_defined_page(settings_object.realm());
+    return permission_state_from(PermissionStore::the().state_for(*feature, key, page));
 }
 
 GC_DEFINE_ALLOCATOR(Permissions);
@@ -214,7 +224,8 @@ void Permissions::query(GC::Ref<JS::Object> permission_desc, GC::Ref<WebIDL::Pro
 
         // 3. Run query's name's permission query algorithm, passing query and status.
         // FIXME: For now, only the base PermissionDescriptor is supported so there is only one permission query algorithm.
-        permission_query_algorithm(query, status);
+        // NB: The status was registered for changes when it was created, so a change from here on reaches it.
+        permission_query_algorithm(query, status, HTML::relevant_settings_object(relevant_global_object));
 
         // 4. Queue a global task on the permissions task source with this's relevant global object to resolve promise with status.
         HTML::queue_global_task(HTML::Task::Source::Permissions, relevant_global_object, GC::create_function(GC::Heap::the(), [relevant_global_object = GC::Ref(relevant_global_object), promise, status]() mutable {
@@ -226,10 +237,10 @@ void Permissions::query(GC::Ref<JS::Object> permission_desc, GC::Ref<WebIDL::Pro
 }
 
 // https://w3c.github.io/permissions/#dfn-permission-query-algorithm
-void permission_query_algorithm(PermissionDescriptor const& permission_desc, PermissionStatus& status)
+void permission_query_algorithm(PermissionDescriptor const& permission_desc, PermissionStatus& status, HTML::EnvironmentSettingsObject& settings)
 {
     // 1. Set status's state to permissionDesc's permission state.
-    status.set_state(permission_state(permission_desc));
+    status.set_state(permission_state(permission_desc, settings));
 }
 
 }

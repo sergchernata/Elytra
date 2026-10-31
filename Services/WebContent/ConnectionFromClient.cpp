@@ -91,6 +91,7 @@
 #include <LibWeb/Painting/DocumentPaintState.h>
 #include <LibWeb/Painting/FlexboxInspectorOverlay.h>
 #include <LibWeb/Painting/PaintingRustBridge.h>
+#include <LibWeb/PermissionsAPI/PermissionStore.h>
 #include <LibWeb/PictureInPicture/PictureInPictureController.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/FontPlugin.h>
@@ -307,6 +308,12 @@ void ConnectionFromClient::deliver_posted_message(Web::PageId page_id, Web::HTML
 {
     if (auto page = this->page(page_id); page.has_value())
         page->deliver_posted_message(navigable_id, move(message));
+}
+
+void ConnectionFromClient::report_violation_of_environment(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, u64 policy_index, Web::ContentSecurityPolicy::RemoteViolationDirective directive, URL::URL resource)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->report_violation_of_environment(environment_id, policy_index, directive, move(resource));
 }
 
 void ConnectionFromClient::close_traversable_from_script(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id)
@@ -556,6 +563,11 @@ void ConnectionFromClient::set_site_compatibility_data(JsonValue data)
         return;
     }
     Web::set_site_compatibility_data(parsed_data.release_value());
+}
+
+void ConnectionFromClient::set_permission_snapshot(Web::Permissions::PermissionSnapshot snapshot)
+{
+    Web::PermissionsAPI::PermissionStore::the().apply_snapshot(move(snapshot));
 }
 
 void ConnectionFromClient::update_screen_rects(Web::PageId page_id, Vector<Web::DevicePixelRect> rects, Vector<Web::DevicePixelRect> available_rects, u32 main_screen)
@@ -967,6 +979,16 @@ void ConnectionFromClient::drag_event(Web::PageId page_id, Web::DragEvent event)
 
 void ConnectionFromClient::pinch_event(Web::PageId page_id, Web::PinchEvent event)
 {
+    enqueue_pinch_event(page_id, {}, move(event));
+}
+
+void ConnectionFromClient::pinch_event_in_hosted_root(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::PinchEvent event)
+{
+    enqueue_pinch_event(page_id, navigable_id, move(event));
+}
+
+void ConnectionFromClient::enqueue_pinch_event(Web::PageId page_id, Optional<Web::HTML::CrossProcessId> navigable_id, Web::PinchEvent event)
+{
     auto page = m_page_host->page(page_id);
     if (!page.has_value()) {
         async_did_finish_handling_input_event(page_id, event.id, Web::EventResult::Dropped);
@@ -977,12 +999,15 @@ void ConnectionFromClient::pinch_event(Web::PageId page_id, Web::PinchEvent even
     //               deltas are multiplicative, so preserve the combined scale change.
     //               Only coalesce events with the same focal point, as applying
     //               one combined zoom around a different point is not equivalent
-    //               to applying each zoom in sequence.
-    if (!m_input_event_queue.is_empty() && m_input_event_queue.tail().page_id == page_id) {
+    //               to applying each zoom in sequence. A frame another process hosts
+    //               hands each pinch it lets through back for its own zoom, so the
+    //               events to such a frame stay apart.
+    if (!navigable_id.has_value() && !m_input_event_queue.is_empty() && m_input_event_queue.tail().page_id == page_id && !m_input_event_queue.tail().navigable_id.has_value()) {
         if (auto const* pinch_event = m_input_event_queue.tail().event.get_pointer<Web::PinchEvent>()) {
             if (pinch_event->position != event.position || pinch_event->modifiers != event.modifiers
-                || pinch_event->async_zoom_performed_default_action != event.async_zoom_performed_default_action)
-                return enqueue_input_event({ page_id, move(event), {}, {} });
+                || pinch_event->async_zoom_performed_default_action != event.async_zoom_performed_default_action
+                || pinch_event->wheel_event_was_dispatched != event.wheel_event_was_dispatched)
+                return enqueue_input_event({ page_id, move(event), {}, navigable_id });
 
             event.scale_delta = (1.0 + pinch_event->scale_delta) * (1.0 + event.scale_delta) - 1.0;
             auto coalesced_event_id = pinch_event->id;
@@ -994,7 +1019,7 @@ void ConnectionFromClient::pinch_event(Web::PageId page_id, Web::PinchEvent even
         }
     }
 
-    enqueue_input_event({ page_id, move(event), {}, {} });
+    enqueue_input_event({ page_id, move(event), {}, navigable_id });
 }
 
 static bool is_discrete_input_event(Web::InputEvent const& event)
@@ -1542,7 +1567,12 @@ static void append_grid_layouts_for_node_and_frame_descendants(Web::DOM::Node& r
         if (!content_navigable)
             return Web::TraversalDecision::Continue;
 
-        auto content_document = as<Web::HTML::LocalNavigable>(*content_navigable).active_document();
+        // A cross-site frame's document lives in another process, so its grids can't be inspected from here.
+        auto* local_content_navigable = as_if<Web::HTML::LocalNavigable>(*content_navigable);
+        if (!local_content_navigable)
+            return Web::TraversalDecision::Continue;
+
+        auto content_document = local_content_navigable->active_document();
         if (!content_document)
             return Web::TraversalDecision::Continue;
 
@@ -2236,19 +2266,21 @@ void ConnectionFromClient::evaluate_javascript_in_debugger_frame(Web::PageId pag
     async_did_evaluate_javascript_in_debugger_frame(page_id, request_id, {}, result.release_value());
 }
 
-void ConnectionFromClient::get_debugger_object_properties(Web::PageId page_id, u64 request_id, u64 object_id)
+void ConnectionFromClient::get_debugger_object_properties(Web::PageId page_id, u64 request_id, u64 object_id, WebView::DebuggerObjectScope scope)
 {
     auto page = this->page(page_id);
     if (!page.has_value()) {
         async_did_get_debugger_object_properties(page_id, request_id, "Unable to locate page"_string, {});
         return;
     }
-    if (!m_devtools_debugger) {
+    if (scope == WebView::DebuggerObjectScope::Pause && !m_devtools_debugger) {
         async_did_get_debugger_object_properties(page_id, request_id, "No debugger client is attached"_string, {});
         return;
     }
 
-    auto properties = m_devtools_debugger->properties_for_object(*page, object_id);
+    auto properties = scope == WebView::DebuggerObjectScope::Console
+        ? page->console_object_properties(object_id)
+        : m_devtools_debugger->properties_for_object(*page, object_id);
     if (properties.is_error()) {
         async_did_get_debugger_object_properties(page_id, request_id, MUST(String::from_utf8(properties.release_error().string_literal())), {});
         return;
@@ -3234,6 +3266,12 @@ void ConnectionFromClient::consume_user_activation(Web::PageId page_id, Web::HTM
         Web::HTML::Window::consume_user_activation_of_windows_hosted_by(page->page(), consumption);
 }
 
+void ConnectionFromClient::notify_about_user_activation(Web::PageId page_id, Web::HTML::CrossProcessId document_id)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->page().notify_document_about_user_activation(document_id);
+}
+
 void ConnectionFromClient::set_enable_global_privacy_control(Web::PageId, bool enable)
 {
     Web::update_loader_config([&](auto& config) { config.enable_global_privacy_control = enable; });
@@ -3251,10 +3289,10 @@ void ConnectionFromClient::geolocation_position_response(Web::PageId page_id, u6
         page->geolocation_position_response(request_id, position, error_code);
 }
 
-void ConnectionFromClient::permission_request_completed(Web::PageId page_id, u64 request_id, bool granted)
+void ConnectionFromClient::permission_request_completed(Web::PageId page_id, u64 request_id, Web::Permissions::EffectiveState state)
 {
     if (auto page = this->page(page_id); page.has_value())
-        page->permission_request_completed(request_id, granted);
+        page->permission_request_completed(request_id, state);
 }
 
 void ConnectionFromClient::set_has_focus(Web::PageId page_id, bool has_focus)
@@ -3388,6 +3426,18 @@ void ConnectionFromClient::js_console_input(Web::PageId page_id, String js_sourc
         return;
 
     page->js_console_input(js_source);
+}
+
+void ConnectionFromClient::complete_js_console_input(Web::PageId page_id, u64 request_id, String input)
+{
+    auto page = this->page(page_id);
+    auto completion = page.has_value() ? page->complete_js_console_input(input) : OptionalNone {};
+    if (!completion.has_value()) {
+        async_did_complete_js_console_input(page_id, request_id, OptionalNone {}, String {});
+        return;
+    }
+
+    async_did_complete_js_console_input(page_id, request_id, move(completion->matches), move(completion->match_prop));
 }
 
 void ConnectionFromClient::run_javascript(Web::PageId page_id, String js_source)
@@ -3559,12 +3609,6 @@ void ConnectionFromClient::toggle_media_controls_state(Web::PageId page_id)
         page->page().toggle_media_controls_state();
 }
 
-void ConnectionFromClient::set_page_mute_state(Web::PageId page_id, Web::HTML::MuteState mute_state)
-{
-    if (auto page = this->page(page_id); page.has_value())
-        page->page().set_page_mute_state(mute_state);
-}
-
 void ConnectionFromClient::system_time_zone_changed()
 {
     JS::clear_system_time_zone_cache();
@@ -3622,14 +3666,6 @@ void ConnectionFromClient::dispatch_changed_gamepad_states()
             page.page().handle_gamepad_updated(state);
         });
     }
-}
-
-void ConnectionFromClient::notify_started_using_gamepads()
-{
-    if (m_did_notify_started_using_gamepads)
-        return;
-    m_did_notify_started_using_gamepads = true;
-    async_did_start_using_gamepads();
 }
 
 void ConnectionFromClient::pump_and_dispatch_gamepad_events()

@@ -4,6 +4,7 @@ set(SOURCES
     Audio/WSOLAInternals.cpp
     Audio/WSOLATimeStretcher.cpp
     AudioDiscardIntervals.cpp
+    Codecs/AudioPacketDurationParser.cpp
     Codecs/FLAC.cpp
     Codecs/Opus.cpp
     Codecs/Vorbis.cpp
@@ -66,7 +67,6 @@ set(SOURCES
     Sinks/RemoteVideoSink.cpp
     TimeRanges.cpp
     Track.cpp
-    VideoEdgeQueue.cpp
     VideoPresentation/VideoPresentationClientConnection.cpp
     VideoPresentation/VideoPresentationServerConnection.cpp
 )

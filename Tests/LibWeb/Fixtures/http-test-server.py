@@ -40,6 +40,9 @@ Endpoints:
       server first sends a binary frame of that many bytes: a 1, zeros, and then a 2.
     - GET /reflect-websocket-cookie with an "Upgrade: websocket" header: As above, but first sends the
       handshake's Cookie header (or an empty string) as a text frame.
+    - GET /downloads/<name>: Reports the browser's download of <name> into the --downloads-directory: 404 while
+      there is none, 202 while it is in progress, and the downloaded file once it has finished. A <name> longer
+      than 188 bytes in UTF-8 gets a 400.
 """
 
 
@@ -86,6 +89,22 @@ unblock_events: Dict[str, threading.Event] = {}
 
 # Per RFC 6455: appended to Sec-WebSocket-Key before hashing to compute the Sec-WebSocket-Accept value.
 WEBSOCKET_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# The browser saves a download as <name>.<id>.<uuid>.download until it finishes. That suffix takes at most 67 of the
+# 255 bytes a filename may have, so a name of up to 188 bytes is never cut short.
+MAXIMUM_REPORTED_DOWNLOAD_NAME_LENGTH = 188
+
+
+def name_of_download_in_progress(filename: str) -> Optional[str]:
+    if not filename.endswith(".download"):
+        return None
+    parts = filename[: -len(".download")].rsplit(".", 2)
+    if len(parts) != 3:
+        return None
+    name, download_id, uuid = parts
+    if not (download_id.isascii() and download_id.isdigit()) or len(uuid) != 36:
+        return None
+    return name
 
 
 class WPTContext:
@@ -177,10 +196,10 @@ class WPTContext:
             return config
 
     def apply_config_for_request(self, request):
-        # test-web serves each test it loads over HTTP from a unique test-web-*.localhost host, so substitutions like
-        # {{host}} and {{domains[www1]}} name that host and its subdomains, as they name the test's host in WPT.
+        # test-web uses unique test-web-*.localhost hosts, or test-web-*.test for insecure-origin tests.
+        # Substitutions like {{host}} and {{domains[www1]}} must name that test host and its subdomains.
         hostname = request.url_parts.hostname or ""
-        match = re.search(r"(?:^|\.)(test-web-[0-9a-fA-F-]+\.localhost)$", hostname)
+        match = re.search(r"(?:^|\.)(test-web-[0-9a-fA-F-]+\.(?:localhost|test))$", hostname)
         if not match:
             return
 
@@ -229,6 +248,7 @@ class TestHTTPSServerIPv6(TestHTTPSServer):
 class TestHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     static_directory: str
     wpt_directory: str
+    downloads_directory: Optional[str] = None
     aia_artifacts: dict
     aia_config: Optional[dict]
 
@@ -368,6 +388,8 @@ class TestHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_echo()
         elif request_path.startswith("/recorded-request-headers/"):
             self._serve_recorded_request_headers()
+        elif request_path.startswith("/downloads/"):
+            self._serve_download()
         elif request_path.endswith(".py"):
             self._serve_wpt_python_script()
         elif request_path.startswith("/aia/"):
@@ -511,6 +533,29 @@ class TestHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(headers).encode("utf-8"))
+
+    def _serve_download(self):
+        name = urllib.parse.unquote(self.path.partition("?")[0][len("/downloads/") :])
+        directory = TestHTTPRequestHandler.downloads_directory
+        body = b""
+        status = 404
+        if len(name.encode("utf-8")) > MAXIMUM_REPORTED_DOWNLOAD_NAME_LENGTH:
+            status = 400
+        elif directory is not None and name not in ("", ".", "..") and os.path.basename(name) == name:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as file:
+                    body = file.read()
+                status = 200
+            elif any(name_of_download_in_progress(entry) == name for entry in os.listdir(directory)):
+                status = 202
+
+        self.send_response(status)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def handle_echo(self):
         method = self.command.upper()
@@ -951,8 +996,9 @@ def _setup_tls_test_servers(http_port, ca_cert_output):
     with open(ca_cert_output, "wb") as ca_file:
         ca_file.write(root.public_bytes(Encoding.PEM))
 
-    # WPT tests reach HTTPS origins on localhost and 127.0.0.1, so the WPT HTTPS server presents a leaf for both, issued
-    # by the root itself.
+    # WPT tests reach HTTPS origins on localhost and 127.0.0.1, and cross-origin ones on the alternate host and its
+    # subdomains ({{hosts[alt][]}} and {{hosts[alt][www]}}), so the WPT HTTPS server presents a leaf for all of them,
+    # issued by the root itself.
     wpt_leaf_key = new_key()
     wpt_leaf = (
         x509.CertificateBuilder()
@@ -966,6 +1012,9 @@ def _setup_tls_test_servers(http_port, ca_cert_output):
             x509.SubjectAlternativeName(
                 [
                     x509.DNSName("localhost"),
+                    # NB: curl ignores a wildcard with fewer than two dots, so the alternate host is named outright.
+                    x509.DNSName("not-localhost.localhost"),
+                    x509.DNSName("*.not-localhost.localhost"),
                     x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
                     x509.IPAddress(ipaddress.ip_address("::1")),
                 ]
@@ -1018,11 +1067,12 @@ def start_mirror_server(server, server_class, address, ssl_context=None):
     return mirror
 
 
-def start_server(port, static_directory, ca_cert_output=None, exit_when_stdin_closes=False):
+def start_server(port, static_directory, ca_cert_output=None, exit_when_stdin_closes=False, downloads_directory=None):
     TestHTTPRequestHandler.static_directory = os.path.abspath(static_directory)
     TestHTTPRequestHandler.wpt_directory = os.path.join(
         TestHTTPRequestHandler.static_directory, "Text", "input", "wpt-import"
     )
+    TestHTTPRequestHandler.downloads_directory = downloads_directory
     httpd = TestHTTPServer(("127.0.0.1", port), TestHTTPRequestHandler)
     httpd.daemon_threads = True
     httpd.scheme = "http"
@@ -1123,6 +1173,12 @@ if __name__ == "__main__":
         default=None,
         help="Path to write the AIA test root CA (PEM) to; enables the AIA broken-chain HTTPS servers",
     )
+    parser.add_argument(
+        "--downloads-directory",
+        type=str,
+        default=None,
+        help="Directory the browser saves downloads to, as reported by GET /downloads/<name>",
+    )
     args = parser.parse_args()
 
     start_server(
@@ -1130,4 +1186,5 @@ if __name__ == "__main__":
         static_directory=args.directory,
         ca_cert_output=args.ca_cert_output,
         exit_when_stdin_closes=args.exit_when_stdin_closes,
+        downloads_directory=args.downloads_directory,
     )

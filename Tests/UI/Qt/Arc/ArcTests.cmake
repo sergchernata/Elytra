@@ -1,5 +1,21 @@
-# Tests for the Arc fork's Qt chrome. Included at the end of Tests/UI/Qt/CMakeLists.txt (fork-only hook),
-# after QtTestMain and deploy_qt_offscreen_platform_plugin() are defined.
+# Tests for the Arc fork's Qt chrome. Included at the end of Tests/UI/Qt/CMakeLists.txt (fork-only hook), after
+# QtTestMain is defined.
+
+# The Qt tests run on the offscreen platform plugin. Static Qt needs it imported explicitly, and Windows needs it copied
+# beside the test.
+function(deploy_qt_offscreen_platform_plugin target)
+    qt_import_plugins(${target} INCLUDE Qt6::QOffscreenIntegrationPlugin)
+    if (NOT WIN32)
+        return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/platforms"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::QOffscreenIntegrationPlugin>"
+            "$<TARGET_FILE_DIR:${target}>/platforms/"
+        VERBATIM
+    )
+endfunction()
 
 set(ARC_SOURCE_DIR "${LADYBIRD_SOURCE_DIR}/UI/Qt/Arc")
 
@@ -26,9 +42,12 @@ target_sources(TestArcWidgets PRIVATE
     "${ARC_SOURCE_DIR}/UpdatePill.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
+    # The chrome's styles take their colors from the theme, which follows the system's appearance.
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearance.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Theme.cpp"
 )
 if (APPLE)
-    target_sources(TestArcWidgets PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm")
+    target_sources(TestArcWidgets PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm" "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearanceMac.mm")
     target_link_libraries(TestArcWidgets PRIVATE "-framework AppKit")
 else()
     target_sources(TestArcWidgets PRIVATE "${ARC_SOURCE_DIR}/SymbolIconOther.cpp")
@@ -100,9 +119,12 @@ target_sources(TestArcEdgeCases PRIVATE
     "${ARC_SOURCE_DIR}/SymbolButton.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/ChromeStyle.cpp"
     "${LADYBIRD_SOURCE_DIR}/UI/Qt/StringUtils.cpp"
+    # The chrome's styles take their colors from the theme, which follows the system's appearance.
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearance.cpp"
+    "${LADYBIRD_SOURCE_DIR}/UI/Qt/Theme.cpp"
 )
 if (APPLE)
-    target_sources(TestArcEdgeCases PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm")
+    target_sources(TestArcEdgeCases PRIVATE "${ARC_SOURCE_DIR}/SymbolIcon.mm" "${LADYBIRD_SOURCE_DIR}/UI/Qt/SystemAppearanceMac.mm")
     target_link_libraries(TestArcEdgeCases PRIVATE "-framework AppKit")
 else()
     target_sources(TestArcEdgeCases PRIVATE "${ARC_SOURCE_DIR}/SymbolIconOther.cpp")

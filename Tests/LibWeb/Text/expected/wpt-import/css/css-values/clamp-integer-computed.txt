@@ -1,0 +1,11 @@
+Harness status: OK
+
+Found 6 tests
+
+6 Pass
+Pass	Property z-index value 'clamp(10, 20, 30)'
+Pass	Property z-index value 'clamp(none, 30, 33)'
+Pass	Property z-index value 'clamp(none, 33, 30)'
+Pass	Property z-index value 'clamp(30, 33, none)'
+Pass	Property z-index value 'clamp(33, 30, none)'
+Pass	Property z-index value 'clamp(none, 30, none)'

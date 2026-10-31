@@ -754,24 +754,30 @@ struct UnicodeLayoutSegmenterHandle {
     Vector<char> ascii_storage;
 };
 
+enum class UnicodeLayoutLineBreakMode : u8 {
+    Strict,
+    Normal,
+    Loose,
+    LooseJapanese,
+    LooseChinese,
+};
+
 extern "C" {
 void* unicode_layout_grapheme_segmenter_create(u16 const*, size_t);
-void* unicode_layout_line_segmenter_create(u16 const*, size_t, bool);
+void* unicode_layout_line_segmenter_create(u16 const*, size_t, UnicodeLayoutLineBreakMode);
 void unicode_layout_word_boundaries(u16 const*, size_t, size_t, size_t*, size_t*);
 i64 unicode_layout_segmenter_next_boundary(void*, size_t, bool);
 void unicode_layout_segmenter_destroy(void*);
 }
 
-static Unicode::Segmenter& unicode_layout_segmenter_prototype(Unicode::SegmenterGranularity granularity, bool allow_conditional_japanese_starters = false)
+static Unicode::Segmenter& unicode_layout_segmenter_prototype(Unicode::SegmenterGranularity granularity, UnicodeLayoutLineBreakMode line_break_mode = UnicodeLayoutLineBreakMode::Strict)
 {
     static thread_local Unicode::Segmenter* grapheme_prototype = nullptr;
-    static thread_local Unicode::Segmenter* line_prototype = nullptr;
-    static thread_local Unicode::Segmenter* normal_line_prototype = nullptr;
+    static thread_local Unicode::Segmenter* line_prototypes[5] {};
     static thread_local Unicode::Segmenter* word_prototype = nullptr;
     auto& prototype = granularity == Unicode::SegmenterGranularity::Grapheme ? grapheme_prototype
         : granularity == Unicode::SegmenterGranularity::Word                 ? word_prototype
-        : allow_conditional_japanese_starters                                ? normal_line_prototype
-                                                                             : line_prototype;
+                                                                             : line_prototypes[to_underlying(line_break_mode)];
     if (!prototype) {
         // https://drafts.csswg.org/css-text-3/#line-break-property
         // The following breaks are forbidden for normal and strict line breaking and allowed in loose:
@@ -779,11 +785,27 @@ static Unicode::Segmenter& unicode_layout_segmenter_prototype(Unicode::Segmenter
         //   Unicode line breaking class CJ.
         // INTEROP: Chrome and Firefox allow breaks before CJ characters for normal as well as loose, despite the
         //          current specification forbidding them for normal. ICU's normal tailoring resolves CJ to ID.
-        // FIXME: Use ICU's loose tailoring for loose, which also allows the other loose-only breaks, such as before
-        //        iteration marks and between inseparable characters.
-        prototype = allow_conditional_japanese_starters
-            ? Unicode::Segmenter::create("en-u-lb-normal"_utf16, granularity).leak_ptr()
-            : Unicode::Segmenter::create(granularity).leak_ptr();
+        // The following breaks are allowed for loose if the writing system is Chinese or Japanese and are otherwise forbidden:
+        // - breaks before certain centered punctuation marks:
+        //   U+30FB, U+FF1A, U+FF1B, U+FF65, U+203C, U+2047, U+2048, U+2049, U+FF01, U+FF1F
+        // NB: ICU's Japanese and Chinese loose tailorings implement these language-specific breaks.
+        switch (line_break_mode) {
+        case UnicodeLayoutLineBreakMode::Strict:
+            prototype = Unicode::Segmenter::create(granularity).leak_ptr();
+            break;
+        case UnicodeLayoutLineBreakMode::Normal:
+            prototype = Unicode::Segmenter::create("en-u-lb-normal"_utf16, granularity).leak_ptr();
+            break;
+        case UnicodeLayoutLineBreakMode::Loose:
+            prototype = Unicode::Segmenter::create("en-u-lb-loose"_utf16, granularity).leak_ptr();
+            break;
+        case UnicodeLayoutLineBreakMode::LooseJapanese:
+            prototype = Unicode::Segmenter::create("ja-u-lb-loose"_utf16, granularity).leak_ptr();
+            break;
+        case UnicodeLayoutLineBreakMode::LooseChinese:
+            prototype = Unicode::Segmenter::create("zh-u-lb-loose"_utf16, granularity).leak_ptr();
+            break;
+        }
     }
     return *prototype;
 }
@@ -802,7 +824,7 @@ extern "C" void* unicode_layout_grapheme_segmenter_create(u16 const* text, size_
     return new UnicodeLayoutSegmenterHandle { .segmenter = move(segmenter), .ascii_storage = {} };
 }
 
-extern "C" void* unicode_layout_line_segmenter_create(u16 const* text, size_t length_in_code_units, bool allow_conditional_japanese_starters)
+extern "C" void* unicode_layout_line_segmenter_create(u16 const* text, size_t length_in_code_units, UnicodeLayoutLineBreakMode line_break_mode)
 {
     auto view = Utf16View { reinterpret_cast<char16_t const*>(text), length_in_code_units };
     if (view.is_ascii()) {
@@ -820,7 +842,7 @@ extern "C" void* unicode_layout_line_segmenter_create(u16 const* text, size_t le
             };
         }
     }
-    auto segmenter = unicode_layout_segmenter_prototype(Unicode::SegmenterGranularity::Line, allow_conditional_japanese_starters).clone();
+    auto segmenter = unicode_layout_segmenter_prototype(Unicode::SegmenterGranularity::Line, line_break_mode).clone();
     segmenter->set_segmented_text(view);
     return new UnicodeLayoutSegmenterHandle { .segmenter = move(segmenter), .ascii_storage = {} };
 }

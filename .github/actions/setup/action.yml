@@ -22,6 +22,10 @@ inputs:
     description: 'When the setup is for building, set the build preset (e.g. Release)'
     required: false
     default: 'Release'
+  use_caches:
+    description: 'Whether to restore and save caches of downloaded files'
+    required: false
+    default: 'true'
 outputs:
   ccache_path:
     description: 'Path to the ccache directory'
@@ -57,7 +61,7 @@ runs:
       if: ${{ inputs.os != 'Linux' }}
       with:
         python-version: 3.12
-        cache: 'pip'
+        cache: ${{ inputs.use_caches == 'true' && 'pip' || '' }}
 
     # actions/setup-python can fail to find its tool-cache pip inside job containers.
     - name: 'Set up Python environment'
@@ -78,20 +82,6 @@ runs:
         else
           python3 "${GITHUB_WORKSPACE}/Meta/Linters/run.py"
         fi
-
-    - name: Ensure clang-cl is available
-      if: ${{ inputs.os == 'Windows' && inputs.toolchain == 'ClangCL' }}
-      shell: bash
-      run: |
-        if ! where clang-cl > /dev/null 2>&1 ; then
-          # Keep the LLVM version in sync with GitHub's Windows runner image:
-          # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md
-          choco install -y llvm --no-progress --version=20.1.8
-
-          echo "C:/Program Files/LLVM/bin" >> "${GITHUB_PATH}"
-          export PATH="/c/Program Files/LLVM/bin:${PATH}"
-        fi
-        clang-cl --version
 
     - name: 'Select latest Xcode'
       if: ${{ inputs.os == 'macOS' || inputs.os == 'Android' }}
@@ -119,7 +109,24 @@ runs:
             nasm \
             ninja \
             pkg-config \
+            sccache \
             unzip
+
+    - name: 'Install Dependencies'
+      if: ${{ inputs.os == 'Windows' }}
+      shell: bash
+      run: |
+        choco install -y sccache --no-progress
+
+        if ! where clang-cl > /dev/null 2>&1 ; then
+          # Keep the LLVM version in sync with GitHub's Windows runner image:
+          # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md
+          choco install -y llvm --no-progress --version=20.1.8
+
+          echo "C:/Program Files/LLVM/bin" >> "${GITHUB_PATH}"
+          export PATH="/c/Program Files/LLVM/bin:${PATH}"
+        fi
+        clang-cl --version
 
     - name: 'Install Rust toolchain'
       if: ${{ inputs.os == 'macOS' || inputs.os == 'Android' }}
@@ -129,13 +136,13 @@ runs:
       if: ${{ inputs.os == 'macOS' || inputs.os == 'Android' || inputs.os == 'Windows' }}
       shell: bash
       run: |
-        if rustup toolchain install ; then
+        if rustup toolchain install && cargo --version ; then
           exit 0
         fi
 
-        # Some Blacksmith runner images boot with a partially installed toolchain whose files rustup does not know
-        # about. It cannot repair that on its own and fails with a "detected conflict" error, so wipe the toolchain and
-        # retry.
+        # Some Blacksmith runner images boot with a partially installed toolchain. Either it has files rustup doesn't
+        # know about, which rustup can't repair on its own and fails on with a "detected conflict" error, or it lacks
+        # cargo although rustup reports the toolchain as installed. So wipe the toolchain and retry.
         CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "${{ github.workspace }}/rust-toolchain.toml")
         if [ -z "${CHANNEL}" ]; then
           echo "Could not determine the pinned Rust channel" >&2
@@ -145,6 +152,7 @@ runs:
         echo "Reinstalling Rust toolchain ${CHANNEL} from scratch"
         rustup toolchain uninstall "${CHANNEL}" || rm -rf "$(rustup show home)/toolchains/${CHANNEL}"-*
         rustup toolchain install
+        cargo --version
 
     - name: 'Resolve wasm-tools release'
       id: 'wasm-tools'
@@ -171,7 +179,7 @@ runs:
 
     - name: 'Restore wasm-tools'
       id: 'wasm-tools-cache'
-      if: ${{ inputs.type == 'build' && inputs.os != 'Linux' }}
+      if: ${{ inputs.use_caches == 'true' && inputs.type == 'build' && inputs.os != 'Linux' }}
       uses: actions/cache/restore@v6
       with:
         path: ${{ github.workspace }}/wasm-tools
@@ -207,7 +215,7 @@ runs:
     # Saved right after the install rather than by actions/cache's post-job step, which runs only if the whole job
     # succeeds — so a flaky test would keep the cache from ever being saved.
     - name: 'Save wasm-tools'
-      if: ${{ inputs.type == 'build' && inputs.os != 'Linux' && steps.wasm-tools-cache.outputs.cache-hit != 'true' }}
+      if: ${{ github.ref == 'refs/heads/master' && inputs.use_caches == 'true' && inputs.type == 'build' && inputs.os != 'Linux' && steps.wasm-tools-cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v6
       with:
         path: ${{ github.workspace }}/wasm-tools
@@ -218,75 +226,9 @@ runs:
       shell: bash
       run: echo "${GITHUB_WORKSPACE}/wasm-tools" >> "$GITHUB_PATH"
 
-    # The build uses sccache as the rustc wrapper whenever it finds sccache on the PATH, so that our Rust code gets the
-    # same compile caching as ccache gives our C++ code.
-    - name: 'Resolve sccache release'
-      id: 'sccache'
-      if: ${{ inputs.type == 'build' }}
-      shell: bash
-      run: |
-        VERSION=0.18.0
-        if ${{ runner.arch == 'ARM64' }} ; then
-          ARCH=aarch64
-        else
-          ARCH=x86_64
-        fi
-        case "${{ runner.os }}" in
-          Linux) TRIPLE="${ARCH}-unknown-linux-musl" ;;
-          macOS) TRIPLE="${ARCH}-apple-darwin" ;;
-          Windows) TRIPLE="${ARCH}-pc-windows-msvc" ;;
-        esac
-        NAME="sccache-v${VERSION}-${TRIPLE}"
-        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-        echo "name=${NAME}" >> "$GITHUB_OUTPUT"
-
-    - name: 'Restore sccache'
-      id: 'sccache-cache'
-      if: ${{ inputs.type == 'build' }}
-      uses: actions/cache/restore@v6
-      with:
-        path: ${{ github.workspace }}/sccache
-        key: ${{ steps.sccache.outputs.name }}
-
-    - name: 'Install sccache'
-      if: ${{ inputs.type == 'build' && steps.sccache-cache.outputs.cache-hit != 'true' }}
-      shell: bash
-      run: |
-        FILENAME="${{ steps.sccache.outputs.name }}.tar.gz"
-        URL="https://github.com/mozilla/sccache/releases/download/v${{ steps.sccache.outputs.version }}/${FILENAME}"
-
-        delays=(5 15 45)
-        attempt=1
-        until curl --fail --location --output "${FILENAME}" "${URL}"; do
-          if (( attempt > ${#delays[@]} )); then
-            echo "sccache download failed after $(( ${#delays[@]} + 1 )) attempts" >&2
-            exit 1
-          fi
-          echo "sccache download failed; retrying in ${delays[attempt-1]}s" >&2
-          sleep "${delays[attempt-1]}"
-          attempt=$(( attempt + 1 ))
-        done
-
-        tar -xzf "${FILENAME}"
-        rm "${FILENAME}"
-        mv "${{ steps.sccache.outputs.name }}" sccache
-
-    # Saved right after the install rather than by actions/cache's post-job step, which runs only if the whole job
-    # succeeds — so a flaky test would keep the cache from ever being saved.
-    - name: 'Save sccache'
-      if: ${{ inputs.type == 'build' && steps.sccache-cache.outputs.cache-hit != 'true' }}
-      uses: actions/cache/save@v6
-      with:
-        path: ${{ github.workspace }}/sccache
-        key: ${{ steps.sccache-cache.outputs.cache-primary-key }}
-
-    - name: 'Add sccache to PATH'
-      if: ${{ inputs.type == 'build' }}
-      shell: bash
-      run: echo "${GITHUB_WORKSPACE}/sccache" >> "$GITHUB_PATH"
-
     - name: 'Restore cargo registry'
       id: 'cargo-registry'
+      if: ${{ inputs.use_caches == 'true' }}
       uses: actions/cache/restore@v6
       with:
         path: |
@@ -311,7 +253,7 @@ runs:
     # Saved right after the fetch rather than by actions/cache's post-job step, which runs only if the whole job
     # succeeds — so a flaky test would keep the cache from ever being saved.
     - name: 'Save cargo registry'
-      if: ${{ steps.cargo-registry.outputs.cache-hit != 'true' }}
+      if: ${{ github.ref == 'refs/heads/master' && inputs.use_caches == 'true' && steps.cargo-registry.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v6
       with:
         path: |

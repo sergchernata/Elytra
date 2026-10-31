@@ -31,9 +31,20 @@ static bool matches_hover_pseudo_class(DOM::Element const& element)
     auto* hovered_node = element.document().hovered_node();
     if (!hovered_node)
         return false;
-    if (&element == hovered_node)
-        return true;
-    return element.is_shadow_including_ancestor_of(*hovered_node);
+    // https://drafts.csswg.org/selectors-4/#useraction-pseudos
+    // NB: Match the top layer boundary used by the style engine's hover chain.
+    bool is_hovered = false;
+    for (auto const* node = hovered_node; node; node = node->flat_tree_parent()) {
+        if (!node->is_connected())
+            return false;
+        if (node == &element)
+            is_hovered = true;
+        if (node->is_document())
+            return is_hovered;
+        if (auto const* ancestor = as_if<DOM::Element>(*node); ancestor && ancestor->rendered_in_top_layer())
+            return is_hovered;
+    }
+    return false;
 }
 
 // https://html.spec.whatwg.org/multipage/semantics-other.html#selector-indeterminate

@@ -316,7 +316,7 @@ pub struct FfiStyleImageFacts {
 }
 
 impl FfiStyleImageFacts {
-    fn of(engine: &crate::css::style::StyleEngine, style_record: u64) -> Self {
+    fn of(engine: &crate::css::style::RetainedState, style_record: u64) -> Self {
         Self {
             style_record,
             holds_image_values: engine.style_record_holds_image_values(style_record),
@@ -417,9 +417,9 @@ impl StabilizationTrace {
                     root.is_invalid(),
                     !root.is_invalid() && arena.node_needs_layout_update(root),
                     arena.needs_full_layout_tree_update(),
-                    arena.partial_relayout_boundary_roots.borrow().roots().len(),
-                    arena.pending_updates_escape_partial_relayout.get(),
-                    arena.deferred_child_list_insertion_parents.borrow().len(),
+                    arena.partial_relayout_boundary_roots.roots().len(),
+                    arena.pending_updates_escape_partial_relayout,
+                    arena.deferred_child_list_insertion_parents.len(),
                 )
             });
         let facts_that_hold: Vec<&str> = [
@@ -498,7 +498,6 @@ pub(crate) struct LayoutRoundJob {
     /// Whether a size container waits for its queries to be evaluated after the next full layout, which only a round
     /// that may lay out partially reads.
     container_query_evaluation_is_pending: bool,
-    container_length_bases: super::layout_pass::ContainerLengthBasesQuery,
 }
 
 /// Which layout a round lays its tree out with.
@@ -570,23 +569,26 @@ pub(crate) struct OwedImage {
 
 impl OwedImage {
     /// Takes the image resources the builds that ran on `arena` owe the rows they stamped and left live.
-    fn take_from(arena: &LayoutNodeArena) -> Vec<Self> {
+    fn take_from(arena: &mut LayoutNodeArena) -> Vec<Self> {
         let owed = arena.take_image_resources_owed_to_host();
         if owed.is_empty() {
             return Vec::new();
         }
-        arena.with_style_engine(|engine| {
-            owed.into_iter()
-                .filter(|&(row, _)| arena.slot_is_live(row))
-                // A box a build visits again with the style record it was owed resources for holds them already.
-                .filter(|&(row, owed)| {
-                    !matches!(
+        let owed: Vec<_> = owed
+            .into_iter()
+            // A box a build visits again with the style record it was owed resources for holds them already.
+            .filter(|&(row, owed)| {
+                arena.slot_is_live(row)
+                    && (!matches!(
                         owed,
                         OwedImageResources::StyleResources {
                             owns_content_replacement_image: false
                         }
-                    ) || arena.owe_style_image_resources_once(row)
-                })
+                    ) || arena.owe_style_image_resources_once(row))
+            })
+            .collect();
+        arena.with_style_store(|engine| {
+            owed.into_iter()
                 .map(|(row, owed)| Self {
                     row,
                     owed,
@@ -617,8 +619,7 @@ pub(crate) struct SealedRound {
 
 impl SealedRound {
     /// Runs the round over `state` in the frame's flight, where the frame's style left its layout to do, owing the host
-    /// `work` besides what the round owes it. The flight reaches nothing of the host, so a length only the host
-    /// resolves leaves the layout for the host to lay out again.
+    /// `work` besides what the round owes it.
     pub(crate) fn run(self, state: &mut ArenaHandle, work: OwedHostWork) -> Option<FlownRound> {
         if state
             .arena()
@@ -627,8 +628,7 @@ impl SealedRound {
             return None;
         }
         let mut answer = self.job.run_owing(state, work);
-        answer.prepare_committed_layout_for_rendering(state.arena());
-        state.arena().mark_unresolved_container_lengths_for_layout();
+        answer.prepare_committed_layout_for_rendering(state.arena_mut());
         Some(FlownRound {
             answer,
             rebuilds_tree: self.rebuilds_tree,
@@ -650,17 +650,15 @@ impl FlownRound {
 }
 
 /// The layout round each tick of a clock lane runs once it has shown the samples of the document's animations: the
-/// document's facts, and a container length query that answers nothing, sealed where the clock's plan was, at the end of
-/// a rendering update that left the layout up to date.
+/// document's facts, sealed where the clock's plan was, at the end of a rendering update that left the layout up to date.
 pub(crate) struct ClockRound {
     facts: FfiLayoutUpdateDocumentFacts,
-    container_length_bases: super::layout_pass::ContainerLengthBasesQuery,
 }
 
 impl ClockRound {
     /// Builds again what the clock frame marked and lays out what it moved, and pushes what the round owes the host to
     /// `owed`, answering it, or nothing where the round laid nothing out. A round declines a build that needs the host
-    /// and a length only the host resolves, after it owes the host what it ran.
+    /// and a length whose container has no box yet, after it owes the host what it ran.
     pub(crate) fn run<'a>(
         &self,
         state: &mut ArenaHandle,
@@ -675,7 +673,6 @@ impl ClockRound {
             build,
             layout: RoundLayout::PartialIfPlanned,
             container_query_evaluation_is_pending: false,
-            container_length_bases: self.container_length_bases,
         }
         .run(state);
         // A box the build gave an image has none until the host attaches it.
@@ -686,13 +683,14 @@ impl ClockRound {
             Some("a build that needs the document's style")
         } else if answer.owed_images.iter().any(|image| image.is_shown(arena)) {
             Some("a box the build owes an image")
+        } else if answer.awaits_container_query_evaluation() {
+            // The host evaluates the queries of a container that had no box once a layout gave it one, and lays out
+            // again what they decide.
+            Some("a length whose container has no box yet")
         } else {
             None
         };
         owed.push(answer);
-        if state.arena().mark_unresolved_container_lengths_for_layout() {
-            return Err(ClockRoundDeclined("a length only the host resolves"));
-        }
         match declined {
             Some(reason) => Err(ClockRoundDeclined(reason)),
             None => Ok(owed.last()),
@@ -708,7 +706,7 @@ impl ClockRound {
         }
         Ok(arena
             .document_style_node()
-            .filter(|&document| arena.layout_tree_update_marks().borrow().child_needs(document))
+            .filter(|&document| arena.layout_tree_update_marks().child_needs(document))
             .map(|document| TreeBuildJob::new(document, None)))
     }
 
@@ -723,12 +721,11 @@ impl ClockRound {
         let Some(build) = Self::marked_build(state.arena())? else {
             return Ok(false);
         };
-        let arena = state.arena();
-        if build.lacks_document_style(arena) {
+        if build.lacks_document_style(state.arena()) {
             return Err(ClockRoundDeclined("a build that needs the document's style"));
         }
         // The round cannot call the host, which hears of the boxes nodes gain and lose once it is over.
-        arena.queue_box_presence();
+        state.arena_mut().queue_box_presence();
         let mut answer = LayoutRoundAnswer {
             build: None,
             work: HostWorkDue::default(),
@@ -749,9 +746,10 @@ impl ClockRound {
             &mut answer,
             self.facts.has_stale_list_item_counters,
         );
-        let arena = state.arena();
+        let arena = state.arena_mut();
         answer.work = work.resolve(arena);
         answer.owed_images = OwedImage::take_from(arena);
+        let arena = state.arena();
         // A box the build gave an image has none until the host attaches it.
         let declined = match end {
             BuildEnd::AnotherPass => Some("a build that asks for another pass"),
@@ -770,7 +768,7 @@ impl ClockRound {
 }
 
 /// A clock round whose tree build or layout needs the host: a build that asks for another pass, reconciles list item
-/// counters or owes the host image resources, or a length only the host resolves.
+/// counters or owes the host image resources, or a length whose container has no box yet.
 pub(crate) struct ClockRoundDeclined(pub(crate) &'static str);
 
 /// Seals the round the ticks of a clock lane of `document_host`'s document run, where its layout is up to date in
@@ -781,12 +779,7 @@ fn seal_clock_round(main_thread: &MainThread, document_host: &DocumentHost, read
     if !facts.document_is_active || !host_layout_is_up_to_date(document_host, read, &facts) {
         return None;
     }
-    Some(ClockRound {
-        facts,
-        container_length_bases: FfiLayoutHostCallbacks::of(main_thread)
-            .container_length_bases_query(main_thread)
-            .sealed(),
-    })
+    Some(ClockRound { facts })
 }
 
 impl LayoutRoundJob {
@@ -798,8 +791,8 @@ impl LayoutRoundJob {
     /// Runs the round over `state`, and resolves what it owes the host as it ends, `work` among it.
     fn run_owing(self, state: &mut ArenaHandle, work: OwedHostWork) -> LayoutRoundAnswer {
         let mut answer = self.run_with(state, &work);
-        answer.work = work.resolve(state.arena());
-        answer.owed_images = OwedImage::take_from(state.arena());
+        answer.work = work.resolve(state.arena_mut());
+        answer.owed_images = OwedImage::take_from(state.arena_mut());
         answer
     }
 
@@ -815,13 +808,12 @@ impl LayoutRoundJob {
             clamped_scroll_offsets: Vec::new(),
         };
         let stage = LayoutStageFacts {
-            container_length_bases: self.container_length_bases,
             viewport_inline_size: crate::layout::CssPixels::from_raw(facts.viewport_inline_size_raw),
             viewport_block_size: crate::layout::CssPixels::from_raw(facts.viewport_block_size_raw),
             document_in_quirks_mode: facts.document_in_quirks_mode,
         };
         // The round cannot call the host, which hears of the boxes nodes gain and lose once it is over.
-        state.arena().queue_box_presence();
+        state.arena_mut().queue_box_presence();
         if self
             .build
             .as_ref()
@@ -841,7 +833,7 @@ impl LayoutRoundJob {
         if self.layout == RoundLayout::PartialIfPlanned
             && arena.partial_relayout_may_be_attempted(
                 arena.layout_root(),
-                arena.partial_relayout_boundary_roots.borrow().roots(),
+                arena.partial_relayout_boundary_roots.roots(),
                 partial_relayout_facts,
             )
         {
@@ -856,7 +848,7 @@ impl LayoutRoundJob {
                 }
             }
 
-            let arena = state.arena();
+            let arena = state.arena_mut();
             // Among the boundaries are those the build registered where it invalidated what deferred child list
             // insertions reach.
             let boundaries = arena.take_partial_relayout_boundary_roots();
@@ -870,7 +862,7 @@ impl LayoutRoundJob {
                 for boundary in planned {
                     answer.commits.push(lay_out_boundary(state, boundary, stage));
                 }
-                state.arena().note_partial_layout();
+                state.arena_mut().note_partial_layout();
                 answer.end = LayoutRoundEnd::PartialLayout;
                 return answer;
             }
@@ -885,7 +877,7 @@ impl LayoutRoundJob {
                 };
                 return answer;
             }
-            state.arena().set_needs_full_layout_tree_update(false);
+            state.arena_mut().set_needs_full_layout_tree_update(false);
             if end == BuildEnd::ReconcileCounters {
                 answer.end = LayoutRoundEnd::Built {
                     needs_another_build_pass: false,
@@ -895,7 +887,7 @@ impl LayoutRoundJob {
             }
         }
         // The full layout below covers every registered boundary, the build's among them.
-        drop(state.arena().take_partial_relayout_boundary_roots());
+        drop(state.arena_mut().take_partial_relayout_boundary_roots());
 
         let layout_root = state.arena().layout_root();
         assert!(!layout_root.is_invalid(), "a full layout pass needs a layout root");
@@ -907,7 +899,7 @@ impl LayoutRoundJob {
             facts.should_collect_devtools_layout_data,
         );
         answer.commits.push(commit);
-        state.arena().note_full_layout();
+        state.arena_mut().note_full_layout();
         answer
     }
 
@@ -923,7 +915,7 @@ impl LayoutRoundJob {
     ) -> BuildEnd {
         let replaced_viewport = state.arena().layout_root();
         let built = build.run(state, work);
-        state.arena().record_layout_tree_build(&built.outcome);
+        state.arena_mut().record_layout_tree_build(&built.outcome);
         if has_stale_list_item_counters {
             answer.rebuilt_roots = state.arena().pending_rebuilt_dom_roots();
         }
@@ -947,9 +939,16 @@ impl LayoutRoundAnswer {
             .flat_map(CommitNotifications::resized_size_containers)
     }
 
+    /// Whether a length the round's layout resolved reads a size container that had no box yet.
+    pub(crate) fn awaits_container_query_evaluation(&self) -> bool {
+        self.commits
+            .iter()
+            .any(CommitNotifications::awaits_container_query_evaluation)
+    }
+
     /// Prepares `arena` for rendering where the round committed a layout, as the host's commit of it asks, so that the
     /// host waits for no preparation of its own after the round.
-    fn prepare_committed_layout_for_rendering(&mut self, arena: &LayoutNodeArena) {
+    fn prepare_committed_layout_for_rendering(&mut self, arena: &mut LayoutNodeArena) {
         if matches!(
             self.end,
             LayoutRoundEnd::Built { .. } | LayoutRoundEnd::NeedsDocumentStyle
@@ -1012,7 +1011,6 @@ fn next_round(
     facts: FfiLayoutUpdateDocumentFacts,
     with_document_style: bool,
 ) -> SealedRound {
-    let layout_host = FfiLayoutHostCallbacks::of(main_thread);
     let rebuilds_tree = facts.document_needs_layout_tree_build
         || read_arena(document_host, read, (), |arena, ()| {
             arena.layout_root().is_invalid() || arena.needs_full_layout_tree_update()
@@ -1031,7 +1029,6 @@ fn next_round(
             build,
             layout: RoundLayout::PartialIfPlanned,
             container_query_evaluation_is_pending: host.container_query_evaluation_is_pending(main_thread, read),
-            container_length_bases: layout_host.container_length_bases_query(main_thread),
         },
         rebuilds_tree,
     }
@@ -1060,10 +1057,7 @@ fn sealed_first_round(
     if !facts.document_is_active || inputs.is_template_contents_document || !needs_round(&facts) {
         return None;
     }
-    let mut round = next_round(main_thread, document_host, read, &host, facts, false);
-    // The round runs beside the host, which it cannot ask.
-    round.job.container_length_bases = round.job.container_length_bases.sealed();
-    Some(round)
+    Some(next_round(main_thread, document_host, read, &host, facts, false))
 }
 
 /// Seals the first round of a rendering update's layout of `document_host`'s document, which the frame the update lets
@@ -1150,7 +1144,6 @@ fn update_layout(
     inputs: &FfiLayoutUpdateInputs,
 ) {
     let host = layout_update_host(document_host);
-    let layout_host = FfiLayoutHostCallbacks::of(main_thread);
     assert!(
         document_host.host_tables().update_layout_running.get(),
         "the layout update runs between document_host_begin_update_layout and its end"
@@ -1245,7 +1238,6 @@ fn update_layout(
                 layout,
                 container_query_evaluation_is_pending: layout == RoundLayout::PartialIfPlanned
                     && host.container_query_evaluation_is_pending(main_thread, read),
-                container_length_bases: layout_host.container_length_bases_query(main_thread),
             });
         };
 
@@ -1421,10 +1413,10 @@ mod tests {
             needs_another_build_pass: false,
             layout: RoundLayout::Full,
         })
-        .prepare_committed_layout_for_rendering(&arena);
+        .prepare_committed_layout_for_rendering(&mut arena);
         assert!(rendering_preparation_pending(&arena).is_some());
 
-        answer_ending(LayoutRoundEnd::FullLayout).prepare_committed_layout_for_rendering(&arena);
+        answer_ending(LayoutRoundEnd::FullLayout).prepare_committed_layout_for_rendering(&mut arena);
         assert!(rendering_preparation_pending(&arena).is_none());
         arena
             .free_subtree(viewport)
@@ -1433,7 +1425,7 @@ mod tests {
 
     #[test]
     fn the_layout_counters_start_at_zero_and_count_each_pass() {
-        let arena = LayoutNodeArena::new();
+        let mut arena = LayoutNodeArena::new();
         assert_eq!(arena.partial_layout_count(), 0);
         assert_eq!(arena.full_layout_count(), 0);
         assert_eq!(arena.layout_tree_build_stats().builds, 0);

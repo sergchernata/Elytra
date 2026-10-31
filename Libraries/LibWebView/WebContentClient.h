@@ -16,6 +16,8 @@
 #include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/WeakPtr.h>
+#include <LibAudio/Audibility.h>
+#include <LibAudio/PlaybackGroupId.h>
 #include <LibCompositing/Types.h>
 #include <LibCore/Forward.h>
 #include <LibGfx/Point.h>
@@ -39,6 +41,7 @@
 #include <LibWebCommon/HTML/FileFilter.h>
 #include <LibWebCommon/HTML/HistoryHandlingBehavior.h>
 #include <LibWebCommon/HTML/HistoryOperation.h>
+#include <LibWebCommon/HTML/MuteState.h>
 #include <LibWebCommon/HTML/ReplicatedNavigableState.h>
 #include <LibWebCommon/HTML/SameDocumentNavigationEntry.h>
 #include <LibWebCommon/HTML/Scripting/ScriptRegistryTypes.h>
@@ -54,6 +57,7 @@
 #include <LibWebCommon/Page/ViewportIsFullscreen.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 #include <LibWebCommon/WebView/Debugger.h>
+#include <LibWebView/AudioServerAudibility.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/ChildIdentity.h>
@@ -162,9 +166,22 @@ public:
     ErrorOr<void> recreate_compositor_contexts(Badge<Application>);
     // The user let the page at the URL capture audio. The process's AudioServer hears of the permission before this
     // returns, so a page told afterwards finds it in place.
-    ErrorOr<void> grant_audio_capture(URL::URL const&);
+    // A file: page's microphone grant, which has no origin to be kept for; every other site's is the PermissionManager's.
+    ErrorOr<void> grant_audio_capture_to_file(URL::URL const&);
+
+    // The sites this process asked for the permissions of, which the UI process keeps it up to date on.
+    Vector<URL::Origin> const& permission_origins() const { return m_permission_origins; }
+    // Keeps the process up to date on a site's permissions from now on.
+    void add_permission_origin(URL::Origin const&);
     // The permission follows the origins the process's open pages show, so it goes with a navigation away.
     void update_audio_capture_permission();
+    // The process's AudioServer plays the page's sound while the page is authorized. It hears of an authorization
+    // before this returns, so a document the page goes on to run is heard from its start.
+    void authorize_audio_playback(Web::PageId);
+    void revoke_audio_playback(Web::PageId);
+    // Muting the page leaves its sound out whether or not it is authorized, and authorizes nothing.
+    void set_audio_playback_mute_state(Web::PageId, Web::HTML::MuteState);
+    void forget_audio_playback(Web::PageId);
     void replay_compositor_view_state_after_reconnect(Badge<Application>);
     void notify_compositor_process_reconnected(Badge<Application>);
     Web::CompositorContextId compositor_context_id_for_page(WebContentPage const&);
@@ -190,6 +207,7 @@ private:
     virtual void did_destroy_compositor_context(Web::CompositorContextId) override;
     virtual Messages::WebContentClient::DidRequestAllCookiesWebdriverResponse did_request_all_cookies_webdriver(URL::URL, Optional<HTTP::Cookie::PartitionContext>) override;
     virtual Messages::WebContentClient::DidRequestAllCookiesCookiestoreResponse did_request_all_cookies_cookiestore(Web::PageId page_id, Web::HTML::EnvironmentId, URL::URL) override;
+    virtual Messages::WebContentClient::DidRequestPermissionSnapshotResponse did_request_permission_snapshot(Web::PageId, URL::Origin top_level_origin) override;
     virtual Messages::WebContentClient::DidRequestNamedCookieResponse did_request_named_cookie(URL::URL, String) override;
     virtual Messages::WebContentClient::DidRequestCookieResponse did_request_cookie(Web::PageId page_id, Optional<Web::HTML::EnvironmentId>, URL::URL, HTTP::Cookie::Source) override;
     virtual void did_close_browsing_context(Web::PageId page_id) override;
@@ -207,7 +225,7 @@ private:
     virtual void storage_area_reset(Web::StorageAPI::StorageAreaId, Vector<StorageItem>) override;
     virtual Messages::WebContentClient::DidStartDownloadWithoutRequestResponse did_start_download_without_request(Web::PageId page_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size) override;
     virtual Messages::WebContentClient::DidStartDownloadResponse did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response) override;
-    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::PageId page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Optional<Web::HTML::CrossProcessId> opener_navigable_id, Optional<URL::URL> opener_base_url, Utf16String target_name, Web::HTML::SandboxingFlagSet popup_sandboxing_flag_set) override;
+    virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::PageId page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url) override;
     virtual Messages::WebContentClient::StartWorkerAgentResponse start_worker_agent(Web::PageId page_id, Web::HTML::WorkerAgentStartRequest request) override;
     virtual void did_update_cookie(HTTP::Cookie::Cookie) override;
     virtual Messages::WebContentClient::DidIsKnownHstsHostResponse did_is_known_hsts_host(String) override;
@@ -215,7 +233,6 @@ private:
     virtual Messages::WebContentClient::RequestMediaServerConnectionResponse request_media_server_connection() override;
     virtual Messages::WebContentClient::RequestAudioServerConnectionResponse request_audio_server_connection() override;
     virtual void request_video_presentation_channel() override;
-    virtual void did_start_using_gamepads() override;
     virtual void gamepad_play_effect(Web::Gamepad::GamepadHandle handle, Web::Gamepad::GamepadEffect effect) override;
     virtual void gamepad_stop_effects(Web::Gamepad::GamepadHandle handle) override;
 
@@ -251,9 +268,13 @@ private:
 
     ErrorOr<IPC::TransportHandle> connect_audio_server_client();
     ErrorOr<void> ensure_audio_server_controller();
+    ErrorOr<void> initialize_audio_server_controller();
     ErrorOr<void> tell_audio_server_of_capture_permission();
+    ErrorOr<void> tell_audio_server_of_playback_authorization(Audio::PlaybackGroupId);
+    void did_change_audio_playback_audibility(Audio::PlaybackGroupId, Audio::Audibility);
     static String audio_capture_permission_key(URL::URL const&);
     bool audio_capture_permitted() const;
+    bool page_may_capture_audio(WebContentPage const&) const;
     void decide_audio_capture_request(u64 request_id);
 
     // The controller connections to the MediaServer and AudioServer spawned for this process, from its first media use
@@ -265,7 +286,12 @@ private:
     // The pages the user let capture audio, and whether an open page is one of them; the AudioServer is told of the latter,
     // again whenever it relaunches, and rules on nothing itself.
     HashTable<String> m_audio_capture_grants;
+    Vector<URL::Origin> m_permission_origins;
     bool m_audio_capture_permitted { false };
+    // Likewise, the AudioServer is told again of the groups it may play, and of those the user has muted.
+    HashTable<Audio::PlaybackGroupId> m_authorized_audio_playback_groups;
+    HashTable<Audio::PlaybackGroupId> m_muted_audio_playback_groups;
+    AudioServerAudibility m_audio_server_audibility { [this](Audio::PlaybackGroupId group, Audio::Audibility audibility) { did_change_audio_playback_audibility(group, audibility); } };
     RefPtr<Core::Timer> m_detached_page_close_timer;
 
     static HashTable<WebContentClient*>& clients();

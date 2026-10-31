@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	autofocus=true, delegatesfocus=false
+Pass	autofocus=true, delegatesfocus=true
+Pass	autofocus=false, delegatesfocus=false
+Pass	autofocus=false, delegatesfocus=true

@@ -7,7 +7,6 @@
 #pragma once
 
 #include <AK/Badge.h>
-#include <AK/EnumBits.h>
 #include <AK/HashMap.h>
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
@@ -20,21 +19,12 @@
 #include <LibWeb/Painting/Scrolling.h>
 #include <LibWebCommon/PixelUnits.h>
 
-namespace Web {
-
-struct ChromeMetrics;
-
-}
-
 namespace Web::Painting {
 
 enum class MouseAction : u8 {
-    None = 0,
-    CaptureInput = 1 << 0,
-    SwallowEvent = 1 << 1,
+    None,
+    CaptureInput,
 };
-
-AK_ENUM_BITWISE_OPERATORS(MouseAction);
 
 enum class ChromeWidgetKind : u8 {
     None,
@@ -43,49 +33,29 @@ enum class ChromeWidgetKind : u8 {
     VerticalScrollbar,
 };
 
-struct ScrollbarData {
-    CSSPixelRect gutter_rect;
-    CSSPixelRect thumb_rect;
-    CSSPixelRect track_rect;
-    CSSPixelFraction thumb_travel_to_scroll_ratio { 0 };
-};
-
-enum class ScrollbarSizing {
-    Regular,
-    Enlarged,
-};
-
 struct PhysicalResizeAxes {
     bool horizontal;
     bool vertical;
 };
 
-Optional<ScrollbarData> compute_scrollbar_data(Layout::Node const&, ScrollDirection, ChromeMetrics const&, Compositing::ScrollStateSnapshot const* = nullptr, ScrollbarSizing = ScrollbarSizing::Regular);
 PhysicalResizeAxes physical_resize_axes(Layout::Node const&);
 
-class Scrollbar;
 class ResizeHandle;
 
+// The compositor takes the pointer input of scrollbars, so the resize handle is the only chrome widget the main thread
+// keeps.
 class ChromeWidgetRegistry : public RefCounted<ChromeWidgetRegistry> {
 public:
     ChromeWidgetRegistry();
     ~ChromeWidgetRegistry();
 
-    RefPtr<Scrollbar> scrollbar(Compositing::RustFFI::NodeSlotId, ScrollDirection) const;
-    NonnullRefPtr<Scrollbar> get_or_create_scrollbar(Layout::NodeArena&, Compositing::RustFFI::NodeSlotId, ScrollDirection);
     RefPtr<ResizeHandle> resize_handle(Compositing::RustFFI::NodeSlotId) const;
     NonnullRefPtr<ResizeHandle> get_or_create_resize_handle(Layout::NodeArena&, Compositing::RustFFI::NodeSlotId);
     void drop_widgets_for_slot(Compositing::RustFFI::NodeSlotId);
     void clear();
 
 private:
-    struct Entry {
-        RefPtr<Scrollbar> horizontal_scrollbar;
-        RefPtr<Scrollbar> vertical_scrollbar;
-        RefPtr<ResizeHandle> resize_handle;
-    };
-
-    HashMap<u32, Entry> m_entries;
+    HashMap<u32, NonnullRefPtr<ResizeHandle>> m_resize_handles;
 };
 
 class ChromeWidget
@@ -95,8 +65,6 @@ public:
     virtual ~ChromeWidget() = default;
 
     virtual MouseAction handle_pointer_event(Utf16FlyString const& type, unsigned button, CSSPixelPoint visual_viewport_position) = 0;
-    virtual void mouse_enter() = 0;
-    virtual void mouse_leave() = 0;
 
     virtual Optional<CSS::CursorPredefined> cursor() const { return {}; }
 

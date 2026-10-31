@@ -153,6 +153,14 @@ const MAX_FUNCTION_RESULTS: usize = 1_000;
 // The maximum number of locals declared in a function, including implicitly declared as parameters, is 50,000.
 const MAX_FUNCTION_LOCALS: usize = 50_000;
 
+// The maximum number of fields in a struct is 10,000.
+const MAX_STRUCT_FIELDS: usize = 10_000;
+
+// AD-HOC: A function's operand stack lives in its frame, 8 bytes per slot. Its height is capped so the frame size
+//         stays far from wrapping a u32 and validation memory stays bounded. A function that needs more than 8 MiB of
+//         operand stack could not be entered on a thread stack anyway.
+const MAX_FUNCTION_STACK_SLOTS: u32 = 1 << 20;
+
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(Error::invalid(message))
 }
@@ -798,6 +806,11 @@ impl FunctionValidator<'_> {
                 return Err(Error::malformed("unexpected end of section or function"));
             }
             self.validate_instruction(reader)?;
+            // NB: One instruction pushes at most a few thousand slots, so checking after each one keeps the height
+            //     far from wrapping.
+            if self.slot_height > MAX_FUNCTION_STACK_SLOTS {
+                return invalid("operand stack too deep");
+            }
         }
         if !reader.is_at_end() {
             return Err(Error::malformed("section size mismatch"));
@@ -2224,7 +2237,12 @@ fn validate_types(module: &Module, identities: &mut Vec<u32>) -> Result<()> {
                         .chain(&function.results)
                         .try_for_each(|&value| check(value))?;
                 }
-                CompositeType::Struct(fields) => fields.iter().try_for_each(|field| check_storage(field.storage))?,
+                CompositeType::Struct(fields) => {
+                    if fields.len() > MAX_STRUCT_FIELDS {
+                        return invalid("too many struct fields");
+                    }
+                    fields.iter().try_for_each(|field| check_storage(field.storage))?;
+                }
                 CompositeType::Array(field) => check_storage(field.storage)?,
             }
             if sub_type.supertypes.len() > 1 {

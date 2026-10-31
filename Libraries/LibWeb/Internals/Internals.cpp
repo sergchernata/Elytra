@@ -12,6 +12,7 @@
 #include <AK/NumericLimits.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf16StringBuilder.h>
+#include <LibAudio/ClientConnection.h>
 #include <LibCompositing/DisplayList/DisplayListResourceStorage.h>
 #include <LibCompositing/Scrolling/AsyncScrollTree.h>
 #include <LibCompositing/Scrolling/AsyncScrollingState.h>
@@ -68,6 +69,7 @@
 #include <LibWeb/Geometry/DOMRect.h>
 #include <LibWeb/HTML/AnimatedBitmapDecodedImageData.h>
 #include <LibWeb/HTML/AutoplaySettings.h>
+#include <LibWeb/HTML/BitmapDecodedImageData.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/TaskQueue.h>
@@ -83,6 +85,8 @@
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
+#include <LibWeb/HTML/Scripting/ConsoleInputCompletion.h>
+#include <LibWeb/HTML/Scripting/DevToolsObjectTable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
@@ -106,6 +110,8 @@
 #include <LibWeb/Painting/HitTestResult.h>
 #include <LibWeb/Painting/PaintingRustBridge.h>
 #include <LibWeb/Painting/Scrolling.h>
+#include <LibWeb/PermissionsAPI/PermissionStore.h>
+#include <LibWeb/PermissionsAPI/Permissions.h>
 #include <LibWeb/PictureInPicture/PictureInPictureController.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/Streams/ReadableStream.h>
@@ -176,6 +182,8 @@ void Internals::visit_edges(GC::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_gamepads);
+    if (m_devtools_object_table.has_value())
+        m_devtools_object_table->visit_edges(visitor);
 }
 
 void Internals::signal_test_is_done(Utf16String const& text)
@@ -415,6 +423,11 @@ void Internals::gc_async(GC::Ref<WebIDL::Promise> promise)
         realm.vm().heap().collect_garbage();
         WebIDL::resolve_promise(*promise);
     });
+}
+
+WebIDL::UnsignedLongLong Internals::discard_decoded_image_frames()
+{
+    return HTML::BitmapDecodedImageData::discard_all_discardable_frames();
 }
 
 WebIDL::ExceptionOr<void> Internals::mark_as_garbage(Utf16String const& variable_name)
@@ -1137,6 +1150,44 @@ Optional<Utf16String> Internals::generate_text_fragment_url(DOM::Range& range, U
     return Utf16String::from_utf8(generated_url->serialize());
 }
 
+// The grip that the DevTools console shows for a value, from a new table.
+Utf16String Internals::devtools_grip(JS::Value value)
+{
+    m_devtools_object_table.emplace(HTML::DevToolsObjectTable::RootObjects::No);
+    return Utf16String::from_utf8(m_devtools_object_table->serialize_value_as_grip(value).serialized());
+}
+
+// What DevTools lists when an object is expanded: the names of its own properties, and the class of its prototype.
+Utf16String Internals::devtools_properties(JS::Value value)
+{
+    m_devtools_object_table.emplace(HTML::DevToolsObjectTable::RootObjects::No);
+    auto serialized = m_devtools_object_table->serialize_value(value);
+    if (serialized.type != WebView::DebuggerValueType::Object)
+        return "not an object"_utf16;
+
+    auto properties = m_devtools_object_table->properties_for_object(serialized.object_id);
+    if (properties.is_error())
+        return Utf16String::from_utf8(properties.error().string_literal());
+
+    JsonArray names;
+    for (auto const& property : properties.value().properties)
+        names.must_append(property.name.to_utf8());
+
+    JsonObject result;
+    result.set("properties"sv, move(names));
+    if (auto const& prototype = properties.value().prototype; prototype.has_value())
+        result.set("prototype"sv, prototype->type == WebView::DebuggerValueType::Object ? JsonValue { prototype->object_class } : JsonValue {});
+    return Utf16String::from_utf8(result.serialized());
+}
+
+Optional<Vector<String>> Internals::complete_console_input(Utf16String const& input)
+{
+    auto completion = HTML::complete_console_input(HTML::relevant_realm(window()), input.to_utf8_but_should_be_ported_to_utf16());
+    if (!completion.has_value())
+        return {};
+    return move(completion->matches);
+}
+
 void Internals::set_marked_text_from_input_method(Utf16String const& text)
 {
     if (auto navigable = page().hosted_focused_navigable())
@@ -1606,8 +1657,9 @@ void Internals::record_display_list_for_testing(bool paint_overlay, bool cold)
     document.update_layout(DOM::UpdateLayoutReason::InternalsHitTest);
     if (!document.navigable() || !document.has_committed_viewport_box())
         return;
+    // A recording against a visual context tree built fresh copies nothing from the published one.
     if (cold)
-        document.paint_state().invalidate_all_cached_paint(document);
+        document.schedule_full_accumulated_visual_context_rebuild(Layout::RustFFI::VisualContextUpdateScope::FreshTree);
     (void)document.record_display_list(read, HTML::PaintConfig { .paint_overlay = paint_overlay }, document.navigable()->display_list_resource_storage(), Painting::PaintCommandCacheMode::ReadWrite);
 }
 
@@ -2057,6 +2109,9 @@ void Internals::perform_per_test_cleanup()
         gamepad->disconnect();
     m_gamepads.clear();
 
+    // Reset gamepad access, so that no test relies on the gamepad use and gestures of an earlier one
+    page().client().reset_gamepad_access_for_testing();
+
     // Clear any input state
     if (auto local_root = local_root_of(window())) {
         local_root->event_handler().clear_per_test_input_state({});
@@ -2087,13 +2142,77 @@ void Internals::set_environments_top_level_url(Utf16String const& url)
     window().associated_document().relevant_settings_object().top_level_creation_url = URL::Parser::basic_parse(url.utf16_view());
 }
 
-void Internals::set_geolocation_emulated_position(double latitude, double longitude, double accuracy)
+void Internals::set_geolocation_emulated_position(double latitude, double longitude, double accuracy, Optional<double> altitude, Optional<double> altitude_accuracy, Optional<double> heading, Optional<double> speed)
 {
     page().set_emulated_position_data(Geolocation::CoordinatesData {
         .accuracy = accuracy,
         .latitude = latitude,
         .longitude = longitude,
+        .altitude = altitude,
+        .altitude_accuracy = altitude_accuracy,
+        .heading = heading,
+        .speed = speed,
     });
+}
+
+// Every position request then fails with POSITION_UNAVAILABLE, as it does when no position can be found.
+void Internals::set_geolocation_emulated_position_unavailable()
+{
+    page().set_emulated_position_data(Geolocation::GeolocationPositionError::ErrorCode::PositionUnavailable);
+}
+
+GC::Ref<WebIDL::Promise> Internals::request_permission(Utf16String const& name)
+{
+    auto& realm = window().principal_realm();
+    auto promise = WebIDL::create_promise_for(window());
+    auto& settings = window().associated_document().relevant_settings_object();
+    PermissionsAPI::request_permission_with_user_prompt({ name }, settings, GC::create_function(realm.heap(), [&realm, promise](PermissionsAPI::PermissionState state) {
+        HTML::TemporaryExecutionContext execution_context { realm };
+        WebIDL::resolve_promise(realm, promise, JS::PrimitiveString::create(realm.vm(), Bindings::idl_enum_to_string(state)));
+    }));
+    return promise;
+}
+
+// The UI process answers with the snapshot that holds the change; resolving in a task on the permissions task source lets
+// whatever the change queued run first.
+static GC::Ref<WebIDL::Promise> apply_snapshot_then_resolve(HTML::Window& window, Optional<Web::Permissions::PermissionSnapshot> snapshot)
+{
+    auto promise = WebIDL::create_promise_for(window);
+    if (snapshot.has_value())
+        PermissionsAPI::PermissionStore::the().apply_snapshot(snapshot.release_value());
+    HTML::queue_global_task(HTML::Task::Source::Permissions, window.associated_document().relevant_settings_object().global_object(), GC::create_function(window.heap(), [&window, promise] {
+        auto& realm = window.principal_realm();
+        HTML::TemporaryExecutionContext execution_context { realm };
+        WebIDL::resolve_promise(realm, promise);
+    }));
+    return promise;
+}
+
+GC::Ref<WebIDL::Promise> Internals::set_permission(Utf16String const& name, Utf16String const& state)
+{
+    auto snapshot = page().client().page_did_set_permission_for_testing(window().associated_document().id(), name.to_utf8(), state.to_utf8());
+    return apply_snapshot_then_resolve(window(), move(snapshot));
+}
+
+void Internals::set_next_permission_prompt_outcome(Utf16String const& name, Utf16String const& outcome, bool held)
+{
+    page().client().page_did_set_next_permission_prompt_outcome_for_testing(name.to_utf8(), outcome.to_utf8(), held);
+}
+
+void Internals::release_held_permission_prompt(WebIDL::UnsignedLong waiters)
+{
+    page().client().page_did_release_held_permission_prompt_for_testing(waiters);
+}
+
+GC::Ref<WebIDL::Promise> Internals::advance_permission_clock(WebIDL::UnsignedLongLong milliseconds)
+{
+    auto snapshot = page().client().page_did_advance_permission_clock_for_testing(milliseconds);
+    return apply_snapshot_then_resolve(window(), move(snapshot));
+}
+
+Vector<String> Internals::permission_cache_origins()
+{
+    return PermissionsAPI::PermissionStore::the().cached_origins_for_testing();
 }
 
 bool Internals::html_parser_body_is_exhausted(DOM::Document& document)
@@ -2115,6 +2234,21 @@ bool Internals::media_element_is_fetching(HTML::HTMLMediaElement& element)
 bool Internals::media_element_is_playing_audio(HTML::HTMLMediaElement& element)
 {
     return element.is_playing_audio();
+}
+
+bool Internals::document_is_playing_audio(DOM::Document& document)
+{
+    return document.is_playing_audio();
+}
+
+bool Internals::tab_is_playing_audio()
+{
+    return window().associated_document().page().client().page_did_request_tab_is_playing_audio_for_testing();
+}
+
+WebIDL::UnsignedLongLong Internals::tab_audibility_change_count()
+{
+    return window().associated_document().page().client().page_did_request_tab_audibility_change_count_for_testing();
 }
 
 bool Internals::media_element_video_sink_is_ticking(HTML::HTMLMediaElement& element)
@@ -2145,9 +2279,10 @@ void Internals::disconnect_media_server()
         client.value()->shutdown();
 }
 
-void Internals::set_page_muted(bool muted)
+void Internals::disconnect_audio_server()
 {
-    window().associated_document().page().set_page_mute_state(muted ? HTML::MuteState::Muted : HTML::MuteState::Unmuted);
+    if (auto connection = Audio::ClientConnection::acquire(); !connection.is_error())
+        connection.value()->shutdown();
 }
 
 DOM::Document::StyleInvalidationCounters const& Internals::style_invalidation_counters() const

@@ -1,0 +1,9 @@
+Harness status: OK
+
+Found 4 tests
+
+4 Pass
+Pass	moveBefore() correctly updates id map when moving into shadow root
+Pass	moveBefore() correctly updates window map when moving id-mapped element into shadow root
+Pass	moveBefore() correctly updates id map when moving between shadow roots
+Pass	moveBefore() correctly updates id map when swapping elements with duplicate ids

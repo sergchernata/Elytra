@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	lh in line-height on root
+Pass	rlh in line-height on root
+Pass	lh in font-size on root
+Pass	rlh in font-size on root
+Pass	2lh in line-height on root
+Pass	2rlh in line-height on root
+Pass	2lh in font-size on root
+Pass	2rlh in font-size on root

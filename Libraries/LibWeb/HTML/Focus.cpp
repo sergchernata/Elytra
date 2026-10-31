@@ -9,7 +9,9 @@
 #include <AK/QuickSort.h>
 #include <AK/TypeCasts.h>
 #include <AK/Vector.h>
+#include <LibGC/ConservativeVector.h>
 #include <LibGC/Root.h>
+#include <LibGC/RootVector.h>
 #include <LibWeb/Bindings/CSS.h>
 #include <LibWeb/CSS/Invalidation/PseudoClassInvalidator.h>
 #include <LibWeb/CSS/StyleEngineInput.h>
@@ -28,6 +30,7 @@
 #include <LibWeb/HTML/Numbers.h>
 #include <LibWeb/HTML/RemoteNavigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Page/Page.h>
@@ -122,8 +125,11 @@ void run_focus_update_steps(Vector<GC::Root<DOM::Node>> old_chain, Vector<GC::Ro
     auto build_focus_within_chain = [](GC::Ptr<DOM::Node> source) {
         Vector<GC::Root<DOM::Element>> chain;
         for (auto* node = source.ptr(); node; node = node->flat_tree_parent()) {
-            if (auto* element = as_if<DOM::Element>(*node))
+            if (auto* element = as_if<DOM::Element>(*node)) {
                 chain.append(*element);
+                if (element->rendered_in_top_layer())
+                    break;
+            }
         }
         return chain;
     };
@@ -398,6 +404,35 @@ static bool is_focusable_area(DOM::Node& node)
     return node.is_focusable();
 }
 
+// NB: Whether the document has a focused area that the focus fixup rule may find not focusable. The viewport is
+//     focusable, and a container stands for its child navigable's viewport in the parent's focus chain. The child
+//     document handles its own focused area; an inert container does not make that document inert.
+bool focus_fixup_rule_may_apply(DOM::Document const& document)
+{
+    auto focused_area = document.focused_area();
+    if (!focused_area)
+        return false;
+    auto const* container = as_if<NavigableContainer>(focused_area.ptr());
+    return !container || !container->content_navigable();
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#focus-fixup-rule
+bool focus_fixup_rule_applies(DOM::Document& document)
+{
+    return focus_fixup_rule_may_apply(document) && !is_focusable_area(*document.focused_area());
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#focus-fixup-rule
+void run_focus_fixup_rule(DOM::Document& document)
+{
+    if (!focus_fixup_rule_applies(document))
+        return;
+
+    TemporaryExecutionContext execution_context { document.relevant_settings_object() };
+    run_focusing_steps(&document);
+    relevant_window(document).navigation()->set_focus_changed_during_ongoing_navigation(false);
+}
+
 // https://html.spec.whatwg.org/multipage/interaction.html#get-the-focusable-area
 static GC::Ptr<DOM::Node> get_focusable_area(DOM::Node& focus_target, FocusTrigger focus_trigger);
 
@@ -484,6 +519,53 @@ GC::Ptr<DOM::Node> focus_delegate(DOM::Node& focus_target, FocusTrigger focus_tr
     return nullptr;
 }
 
+// https://html.spec.whatwg.org/multipage/popover.html#popover-focusing-steps
+void run_popover_focusing_steps(HTMLElement& subject)
+{
+    // 1. If the allow focus steps given subject's node document return false, then return.
+    if (!subject.document().allow_focus())
+        return;
+
+    // 2. If subject is a dialog element, then run the dialog focusing steps given subject and return.
+    if (auto* dialog = as_if<HTMLDialogElement>(subject)) {
+        dialog->run_dialog_focusing_steps();
+        return;
+    }
+
+    // 3. If subject has the autofocus attribute, then let control be subject.
+    // 4. Otherwise, let control be the autofocus delegate for subject given "other".
+    GC::Ptr<DOM::Node> control = subject.has_attribute(AttributeNames::autofocus)
+        ? GC::Ptr<DOM::Node> { subject }
+        : autofocus_delegate(subject, FocusTrigger::Other);
+
+    // 5. If control is null, then return.
+    if (!control)
+        return;
+
+    // 6. Run the focusing steps given control.
+    run_focusing_steps(control);
+
+    // 7. Let topDocument be control's node navigable's top-level traversable's active document.
+    // NB: Focus event handlers can detach the document from its navigable.
+    auto navigable = control->navigable();
+    if (!navigable)
+        return;
+    auto* top_level_traversable = as_if<LocalNavigable>(*navigable->top_level_traversable());
+    if (!top_level_traversable)
+        return;
+    auto top_document = top_level_traversable->active_document();
+
+    // 8. If control's node document's origin is not the same as the origin of topDocument, then return.
+    if (!top_document || !control->document().origin().is_same_origin(top_document->origin()))
+        return;
+
+    // 9. Empty topDocument's autofocus candidates.
+    top_document->autofocus_candidates().clear();
+
+    // 10. Set topDocument's autofocus processed flag to true.
+    top_document->set_autofocus_processed_flag(true);
+}
+
 static GC::Ptr<DOM::Node> get_focusable_area(DOM::Node& focus_target, FocusTrigger focus_trigger)
 {
     // FIXME: Implement the rest of the get the focusable area algorithm.
@@ -534,7 +616,7 @@ static GC::Ptr<DOM::Node> get_focusable_area(DOM::Node& focus_target, FocusTrigg
 
 // https://html.spec.whatwg.org/multipage/interaction.html#focusing-steps
 // FIXME: This should accept more types.
-void run_focusing_steps(GC::Ptr<DOM::Node> new_focus_target, GC::Ptr<DOM::Node> fallback_target, FocusTrigger focus_trigger, ScrollIntoView scroll_into_view)
+void run_focusing_steps(GC::Ptr<DOM::Node> new_focus_target, GC::Ptr<DOM::Node> fallback_target, FocusTrigger focus_trigger, ScrollIntoView scroll_into_view, Optional<bool> focus_visible)
 {
     // 1. If new focus target is not a focusable area, then set new focus target to the result of getting the focusable
     //    area for new focus target, given focus trigger if it was passed.
@@ -585,8 +667,13 @@ void run_focusing_steps(GC::Ptr<DOM::Node> new_focus_target, GC::Ptr<DOM::Node> 
     auto root = focus_root(new_focus_target->document());
     if (!root)
         return;
-    if (new_focus_target.ptr() == root->currently_focused_area().ptr())
+    if (new_focus_target.ptr() == root->currently_focused_area().ptr()) {
+        // NB: focus()'s focusVisible option still applies to the element that already has focus, e.g. the delegate a
+        //     shadow host resolved to.
+        if (focus_visible.has_value())
+            new_focus_target->document().request_focus_visibility_for_focused_element(*focus_visible);
         return;
+    }
 
     // 6. Let old chain be the current focus chain of the top-level browsing context in which
     //    new focus target finds itself.
@@ -597,6 +684,9 @@ void run_focusing_steps(GC::Ptr<DOM::Node> new_focus_target, GC::Ptr<DOM::Node> 
 
     // AD-HOC: Remember last focus trigger for :focus-visible / focus indication.
     new_focus_target->document().set_last_focus_trigger(focus_trigger);
+    new_focus_target->document().set_requested_focus_visibility(new_focus_target, focus_visible);
+    if (focus_trigger == FocusTrigger::Click || focus_trigger == FocusTrigger::Key)
+        new_focus_target->document().set_last_user_focus_was_by_pointer(focus_trigger == FocusTrigger::Click);
 
     // NB: The tab's focused navigable shows the walk below a top-level traversable another process hosts, and the other
     //     pages of the tab follow it, so it moves to the navigable of new focus target before any focus event fires.
@@ -777,13 +867,13 @@ static void append_focus_navigation_scope_descendants(DOM::Node& parent, Vector<
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#focus-navigation-scope
-static GC::ConservativeVector<GC::Ref<DOM::Element>> focus_navigation_scope(DOM::Node& owner)
+static GC::RootVector<GC::Ref<DOM::Element>> focus_navigation_scope(DOM::Node& owner)
 {
     // The contents of a given focus navigation scope owner owner's focus navigation scope are all elements whose
     // associated focus navigation owner is owner.
     // NB: We collect them in tree order by walking down from owner, instead of computing the associated focus
     //     navigation owner of every element.
-    GC::ConservativeVector<GC::Ref<DOM::Element>> scope;
+    GC::RootVector<GC::Ref<DOM::Element>> scope;
 
     if (auto* document = as_if<DOM::Document>(owner)) {
         // NB: We treat the document element as being in its document's scope.
@@ -852,7 +942,7 @@ static bool is_sequentially_focusable(DOM::Node const& node)
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#tabindex-ordered-focus-navigation-scope
-static GC::ConservativeVector<GC::Ref<DOM::Element>> tabindex_ordered_focus_navigation_scope(DOM::Node& owner)
+static GC::RootVector<GC::Ref<DOM::Element>> tabindex_ordered_focus_navigation_scope(DOM::Node& owner)
 {
     // A tabindex-ordered focus navigation scope is a list of focusable areas and focus navigation scope owners.
     // Every focus navigation scope owner owner has tabindex-ordered focus navigation scope, whose contents are
@@ -870,7 +960,7 @@ static GC::ConservativeVector<GC::Ref<DOM::Element>> tabindex_ordered_focus_navi
         size_t tree_index;
     };
     GC::ConservativeVector<Item> positive_items;
-    GC::ConservativeVector<GC::Ref<DOM::Element>> result;
+    GC::RootVector<GC::Ref<DOM::Element>> result;
 
     for (auto const& element : focus_navigation_scope(owner)) {
         if (!is_focus_navigation_scope_owner(*element) && !is_sequential_focus_navigation_focusable_area(*element))
@@ -893,7 +983,7 @@ static GC::ConservativeVector<GC::Ref<DOM::Element>> tabindex_ordered_focus_navi
         return a.tree_index < b.tree_index;
     });
 
-    GC::ConservativeVector<GC::Ref<DOM::Element>> ordered;
+    GC::RootVector<GC::Ref<DOM::Element>> ordered;
     ordered.ensure_capacity(positive_items.size() + result.size());
     for (auto const& item : positive_items)
         ordered.unchecked_append(item.element);
@@ -927,12 +1017,12 @@ static void append_flattened_tabindex_ordered_focus_navigation_scope(DOM::Node& 
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#sequential-focus-navigation-order
-GC::ConservativeVector<GC::Ref<DOM::Element>> sequential_focus_navigation_order(DOM::Document& document)
+GC::RootVector<GC::Ref<DOM::Element>> sequential_focus_navigation_order(DOM::Document& document)
 {
     // Each Document has a sequential focus navigation order, which orders some or all of the focusable areas in the
     // Document relative to each other. Its contents and ordering are given by the flattened tabindex-ordered focus
     // navigation scope of the Document.
-    GC::ConservativeVector<GC::Ref<DOM::Element>> order;
+    GC::RootVector<GC::Ref<DOM::Element>> order;
     append_flattened_tabindex_ordered_focus_navigation_scope(document, order);
     return order;
 }

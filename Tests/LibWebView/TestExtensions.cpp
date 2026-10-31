@@ -74,7 +74,7 @@ void web_pages_reach_only_web_accessible_resources(WebView::HeadlessWebView& vie
 void links_out_of_the_extension_folder_are_not_followed(WebView::HeadlessWebView& view, WebView::ExtensionRegistry& registry, ByteString const& directory)
 {
     auto extension_directory = ByteString::formatted("{}/linked", directory);
-    MUST(FileSystem::copy_file_or_directory(extension_directory, fixture("basic"sv), FileSystem::RecursionMode::Allowed));
+    MUST(copy_recursively(extension_directory, fixture("basic"sv)));
     auto secret = write_temporary_file(directory, "secret.txt"sv, "secret"sv);
     MUST(FileSystem::remove(ByteString::formatted("{}/private.txt", extension_directory), FileSystem::RecursionMode::Disallowed));
     MUST(Core::System::symlink(secret, ByteString::formatted("{}/private.txt", extension_directory)));

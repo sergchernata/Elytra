@@ -14,6 +14,7 @@
 #include <LibWebCommon/HTML/HistoryOperation.h>
 #include <LibWebCommon/HTML/SerializationRecords.h>
 #include <LibWebCommon/Page/ViewportIsFullscreen.h>
+#include <LibWebCommon/SecureContexts/AbstractOperations.h>
 #include <LibWebCommon/WebView/SiteIsolation.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/BrowsingSession.h>
@@ -132,7 +133,7 @@ static bool navigation_must_be_a_replace(URL::URL const& url, CanonicalDocument 
 // NB: This is a navigation from the browser's UI, whose sourceDocument is null.
 void CanonicalNavigable::navigate(URL::URL url, Web::HTML::DocumentResource document_resource, Web::Bindings::NavigationHistoryBehavior history_handling)
 {
-    begin_navigation(prepare_navigation(move(url), move(document_resource), history_handling), IsBrowserUINavigation::Yes);
+    begin_navigation(prepare_navigation(move(url), move(document_resource), history_handling), {}, IsBrowserUINavigation::Yes);
 }
 
 // Steps 1 to 7 of navigate, for a navigation from the browser's UI.
@@ -183,7 +184,7 @@ Web::HTML::PreparedNavigationDescriptor CanonicalNavigable::prepare_navigation(U
 }
 
 // Continue the navigate algorithm at step 9 with the values prepared by steps 1-7.
-void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescriptor navigation, IsBrowserUINavigation is_browser_ui_navigation)
+void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescriptor navigation, RefPtr<WebContentPage> source_page, IsBrowserUINavigation is_browser_ui_navigation)
 {
     auto& traversable = top_level_traversable();
     auto const& url = navigation.url;
@@ -341,6 +342,7 @@ void CanonicalNavigable::begin_navigation(Web::HTML::PreparedNavigationDescripto
         .state = CanonicalNavigation::CheckingIfUnloadingIsCanceled { move(start_request) },
         .page = worker,
         .history_entry = {},
+        .source_page = move(source_page),
         .is_browser_ui_navigation = is_the_browsers_own_navigation,
     });
     worker->async_set_ongoing_navigation(id(), navigation_id);
@@ -430,11 +432,15 @@ NonnullRefPtr<CanonicalDocument> CanonicalNavigable::create_and_initialize_a_doc
     }
     // 7. Otherwise:
     else {
-        // FIXME: 1. Let oacHeader be the result of getting a structured field value given `Origin-Agent-Cluster` and "item"
-        //           from navigationParams's response's header list.
-        // FIXME: 2. Let requestsOAC be true if oacHeader is not null and oacHeader[0] is the boolean true; otherwise false.
-        // FIXME: 3. If navigationParams's reserved environment is a non-secure context, then set requestsOAC to false.
-        auto requests_oac = false;
+        // NB: NavigationLoader parsed the response's Origin-Agent-Cluster field for steps 1 and 2.
+        auto requests_oac = navigation_params.requests_oac;
+
+        // 3. If navigationParams's reserved environment is a non-secure context, then set requestsOAC to false.
+        // NB: Derive this from canonical navigation state, since WebContent supplies the reserved environment.
+        auto reserved_top_level_creation_url = m_parent ? m_parent->active_document().relevant_global_object().relevant_settings_object().top_level_creation_url().value() : creation_url;
+        if (reserved_top_level_creation_url.scheme() == "data"sv
+            || Web::SecureContexts::is_url_potentially_trustworthy(reserved_top_level_creation_url) == Web::SecureContexts::Trustworthiness::NotTrustworthy)
+            requests_oac = false;
 
         // 4. Let agent be the result of obtaining a similar-origin window agent given navigationParams's origin,
         //    browsingContext's group, and requestsOAC.
@@ -567,6 +573,50 @@ bool CanonicalNavigable::is_ancestor_of(CanonicalNavigable const& potential_desc
     return false;
 }
 
+// https://html.spec.whatwg.org/multipage/interaction.html#fully-active-descendant-of-a-top-level-traversable-with-user-attention
+bool CanonicalNavigable::active_document_is_fully_active_descendant_of_a_top_level_traversable_with_user_attention() const
+{
+    // A Document d is a fully active descendant of a top-level traversable with user attention when d is fully active
+    // and d's node navigable's top-level traversable has user attention.
+    // NB: The process hosting the active document reports whether it is fully active. A lost document has no host, and
+    //     is not fully active whatever its host last reported.
+    if (!active_document().host())
+        return false;
+    return m_hosted_state.has_value() && m_hosted_state->active_document_is_fully_active && top_level_traversable().has_user_attention();
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#activation-notification
+void CanonicalNavigable::run_activation_notification_steps_for_active_document(HashTable<Web::HTML::CrossProcessId>& notified_document_ids) const
+{
+    auto const& document = active_document();
+
+    // 2. Let windows be « document's relevant global object ».
+    Vector<NonnullRefPtr<CanonicalDocument const>> windows { document };
+
+    // 3. Extend windows with the active window of each of document's ancestor navigables.
+    for (auto const* ancestor = parent(); ancestor; ancestor = ancestor->parent())
+        windows.append(ancestor->active_document());
+
+    // 4. Extend windows with the active window of each of document's descendant navigables, filtered to include only
+    //    those navigables whose active document's origin is same origin with document's origin.
+    for_each_in_subtree([&](CanonicalNavigable const& descendant) {
+        auto const& descendant_document = descendant.active_document();
+        if (descendant_document.origin().is_same_origin(document.origin()))
+            windows.append(descendant_document);
+        return IterationDecision::Continue;
+    });
+
+    // 5. For each window in windows:
+    // NB: The page hosting the window's document runs steps 5.1 and 5.2. Running them again for the same input changes
+    //     nothing, so a window already notified for it is skipped.
+    for (auto const& window : windows) {
+        if (notified_document_ids.set(window->id()) != HashSetResult::InsertedNewEntry)
+            continue;
+        if (auto const& host = window->host())
+            host->notify_about_user_activation(window->id());
+    }
+}
+
 // https://html.spec.whatwg.org/multipage/document-sequences.html#familiar-with
 // NB: Stated on the navigables whose active browsing contexts are compared, as in the renderer.
 bool CanonicalNavigable::is_familiar_with(CanonicalNavigable const& other) const
@@ -600,6 +650,78 @@ bool CanonicalNavigable::is_familiar_with(CanonicalNavigable const& other) const
 
     // 5. Return false.
     return false;
+}
+
+// https://html.spec.whatwg.org/multipage/document-sequences.html#the-rules-for-choosing-a-navigable
+CanonicalNavigable::ChosenTopLevelTraversable CanonicalNavigable::choose_a_new_top_level_traversable(WebContentPage& current_page, Utf16View name, bool no_opener, Optional<URL::URL> current_document_base_url, Web::HTML::CrossProcessId id, Web::HTML::CrossProcessId document_id)
+{
+    // NB: The branch in which the user agent creates a new top-level traversable. The renderer runs the rules up to it,
+    //     and runs the branch for its page of the traversable with the windowType returned here.
+    auto& current_navigable = *this;
+
+    // NB: sandboxingFlagSet is currentNavigable's active document's active sandboxing flag set.
+    auto sandboxing_flag_set = current_navigable.active_document().active_sandboxing_flag_set();
+
+    // 1. Consume user activation of currentNavigable's active window.
+    // NB: The UI process holds the activation of the input it delivered to the page hosting currentNavigable.
+    current_page.consume_transient_user_activation();
+
+    // 2. Set windowType to "new and unrestricted".
+    auto window_type = Web::HTML::WindowType::NewAndUnrestricted;
+
+    // 3. Let currentDocument be currentNavigable's active document.
+    auto& current_document = current_navigable.active_document();
+
+    // 4. If currentDocument's opener policy's value is "same-origin" or "same-origin-plus-COEP", and currentDocument's
+    //    origin is not same origin with currentDocument's relevant settings object's top-level origin, then:
+    // NB: A document whose top-level browsing context was discarded has no top-level origin to be same origin with.
+    auto top_level_origin = current_document.relevant_global_object().relevant_settings_object().top_level_origin();
+    if ((current_document.opener_policy().value == Web::HTML::OpenerPolicyValue::SameOrigin || current_document.opener_policy().value == Web::HTML::OpenerPolicyValue::SameOriginPlusCOEP)
+        && (!top_level_origin.has_value() || !current_document.origin().is_same_origin(*top_level_origin))) {
+        // 1. Set noopener to true.
+        no_opener = true;
+
+        // 2. Set name to "_blank".
+        name = u"_blank"sv;
+
+        // 3. Set windowType to "new with no opener".
+        window_type = Web::HTML::WindowType::NewWithNoOpener;
+    }
+    // NOTE: In the presence of an opener policy, nested documents that are cross-origin with their top-level browsing
+    //       context's active document always set noopener to true.
+
+    // 5. Let targetName be the empty string.
+    Utf16String target_name;
+
+    // 6. If name is not an ASCII case-insensitive match for "_blank", then set targetName to name.
+    if (!name.equals_ignoring_ascii_case(u"_blank"sv))
+        target_name = Utf16String::from_utf16(name);
+
+    // 7. If noopener is true, then set chosen to the result of creating a new top-level traversable given null and targetName.
+    // 8. Otherwise:
+    //    1. Set chosen to the result of creating a new top-level traversable given currentNavigable's active browsing
+    //       context, targetName, and currentNavigable.
+    // NB: The about:blank document created with an opener takes the opener's document base URL, which the renderer
+    //     sends, as the UI process does not hold it.
+    auto opener = no_opener ? Optional<CanonicalNavigable&> {} : current_navigable;
+    auto initial_history_entry = Web::HTML::create_initial_session_history_entry_descriptor(Application::the().allocate_ui_process_cross_process_id(), opener.has_value() ? move(current_document_base_url) : Optional<URL::URL> {}, move(target_name));
+    auto& chosen = CanonicalTraversable::create_a_new_top_level_traversable(id, opener, move(initial_history_entry), document_id);
+
+    //    2. If sandboxingFlagSet's sandboxed navigation browsing context flag is set, then set chosen's active browsing
+    //       context's one permitted sandboxed navigator to currentNavigable's active browsing context.
+    // AD-HOC: For a noopener popup too. See https://github.com/whatwg/html/issues/12297
+    if (has_flag(sandboxing_flag_set, Web::HTML::SandboxingFlagSet::SandboxedNavigation))
+        chosen.active_browsing_context().set_the_one_permitted_sandboxed_navigator(current_navigable.active_browsing_context());
+
+    // 9. If sandboxingFlagSet's sandbox propagates to auxiliary browsing contexts flag is set, then all the flags that are
+    //    set in sandboxingFlagSet must be set in chosen's active browsing context's popup sandboxing flag set.
+    if (has_flag(sandboxing_flag_set, Web::HTML::SandboxingFlagSet::SandboxPropagatesToAuxiliaryBrowsingContexts))
+        chosen.active_browsing_context().set_popup_sandboxing_flag_set(sandboxing_flag_set);
+
+    // 10. Set chosen's is created by web content to true.
+    chosen.set_is_created_by_web_content(true);
+
+    return { chosen, window_type };
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#allowed-to-navigate
@@ -639,7 +761,9 @@ bool CanonicalNavigable::allowed_by_sandboxing_to_navigate(CanonicalNavigable co
 
     // 4. If target is a top-level traversable:
     if (target.is_top_level_traversable()) {
-        // FIXME: 1. If source is the one permitted sandboxed navigator of target, then return true.
+        // 1. If source is the one permitted sandboxed navigator of target, then return true.
+        if (target.active_browsing_context().the_one_permitted_sandboxed_navigator() == &source.active_browsing_context())
+            return true;
 
         // 2. If sourceSnapshotParams's sandboxing flags's sandboxed navigation browsing context flag is set, then return false.
         if (has_flag(source_snapshot_params.sandboxing_flags, Web::HTML::SandboxingFlagSet::SandboxedNavigation))
@@ -1038,6 +1162,9 @@ void CanonicalNavigable::abandon_populated_document(NonnullRefPtr<CanonicalDocum
 void CanonicalNavigable::place_populated_document(CanonicalDocument& document, WebContentPage& page)
 {
     document.set_host(page);
+    // A provisional host snapshots its container before population. Refresh it before giving that host a viewport.
+    if (parent() && m_hosted_state.has_value())
+        page.async_update_local_root_container_state(id(), m_hosted_state->container);
     if (auto* bidi = WebDriverBiDi::the())
         bidi->push_session_state_for_client(page.client());
     send_viewport_to_host();
@@ -1065,7 +1192,7 @@ void CanonicalNavigable::discard_pending_host()
 
 void CanonicalNavigable::discard_pending_host(WebContentPage const& page)
 {
-    if (active_document().host() == &page)
+    if (page.hosts_active_document_of(*this))
         return;
     Vector<NonnullRefPtr<CanonicalDocumentState>> document_states;
     for_each_populated_document_state([&](CanonicalDocumentState& document_state) {
@@ -1158,8 +1285,14 @@ void CanonicalNavigable::update_container_state(Web::HTML::ReplicatedContainerSt
         state.document_permissions_policy = m_container_document->permissions_policy();
     }
     m_hosted_state->container = state;
-    if (has_remote_host())
-        remote_host().async_update_local_root_container_state(id(), move(state));
+    RefPtr<WebContentPage> active_host = has_remote_host() ? &remote_host() : nullptr;
+    if (active_host)
+        active_host->async_update_local_root_container_state(id(), state);
+    // Viewport updates also reach provisional hosts. Keep their container snapshot current before they activate.
+    for_each_pending_host([&](WebContentPage& host) {
+        if (&host != active_host.ptr())
+            host.async_update_local_root_container_state(id(), state);
+    });
     send_replicated_state();
 }
 
@@ -1192,6 +1325,13 @@ Optional<Web::HTML::ReplicatedNavigableState> CanonicalNavigable::replicated_sta
             opener_navigable_id = opener->id();
     }
 
+    // So is the one permitted sandboxed navigator.
+    Optional<Web::HTML::CrossProcessId> one_permitted_sandboxed_navigator_navigable_id;
+    if (auto const* navigator_browsing_context = browsing_context.the_one_permitted_sandboxed_navigator()) {
+        if (auto const* navigator = CanonicalTraversable::navigable_with_active_browsing_context(*navigator_browsing_context))
+            one_permitted_sandboxed_navigator_navigable_id = navigator->id();
+    }
+
     Optional<u64> browsing_context_group_id;
     if (auto group = traversable.active_browsing_context().group())
         browsing_context_group_id = group->id();
@@ -1210,6 +1350,7 @@ Optional<Web::HTML::ReplicatedNavigableState> CanonicalNavigable::replicated_sta
         .opener_policy = active_document().opener_policy(),
         .active_browsing_context_is_auxiliary = browsing_context.is_auxiliary(),
         .opener_navigable_id = opener_navigable_id,
+        .one_permitted_sandboxed_navigator_navigable_id = one_permitted_sandboxed_navigator_navigable_id,
         .active_document_is_completely_loaded = active_document().is_completely_loaded(),
         .is_closing = hosted_state.is_closing,
         .container = hosted_state.container,

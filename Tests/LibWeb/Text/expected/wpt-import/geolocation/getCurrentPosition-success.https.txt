@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	getCurrentPosition called with success and error callbacks
+Pass	Error callback is nullable for getCurrentPosition().

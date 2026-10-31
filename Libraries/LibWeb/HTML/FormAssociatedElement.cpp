@@ -880,11 +880,20 @@ WebIDL::ExceptionOr<void> FormAssociatedTextControlElement::select()
     // 1. If this element is an input element, and either select() does not apply to this element
     //    or the corresponding control has no selectable text, return.
     auto& html_element = text_control_to_html_element();
-    if (is<HTMLInputElement>(html_element)) {
-        auto& input_element = static_cast<HTMLInputElement&>(html_element);
-        if (!input_element.select_applies() || !input_element.has_selectable_text())
-            return {};
-    }
+    auto select_does_not_apply = [&] {
+        auto* input_element = as_if<HTMLInputElement>(html_element);
+        return input_element && (!input_element->select_applies() || !input_element->has_selectable_text());
+    };
+    if (select_does_not_apply())
+        return {};
+
+    // INTEROP: select() also focuses the control, without scrolling it into view. Sites rely on this to focus an
+    //          input, e.g. Instagram's search box.
+    html_element.focus({ .prevent_scroll = true });
+
+    // AD-HOC: Focus event handlers may have changed the control's type, so check step 1 again.
+    if (select_does_not_apply())
+        return {};
 
     // 2. Set the selection range with 0 and infinity.
     set_the_selection_range(0, NumericLimits<WebIDL::UnsignedLong>::max());
@@ -1330,7 +1339,7 @@ void FormAssociatedTextControlElement::handle_insert(Utf16FlyString const& input
     if (first_is_one_of(input_type, UIEvents::InputTypes::insertText, UIEvents::InputTypes::insertCompositionText, UIEvents::InputTypes::insertFromPaste, UIEvents::InputTypes::insertReplacementText))
         data_for_input_event = Utf16String::from_utf16(data_for_insertion);
 
-    did_edit_text_node(input_type, data_for_input_event);
+    did_edit_text_node(input_type, data_for_input_event, old_value);
     html_element.document().spell_check_controller().did_user_edit(html_element);
     html_element.document().writing_suggestion_controller().did_user_edit(html_element);
     reveal_cursor_after_edit();
@@ -1420,7 +1429,7 @@ void FormAssociatedTextControlElement::handle_delete(Utf16FlyString const& input
     }
     history->end_recording();
 
-    did_edit_text_node(input_type, {});
+    did_edit_text_node(input_type, {}, old_value);
     html_element.document().spell_check_controller().did_user_edit(html_element);
     html_element.document().writing_suggestion_controller().did_user_edit(html_element);
     reveal_cursor_after_edit();

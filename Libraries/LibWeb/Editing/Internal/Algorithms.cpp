@@ -3999,7 +3999,16 @@ void push_down_values(Utf16FlyString const& command, GC::Ref<DOM::Node> node, Op
 
     // 10. If the effective command value of command is not loosely equivalent to new value on the parent of the last
     //     member of ancestor list, and new value is not null, abort this algorithm.
-    if (new_value.has_value() && ancestor_list.last()->parent()
+    // INTEROP: Replace simple inline font size wrappers even when no ancestor already has the requested size.
+    //          Keep container styles intact.
+    auto can_replace_inline_font_size = command == CommandNames::fontSize
+        && all_of(ancestor_list, [](auto const& ancestor) {
+               if (!is_simple_modifiable_element(ancestor))
+                   return false;
+               auto display = resolved_display(ancestor);
+               return display.has_value() && display->is_inline_outside() && display->is_flow_inside();
+           });
+    if (!can_replace_inline_font_size && new_value.has_value() && ancestor_list.last()->parent()
         && !values_are_loosely_equivalent(command, optional_utf16_view(effective_command_value(ancestor_list.last()->parent(), command)), new_value))
         return;
 
@@ -4061,11 +4070,9 @@ Vector<RecordedOverride> record_current_overrides(DOM::Document const& document)
 
     // 3. For each command in the list "bold", "italic", "strikethrough", "subscript", "superscript", "underline", in
     //    order: if there is a state override for command, add (command, command's state override) to overrides.
-    for (auto const& command : { CommandNames::bold, CommandNames::italic, CommandNames::strikethrough,
-             CommandNames::subscript, CommandNames::superscript, CommandNames::underline }) {
-        if (auto override = document.command_state_override(command); override.has_value())
-            overrides.empend(command, override.release_value());
-    }
+    // INTEROP: Preserve the order in which inline styles were enabled so reconstructed typing style has the same nesting.
+    for (auto const& entry : document.command_state_overrides())
+        overrides.empend(entry.key, entry.value);
 
     // 4. For each command in the list "fontName", "fontSize", "foreColor", "hiliteColor", in order: if there is a value
     //    override for command, add (command, command's value override) to overrides.
@@ -4289,8 +4296,20 @@ void restore_states_and_values(DOM::Document& document, Vector<RecordedOverride>
 
     // 2. If node is not null,
     if (node) {
+        // INTEROP: Applying a state wraps the previously styled content. Reconstruct the innermost state first so
+        //          earlier enabled styles remain outside later ones, while font values keep their existing order.
+        Vector<RecordedOverride, 6> state_overrides;
+        for (auto const& override : overrides) {
+            if (override.value.has<bool>())
+                state_overrides.append(override);
+        }
+        auto remaining_state_overrides = state_overrides.size();
+
         // then for each (command, override) pair in overrides, in order:
         for (auto override : overrides) {
+            if (override.value.has<bool>())
+                override = state_overrides[--remaining_state_overrides];
+
             // 1. If override is a boolean, and queryCommandState(command) returns something different from override,
             //    take the action for command, with value equal to the empty string.
             if (override.value.has<bool>() && MUST(document.query_command_state(override.command)) != override.value.get<bool>()) {
@@ -5302,7 +5321,8 @@ bool values_are_loosely_equivalent(Utf16FlyString const& command, Optional<Utf16
 GC::Ptr<DOM::Node> wrap(
     GC::RootVector<GC::Ref<DOM::Node>> node_list,
     Function<bool(GC::Ref<DOM::Node>)> sibling_criteria,
-    Function<GC::Ptr<DOM::Node>()> new_parent_instructions)
+    Function<GC::Ptr<DOM::Node>()> new_parent_instructions,
+    PreservePrecedingLineBreak preserve_preceding_line_break)
 {
     VERIFY(!node_list.is_empty());
 
@@ -5479,7 +5499,10 @@ GC::Ptr<DOM::Node> wrap(
     }
 
     // 16. Remove extraneous line breaks from new parent.
-    remove_extraneous_line_breaks_from_a_node(*new_parent);
+    // INTEROP: Inserting a paragraph keeps the line break before its newly wrapped content.
+    if (preserve_preceding_line_break == PreservePrecedingLineBreak::No)
+        remove_extraneous_line_breaks_before_node(*new_parent);
+    remove_extraneous_line_breaks_at_the_end_of_node(*new_parent);
 
     // 17. Return new parent.
     return new_parent;

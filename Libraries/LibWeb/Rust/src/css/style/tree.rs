@@ -43,6 +43,7 @@ pub(super) struct ContainerQueryInputRow {
     pub(super) style_record: u64,
     pub(super) names: Vec<Vec<u16>>,
     pub(super) is_size_container: bool,
+    pub(super) size_queries_available: bool,
     pub(super) is_inline_size_container: bool,
     pub(super) is_scroll_state_container: bool,
     pub(super) writing_mode: u8,
@@ -1697,7 +1698,10 @@ impl StyleNodeTree {
         if let Some(slot) = self.assigned_slot_of(node) {
             return Some(slot);
         }
-        let parent = self.parent(node)?;
+        let parent = match node.text_index() {
+            Some(_) => self.text_parent(node)?,
+            None => self.parent(node)?,
+        };
         Some(self.host_of(parent).unwrap_or(parent))
     }
 

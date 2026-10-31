@@ -289,12 +289,12 @@ impl RetainedState {
             else {
                 return Some(MonospaceRecascade::AwaitsFont(request));
             };
-            // The ancestor's own font is the one being recascaded; its line height is the one it
-            // inherits, and the initial one is zero.
+            // NB: The ancestor's own font is the one being recascaded; its line height is the one it
+            //     inherits, or the initial font's normal line height when there is no parent.
             let (line_height, inherited_font_metrics_depend_on_viewport_metrics) = index
                 .checked_sub(1)
                 .and_then(|parent| views[parent].1.as_ref())
-                .map_or((0.0, false), |view| {
+                .map_or((inputs.initial_line_height, false), |view| {
                     let font = unsafe {
                         view.payloads[STYLE_GROUP_INDEX_FONT]
                             .cast::<crate::css::computed_value_types::FontValues>()
@@ -345,7 +345,7 @@ impl RetainedState {
                 zoom: if applies_zoom { zoom } else { 1.0 },
             };
             // The ancestor's container-relative font size resolves against its own containers.
-            self.container_unit_bases(*ancestor_node).apply_to(&mut context);
+            self.container_unit_bases(*ancestor_node, false).apply_to(&mut context);
             batch = recascade_font_size_batch(
                 views.len(),
                 value_at,
@@ -497,7 +497,7 @@ impl RetainedState {
             zoom: 1.0,
         };
         if reads_container_units {
-            self.container_unit_bases(node).apply_to(&mut length);
+            self.container_unit_bases(node, false).apply_to(&mut length);
         }
         // NB: Remaining-phase computation uses the current box-type inputs and compares its
         //     required driver outputs with the retained record below. Font-phase and line-height
@@ -701,11 +701,10 @@ impl RetainedState {
             .or_refused()
             .inspect_err(|_| self.counters.bump(Counter::EngineComputedRecordBailValue))?;
         let resource_contexts = store.drive_resource_contexts(self);
-        // A pseudo-element's container-relative lengths resolve against its originating
-        // element's query containers.
+        // NB: Include the originating element when selecting a pseudo-element's query containers.
         let container_unit_bases = store
             .reads_container_units(self)
-            .then(|| self.container_unit_bases(subject.target.node()));
+            .then(|| self.container_unit_bases(subject.target.node(), subject.target.is_pseudo()));
         let document_base_url = &self.document_resource_contexts.document_base_url;
         let store = store.view(self);
         use crate::css::computed_value_types::{STYLE_GROUP_INDEX_FONT, STYLE_GROUP_INDEX_INHERITED_BOX};
@@ -798,7 +797,7 @@ impl RetainedState {
             x_height: inputs.initial_font_x_height,
             cap_height: inputs.initial_font_cap_height,
             zero_advance: inputs.initial_font_zero_advance,
-            line_height: 0.0,
+            line_height: inputs.initial_line_height,
         };
         let (parent_metrics, parent_font_metrics_depend_on_viewport_metrics, parent_line_height_used) =
             match &parent_view {
@@ -820,7 +819,7 @@ impl RetainedState {
                         parent_font.line_height_used.to_double(),
                     )
                 }
-                None => (initial_metrics, false, 0.0),
+                None => (initial_metrics, false, inputs.initial_line_height),
             };
         let snapshot = match &parent_view {
             Some(parent_view) => {
@@ -1166,6 +1165,7 @@ impl RetainedState {
                     ..remaining_length
                 },
                 u8::try_from(effective_color_scheme).unwrap_or(inputs.preferred_color_scheme),
+                target.is_pseudo(),
             );
 
             // The initial environment already used this context. Resolve again only if

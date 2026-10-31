@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <LibAudio/Audibility.h>
+
 #include <QHash>
 #include <QPushButton>
 #include <QSet>
@@ -302,7 +304,12 @@ private:
     QPointer<Tab> m_player_tab;
     bool m_mini_player_update_scheduled { false };
     bool m_player_tab_had_window { false };
-    bool m_player_playing { false }; // Known from its sound, except while it's muted.
+    bool m_player_playing { false }; // What the player was last asked to do, or its sound last changed to.
+    // The tab's sound as the player last saw it: the player takes a change of it (the page played or paused by
+    // itself), not the sound itself, which goes on a few seconds after the media stops.
+    Optional<Audio::Audibility> m_player_seen_audibility;
+    // A tab whose Picture-in-Picture was closed with its video stopped: no player for it while its sound fades.
+    QPointer<Tab> m_player_dismissed_tab;
     bool m_player_waits_for_window_close { false };
 
     QWidget* m_top_strip { nullptr };

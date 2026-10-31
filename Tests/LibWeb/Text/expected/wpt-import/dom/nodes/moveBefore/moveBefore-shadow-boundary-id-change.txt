@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Changing the id of an element moved into a shadow root only updates the shadow root's id map
+Pass	Changing the id of an element moved out of a shadow root updates the document's id and name maps

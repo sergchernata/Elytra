@@ -41,6 +41,7 @@ type Result<T> = std::result::Result<T, CalcParseError>;
 #[derive(Clone, Copy)]
 pub(crate) struct CalcParserContext<'a> {
     pub percentages_resolve_as: Option<u8>,
+    pub allow_percentages: bool,
     pub property: u16,
     pub random_function_index: Option<&'a RandomFunctionIndex>,
     pub allowed_color_channels: u64,
@@ -55,6 +56,7 @@ impl CalcParserContext<'_> {
     fn for_test(percentages_resolve_as: Option<u8>) -> Self {
         Self {
             percentages_resolve_as,
+            allow_percentages: true,
             property: 0,
             random_function_index: None,
             allowed_color_channels: 0,
@@ -180,6 +182,11 @@ impl<'a> CalculationParser<'a> {
                 })))
             }
             ComponentKind::Token(ParserTokenKind::Percentage { value, .. }) => {
+                // https://drafts.csswg.org/css-values-4/#calc-context
+                // Math functions always inherit the calculation context from wherever they’re used.
+                if !self.context.allow_percentages {
+                    return Err(CalcParseError::Invalid);
+                }
                 Ok(Arc::new(CalcNode::Numeric(CalcNumericValue::Percentage(*value))))
             }
             ComponentKind::Token(ParserTokenKind::Dimension { value, unit, .. }) => {
@@ -439,7 +446,7 @@ pub(crate) fn parse_a_calc_function_node(
                     if !types.iter().all(accepts_dimension_or_percentage) {
                         return Err(CalcParseError::Invalid);
                     }
-                    require_same(&types)?;
+                    require_consistent(&types)?;
                 }
                 _ => unreachable!(),
             }
@@ -462,7 +469,42 @@ pub(crate) fn parse_a_calc_function_node(
                 },
             })
         }
-        MathFunction::Clamp | MathFunction::Progress => {
+        MathFunction::Clamp => {
+            if arguments.len() != 3 {
+                return Err(CalcParseError::Invalid);
+            }
+            // https://drafts.csswg.org/css-values-4/#funcdef-clamp
+            // Either the min or max calculations (or even both) can instead be the keyword none, which indicates
+            // the value is not clamped from that side.
+            let parse_bound = |values: &[ComponentValue]| {
+                let mut significant = values.iter().filter(|value| !value.is_whitespace());
+                if significant
+                    .next()
+                    .and_then(ComponentValue::ident)
+                    .is_some_and(|ident| equals_ascii_case_insensitive(ident, b"none"))
+                    && significant.next().is_none()
+                {
+                    Ok(None)
+                } else {
+                    parse_argument(values, context).map(Some)
+                }
+            };
+            let min = parse_bound(arguments[0])?;
+            let center = parse_argument(arguments[1], context)?;
+            let max = parse_bound(arguments[2])?;
+            let types = min
+                .iter()
+                .chain(std::iter::once(&center))
+                .chain(max.iter())
+                .map(|node| argument_type(node, percentages_resolve_as))
+                .collect::<Result<Vec<_>>>()?;
+            if !types.iter().all(accepts_dimension_or_percentage) {
+                return Err(CalcParseError::Invalid);
+            }
+            require_consistent(&types)?;
+            Arc::new(CalcNode::Clamp { min, center, max })
+        }
+        MathFunction::Progress => {
             let nodes = parse_fixed_arguments(&arguments, 3, context)?;
             let types = nodes
                 .iter()
@@ -472,19 +514,11 @@ pub(crate) fn parse_a_calc_function_node(
                 return Err(CalcParseError::Invalid);
             }
             require_consistent(&types)?;
-            Arc::new(if function == MathFunction::Clamp {
-                CalcNode::Clamp {
-                    min: nodes[0].clone(),
-                    center: nodes[1].clone(),
-                    max: nodes[2].clone(),
-                }
-            } else {
-                CalcNode::Progress {
-                    no_clamp: progress_no_clamp,
-                    progress: nodes[0].clone(),
-                    from: nodes[1].clone(),
-                    to: nodes[2].clone(),
-                }
+            Arc::new(CalcNode::Progress {
+                no_clamp: progress_no_clamp,
+                progress: nodes[0].clone(),
+                from: nodes[1].clone(),
+                to: nodes[2].clone(),
             })
         }
         MathFunction::Log => {
@@ -785,6 +819,7 @@ mod tests {
         let random_function_index = RandomFunctionIndex::new(4);
         let context = CalcParserContext {
             percentages_resolve_as: None,
+            allow_percentages: true,
             property: 1,
             random_function_index: Some(&random_function_index),
             allowed_color_channels: 0,

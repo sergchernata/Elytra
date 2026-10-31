@@ -600,7 +600,7 @@ pub(crate) fn node_applies_text_overflow_ellipsis(style: Option<ComputedValuesVi
 }
 
 pub(crate) fn has_ancestor_fact(data: &NodeData, fact: AncestorFact) -> bool {
-    data.ancestor_facts.get() & fact as u8 != 0
+    data.ancestor_facts & fact as u8 != 0
 }
 
 /// The construction facts a test row is built with, as the word the style mirror publishes them in.
@@ -988,7 +988,7 @@ impl<'pass> NodeFacts<'pass> {
                 aspect_ratio: aspect_ratio
                     .map(|(numerator, denominator)| (numerator.raw_value(), denominator.raw_value())),
             };
-            self.callbacks.scratch().note_host_findings(|findings| {
+            self.callbacks.note_host_findings(|findings| {
                 findings.document_svg_root_natural_size = Some((self.node, natural_size));
             });
         }

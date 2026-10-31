@@ -14,6 +14,7 @@
 #include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/Scripting/Agent.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -56,11 +57,12 @@ RustInterfaceCell* rust_interface_cell_of_wrapper(JS::Object& object, JSHostClas
 
 bool rust_interface_object_implements_interface(JS::Object const& object, StringView interface_name)
 {
-    if (!JS::is_host_instance_of(object, web_bindings_rust_interface_wrapper_host_class))
+    auto const* wrapper = as_if<JS::HostObject>(object);
+    if (!wrapper || !JS::host_data_of(object))
         return false;
-    // NB: The class of the wrappers of an interface has the name of the interface, and the class of the wrappers of
-    //     the interface that it inherits from as its parent.
-    for (auto const* host_class = &as<JS::HostObject>(object).host_class(); host_class != &web_bindings_rust_interface_wrapper_host_class; host_class = host_class->parent) {
+    // NB: The host class of an interface's wrappers is named after it, and chains through the parent interfaces'
+    //     classes up to the class of every Rust interface, or else to that of a C++ interface it inherits from.
+    for (auto const* host_class = &wrapper->host_class(); host_class && host_class != &web_bindings_rust_interface_wrapper_host_class; host_class = host_class->parent) {
         if (StringView { host_class->name, host_class->name_length } == interface_name)
             return true;
     }
@@ -95,6 +97,9 @@ JSValue web_bindings_value_for_world(void* realm, JSValue value);
 void web_bindings_queue_a_microtask(void* realm, JSObject* function);
 void web_bindings_run_in_parallel(void* realm, void* cell, void (*steps)(JSVM*, void*));
 void web_bindings_queue_a_task(void* realm, u8 task_source, void* cell, void (*steps)(JSVM*, void*));
+u64 web_bindings_queue_a_global_task(void* realm, u8 task_source, void* cell, void (*steps)(JSVM*, void*));
+void web_bindings_remove_tasks(void* realm, ReadonlySpan<u64> task_ids);
+u64 web_bindings_currently_running_task(void* realm);
 void* web_bindings_create_callback_function(JSObject* callable, bool returns_promise);
 JSCompletion web_bindings_invoke_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments);
 void* web_bindings_invoke_promise_callback_function(void* callback, bool has_this_value, JSValue this_value, ReadonlySpan<JSValue> arguments);
@@ -354,6 +359,7 @@ void web_bindings_run_in_parallel(void* realm, void* cell, void (*steps)(JSVM*, 
 // NB: The task sources of the Rust bindings' TaskSource.
 static_assert(to_underlying(HTML::Task::Source::Unspecified) == 0);
 static_assert(to_underlying(HTML::Task::Source::Networking) == 3);
+static_assert(to_underlying(HTML::Task::Source::FileReading) == 13);
 
 void web_bindings_queue_a_task(void* realm, u8 task_source, void* cell, void (*steps)(JSVM*, void*))
 {
@@ -363,6 +369,31 @@ void web_bindings_queue_a_task(void* realm, u8 task_source, void* cell, void (*s
         HTML::TemporaryExecutionContext execution_context { js_realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
         steps(JS::HostABI::vm_to_abi(js_realm->vm()), cell);
     }));
+}
+
+u64 web_bindings_queue_a_global_task(void* realm, u8 task_source, void* cell, void (*steps)(JSVM*, void*))
+{
+    GC::Ref<JS::Realm> js_realm = *static_cast<JS::Realm*>(realm);
+    // NB: The task's captures, which the collector scans, keep the cell alive until the steps run.
+    auto task_id = HTML::queue_global_task(static_cast<HTML::Task::Source>(task_source), js_realm->global_object(), GC::create_function(GC::Heap::the(), [js_realm, cell, steps] {
+        steps(JS::HostABI::vm_to_abi(js_realm->vm()), cell);
+    }));
+    return task_id.value();
+}
+
+void web_bindings_remove_tasks(void* realm, ReadonlySpan<u64> task_ids)
+{
+    auto& event_loop = *HTML::relevant_agent(static_cast<JS::Realm*>(realm)->global_object()).event_loop;
+    event_loop.task_queue().remove_tasks_matching([&](auto const& task) {
+        return task_ids.contains_slow(task.id().value());
+    });
+}
+
+u64 web_bindings_currently_running_task(void* realm)
+{
+    auto& event_loop = *HTML::relevant_agent(static_cast<JS::Realm*>(realm)->global_object()).event_loop;
+    VERIFY(event_loop.currently_running_task());
+    return event_loop.currently_running_task()->id().value();
 }
 
 void* web_bindings_create_callback_function(JSObject* callable, bool returns_promise)

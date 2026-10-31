@@ -36,6 +36,10 @@ class MediaDevices final : public DOM::EventTarget {
     GC_DECLARE_ALLOCATOR(MediaDevices);
 
 public:
+    // Ends every live track once the document may no longer use the microphone.
+    void end_tracks_without_permission();
+    void track_was_cloned(Badge<MediaStreamTrack>, MediaStreamTrack& clone);
+
     [[nodiscard]] static GC::Ref<MediaDevices> create(HTML::Window&);
 
     MediaTrackSupportedConstraints get_supported_constraints();

@@ -10,6 +10,7 @@
 
 #include <AK/ByteBuffer.h>
 #include <AK/Function.h>
+#include <LibGC/WeakHashSet.h>
 #include <LibWeb/Bindings/BaseAudioContext.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/WebAudio/AnalyserNode.h>
@@ -66,7 +67,7 @@ public:
 
     GC::Ref<AudioDestinationNode> destination() const { return *m_destination; }
     float sample_rate() const { return m_sample_rate; }
-    virtual double current_time() const { return m_current_time; }
+    virtual double current_time() const { return 0; }
     GC::Ref<AudioListener> listener() const
     {
         VERIFY(m_listener);
@@ -128,9 +129,8 @@ public:
     NonnullRefPtr<ControlMessageQueue> control_message_queue() const { return m_control_message_queue; }
 
     void add_playing_source(GC::Ref<AudioNode>);
+    void add_script_processor_node(ScriptProcessorNode&);
     void handle_ended_sources(ReadonlySpan<NodeID>);
-
-    void set_current_time(double current_time) { m_current_time = current_time; }
 
     NodeID next_node_id(Badge<AudioNode>) { return ++m_next_node_id; }
 
@@ -157,7 +157,6 @@ private:
     u64 m_next_node_id { 0 };
 
     float m_sample_rate { 0 };
-    double m_current_time { 0 };
 
     GC::Ptr<AudioListener> m_listener;
     GC::Ref<DOM::EventTarget> m_global_object;
@@ -174,6 +173,7 @@ private:
     NonnullRefPtr<ControlMessageQueue> m_control_message_queue;
 
     HashMap<NodeID, GC::Ref<AudioNode>> m_playing_sources;
+    GC::WeakHashSet<ScriptProcessorNode> m_script_processor_nodes;
 };
 
 void resolve_audio_buffer_promise(JS::Realm&, WebIDL::Promise const&, AudioBuffer&);

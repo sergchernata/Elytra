@@ -1,0 +1,50 @@
+Harness status: OK
+
+Found 45 tests
+
+45 Pass
+Pass	#tests .abspos 1
+Pass	#tests .abspos 2
+Pass	#tests .abspos 3
+Pass	#tests .abspos 4
+Pass	#tests .abspos 5
+Pass	#tests .abspos 6
+Pass	#tests .abspos 7
+Pass	#tests .abspos 8
+Pass	#tests .abspos 9
+Pass	#tests .abspos 10
+Pass	#tests .abspos 11
+Pass	#tests .abspos 12
+Pass	#tests .abspos 13
+Pass	#tests .abspos 14
+Pass	#tests .abspos 15
+Pass	#tests .abspos 16
+Pass	#tests .abspos 17
+Pass	#tests .abspos 18
+Pass	#tests .abspos 19
+Pass	#tests .abspos 20
+Pass	#tests .abspos 21
+Pass	#tests .abspos 22
+Pass	#tests .abspos 23
+Pass	#tests .abspos 24
+Pass	#tests .abspos 25
+Pass	#tests .abspos 26
+Pass	#tests .abspos 27
+Pass	#tests .abspos 28
+Pass	#tests .abspos 29
+Pass	#tests .abspos 30
+Pass	#tests .abspos 31
+Pass	#tests .abspos 32
+Pass	#tests .abspos 33
+Pass	#tests .abspos 34
+Pass	#tests .abspos 35
+Pass	#tests .abspos 36
+Pass	#tests .abspos 37
+Pass	#tests .abspos 38
+Pass	#tests .abspos 39
+Pass	#tests .abspos 40
+Pass	#tests .abspos 41
+Pass	#tests .abspos 42
+Pass	#tests .abspos 43
+Pass	#tests .abspos 44
+Pass	#tests .abspos 45

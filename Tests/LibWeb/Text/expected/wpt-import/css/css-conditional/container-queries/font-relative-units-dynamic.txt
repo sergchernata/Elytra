@@ -1,0 +1,17 @@
+Harness status: OK
+
+Found 12 tests
+
+12 Pass
+Pass	em units respond to changes
+Pass	rem units respond to changes
+Pass	ex units respond to changes
+Pass	rex units respond to changes
+Pass	ch units respond to changes
+Pass	rch units respond to changes
+Pass	lh units respond to changes
+Pass	rlh units respond to changes
+Pass	ic units respond to changes
+Pass	ric units respond to changes
+Pass	cap units respond to changes
+Pass	rcap units respond to changes

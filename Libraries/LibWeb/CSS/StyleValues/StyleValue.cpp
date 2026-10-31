@@ -332,10 +332,6 @@ bool StyleValue::equals(StyleValue const& other) const
         // The value of a pending-substitution value is unknown, so they never compare equal
         // (not even to themselves).
         return false;
-    case Type::Unresolved:
-        // Unresolved values compare by their normalized comparison text (and attr taint), not
-        // by the raw source text and cached parse state the data also carries.
-        return as_unresolved().equals(other);
     case Type::Calculated:
         // Calculations compare by tree structure alone; the data also carries parse-context
         // fields (resolved type, accepted ranges) that must not affect equality.
@@ -501,6 +497,11 @@ GC::Ref<CSSStyleValue> StyleValue::reify(Utf16FlyString const& associated_proper
         return as_custom_ident().reify(associated_property);
     case Type::Display:
         return as_display().reify(associated_property);
+    case Type::Easing:
+        // NB: Preserve authored step keywords until computation canonicalizes them to steps().
+        if (m_value->easing.is_keyword)
+            return CSSKeywordValue::create(m_value->easing.step_position == to_underlying(StepPosition::Start) ? "step-start"_utf16_fly_string : "step-end"_utf16_fly_string);
+        break;
     case Type::Integer:
         return as_integer().reify(associated_property);
     case Type::Keyword:

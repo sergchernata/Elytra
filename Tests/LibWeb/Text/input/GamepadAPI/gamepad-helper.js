@@ -1,10 +1,20 @@
 (() => {
+    // A page learns of gamepads only once it uses them and the user then interacts with one.
+    globalThis.startUsingGamepads = () => {
+        navigator.getGamepads();
+    };
+
     globalThis.pumpGamepadEvents = () => {
         internals.pumpGamepadEvents();
         return new Promise(resolve => {
             setTimeout(() => resolve(), 0);
         });
     };
+
+    // The activation of a gamepad user gesture comes over another connection than the pumped gamepad state, so it can
+    // arrive after it.
+    globalThis.waitForUserActivation = (targetWindow = window) =>
+        waitForCondition(() => targetWindow.navigator.userActivation.isActive);
 
     globalThis.getStringifiedGamepads = () => {
         const gamepads = navigator.getGamepads().map(gamepad => ({

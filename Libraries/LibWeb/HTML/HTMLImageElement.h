@@ -146,6 +146,7 @@ private:
     virtual void finalize() override;
 
     virtual void adopted_from(DOM::Document&) override;
+    virtual void inserted() override;
     virtual void moved_from(IsSubtreeRoot, GC::Ptr<DOM::Node> old_ancestor) override;
     virtual void removed_from(IsSubtreeRoot, DOM::Node* old_ancestor, DOM::Node& old_root) override;
 
@@ -161,6 +162,7 @@ private:
 
     void handle_failed_fetch();
     void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, Utf16View url_string, Utf16View previous_url);
+    void stop_delaying_the_load_event_for_aborted_requests();
 
     void create_alt_text_shadow_tree();
     void remove_alt_text_shadow_tree();
@@ -169,6 +171,7 @@ private:
     void record_box_kind();
 
     virtual void decoded_image_data_did_update() override;
+    virtual bool decoded_image_data_may_be_rendered() const override { return has_layout_box(); }
 
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;
 

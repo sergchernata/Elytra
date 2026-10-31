@@ -1,0 +1,7 @@
+Harness status: OK
+
+Found 2 tests
+
+2 Pass
+Pass	Rendering is blocked before render-blocking resources are loaded
+Pass	Parser-inserted render-blocking module script is evaluated

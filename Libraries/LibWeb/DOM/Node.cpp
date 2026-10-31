@@ -17,6 +17,7 @@
 #include <LibGC/ConservativeVector.h>
 #include <LibGC/DeferGC.h>
 #include <LibGC/Heap.h>
+#include <LibGC/RootVector.h>
 #include <LibJS/Runtime/ExternalMemory.h>
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Bindings/Node.h>
@@ -83,6 +84,7 @@
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
+#include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/SimilarOriginWindowAgent.h>
@@ -1053,7 +1055,7 @@ static void run_post_connection_steps(Nodes const& nodes)
     //       post-connection steps while we’re traversing the node tree. This is because the post-connection steps can
     //       modify the tree’s structure, making live traversal unsafe, possibly leading to the post-connection steps
     //       being called multiple times on the same node.
-    GC::ConservativeVector<GC::Ref<Node>, 1> static_node_list;
+    GC::RootVector<GC::Ref<Node>, 1> static_node_list;
 
     // 11. For each node of nodes, in tree order:
     for (auto& node : nodes) {
@@ -1115,12 +1117,16 @@ void Node::insert_nodes_before(ReadonlySpan<GC::Ref<Node>> nodes, GC::Ptr<Node> 
                 return TraversalDecision::Continue;
 
             // 3. If inclusiveDescendant is an element and inclusiveDescendant’s custom element registry is non-null:
-            if (auto* element = as_if<Element>(inclusive_descendant); element && element->custom_element_registry()) {
+            // INTEROP: Already-custom elements still receive connectedCallback after adoption into a document with
+            //          no registry, as in Chromium and Firefox. Their definition supplies the callback independently of
+            //          the registry available to upgrade new elements.
+            if (auto* element = as_if<Element>(inclusive_descendant)) {
+                auto registry = element->custom_element_registry();
                 // 1. If inclusiveDescendant’s custom element registry’s is scoped is true, then append
                 //    inclusiveDescendant’s node document to inclusiveDescendant’s custom element registry’s scoped
                 //    document set.
-                if (element->custom_element_registry()->is_scoped())
-                    element->custom_element_registry()->append_scoped_document(element->document());
+                if (registry && registry->is_scoped())
+                    registry->append_scoped_document(element->document());
 
                 // 2. If inclusiveDescendant is custom, then enqueue a custom element callback reaction with
                 //    inclusiveDescendant, callback name "connectedCallback", and « ».
@@ -1128,7 +1134,7 @@ void Node::insert_nodes_before(ReadonlySpan<GC::Ref<Node>> nodes, GC::Ptr<Node> 
                     element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::connectedCallback);
 
                 // 3. Otherwise, try to upgrade inclusiveDescendant.
-                else {
+                else if (registry) {
                     element->try_to_upgrade();
                 }
             }
@@ -1763,6 +1769,10 @@ void Node::remove(bool suppress_observers)
 
     removal_style_record_pins.pin_style_records_after_removal(*this, was_connected);
 
+    // NB: A subtree holding the focused or hovered node takes :focus-within and :hover out of its old ancestor
+    //     chain. Republish that chain before the removing steps clear the focused area.
+    CSS::Invalidation::invalidate_style_after_subtree_place_changed(*this, parent);
+
     // 11. Run the removing steps with node, true, and parent.
     // 12. Let isParentConnected be parent’s connected.
     // 13. If node is custom and isParentConnected is true, then enqueue a custom element callback reaction with node,
@@ -1771,10 +1781,6 @@ void Node::remove(bool suppress_observers)
     run_removing_steps(*parent, parent_root, was_tracked_by_style_engine);
 
     removal_style_record_pins.release_dom_style_records();
-
-    // A subtree holding the focused or hovered node takes `:focus-within` and `:hover` out of the
-    // chain it hung off. Nothing about any element in that chain moved, so it has to be told.
-    CSS::Invalidation::invalidate_style_after_subtree_place_changed(*this, parent);
 
     // 15. Add transient registered observers given node and parent.
     add_transient_registered_observers(*parent);
@@ -2198,6 +2204,9 @@ WebIDL::ExceptionOr<void> Node::move_node(Node& new_parent, Node* child)
     // OPTIMIZATION: Moving into a named shadow tree only changes slot assignments when the moved subtree holds a slot.
     if (!new_shadow_root || moved_subtree_has_slot || new_shadow_root->slot_assignment() == SlotAssignmentMode::Manual)
         assign_slottables_for_a_tree(new_root);
+
+    // NB: Refresh lookup caches before moving steps can query the completed tree change.
+    document().subtree_was_moved({}, *this, old_parent_root);
 
     CSS::Invalidation::invalidate_style_after_subtree_place_changed(*this, moved_from_parent);
 
@@ -2789,7 +2798,10 @@ static void derive_inside_blocking_wheel_event_handler_state_after_tree_change(N
 {
     if (!node.document().may_have_blocking_wheel_event_listener())
         return;
-    (void)node.update_inside_blocking_wheel_event_handler_state();
+    if (is<HTML::HTMLSlotElement>(node))
+        node.update_inside_blocking_wheel_event_handler_state_for_subtree();
+    else
+        (void)node.update_inside_blocking_wheel_event_handler_state();
 }
 
 void Node::inserted()
@@ -2870,6 +2882,17 @@ void Node::removed_from(IsSubtreeRoot, Node* old_parent, Node&)
 
     m_is_connected = false;
     m_in_editable_subtree = false;
+
+    // https://html.spec.whatwg.org/multipage/infrastructure.html#dom-trees:concept-node-remove-ext
+    // 1. Let document be removedNode's node document.
+    auto& document = this->document();
+
+    // 2. If document's focused area is removedNode, then set document's focused area to document's viewport, and set
+    //    document's relevant global object's navigation API's focus changed during ongoing navigation to false.
+    if (document.focused_area().ptr() == this) {
+        document.set_focused_area(nullptr);
+        HTML::relevant_window(document).navigation()->set_focus_changed_during_ongoing_navigation(false);
+    }
 }
 
 // https://dom.spec.whatwg.org/#concept-node-move-ext
@@ -2901,9 +2924,11 @@ bool Node::update_inside_blocking_wheel_event_handler_state()
 {
     bool const was_inside_blocking_wheel_event_handler = m_inside_blocking_wheel_event_handler;
     m_inside_blocking_wheel_event_handler = false;
-    if (auto* parent = parent_or_shadow_host()) {
-        // A shadow root may not have derived its state since its host's changed, so it derives it first.
-        if (is<ShadowRoot>(*parent))
+    auto assigned_slot = assigned_slot_for_node(*this);
+    auto* parent = assigned_slot ? static_cast<Node*>(assigned_slot.ptr()) : parent_or_shadow_host();
+    if (parent) {
+        // A shadow root or assigned slot may not have derived its inherited state yet.
+        if (assigned_slot || is<ShadowRoot>(*parent))
             parent->update_inside_blocking_wheel_event_handler_state();
         m_inside_blocking_wheel_event_handler = parent->inside_blocking_wheel_event_handler();
     }
@@ -2932,7 +2957,17 @@ void Node::update_inside_blocking_wheel_event_handler_state_for_subtree()
     top_layer_marks.repaint_backdrop = true;
     bool any_descendant_flipped_blocking_wheel_state = false;
     for_each_shadow_including_inclusive_descendant([&](Node& node) {
-        if (!node.update_inside_blocking_wheel_event_handler_state())
+        auto flipped = node.update_inside_blocking_wheel_event_handler_state();
+        // Assigned nodes are outside the slot's DOM subtree, but their wheel events pass through it.
+        if (auto* slot = as_if<HTML::HTMLSlotElement>(node); slot && flipped) {
+            slot->assign_slottables_if_needed();
+            for (auto const& assigned : slot->assigned_nodes_internal()) {
+                assigned.visit([](auto const& assigned_node) {
+                    assigned_node->update_inside_blocking_wheel_event_handler_state_for_subtree();
+                });
+            }
+        }
+        if (!flipped)
             return TraversalDecision::Continue;
         any_descendant_flipped_blocking_wheel_state = true;
         if (auto* element = as_if<Element>(node); element && element->rendered_in_top_layer())
@@ -3143,6 +3178,10 @@ void Node::remove_all_children(bool suppress_observers)
 
         removal_style_record_pins.pin_style_records_after_removal(*child, was_connected);
 
+        // NB: Republish the old chain before the removing steps clear the focused area.
+        if (a_child_holds_a_propagating_state_source)
+            CSS::Invalidation::invalidate_style_after_subtree_place_changed(*child, this);
+
         // 11. Run the removing steps with node, true, and parent.
         // 12. Let isParentConnected be parent’s connected.
         // 13. If node is custom and isParentConnected is true, then enqueue a custom element callback reaction with
@@ -3151,9 +3190,6 @@ void Node::remove_all_children(bool suppress_observers)
         child->run_removing_steps(*this, parent_root, was_tracked_by_style_engine);
 
         removal_style_record_pins.release_dom_style_records();
-
-        if (a_child_holds_a_propagating_state_source)
-            CSS::Invalidation::invalidate_style_after_subtree_place_changed(*child, this);
 
         // 15. Add transient registered observers given node and parent.
         child->add_transient_registered_observers(*this);
@@ -3277,11 +3313,8 @@ bool Node::is_host_including_inclusive_ancestor_of(Node const& other) const
         return true;
 
     // or if B’s root has a non-null host and A is a host-including inclusive ancestor of B’s root’s host
-    if (is<DocumentFragment>(other.root())
-        && static_cast<DocumentFragment const&>(other.root()).host()
-        && is_inclusive_ancestor_of(*static_cast<DocumentFragment const&>(other.root()).host())) {
-        return true;
-    }
+    if (auto const* fragment = as_if<DocumentFragment>(other.root()); fragment && fragment->host())
+        return is_host_including_inclusive_ancestor_of(*fragment->host());
     return false;
 }
 
@@ -3327,6 +3360,7 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<Utf16StringBuilder>& obje
     Layout::ForcedReadScope read { document() };
     MUST(object.add("name"sv, node_name().view()));
     MUST(object.add("id"sv, unique_id().value()));
+    bool serialized_content_document = false;
     if (is_document()) {
         MUST(object.add("type"sv, "document"));
     } else if (is_element()) {
@@ -3345,14 +3379,17 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<Utf16StringBuilder>& obje
             MUST(attributes.finish());
         }
 
+        // DevTools shows the document of a nested navigable in this process whatever its origin, as the only child of its
+        // container: The container's own child nodes are fallback content that isn't rendered.
         if (element->is_navigable_container()) {
             auto const* container = static_cast<HTML::NavigableContainer const*>(element);
-            if (auto const* content_document = container->content_document()) {
+            if (auto const* content_document = container->content_document_without_origin_check()) {
                 auto children = MUST(object.add_array("children"sv));
                 JsonObjectSerializer<Utf16StringBuilder> content_document_object = MUST(children.add_object());
                 content_document->serialize_tree_as_json(content_document_object);
                 MUST(content_document_object.finish());
                 MUST(children.finish());
+                serialized_content_document = true;
             }
         }
 
@@ -3385,7 +3422,8 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<Utf16StringBuilder>& obje
     MUST((object.add("visible"sv, !!layout_node(read))));
 
     if (auto const* element = as_if<Element>(this)) {
-        element->serialize_children_as_json(read, object);
+        if (!serialized_content_document)
+            element->serialize_children_as_json(read, object);
     } else if (has_child_nodes()) {
         auto children = MUST(object.add_array("children"sv));
         auto add_child = [this, &children](Node const& child) {

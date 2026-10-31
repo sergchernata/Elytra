@@ -23,6 +23,7 @@
 #include <LibWebCommon/HTML/WorkerAgentTypes.h>
 #include <LibWebCommon/Loader/NavigatorCompatibilityMode.h>
 #include <LibWebCommon/Page/PageId.h>
+#include <LibWebCommon/Permissions/Permissions.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/Forward.h>
@@ -72,6 +73,9 @@ public:
     Optional<u64> exclusive_performance_owner(pid_t) const;
 
     size_t client_count() const { return m_agents.size(); }
+
+    void update_permission_snapshot(PermissionManager const&);
+    Optional<URL::Origin> top_level_origin(Web::HTML::WorkerAgentId) const;
 
     template<CallableAs<IterationDecision, WebWorkerClient&> Callback>
     void for_each_client(Callback callback)

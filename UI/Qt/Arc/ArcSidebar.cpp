@@ -10,6 +10,7 @@
 #include <UI/Qt/Arc/AddressBar.h>
 #include <UI/Qt/Arc/ArcIcons.h>
 #include <LibURL/Parser.h>
+#include <LibWebView/PictureInPictureManager.h>
 #include <LibWebView/SessionHistory.h>
 #include <UI/Qt/Arc/ArcSidebar.h>
 #include <UI/Qt/Arc/Extensions.h>
@@ -355,11 +356,10 @@ ArcSidebar::ArcSidebar(BrowserWindow& window, TabWidget& tabs)
         if (!m_player_tab)
             return;
         m_player_tab->view().toggle_playing_media();
-        // A muted tab's sound can't tell whether it's playing, so the player goes by what it was asked to do.
-        if (m_player_tab->view().page_mute_state() == Web::HTML::MuteState::Muted) {
-            m_player_playing = !m_player_playing;
-            m_mini_player->set_playing(m_player_playing);
-        }
+        // The player goes by what it was asked to do: the tab's sound goes on for a moment after it pauses, and a muted
+        // tab has none.
+        m_player_playing = !m_player_playing;
+        m_mini_player->set_playing(m_player_playing);
     });
     connect(m_mini_player, &MiniPlayer::toggle_mute, this, [this] {
         if (!m_player_tab)
@@ -1233,7 +1233,7 @@ void ArcSidebar::watch_tab(Tab& tab)
     };
     connect(&tab, &Tab::title_changed, this, refresh);
     connect(&tab, &Tab::favicon_changed, this, refresh);
-    connect(&tab, &Tab::audio_play_state_changed, this, [this] { schedule_mini_player_update(); });
+    connect(&tab, &Tab::audibility_changed, this, [this] { schedule_mini_player_update(); });
     connect(&tab, &Tab::title_changed, this, [this, guarded] {
         if (guarded && guarded == m_player_tab)
             schedule_mini_player_update();
@@ -1546,7 +1546,7 @@ bool ArcSidebar::should_open_picture_in_picture_leaving(Tab& tab)
         return false;
     auto& view = tab.view();
     return !tab.property(CLOSING_PROPERTY).toBool() && m_tabs.index_of(&tab) >= 0
-        && view.audio_play_state() == Web::HTML::AudioPlayState::Playing
+        && view.audibility() == Audio::Audibility::Audible
         && view.page_mute_state() == Web::HTML::MuteState::Unmuted
         && !view.has_picture_in_picture_window();
 }
@@ -1588,7 +1588,7 @@ void ArcSidebar::picture_in_picture_windows_changed()
 
 static bool is_playing_sound(Tab& tab)
 {
-    return tab.is_loaded() && tab.view().audio_play_state() == Web::HTML::AudioPlayState::Playing;
+    return tab.is_loaded() && tab.view().audibility() == Audio::Audibility::Audible;
 }
 
 void ArcSidebar::update_mini_player()
@@ -1596,11 +1596,15 @@ void ArcSidebar::update_mini_player()
     auto* current = m_window ? m_window->current_tab() : nullptr;
     if (m_player_tab && (m_player_tab == current || m_tabs.index_of(m_player_tab) < 0 || m_player_tab->property(CLOSING_PROPERTY).toBool()))
         m_player_tab = nullptr;
+    // Once its sound has faded, or the user is back in it, the tab may have a player again.
+    if (m_player_dismissed_tab && (!is_playing_sound(*m_player_dismissed_tab) || m_player_dismissed_tab == current))
+        m_player_dismissed_tab = nullptr;
     if (!m_player_tab) {
         for (auto* tab : tabs()) {
-            if (tab != current && !tab->property(CLOSING_PROPERTY).toBool() && is_playing_sound(*tab)) {
+            if (tab != current && tab != m_player_dismissed_tab && !tab->property(CLOSING_PROPERTY).toBool() && is_playing_sound(*tab)) {
                 m_player_tab = tab;
                 m_player_playing = true;
+                m_player_seen_audibility = Audio::Audibility::Audible;
                 break;
             }
         }
@@ -1614,8 +1618,10 @@ void ArcSidebar::update_mini_player()
             m_player_waits_for_window_close = true;
             QTimer::singleShot(350, this, [this, tab = m_player_tab] {
                 m_player_waits_for_window_close = false;
-                if (tab && tab == m_player_tab && !is_playing_sound(*tab))
+                if (tab && tab == m_player_tab && (!is_playing_sound(*tab) || WebView::PictureInPictureManager::the().last_window_closed_with_video_stopped(tab->view().traversable()))) {
+                    m_player_dismissed_tab = is_playing_sound(*tab) ? tab : nullptr;
                     m_player_tab = nullptr;
+                }
                 update_mini_player();
             });
         }
@@ -1629,8 +1635,10 @@ void ArcSidebar::update_mini_player()
         m_mini_player->set_title(m_player_tab->title());
         m_mini_player->set_icon(m_player_tab->favicon());
         auto muted = m_player_tab->view().page_mute_state() == Web::HTML::MuteState::Muted;
-        if (!muted)
-            m_player_playing = is_playing_sound(*m_player_tab);
+        auto audibility = m_player_tab->view().audibility();
+        if (!muted && m_player_seen_audibility != audibility)
+            m_player_playing = audibility == Audio::Audibility::Audible;
+        m_player_seen_audibility = audibility;
         m_mini_player->set_playing(m_player_playing);
         m_mini_player->set_muted(muted);
     }

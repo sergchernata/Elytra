@@ -159,7 +159,7 @@ public:
         return GC::Heap::the().allocate<UpdateAlgorithmState>();
     }
 
-    OrderedHashMap<URL::URL, GC::Ref<Fetch::Infrastructure::Response>>& updated_resource_map() { return m_map; }
+    OrderedHashMap<URL::URL, GC::Ref<Fetch::Infrastructure::ResponseView>>& updated_resource_map() { return m_map; }
     bool has_updated_resources() const { return m_has_updated_resources; }
     void set_has_updated_resources(bool b) { m_has_updated_resources = b; }
 
@@ -172,11 +172,66 @@ private:
         visitor.visit(m_map);
     }
 
-    OrderedHashMap<URL::URL, GC::Ref<Fetch::Infrastructure::Response>> m_map;
+    OrderedHashMap<URL::URL, GC::Ref<Fetch::Infrastructure::ResponseView>> m_map;
     bool m_has_updated_resources { false };
 };
 
 GC_DEFINE_ALLOCATOR(UpdateAlgorithmState);
+
+// The consume-body steps of one of a job's script fetches. They run once: when the fetch consumes its body, or when it
+// is stopped.
+class ScriptFetchConsumeBody : JS::Cell {
+    GC_CELL(ScriptFetchConsumeBody, JS::Cell);
+    GC_DECLARE_ALLOCATOR(ScriptFetchConsumeBody);
+
+public:
+    using Steps = GC::Function<Fetch::Infrastructure::FetchAlgorithms::ProcessResponseConsumeBodyFunction::FunctionType>;
+
+    static GC::Ref<ScriptFetchConsumeBody> create(Fetch::Infrastructure::FetchAlgorithms::ProcessResponseConsumeBodyFunction steps)
+    {
+        return GC::Heap::the().allocate<ScriptFetchConsumeBody>(GC::create_function(GC::Heap::the(), move(steps)));
+    }
+
+    void run(GC::Ref<Fetch::Infrastructure::ResponseView> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes)
+    {
+        if (auto steps = exchange(m_steps, nullptr))
+            steps->function()(response, move(body_bytes));
+    }
+
+private:
+    explicit ScriptFetchConsumeBody(GC::Ref<Steps> steps)
+        : m_steps(steps)
+    {
+    }
+
+    virtual void visit_edges(JS::Cell::Visitor& visitor) override
+    {
+        Base::visit_edges(visitor);
+        visitor.visit(m_steps);
+    }
+
+    GC::Ptr<Steps> m_steps;
+};
+
+GC_DEFINE_ALLOCATOR(ScriptFetchConsumeBody);
+
+static GC::Ref<Fetch::Infrastructure::FetchController> fetch_job_script(Job const& job, Fetch::Infrastructure::Request& request, Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input, GC::Ref<ScriptFetchConsumeBody> consume_body)
+{
+    fetch_algorithms_input.process_response_consume_body = [consume_body](GC::Ref<Fetch::Infrastructure::ResponseView> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) {
+        consume_body->run(response, move(body_bytes));
+    };
+
+    // FIXME: Soft-Update has no client
+    auto& realm = job.client->realm();
+    auto fetch_controller = Fetch::Fetching::fetch(realm, request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
+
+    // AD-HOC: Stopping a fetch does not guarantee that its consume-body steps run, so the stop completes the script
+    //         fetch as with a network error.
+    fetch_controller->set_stop_steps(GC::create_function(realm.heap(), [consume_body] {
+        consume_body->run(Fetch::Infrastructure::ResponseView::network_error("Service Worker script fetch was stopped"_string), Empty {});
+    }));
+    return fetch_controller;
+}
 
 // https://w3c.github.io/ServiceWorker/#update-algorithm
 static void update(JS::VM& vm, GC::Ref<Job> job)
@@ -217,9 +272,6 @@ static void update(JS::VM& vm, GC::Ref<Job> job)
 
     // To perform the fetch hook given request, run the following steps:
     auto perform_the_fetch_hook_function = [&registration = *registration, job, newest_worker, state](NonnullRefPtr<Fetch::Infrastructure::Request> request, HTML::TopLevelModule top_level, Fetch::Infrastructure::FetchAlgorithms::ProcessResponseConsumeBodyFunction process_custom_fetch_response) -> WebIDL::ExceptionOr<void> {
-        // FIXME: Soft-Update has no client
-        auto& realm = job->client->realm();
-
         // 1. Append `Service-Worker`/`script` to request’s header list.
         // Note: See https://w3c.github.io/ServiceWorker/#service-worker
         request->header_list()->append(HTTP::Header::isomorphic_encode("Service-Worker"sv, "script"sv));
@@ -238,12 +290,12 @@ static void update(JS::VM& vm, GC::Ref<Job> job)
         request->set_service_workers_mode(Fetch::Infrastructure::Request::ServiceWorkersMode::None);
 
         Web::Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Web::Fetch::Engine::BodyIntent::ConsumeForCallback };
-        fetch_algorithms_input.process_response_consume_body = move(process_custom_fetch_response);
+        auto consume_body = ScriptFetchConsumeBody::create(move(process_custom_fetch_response));
 
         // 4. If the isTopLevel flag is unset, then return the result of fetching request.
         // FIXME: Needs spec issue, this wording is confusing and contradicts the way perform the fetch hook is used in `run a worker`
         if (top_level == HTML::TopLevelModule::No) {
-            Web::Fetch::Fetching::fetch(realm, request, Web::Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
+            (void)fetch_job_script(*job, *request, move(fetch_algorithms_input), consume_body);
             return {};
         }
 
@@ -258,7 +310,7 @@ static void update(JS::VM& vm, GC::Ref<Job> job)
         //        Is this actually what the spec wants us to do?
         IGNORE_USE_IN_ESCAPING_LAMBDA auto process_response_completion_result = Optional<WebIDL::ExceptionOr<void>> {};
 
-        fetch_algorithms_input.process_response = [request, job, state, newest_worker, &registration, &process_response_completion_result](GC::Ref<Fetch::Infrastructure::Response> response) mutable -> void {
+        fetch_algorithms_input.process_response = [request, job, state, newest_worker, &registration, &process_response_completion_result](GC::Ref<Fetch::Infrastructure::ResponseView> response) mutable -> void {
             // 7. Extract a MIME type from the response’s header list. If s MIME type (ignoring parameters) is not a JavaScript MIME type, then:
             auto mime_type = Fetch::Infrastructure::extract_mime_type(response->header_list());
             if (!mime_type.has_value() || !mime_type->is_javascript()) {
@@ -382,7 +434,7 @@ static void update(JS::VM& vm, GC::Ref<Job> job)
             process_response_completion_result = WebIDL::ExceptionOr<void> {};
         };
 
-        auto fetch_controller = Web::Fetch::Fetching::fetch(realm, request, Web::Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
+        auto fetch_controller = fetch_job_script(*job, *request, move(fetch_algorithms_input), consume_body);
 
         // FIXME: This feels.. uncomfortable but it should work to block the current task until the fetch has progressed past our processResponse hook or aborted
         auto& event_loop = job->client ? job->client->responsible_event_loop() : HTML::main_thread_event_loop();
@@ -391,6 +443,11 @@ static void update(JS::VM& vm, GC::Ref<Job> job)
                 return true;
             if (fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Terminated || fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Aborted) {
                 process_response_completion_result = WebIDL::AbortError::create("Service Worker fetch was terminated or aborted"_utf16);
+                return true;
+            }
+            // NB: A stopped fetch's stop steps have completed the script fetch.
+            if (fetch_controller->state() == Fetch::Infrastructure::FetchController::State::Stopped) {
+                process_response_completion_result = WebIDL::ExceptionOr<void> {};
                 return true;
             }
             return false;

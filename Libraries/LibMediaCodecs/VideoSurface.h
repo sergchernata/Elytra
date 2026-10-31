@@ -11,6 +11,7 @@
 #include <AK/NonnullRefPtr.h>
 #include <AK/Platform.h>
 #include <LibGfx/Forward.h>
+#include <LibGfx/Size.h>
 #include <LibIPC/Forward.h>
 #include <LibMediaCodecs/Color/CodingIndependentCodePoints.h>
 #include <LibMediaCodecs/Export.h>
@@ -32,13 +33,14 @@ public:
 };
 
 // A frame's pixels in memory that a GPU can sample without a copy. Hardware decoders allocate these and recycle a
-// bounded set of them, so each carries the identity its recycling is recognized by. The hold on the frame slot a
-// surface was handed out in is what keeps its pixels from being decoded over, wherever they are shown.
+// bounded set of them, so each carries the identity its recycling is recognized by.
 class MEDIACODECS_API VideoSurface : public AtomicRefCounted<VideoSurface> {
 public:
     ~VideoSurface();
 
-    u32 id() const { return m_id; }
+    // Tells the surface apart from every other its sender has handed out, including from an earlier decoder process.
+    u64 id() const { return m_id; }
+    Gfx::IntSize size() const;
 
     // Reads the pixels back into memory, which works only where the platform lets this process map the surface.
     ErrorOr<NonnullRefPtr<Gfx::Bitmap>> read_back_bitmap(CodingIndependentCodePoints const&) const;
@@ -53,14 +55,14 @@ public:
 #ifdef AK_OS_LINUX
     // The decoder assigns the ID, since the memory behind an image can be exported as any number of file
     // descriptors. The size is the image's, which can exceed the frames decoded into it.
-    static ErrorOr<NonnullRefPtr<VideoSurface>> create_from_dma_buf(u32 id, Gfx::LinuxDmaBufHandle);
+    static ErrorOr<NonnullRefPtr<VideoSurface>> create_from_dma_buf(u64 id, Gfx::LinuxDmaBufHandle);
 
     Gfx::LinuxDmaBufHandle const& dma_buf() const { return m_dma_buf; }
 #endif
 
 private:
 #ifdef AK_OS_MACOS
-    VideoSurface(Core::IOSurfaceHandle io_surface, u32 id)
+    VideoSurface(Core::IOSurfaceHandle io_surface, u64 id)
         : m_io_surface(move(io_surface))
         , m_id(id)
     {
@@ -70,7 +72,7 @@ private:
 #endif
 
 #ifdef AK_OS_LINUX
-    VideoSurface(u32 id, Gfx::LinuxDmaBufHandle dma_buf)
+    VideoSurface(u64 id, Gfx::LinuxDmaBufHandle dma_buf)
         : m_dma_buf(move(dma_buf))
         , m_id(id)
     {
@@ -79,7 +81,7 @@ private:
     Gfx::LinuxDmaBufHandle m_dma_buf;
 #endif
 
-    u32 m_id { 0 };
+    u64 m_id { 0 };
 };
 
 }
@@ -87,9 +89,9 @@ private:
 namespace IPC {
 
 template<>
-MEDIACODECS_API ErrorOr<void> encode(Encoder&, RefPtr<Media::VideoSurface> const&);
+MEDIACODECS_API ErrorOr<void> encode(Encoder&, NonnullRefPtr<Media::VideoSurface> const&);
 
 template<>
-MEDIACODECS_API ErrorOr<RefPtr<Media::VideoSurface>> decode(Decoder&);
+MEDIACODECS_API ErrorOr<NonnullRefPtr<Media::VideoSurface>> decode(Decoder&);
 
 }

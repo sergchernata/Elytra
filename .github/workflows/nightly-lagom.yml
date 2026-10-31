@@ -23,8 +23,8 @@ jobs:
         build_preset: ['Sanitizer']
         toolchain: ['Clang']
         clang_plugins: [false]
-        runner_labels: ['["blacksmith-8vcpu-ubuntu-2404-arm"]']
-        container: ['{"image":"ghcr.io/ladybirdbrowser/ladybird-ci:2026.10.16"}']
+        runner_labels: ['["blacksmith-16vcpu-ubuntu-2404-arm"]']
+        container: ['{"image":"ghcr.io/ladybirdbrowser/ladybird-ci:2026.10.29","options":"--ulimit core=1"}']
 
         include:
           - os_name: 'Windows'
@@ -32,7 +32,7 @@ jobs:
             build_preset: 'Sanitizer'
             toolchain: 'ClangCL'
             clang_plugins: false
-            runner_labels: '["blacksmith-8vcpu-windows-2025"]'
+            runner_labels: '["blacksmith-16vcpu-windows-2025"]'
             container: 'null'
 
     secrets: inherit

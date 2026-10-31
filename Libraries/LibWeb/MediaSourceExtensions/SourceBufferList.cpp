@@ -37,17 +37,30 @@ void SourceBufferList::visit_edges(Cell::Visitor& visitor)
 
 void SourceBufferList::append(GC::Ref<SourceBuffer> buffer)
 {
-    // From https://w3c.github.io/media-source/#addsourcebuffer-method
-    // 8. Append buffer to this's sourceBuffers.
     m_buffers.append(buffer);
+}
 
-    // 9. Queue a task to fire an event named addsourcebuffer at this's sourceBuffers.
-    // FIXME: Should this have a task source? An event loop? A document?
-    HTML::queue_a_task(HTML::Task::Source::Unspecified, nullptr, nullptr, GC::create_function(GC::Heap::the(), [weak_self = GC::Weak(*this)] {
-        if (!weak_self)
-            return;
-        weak_self->dispatch_event(weak_self->m_media_source->create_associated_event(EventNames::addsourcebuffer));
-    }));
+void SourceBufferList::insert_in_order_of(GC::Ref<SourceBuffer> buffer, SourceBufferList const& ordered_list)
+{
+    VERIFY(!contains(buffer));
+    VERIFY(ordered_list.contains(buffer));
+
+    size_t insertion_index = 0;
+    for (auto ordered_buffer : ordered_list.m_buffers) {
+        if (ordered_buffer == buffer)
+            break;
+        if (contains(ordered_buffer))
+            insertion_index++;
+    }
+    m_buffers.insert(insertion_index, buffer);
+}
+
+void SourceBufferList::remove(SourceBuffer const& buffer)
+{
+    auto removed = m_buffers.remove_first_matching([&](GC::Ref<SourceBuffer> contained_buffer) {
+        return contained_buffer.ptr() == &buffer;
+    });
+    VERIFY(removed);
 }
 
 void SourceBufferList::remove_all_buffers(Badge<MediaSource>)

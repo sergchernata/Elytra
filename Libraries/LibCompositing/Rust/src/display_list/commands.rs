@@ -565,6 +565,15 @@ pub struct DisplayListGlyph {
 }
 ffi_bytes_fields!(DisplayListGlyph { position, glyph_id });
 
+impl From<&text_layout::DrawGlyph> for DisplayListGlyph {
+    fn from(glyph: &text_layout::DrawGlyph) -> Self {
+        Self {
+            position: FloatPoint { x: glyph.x, y: glyph.y },
+            glyph_id: glyph.glyph_id,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CompositorScrollNodeKind {
@@ -1696,7 +1705,6 @@ pub struct CompositorScrollbar {
     pub track_color: Color,
     pub vertical: bool,
     pub is_painted_by_compositor: bool,
-    pub display_list_paints_enlarged_scrollbar: bool,
 }
 ffi_bytes_fields!(CompositorScrollbar {
     document_id,
@@ -1713,8 +1721,7 @@ ffi_bytes_fields!(CompositorScrollbar {
     thumb_color,
     track_color,
     vertical,
-    is_painted_by_compositor,
-    display_list_paints_enlarged_scrollbar
+    is_painted_by_compositor
 });
 
 impl DisplayListCommand for CompositorScrollbar {
@@ -1728,6 +1735,8 @@ pub struct PaintScrollBar {
     pub gutter_rect: IntRect,
     pub thumb_rect: IntRect,
     pub track_rect: IntRect,
+    // The compositor presents the scrollbar growing into this rect as it is hovered.
+    pub expanded_gutter_rect: IntRect,
     pub scroll_size: f64,
     pub thumb_color: Color,
     pub track_color: Color,
@@ -1738,6 +1747,7 @@ ffi_bytes_fields!(PaintScrollBar {
     gutter_rect,
     thumb_rect,
     track_rect,
+    expanded_gutter_rect,
     scroll_size,
     thumb_color,
     track_color,
@@ -1747,7 +1757,11 @@ ffi_bytes_fields!(PaintScrollBar {
 impl DisplayListCommand for PaintScrollBar {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::PaintScrollBar;
     fn bounding_rect(&self) -> Option<IntRect> {
-        Some(self.track_rect.united(self.thumb_rect))
+        Some(
+            self.track_rect
+                .united(self.thumb_rect)
+                .united(self.expanded_gutter_rect),
+        )
     }
 }
 

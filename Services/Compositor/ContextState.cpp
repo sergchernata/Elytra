@@ -128,6 +128,7 @@ void ContextState::dispatch_pinch_event_to_web_content(Web::PinchEvent const& ev
 
 void ContextState::stop_presenting_to_client()
 {
+    m_pointer_in_nested_contexts = {};
     end_keyboard_scroll_gesture();
     m_elastic_overscroll_controller.forget();
     m_presenter.stop_presenting_to_client();
@@ -422,25 +423,89 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         static_cast<float>(event.position.x().value()),
         static_cast<float>(event.position.y().value()),
     };
+    return handle_mouse_event_at(event, position);
+}
 
-    if (m_scrollbar_controller.is_empty())
+ContextState::ContextUpdateResult ContextState::handle_mouse_event_from_containing_context(Web::MouseEvent const& event, Gfx::FloatPoint position)
+{
+    return handle_mouse_event_at(event, position);
+}
+
+// The compositor presents how scrollbars expand, outside of what damage tracking sees.
+Optional<PendingFrame> ContextState::frame_repainting_scrollbars() const
+{
+    if (m_async_scrolling_viewport_rect.is_empty())
+        return {};
+    return PendingFrame::repainting_everything(m_async_scrolling_viewport_rect);
+}
+
+Optional<PendingFrame> ContextState::clear_scrollbar_hover()
+{
+    if (!m_scrollbar_controller.set_hovered_scrollbar({}))
+        return {};
+    return frame_repainting_scrollbars();
+}
+
+Optional<size_t> ContextState::scrollbar_under_pointer(Gfx::FloatPoint position)
+{
+    if (auto scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_compositor(m_async_scroll_tree, m_scroll_state_snapshot, position); scrollbar_index.has_value())
+        return scrollbar_index;
+    return m_scrollbar_controller.hit_test_scrollbar_painted_by_display_list(m_async_scroll_tree, m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
+}
+
+// The compositor paints its own scrollbars over everything, so a nested context only takes the pointer where none of
+// them is under it, and where no scrollbar the display list paints comes after the nested context's content in paint
+// order. A press passes by a scrollbar that has faded out, as it does here.
+Optional<Compositing::NestedContextHit> ContextState::nested_context_taking_mouse_event_at(Web::MouseEvent::Type type, Gfx::FloatPoint position)
+{
+    if (!m_has_async_scrolling_state)
+        return {};
+    auto const& visual_context_tree = m_scene.visual_context_tree_for_compositing();
+    auto hit = m_async_scroll_tree.nested_context_at(visual_context_tree, position);
+    if (!hit.has_value())
+        return {};
+    if (auto scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_compositor(m_async_scroll_tree, m_scroll_state_snapshot, position); scrollbar_index.has_value()) {
+        if (type != Web::MouseEvent::Type::MouseDown || m_scrollbar_controller.is_shown(*scrollbar_index))
+            return {};
+    }
+    if (auto scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_display_list(m_async_scroll_tree, visual_context_tree, m_scroll_state_snapshot, position); scrollbar_index.has_value()) {
+        if (m_scrollbar_controller.scrollbars()[*scrollbar_index].paint_order_index > hit->paint_order_index)
+            return {};
+    }
+    return hit;
+}
+
+Optional<Compositing::NestedContextHit> ContextState::position_in_content_of_nested_context(Web::CompositorContextId nested_context_id, Gfx::FloatPoint position)
+{
+    if (!m_has_async_scrolling_state)
+        return {};
+    return m_async_scroll_tree.position_in_content_of_nested_context(nested_context_id, m_scene.visual_context_tree_for_compositing(), position);
+}
+
+ContextState::ContextUpdateResult ContextState::handle_mouse_event_at(Web::MouseEvent const& event, Gfx::FloatPoint position)
+{
+    if (m_scrollbar_controller.is_empty() && !m_async_scroll_tree.has_nested_contexts())
         return ContextUpdateResult::declined(Web::InputRoutingDecision::NotOverAScrollbar);
 
     auto scroller_of_scrollbar = [&](size_t scrollbar_index) {
         return m_scrollbar_controller.scrollbars()[scrollbar_index].scroller_stable_node_id;
     };
 
-    // The compositor paints how its own scrollbars expand, outside of what damage tracking sees.
-    auto frame_repainting_scrollbars_painted_by_compositor = [&]() -> Optional<PendingFrame> {
-        if (m_async_scrolling_viewport_rect.is_empty())
-            return {};
-        return PendingFrame::repainting_everything(m_async_scrolling_viewport_rect);
+    // The pointer goes on into a nested context, and leaves the scrollbar here it was over.
+    auto hand_to_nested_context = [&](Compositing::NestedContextHit const& hit) {
+        return ContextUpdateResult {
+            .frame_to_present = clear_scrollbar_hover(),
+            .nested_context_mouse_hit = hit,
+        };
     };
 
     switch (event.type) {
     case Web::MouseEvent::Type::MouseDown: {
         if (event.button != Web::UIEvents::MouseButton::Primary)
             return ContextUpdateResult::declined(Web::InputRoutingDecision::NotPrimaryButton);
+
+        if (auto hit = nested_context_taking_mouse_event_at(event.type, position); hit.has_value())
+            return hand_to_nested_context(*hit);
 
         auto drag = m_scrollbar_controller.begin_drag(m_async_scroll_tree, m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
         if (!drag.has_value())
@@ -452,9 +517,8 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         result.accepted = true;
         result.routing_decision = Web::InputRoutingDecision::BeganScrollbarDrag;
         result.routed_scroller = scroller_of_scrollbar(drag->scrollbar_index);
-        result.scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
-        if (!result.scrollbar_dragged_by_compositor.has_value())
-            result.frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+        result.scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list(m_context_id);
+        result.frame_to_present = frame_repainting_scrollbars();
 
         // A press beside the thumb pages toward the pointer or jumps there, as the platform says, and a modifier swaps
         // the two.
@@ -499,7 +563,7 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
     }
     case Web::MouseEvent::Type::MouseMove: {
         if (m_scrollbar_controller.has_captured_scrollbar()) {
-            auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
+            auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list(m_context_id);
             auto drag = m_scrollbar_controller.captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
             VERIFY(drag.has_value());
             // While paging, the pointer only says where the thumb pages to.
@@ -521,18 +585,22 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
             };
         }
 
-        // The main thread hovers the scrollbars the display list paints.
-        auto hovered_scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_compositor(m_async_scroll_tree, m_scroll_state_snapshot, position);
+        if (auto hit = nested_context_taking_mouse_event_at(event.type, position); hit.has_value())
+            return hand_to_nested_context(*hit);
+
+        auto hovered_scrollbar_index = scrollbar_under_pointer(position);
         Optional<PendingFrame> frame_to_present;
         if (m_scrollbar_controller.set_hovered_scrollbar(hovered_scrollbar_index))
-            frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+            frame_to_present = frame_repainting_scrollbars();
         if (!hovered_scrollbar_index.has_value())
             return { .frame_to_present = frame_to_present, .routing_decision = Web::InputRoutingDecision::NotOverAScrollbar };
+        // The page sees the pointer move over a scrollbar the display list paints, as it is part of the page's content.
+        auto is_painted_by_compositor = m_scrollbar_controller.scrollbars()[*hovered_scrollbar_index].is_painted_by_compositor;
         return {
-            .accepted = true,
+            .accepted = is_painted_by_compositor,
             .frame_to_present = frame_to_present,
             .should_request_rendering_update = false,
-            .routing_decision = Web::InputRoutingDecision::HoveringScrollbarPaintedByCompositor,
+            .routing_decision = is_painted_by_compositor ? Web::InputRoutingDecision::HoveringScrollbarPaintedByCompositor : Web::InputRoutingDecision::HoveringScrollbarPaintedByDisplayList,
             .routed_scroller = scroller_of_scrollbar(*hovered_scrollbar_index),
         };
     }
@@ -541,7 +609,7 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
             return ContextUpdateResult::declined(Web::InputRoutingDecision::NotPrimaryButton);
 
         auto box_of_dragged_scrollbar = box_of_captured_scrollbar();
-        auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
+        auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list(m_context_id);
         auto drag = m_scrollbar_controller.release_captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
         auto was_paging = m_scrollbar_paging.has_value();
         stop_scrollbar_paging();
@@ -558,16 +626,14 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         // The main thread learns of the release from the next update it takes, so one is asked for even when the
         // release scrolls nothing.
         result.should_request_rendering_update = true;
-        if (!scrollbar_dragged_by_compositor.has_value())
-            result.frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+        result.frame_to_present = frame_repainting_scrollbars();
         if (!was_paging) {
             if (auto frame_to_present = apply_scrollbar_drag(*drag); frame_to_present.has_value())
                 result.frame_to_present = *frame_to_present;
         }
 
-        auto hovered_scrollbar_index = m_scrollbar_controller.hit_test_scrollbar_painted_by_compositor(m_async_scroll_tree, m_scroll_state_snapshot, position);
-        if (m_scrollbar_controller.set_hovered_scrollbar(hovered_scrollbar_index)) {
-            if (auto frame_to_present = frame_repainting_scrollbars_painted_by_compositor(); frame_to_present.has_value())
+        if (m_scrollbar_controller.set_hovered_scrollbar(scrollbar_under_pointer(position))) {
+            if (auto frame_to_present = frame_repainting_scrollbars(); frame_to_present.has_value())
                 result.frame_to_present = frame_to_present;
         }
 
@@ -577,12 +643,12 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         auto had_capture = m_scrollbar_controller.has_captured_scrollbar();
         Optional<PendingFrame> frame_to_present;
         if (m_scrollbar_controller.set_hovered_scrollbar({}))
-            frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+            frame_to_present = frame_repainting_scrollbars();
         return {
             .accepted = had_capture,
             .frame_to_present = frame_to_present,
             .should_request_rendering_update = false,
-            .scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list(),
+            .scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list(m_context_id),
             .routing_decision = had_capture ? Web::InputRoutingDecision::LeftDuringScrollbarDrag : Web::InputRoutingDecision::NoScrollbarDrag,
         };
     }
@@ -591,7 +657,6 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         // counts as having left. The page still sees the cancel, so it is not accepted.
         auto was_dragging_scrollbar = m_scrollbar_controller.has_captured_scrollbar();
         auto box_of_dragged_scrollbar = box_of_captured_scrollbar();
-        auto scrollbar_dragged_by_compositor = m_scrollbar_controller.captured_scrollbar_painted_by_display_list();
         (void)m_scrollbar_controller.release_captured_drag(m_scene.visual_context_tree_for_compositing(), m_scroll_state_snapshot, position);
         stop_scrollbar_paging();
         note_user_scroll_gesture_end_if_drag_ended(box_of_dragged_scrollbar);
@@ -600,8 +665,8 @@ ContextState::ContextUpdateResult ContextState::handle_mouse_event(Web::MouseEve
         ContextUpdateResult result;
         // As for a release, the main thread learns that the drag ended from the next update it takes.
         result.should_request_rendering_update = was_dragging_scrollbar;
-        if ((was_dragging_scrollbar && !scrollbar_dragged_by_compositor.has_value()) || hovered_scrollbar_changed)
-            result.frame_to_present = frame_repainting_scrollbars_painted_by_compositor();
+        if (was_dragging_scrollbar || hovered_scrollbar_changed)
+            result.frame_to_present = frame_repainting_scrollbars();
         return result;
     }
     case Web::MouseEvent::Type::MouseWheel:
@@ -1520,6 +1585,7 @@ void ContextState::clear_per_test_input_state()
 {
     // A gesture held by fingers never ends by itself, so one a test left unended would take in the next test's steps.
     m_wheel_gesture_routing.forget_gesture();
+    m_pointer_in_nested_contexts = {};
     m_last_reported_scroll_momentum_step.clear();
     m_reported_scroll_momentum_was_interrupted = false;
 }
@@ -1670,7 +1736,7 @@ bool ContextState::may_hand_first_wheel_steps_to_nested_contexts() const
     return m_has_async_scrolling_state && m_scene.visual_viewport_scale().value_or(1.0f) == 1.0f;
 }
 
-Optional<Compositing::NestedContextWheelHit> ContextState::nested_context_for_wheel_at(Gfx::FloatPoint position)
+Optional<Compositing::NestedContextHit> ContextState::nested_context_for_wheel_at(Gfx::FloatPoint position)
 {
     if (!m_has_async_scrolling_state)
         return {};
@@ -1935,15 +2001,13 @@ ContextPresenter::FrameContent ContextState::frame_content(Compositing::ScrollSt
 }
 
 // Each frame shows the scrollbars as of when it is painted. An elastic overscroll moves the presented scroll offsets
-// only, and shows the scrollbars of the stretched scroller as a scroll does. Returns the damage of the scrollbars that
-// the display list does not damage itself.
-Gfx::IntRect ContextState::update_scrollbar_visibility()
+// only, and shows the scrollbars of the stretched scroller as a scroll does.
+void ContextState::update_scrollbar_visibility()
 {
     auto stretched_scroll_state_snapshot = scroll_state_snapshot_stretched_by_elastic_overscrolls();
     auto const& presented_scroll_state_snapshot = stretched_scroll_state_snapshot.has_value() ? *stretched_scroll_state_snapshot : m_scroll_state_snapshot;
-    auto const* visual_context_tree = m_scene.visual_context_tree().has_value() ? &m_scene.visual_context_tree_for_compositing() : nullptr;
     auto now = MonotonicTime::now();
-    auto damage_rect = m_scrollbar_controller.update_visibility(visual_context_tree, presented_scroll_state_snapshot, now);
+    m_scrollbar_controller.update_visibility(presented_scroll_state_snapshot, now);
     report_scrollbar_visibility_changes();
 
     // A hovered scrollbar starts to grow here, which needs display ticks before anything else asks for a frame.
@@ -1955,7 +2019,7 @@ Gfx::IntRect ContextState::update_scrollbar_visibility()
     if (!fade_out_time.has_value() || !m_request_animation_frames) {
         if (m_scrollbar_fade_out_timer)
             m_scrollbar_fade_out_timer->stop();
-        return damage_rect;
+        return;
     }
     if (!m_scrollbar_fade_out_timer) {
         m_scrollbar_fade_out_timer = Core::Timer::create_single_shot(AK::Duration::zero(), [this] {
@@ -1964,11 +2028,11 @@ Gfx::IntRect ContextState::update_scrollbar_visibility()
     }
     auto delay = max(AK::Duration::zero(), *fade_out_time - now);
     m_scrollbar_fade_out_timer->restart(delay);
-    return damage_rect;
 }
 
 // NB: This goes on the connection the compositor forwards input on, so the main thread knows which scrollbars have
-//     faded out before it hit tests any later press.
+//     faded out before it hit tests any later press. A nested context another process owns reports to that process,
+//     which gets its input through the UI instead.
 void ContextState::report_scrollbar_visibility_changes()
 {
     auto changes = m_scrollbar_controller.take_visibility_changes();
@@ -1992,7 +2056,7 @@ Optional<PendingFrame> ContextState::advance_scrollbar_fades(MonotonicTime frame
 
 Optional<PreparedFrame> ContextState::prepare_frame(DisplayListPlayerSkia& display_list_player, PendingFrame pending_frame, CompositedContextResolver const* composited_context_resolver)
 {
-    pending_frame.forced_damage_rect.unite(update_scrollbar_visibility());
+    update_scrollbar_visibility();
     auto stretched_scroll_state_snapshot = scroll_state_snapshot_stretched_by_elastic_overscrolls();
     auto const& presented_scroll_state_snapshot = stretched_scroll_state_snapshot.has_value() ? *stretched_scroll_state_snapshot : m_scroll_state_snapshot;
     return m_presenter.prepare_frame(display_list_player, pending_frame, frame_content(presented_scroll_state_snapshot, composited_context_resolver));

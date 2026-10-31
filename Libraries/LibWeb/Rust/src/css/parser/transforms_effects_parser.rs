@@ -46,6 +46,7 @@ fn transformation(property: u16, transform_function: u8, values: Vec<StyleValueD
         property,
         transform_function,
         values: RetainedStyleValueDataList::from_retained_values(values.into_iter().map(retained).collect()),
+        matrix_values: crate::css::style_value::RetainedStyleValueDataList::from_retained_values(Vec::new()),
     }
 }
 
@@ -360,6 +361,7 @@ fn easing(
     coordinates: [Option<StyleValueData>; 4],
     number_of_intervals: Option<StyleValueData>,
     step_position: u8,
+    is_keyword: bool,
 ) -> StyleValueData {
     let [x1, y1, x2, y2] = coordinates.map(|value| value.map_or_else(RetainedStyleValueData::none, retained));
     StyleValueData::Easing {
@@ -371,6 +373,7 @@ fn easing(
         y2,
         number_of_intervals: number_of_intervals.map_or_else(RetainedStyleValueData::none, retained),
         step_position,
+        is_keyword,
     }
 }
 
@@ -449,7 +452,7 @@ fn parse_linear_easing(context: &ParseContext, property: u16, values: &[Componen
             }
         }
     }
-    (!stops.is_empty()).then(|| easing(0, stops, [None, None, None, None], None, 0))
+    (!stops.is_empty()).then(|| easing(0, stops, [None, None, None, None], None, 0, false))
 }
 
 fn parse_cubic_bezier_easing(
@@ -491,6 +494,7 @@ fn parse_cubic_bezier_easing(
         ],
         None,
         0,
+        false,
     ))
 }
 
@@ -526,6 +530,7 @@ fn parse_steps_easing(context: &ParseContext, property: u16, values: &[Component
         [None, None, None, None],
         Some(intervals),
         position,
+        false,
     ))
 }
 
@@ -553,6 +558,7 @@ fn parse_easing_value(context: &ParseContext, property: u16, values: &[Component
             [None, None, None, None],
             Some(StyleValueData::Integer { value: 1 }),
             position,
+            true,
         ));
     }
     let (name, arguments) = value[0].function()?;

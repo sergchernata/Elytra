@@ -16,6 +16,7 @@ use crate::css::css_pixels::CssPixels;
 use crate::css::css_string::{CssString, CssStringList};
 use crate::css::css_tokenizer::{
     CssNumberType, ParserTokenKind, TokenizerInput, tokenize_for_parser, tokenize_for_parser_without_source,
+    trim_component_value_boundary_whitespace,
 };
 use crate::css::display::FfiDisplay;
 use crate::css::ffi_support::FfiUtf16View;
@@ -27,7 +28,8 @@ use crate::css::parser::arbitrary_substitution::{
 use crate::css::parser::calc_parser::{CalcParseError, parse_a_calc_function_node};
 use crate::css::parser::color_parser::{is_color_function_name, parse_color_value};
 use crate::css::parser::component_value::{
-    ComponentKind, ComponentValue, consume_a_list_of_component_values, consume_a_small_list_of_component_values,
+    ComponentKind, ComponentValue, ComponentValueList, consume_a_counted_list_of_component_values,
+    consume_a_list_of_component_values, consume_a_small_list_of_component_values,
 };
 use crate::css::parser::fonts_parser::parse_font_property;
 use crate::css::parser::grid_parser::parse_grid_property;
@@ -1253,6 +1255,17 @@ pub(crate) fn parse_calculated_numeric_value_allowing_size_keyword(
         values,
         crate::css::parser::calc_parser::CalcParserContext {
             percentages_resolve_as,
+            // AD-HOC: Number and length contexts keep accepting percentages, which a later type check can still
+            //         resolve or reject (for example, a ratio of two percentages is a number).
+            allow_percentages: percentages_resolve_as.is_some()
+                || matches!(
+                    value_type,
+                    VALUE_TYPE_NUMBER
+                        | VALUE_TYPE_INTEGER
+                        | VALUE_TYPE_LENGTH
+                        | VALUE_TYPE_PERCENTAGE
+                        | VALUE_TYPE_OPACITY_VALUE
+                ),
             property,
             random_function_index: context.random_function_index,
             allowed_color_channels: 0,
@@ -4016,7 +4029,7 @@ pub(crate) fn parse_initial_value(property: u16) -> Option<Arc<StyleValueData>> 
     };
     let values = component_values_from_source(property_initial_value(property).as_bytes()).ok()?;
     let presence = SubstitutionFunctionsPresence::default();
-    match parse_css_value_after_substitution_scan(&context, property, &values, &[], &[], presence) {
+    match parse_css_value_after_substitution_scan(&context, property, &values, &[], presence) {
         // A keyword is the shared value of that keyword, which C++ keyword values hold too.
         ParseOutcome::Parsed(value) => match *value {
             StyleValueData::Keyword { keyword } => Some(shared_style_value(StyleValueData::Keyword { keyword })),
@@ -5000,6 +5013,62 @@ fn parse_border_image_shorthand(context: &ParseContext, values: &[ComponentValue
     ParseOutcome::Invalid
 }
 
+// https://drafts.csswg.org/css-fonts-4/#font-synthesis
+fn parse_font_synthesis_shorthand(values: &[ComponentValue]) -> ParseOutcome {
+    // https://drafts.csswg.org/css-fonts-4/#font-synthesis
+    let Some(keywords) = values
+        .iter()
+        .filter(|value| !value.is_whitespace())
+        .map(|value| value.ident())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return ParseOutcome::Invalid;
+    };
+    if keywords.is_empty() || keywords.len() > 4 {
+        return ParseOutcome::Invalid;
+    }
+    let mut enabled = [false; 4];
+    if keywords.len() != 1 || !equals_ascii_case_insensitive(keywords[0], b"none") {
+        for ident in keywords {
+            let index = if equals_ascii_case_insensitive(ident, b"position") {
+                3
+            } else {
+                match keyword_from_ascii_case_insensitive(ident) {
+                    Some(keyword::WEIGHT) => 0,
+                    Some(keyword::STYLE) => 1,
+                    Some(keyword::SMALL_CAPS) => 2,
+                    _ => return ParseOutcome::Invalid,
+                }
+            };
+            if enabled[index] {
+                return ParseOutcome::Invalid;
+            }
+            enabled[index] = true;
+        }
+    }
+    let properties = longhands_for_shorthand(property_id::FONT_SYNTHESIS);
+    let values = properties
+        .iter()
+        .map(|property| {
+            let index = match *property {
+                property_id::FONT_SYNTHESIS_WEIGHT => 0,
+                property_id::FONT_SYNTHESIS_STYLE => 1,
+                property_id::FONT_SYNTHESIS_SMALL_CAPS => 2,
+                property_id::FONT_SYNTHESIS_POSITION => 3,
+                _ => unreachable!(),
+            };
+            StyleValueData::Keyword {
+                keyword: if enabled[index] { keyword::AUTO } else { keyword::NONE },
+            }
+        })
+        .collect();
+    ParseOutcome::Parsed(shared_style_value(shorthand_value(
+        property_id::FONT_SYNTHESIS,
+        properties.to_vec(),
+        values,
+    )))
+}
+
 fn parse_font_variant_shorthand(context: &ParseContext, values: &[ComponentValue]) -> ParseOutcome {
     let components = values
         .iter()
@@ -5800,43 +5869,20 @@ fn parse_animation_transition_shorthand(
     ParseOutcome::Parsed(shared_style_value(shorthand_value(property, sub_properties, output)))
 }
 
-fn trim_ascii_whitespace(code_units: &[u16]) -> &[u16] {
-    let is_ascii_whitespace = |unit: &u16| matches!(*unit, 0x09 | 0x0a | 0x0c | 0x0d | 0x20);
-    let start = code_units
-        .iter()
-        .position(|unit| !is_ascii_whitespace(unit))
-        .unwrap_or(code_units.len());
-    let end = code_units
-        .iter()
-        .rposition(|unit| !is_ascii_whitespace(unit))
-        .map_or(start, |position| position + 1);
-    &code_units[start..end]
-}
-
 pub(crate) fn unresolved_value_from_string(
     unresolved_source: &[u16],
-    comparison_source: &[u16],
     presence: SubstitutionFunctionsPresence,
 ) -> StyleValueData {
-    let source_text = trim_ascii_whitespace(unresolved_source);
-    let component_source = if comparison_source.is_empty() {
-        source_text
-    } else {
-        comparison_source
-    };
-    let values =
-        super::component_value::consume_a_counted_list_of_component_values(tokenize_for_parser(component_source))
-            .unwrap_or_default();
-    unresolved_value(source_text, comparison_source, values, presence)
+    let values = consume_a_counted_list_of_component_values(tokenize_for_parser(unresolved_source)).unwrap_or_default();
+    unresolved_value(unresolved_source, values, presence)
 }
 
 pub(crate) fn unresolved_value(
     unresolved_source: &[u16],
-    comparison_source: &[u16],
-    values: impl Into<super::component_value::ComponentValueList>,
+    values: impl Into<ComponentValueList>,
     presence: SubstitutionFunctionsPresence,
 ) -> StyleValueData {
-    let source_text = trim_ascii_whitespace(unresolved_source);
+    let source_text = trim_component_value_boundary_whitespace(unresolved_source);
     let components = RetainedComponentValueList::from_values(values);
     if presence.attr {
         crate::css::parser::arbitrary_substitution::note_attr_names_read_by(components.as_slice());
@@ -5844,7 +5890,6 @@ pub(crate) fn unresolved_value(
     StyleValueData::Unresolved {
         components,
         source_text: CssString::from_utf16(source_text),
-        value_comparison_text: CssString::from_utf16(comparison_source),
         presence_attr: presence.attr,
         presence_dashed_function: presence.dashed_function,
         presence_env: presence.env,
@@ -5864,7 +5909,7 @@ pub(crate) fn unresolved_value_from_component_values(
         &values,
         crate::css::parser::component_value::ComponentSerializationMode::Retokenize,
     );
-    unresolved_value(&source, &[], values, presence)
+    unresolved_value(&source, values, presence)
 }
 
 pub(crate) fn parse_css_value_with_source(
@@ -5872,7 +5917,6 @@ pub(crate) fn parse_css_value_with_source(
     property_id: u16,
     values: &[ComponentValue],
     unresolved_source: &[u16],
-    comparison_source: &[u16],
 ) -> ParseOutcome {
     if values
         .iter()
@@ -5885,14 +5929,7 @@ pub(crate) fn parse_css_value_with_source(
     if collect_arbitrary_substitution_function_presence(values, &mut substitution_presence).is_err() {
         return ParseOutcome::Invalid;
     }
-    parse_css_value_after_substitution_scan(
-        context,
-        property_id,
-        values,
-        unresolved_source,
-        comparison_source,
-        substitution_presence,
-    )
+    parse_css_value_after_substitution_scan(context, property_id, values, unresolved_source, substitution_presence)
 }
 
 fn parse_css_value_after_substitution_scan(
@@ -5900,7 +5937,6 @@ fn parse_css_value_after_substitution_scan(
     property_id: u16,
     values: &[ComponentValue],
     unresolved_source: &[u16],
-    comparison_source: &[u16],
     substitution_presence: SubstitutionFunctionsPresence,
 ) -> ParseOutcome {
     if let Some(value) = parse_builtin_value(values) {
@@ -5914,12 +5950,7 @@ fn parse_css_value_after_substitution_scan(
         if !declaration_values.is_empty() && !declaration_value_is_valid(declaration_values) {
             return ParseOutcome::Invalid;
         }
-        let mut unresolved = unresolved_value(
-            unresolved_source,
-            comparison_source,
-            values.to_vec(),
-            substitution_presence,
-        );
+        let mut unresolved = unresolved_value(unresolved_source, values.to_vec(), substitution_presence);
         if let StyleValueData::Unresolved {
             source_text,
             contains_attr_tainted_values,
@@ -6032,6 +6063,9 @@ fn parse_css_value_after_substitution_scan(
         }
         if property_id == property_id::BORDER_IMAGE {
             return parse_border_image_shorthand(context, values);
+        }
+        if property_id == property_id::FONT_SYNTHESIS {
+            return parse_font_synthesis_shorthand(values);
         }
         if property_id == property_id::FONT_VARIANT {
             return parse_font_variant_shorthand(context, values);
@@ -6266,18 +6300,7 @@ pub(crate) fn parse_css_value_with_utf16_source(
         return ParseOutcome::Invalid;
     }
     if property_id == property_id::CUSTOM {
-        let comparison_source = crate::css::serialize::serialize_component_values_to_utf16(
-            values,
-            crate::css::parser::component_value::ComponentSerializationMode::Normalized,
-        );
-        return parse_css_value_after_substitution_scan(
-            context,
-            property_id,
-            values,
-            source,
-            &comparison_source,
-            substitution_presence,
-        );
+        return parse_css_value_after_substitution_scan(context, property_id, values, source, substitution_presence);
     }
     if substitution_presence.has_any() {
         let unresolved_source = crate::css::serialize::serialize_component_values_to_utf16(
@@ -6289,11 +6312,10 @@ pub(crate) fn parse_css_value_with_utf16_source(
             property_id,
             values,
             &unresolved_source,
-            &[],
             substitution_presence,
         );
     }
-    parse_css_value_after_substitution_scan(context, property_id, values, &[], &[], substitution_presence)
+    parse_css_value_after_substitution_scan(context, property_id, values, &[], substitution_presence)
 }
 
 /// Parse a property value using the grammars which have been ported to Rust.
@@ -6302,21 +6324,13 @@ pub(crate) fn parse_css_value(context: &ParseContext, property_id: u16, values: 
         .iter()
         .flat_map(|value| value.original_source_text.iter())
         .collect::<Vec<_>>();
-    parse_css_value_with_source(context, property_id, values, &source, &[])
+    parse_css_value_with_source(context, property_id, values, &source)
 }
 
-fn component_values_from_source<'a>(
+pub(crate) fn component_values_from_source<'a>(
     source: impl Into<TokenizerInput<'a>>,
 ) -> Result<smallvec::SmallVec<[ComponentValue; 8]>, ()> {
     consume_a_small_list_of_component_values(tokenize_for_parser_without_source(source))
-}
-
-/// Parses a UTF-16 property value whose component-value source is already serialized.
-pub(crate) fn parse_css_value_from_source(context: &ParseContext, property_id: u16, source: &[u16]) -> ParseOutcome {
-    match component_values_from_source(source) {
-        Ok(values) => parse_css_value_with_source(context, property_id, &values, source, &[]),
-        Err(()) => ParseOutcome::NotHandled,
-    }
 }
 
 /// The result category returned through the value-parser FFI.
@@ -6364,7 +6378,7 @@ pub unsafe extern "C" fn rust_parse_css_value(
                     Err(()) => ParseOutcome::NotHandled,
                 }
             } else {
-                parse_css_value_after_substitution_scan(context, property_id, &values, &[], &[], Default::default())
+                parse_css_value_after_substitution_scan(context, property_id, &values, &[], Default::default())
             }
         }
         Err(()) => ParseOutcome::NotHandled,
@@ -6622,14 +6636,12 @@ mod tests {
     fn parses_a_serialized_substituted_value() {
         let mut parse_context = context();
         parse_context.is_substituted_value = true;
-        let valid = utf16("rgb(1 2 3)");
-        let trailing = utf16("rgb(1 2 3) trailing");
         assert!(matches!(
-            parse_css_value_from_source(&parse_context, property_id::COLOR, &valid),
+            parse_with_context(&parse_context, property_id::COLOR, "rgb(1 2 3)"),
             ParseOutcome::Parsed(_)
         ));
         assert!(matches!(
-            parse_css_value_from_source(&parse_context, property_id::COLOR, &trailing),
+            parse_with_context(&parse_context, property_id::COLOR, "rgb(1 2 3) trailing"),
             ParseOutcome::Invalid
         ));
     }
@@ -7742,7 +7754,6 @@ mod tests {
             };
             let StyleValueData::Unresolved {
                 source_text,
-                value_comparison_text,
                 presence_attr,
                 presence_var,
                 ..
@@ -7751,7 +7762,6 @@ mod tests {
                 panic!("substitution function should produce an unresolved value: {source}");
             };
             assert_eq!(retained_utf16(source_text), utf16(source));
-            assert!(value_comparison_text.units().is_empty());
             assert_eq!(*presence_attr, expected_attr);
             assert_eq!(*presence_var, expected_var);
         }
@@ -7774,46 +7784,36 @@ mod tests {
         else {
             panic!("attr() should parse");
         };
-        let StyleValueData::Unresolved {
-            source_text,
-            value_comparison_text,
-            ..
-        } = &*value
-        else {
+        let StyleValueData::Unresolved { source_text, .. } = &*value else {
             panic!("attr() should remain unresolved");
         };
         assert_eq!(retained_utf16(source_text), utf16("attr( foo )"));
-        assert!(value_comparison_text.units().is_empty());
     }
 
     #[test]
     fn parses_custom_properties_as_unresolved_values() {
         let source = utf16(" 10\\70 x ");
-        let comparison = utf16("10px");
         let values = consume_a_list_of_component_values(tokenize_for_parser(&source)).unwrap();
         let ParseOutcome::Parsed(value) =
-            parse_css_value_with_source(&context(), property_id::CUSTOM, &values, &source, &comparison)
+            parse_css_value_with_source(&context(), property_id::CUSTOM, &values, &source)
         else {
             panic!("custom property should parse");
         };
         let StyleValueData::Unresolved {
             components,
             source_text,
-            value_comparison_text,
             ..
         } = &*value
         else {
             panic!("custom property should produce an unresolved value");
         };
         assert_eq!(retained_utf16(source_text), utf16("10\\70 x"));
-        assert_eq!(retained_utf16(value_comparison_text), comparison);
         assert_eq!(components.as_slice(), values.as_slice());
 
         let source = utf16("a/* comment */");
-        let comparison = utf16("a");
         let values = consume_a_list_of_component_values(tokenize_for_parser(&source)).unwrap();
         let ParseOutcome::Parsed(value) =
-            parse_css_value_with_source(&context(), property_id::CUSTOM, &values, &source, &comparison)
+            parse_css_value_with_source(&context(), property_id::CUSTOM, &values, &source)
         else {
             panic!("custom property should parse");
         };

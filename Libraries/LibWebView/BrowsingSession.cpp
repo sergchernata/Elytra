@@ -5,6 +5,7 @@
  */
 
 #include <AK/HashTable.h>
+#include <AK/LexicalPath.h>
 #include <LibCore/Directory.h>
 #include <LibDatabase/Database.h>
 #include <LibWebView/Application.h>
@@ -14,6 +15,7 @@
 #include <LibWebView/FaviconStore.h>
 #include <LibWebView/HSTSStore.h>
 #include <LibWebView/HistoryStore.h>
+#include <LibWebView/PermissionManager.h>
 #include <LibWebView/SessionStore.h>
 #include <LibWebView/StorageJar.h>
 
@@ -102,6 +104,13 @@ ErrorOr<NonnullRefPtr<BrowsingSession>> BrowsingSession::create_persistent(ByteS
         }
     }
     session->blob_url_store = make<BlobURLStore>();
+
+    // The profile's own site permissions, kept beside its site data. One kept in memory follows the default session's,
+    // as a private session does, writing nothing.
+    if (persist == Persist::Yes)
+        session->permission_manager = PermissionManager::create_for_ordinary_session(LexicalPath::join(directory, "Permissions.json"sv).string());
+    else if (records.permission_manager)
+        session->permission_manager = PermissionManager::create_for_private_session(*records.permission_manager);
 
     // Never used: views of this session keep tab restore in `records` (see records()). Present so that no store is
     // ever null.

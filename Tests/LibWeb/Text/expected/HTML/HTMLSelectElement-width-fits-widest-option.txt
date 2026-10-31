@@ -1,0 +1,7 @@
+short selected option: true
+short selected option, appearance none: true
+option in optgroup: true
+after inserting wider option: true
+after shortening its text: true
+after setting a wider label: true
+after removing it: true

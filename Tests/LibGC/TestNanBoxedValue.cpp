@@ -10,9 +10,12 @@
 #include <LibGC/Heap.h>
 #include <LibGC/HeapRegion.h>
 #include <LibGC/NanBoxedValue.h>
+#include <LibGC/Testing.h>
 #include <LibGC/Weak.h>
 #include <LibGC/WeakInlines.h>
 #include <LibTest/TestCase.h>
+
+namespace {
 
 class TestCell final : public GC::Cell {
     GC_CELL(TestCell, GC::Cell);
@@ -27,13 +30,6 @@ static GC::Heap& test_heap()
 {
     static AK::NeverDestroyed<GC::Heap> heap([](auto&) { });
     return *heap;
-}
-
-static NEVER_INLINE void scrub_stack()
-{
-    u8 volatile filler[8 * KiB];
-    for (size_t i = 0; i < sizeof(filler); ++i)
-        filler[i] = 0;
 }
 
 TEST_SETUP
@@ -93,12 +89,14 @@ TEST_CASE(conservative_scanner_decodes_caged_value)
         EXPECT(boxed_value != 0);
     }
 
-    scrub_stack();
+    GC::scrub_stack_for_testing();
     heap.collect_garbage();
     EXPECT(weak_cell);
 
     boxed_value = 0;
-    scrub_stack();
+    GC::scrub_stack_for_testing();
     heap.collect_garbage(GC::Heap::CollectionType::CollectEverything);
     EXPECT(!weak_cell);
+}
+
 }

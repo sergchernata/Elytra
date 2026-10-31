@@ -169,6 +169,10 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
         agent_cluster_id,
         agent_cluster_cross_origin_isolation_mode);
 
+    auto agent_cluster_is_origin_keyed = origin.is_opaque()
+        || (creator && origin.is_same_origin(*creator_origin) && as<WindowEnvironmentSettingsObject>(creator->relevant_settings_object()).agent_cluster_is_origin_keyed());
+    as<WindowEnvironmentSettingsObject>(relevant_settings_object(*window)).set_agent_cluster_is_origin_keyed(agent_cluster_is_origin_keyed);
+
     // 14. Let loadTimingInfo be a new document load timing info with its navigation start time set to the result of calling
     //     coarsen time with unsafeContextCreationTime and the new environment settings object's cross-origin isolated capability.
     auto load_timing_info = DOM::DocumentLoadTimingInfo();
@@ -301,6 +305,20 @@ GC::Ptr<Navigable> BrowsingContext::opener_navigable() const
     if (!navigable || navigable->has_been_destroyed())
         return nullptr;
     return navigable;
+}
+
+Optional<CrossProcessId> BrowsingContext::one_permitted_sandboxed_navigator_navigable_id() const
+{
+    if (auto navigable = one_permitted_sandboxed_navigator_navigable())
+        return navigable->id();
+    return {};
+}
+
+GC::Ptr<Navigable> BrowsingContext::one_permitted_sandboxed_navigator_navigable() const
+{
+    if (!m_the_one_permitted_sandboxed_navigator || !m_the_one_permitted_sandboxed_navigator->active_document())
+        return nullptr;
+    return m_the_one_permitted_sandboxed_navigator->active_document()->navigable();
 }
 
 void BrowsingContext::set_opener_browsing_context(GC::Ptr<BrowsingContext> opener)

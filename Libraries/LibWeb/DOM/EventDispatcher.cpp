@@ -6,6 +6,7 @@
  */
 
 #include <AK/Assertions.h>
+#include <AK/NeverDestroyed.h>
 #include <AK/Optional.h>
 #include <AK/TypeCasts.h>
 #include <LibWeb/DOM/AbortSignal.h>
@@ -26,10 +27,12 @@
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
 #include <LibWeb/HTML/HTMLButtonElement.h>
+#include <LibWeb/HTML/HTMLLabelElement.h>
 #include <LibWeb/HTML/HTMLSlotElement.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/MouseEvent.h>
 #include <LibWeb/UIEvents/TouchEvent.h>
 
@@ -46,6 +49,11 @@ static Optional<Utf16FlyString> legacy_event_type_for_event_type(Utf16FlyString 
         return HTML::EventNames::webkitAnimationStart;
     if (event_type == HTML::EventNames::transitionend)
         return HTML::EventNames::webkitTransitionEnd;
+    // INTEROP: Other browsers use mousewheel as the legacy event type for trusted wheel events.
+    if (event_type == UIEvents::EventNames::wheel) {
+        static NeverDestroyed<Utf16FlyString> mousewheel_event_type { "mousewheel"_utf16_fly_string };
+        return *mousewheel_event_type;
+    }
     return {};
 }
 
@@ -270,6 +278,9 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
 
     // 3. Let activationTarget be null.
     GC::Ptr<EventTarget> activation_target;
+    // NB: Labels need the click target relative to their tree, even after dispatch retargets or clears event.target.
+    GC::Ptr<EventTarget> activation_event_target;
+    bool activation_target_is_interactive_label_descendant = false;
 
     // 4. Let relatedTarget be the result of retargeting event’s relatedTarget against target.
     GC::Ptr<EventTarget> related_target = retarget(event.related_target().ptr(), target.ptr());
@@ -284,10 +295,26 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
     bool should_dispatch = is_activation_event;
     if (!should_dispatch) {
         auto const* node = as_if<Node>(*target);
-        should_dispatch = !node || node->has_inclusive_ancestor_with_event_listener(event.type());
+        auto has_listener_on_event_path = [&](Utf16FlyString const& type) {
+            for (auto* ancestor = target.ptr(); ancestor;) {
+                if (ancestor->has_event_listener(type))
+                    return true;
+                // NB: ShadowRoot::get_parent() reads the first path entry for non-composed events. The path is not
+                //     built yet, so apply that boundary check here before calling it.
+                if (!event.composed() && is<ShadowRoot>(*ancestor)) {
+                    if (node && &node->root() == ancestor)
+                        break;
+                    ancestor = as<ShadowRoot>(*ancestor).host();
+                    continue;
+                }
+                ancestor = ancestor->get_parent(event);
+            }
+            return false;
+        };
+        should_dispatch = !node || has_listener_on_event_path(event.type());
         if (!should_dispatch && event.is_trusted()) {
             if (auto legacy_event_type = legacy_event_type_for_event_type(event.type()); legacy_event_type.has_value())
-                should_dispatch = node->has_inclusive_ancestor_with_event_listener(*legacy_event_type);
+                should_dispatch = has_listener_on_event_path(*legacy_event_type);
         }
     }
 
@@ -309,8 +336,10 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
         // NB: Step 4 is executed above as part of an optimization.
 
         // 5. If isActivationEvent is true and target has activation behavior, then set activationTarget to target.
-        if (is_activation_event && target->has_activation_behavior())
+        if (is_activation_event && target->has_activation_behavior()) {
             activation_target = target;
+            activation_event_target = target;
+        }
 
         // 6. Let slottable be target, if target is a slottable and is assigned, and null otherwise.
         GC::Ptr<EventTarget> slottable;
@@ -364,8 +393,10 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
                 || !is<Node>(parent)
                 || (is<Node>(parent) && as<Node>(*target).root().is_shadow_including_inclusive_ancestor_of(as<Node>(*parent)))) {
                 // 1. If isActivationEvent is true, event’s bubbles attribute is true, activationTarget is null, and parent has activation behavior, then set activationTarget to parent.
-                if (is_activation_event && event.bubbles() && !activation_target && parent->has_activation_behavior())
+                if (is_activation_event && event.bubbles() && !activation_target && parent->has_activation_behavior()) {
                     activation_target = parent;
+                    activation_event_target = target;
+                }
 
                 // 2. Append to an event path with event, parent, null, relatedTarget, touchTargets, and slot-in-closed-tree.
                 event.append_to_path(*parent, nullptr, related_target, touch_targets, slot_in_closed_tree);
@@ -380,8 +411,10 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
                 target = *parent;
 
                 // 1. If isActivationEvent is true, activationTarget is null, and target has activation behavior, then set activationTarget to target.
-                if (is_activation_event && !activation_target && target->has_activation_behavior())
+                if (is_activation_event && !activation_target && target->has_activation_behavior()) {
                     activation_target = target;
+                    activation_event_target = target;
+                }
 
                 // 2. Append to an event path with event, parent, target, relatedTarget, touchTargets, and slot-in-closed-tree.
                 event.append_to_path(*parent, target, related_target, touch_targets, slot_in_closed_tree);
@@ -429,6 +462,10 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
                 }
             }
         }
+
+        // NB: Keep the original interactive ancestry if listeners remove or reparent the clicked node.
+        if (auto* label = as_if<HTML::HTMLLabelElement>(activation_target.ptr()))
+            activation_target_is_interactive_label_descendant = label->is_interactive_descendant_event_target(activation_event_target.ptr());
 
         // 12. If activationTarget is non-null and activationTarget has legacy-pre-activation behavior, then run activationTarget’s legacy-pre-activation behavior.
         if (activation_target)
@@ -538,7 +575,10 @@ bool EventDispatcher::dispatch(GC::Ref<EventTarget> target, Event& event, bool l
     if (activation_target) {
         // 1. If event’s canceled flag is unset, then run activationTarget’s activation behavior with event.
         if (!event.cancelled()) {
-            activation_target->activation_behavior(event);
+            if (auto* label = as_if<HTML::HTMLLabelElement>(*activation_target))
+                label->activation_behavior(event, activation_target_is_interactive_label_descendant);
+            else
+                activation_target->activation_behavior(event);
             activation_target->legacy_cancelled_activation_behavior_was_not_called();
         }
         // 2. Otherwise, if activationTarget has legacy-canceled-activation behavior, then run activationTarget’s legacy-canceled-activation behavior.

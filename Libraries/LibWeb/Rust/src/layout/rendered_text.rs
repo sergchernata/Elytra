@@ -8,7 +8,7 @@ use super::node_data::NodeSlotId;
 use super::text_transform::{TextRenderingOptions, may_require_bidi_processing, render_text};
 use super::{ComputedValuesView, LayoutNodeArena};
 use crate::css::css_enums::text_transform;
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// Selects the beginning or end of a transformed span for offsets inside it.
@@ -80,12 +80,10 @@ impl PartialEq for PublishedTextSlot {
     }
 }
 
-/// A text row's rendered text, with what layout caches beside it.
+/// A text row's rendered text, with what it was rendered for.
 #[derive(Clone, Default)]
 pub(crate) struct TextContent {
     rendered: Arc<RenderedText>,
-    grapheme_segmenter: crate::fork::ForkReset<OnceCell<super::text_chunker::GraphemeSegmenter>>,
-    chunks: RefCell<Option<Arc<CachedTextChunks>>>,
     pub(super) rendering_key: Option<TextRenderingKey>,
 }
 
@@ -113,32 +111,45 @@ fn transform_uses_locale(transform: u8) -> bool {
     )
 }
 
-/// Enrolls the text under `root` whose casing depends on the language it renders with, and answers whether there was
+/// Enrolls the text under `root` whose casing or loose line breaking depends on its language, and answers whether there was
 /// any. This only enrolls text; source views are requested after DOM language invalidation completes.
-pub(crate) fn enroll_text_after_language_change(arena: &LayoutNodeArena, root: NodeSlotId) -> bool {
-    let mut changed = false;
-    let mut enroll = |node| {
+pub(crate) fn enroll_text_after_language_change(arena: &mut LayoutNodeArena, root: NodeSlotId) -> bool {
+    let depends_on_language = |arena: &LayoutNodeArena, node: NodeSlotId| {
         if !super::node_facts::kind_is_text(arena.data(node).kind.get()) {
-            return;
+            return false;
         }
         let parent = arena.data(node).parent.get();
-        if !parent.is_invalid()
+        !parent.is_invalid()
             && arena.style_payloads(parent).is_some_and(|style| {
-                transform_uses_locale(ComputedValuesView::new(&style.groups).inherited_text().text_transform)
+                let values = ComputedValuesView::new(&style.groups);
+                transform_uses_locale(values.inherited_text().text_transform)
+                    || values.line_break() == crate::css::css_enums::line_break::LOOSE
             })
-        {
-            arena.enroll_text_node_for_content_sync(node);
-            changed = true;
-        }
     };
-    if super::node_facts::kind_is_text(arena.data(root).kind.get()) {
-        for &node in arena.text_fragments(root).as_slice() {
-            enroll(node);
+    let mut enrolled = Vec::new();
+    {
+        let arena: &LayoutNodeArena = arena;
+        if super::node_facts::kind_is_text(arena.data(root).kind.get()) {
+            enrolled.extend(
+                arena
+                    .text_fragments(root)
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .filter(|&node| depends_on_language(arena, node)),
+            );
+        } else {
+            arena.for_each_node_in_layout_subtree_in_pre_order(root, |node| {
+                if depends_on_language(arena, node) {
+                    enrolled.push(node);
+                }
+            });
         }
-    } else {
-        arena.for_each_node_in_layout_subtree_in_pre_order(root, enroll);
     }
-    changed
+    for &node in &enrolled {
+        arena.enroll_text_node_for_content_sync(node);
+    }
+    !enrolled.is_empty()
 }
 
 #[derive(Clone)]
@@ -149,6 +160,7 @@ pub(crate) struct TextChunkCacheKey {
     pub(crate) white_space_collapse: u8,
     pub(crate) word_break: u8,
     pub(crate) line_break: u8,
+    pub(crate) line_break_language: super::text_chunker::LineBreakLanguage,
     pub(crate) font_variant_emoji: u8,
     pub(crate) frozen_font_list: std::sync::Arc<libgfx_rust::font::FrozenFontList>,
     pub(crate) splits_at_orientation_changes: bool,
@@ -162,6 +174,7 @@ impl PartialEq for TextChunkCacheKey {
             && self.white_space_collapse == other.white_space_collapse
             && self.word_break == other.word_break
             && self.line_break == other.line_break
+            && self.line_break_language == other.line_break_language
             && self.font_variant_emoji == other.font_variant_emoji
             && self.splits_at_orientation_changes == other.splits_at_orientation_changes
             // A frozen cascade is immutable, so naming the same one is the whole of equality.
@@ -207,16 +220,54 @@ impl TextContent {
             .as_ref()
             .is_some_and(|key| key.options.is_password_input)
     }
+}
 
+/// What layout keeps beside the rendered text of the text rows it lays out: the chunks the last run that chunked a row
+/// made, and the row's grapheme segmenter. Each keeps the rendered text it was made for, which tells whether the row's
+/// text is still that text.
+#[derive(Default)]
+pub(crate) struct TextMemos {
+    chunks: RefCell<Vec<Option<ChunksOfText>>>,
+    grapheme_segmenters: RefCell<Vec<Option<GraphemeSegmenterOfText>>>,
+}
+
+/// The chunks a run made of a row's rendered text, and that text.
+#[derive(Clone)]
+struct ChunksOfText {
+    rendered: Arc<RenderedText>,
+    chunks: Arc<CachedTextChunks>,
+}
+
+/// A grapheme segmenter and the rendered text it segments, which it points into, and so drops before.
+struct GraphemeSegmenterOfText {
+    segmenter: super::text_chunker::GraphemeSegmenter,
+    rendered: Arc<RenderedText>,
+}
+
+impl TextMemos {
+    /// The memos of a fork of the arena, which keeps the chunks and makes grapheme segmenters anew.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            chunks: self.chunks.clone(),
+            grapheme_segmenters: RefCell::default(),
+        }
+    }
+
+    /// The chunks of the text row `node`, whose rendered text is `rendered`, for `key`, made by `compute` where the last
+    /// run that chunked the row's text did so for another key.
     pub(crate) fn text_chunks(
         &self,
+        node: NodeSlotId,
+        rendered: &Arc<RenderedText>,
         key: &TextChunkCacheKey,
         compute: impl FnOnce() -> Vec<super::text_chunker::TextChunk>,
     ) -> Arc<CachedTextChunks> {
-        if let Some(entry) = self.chunks.borrow().as_ref()
-            && entry.key == *key
+        let index = node.slot_index() as usize;
+        if let Some(Some(memo)) = self.chunks.borrow().get(index)
+            && Arc::ptr_eq(&memo.rendered, rendered)
+            && memo.chunks.key == *key
         {
-            return entry.clone();
+            return memo.chunks.clone();
         }
 
         // A nested measurement can request a different key while an iterator
@@ -226,13 +277,47 @@ impl TextContent {
             key: key.clone(),
             chunks: compute(),
         });
-        *self.chunks.borrow_mut() = Some(entry.clone());
+        let mut chunks = self.chunks.borrow_mut();
+        if chunks.len() <= index {
+            chunks.resize_with(index + 1, || None);
+        }
+        chunks[index] = Some(ChunksOfText {
+            rendered: rendered.clone(),
+            chunks: entry.clone(),
+        });
         entry
     }
 
-    pub(crate) fn grapheme_segmenter(&self) -> &super::text_chunker::GraphemeSegmenter {
-        self.grapheme_segmenter
-            .get_or_init(|| super::text_chunker::GraphemeSegmenter::new(&self.text))
+    /// Runs `read` with the grapheme segmenter of the text row `node`, whose rendered text is `rendered`.
+    pub(crate) fn with_grapheme_segmenter<R>(
+        &self,
+        node: NodeSlotId,
+        rendered: &Arc<RenderedText>,
+        read: impl FnOnce(&super::text_chunker::GraphemeSegmenter) -> R,
+    ) -> R {
+        let index = node.slot_index() as usize;
+        let mut segmenters = self.grapheme_segmenters.borrow_mut();
+        if segmenters.len() <= index {
+            segmenters.resize_with(index + 1, || None);
+        }
+        let memo = &mut segmenters[index];
+        if !memo.as_ref().is_some_and(|memo| Arc::ptr_eq(&memo.rendered, rendered)) {
+            *memo = Some(GraphemeSegmenterOfText {
+                segmenter: super::text_chunker::GraphemeSegmenter::new(&rendered.text),
+                rendered: rendered.clone(),
+            });
+        }
+        read(&memo.as_ref().expect("the memo was just made").segmenter)
+    }
+
+    /// Lets go of what the memos keep for the row in `slot`, which the arena freed.
+    pub(crate) fn forget(&self, slot: u32) {
+        if let Some(chunks) = self.chunks.borrow_mut().get_mut(slot as usize) {
+            *chunks = None;
+        }
+        if let Some(segmenter) = self.grapheme_segmenters.borrow_mut().get_mut(slot as usize) {
+            *segmenter = None;
+        }
     }
 }
 
@@ -402,8 +487,6 @@ fn sync_text_content(arena: &mut LayoutNodeArena, id: NodeSlotId) {
                 dom_length_in_code_units: source_range.length,
                 edits: rendered.edits,
             }),
-            grapheme_segmenter: crate::fork::ForkReset::default(),
-            chunks: RefCell::default(),
             rendering_key: Some(key),
         };
         arena.set_text_content(id, content);
@@ -433,14 +516,56 @@ mod tests {
     }
 
     #[test]
+    fn text_chunk_cache_tracks_line_break_language_changes() {
+        use crate::layout::text_chunker::LineBreakLanguage;
+        let content = content("文・", 0, 2, Vec::new());
+        let mut key = TextChunkCacheKey {
+            should_wrap_lines: true,
+            should_respect_linebreaks: false,
+            unidirectional_ltr: true,
+            white_space_collapse: 0,
+            word_break: 0,
+            line_break: crate::css::css_enums::line_break::LOOSE,
+            line_break_language: LineBreakLanguage::Japanese,
+            font_variant_emoji: 0,
+            frozen_font_list: std::sync::Arc::new(libgfx_rust::font::FrozenFontList::empty()),
+            splits_at_orientation_changes: false,
+        };
+        let memos = TextMemos::default();
+        let node = NodeSlotId::new(0, 1);
+        let mut previous = memos.text_chunks(node, content.rendered(), &key, Vec::new);
+        for language in [
+            LineBreakLanguage::Other,
+            LineBreakLanguage::Chinese,
+            LineBreakLanguage::Japanese,
+        ] {
+            key.line_break_language = language;
+            let chunks = memos.text_chunks(node, content.rendered(), &key, Vec::new);
+            assert!(!std::sync::Arc::ptr_eq(&previous, &chunks));
+            let hit = memos.text_chunks(node, content.rendered(), &key, || {
+                panic!("unchanged language should reuse chunks")
+            });
+            assert!(std::sync::Arc::ptr_eq(&chunks, &hit));
+            previous = chunks;
+        }
+    }
+
+    #[test]
     fn text_chunk_users_survive_cache_and_snapshot_replacement() {
         use super::TextChunkCacheKey;
         use crate::layout::text_chunker::TextChunk;
         use std::sync::Arc;
 
         let mut arena = LayoutNodeArena::new();
+        let scratch = crate::layout::run_state::LayoutScratch::default();
         let node = arena.allocate_for_test().slot;
         arena.set_text_content(node, content("hello", 0, 5, Vec::new()));
+        scratch.apply_memo_invalidations(&mut arena);
+        let text_chunks = |arena: &LayoutNodeArena, key: &TextChunkCacheKey, compute: &dyn Fn() -> Vec<TextChunk>| {
+            scratch
+                .text_memos()
+                .text_chunks(node, arena.text_content(node).unwrap().rendered(), key, compute)
+        };
         let key = TextChunkCacheKey {
             should_wrap_lines: true,
             should_respect_linebreaks: false,
@@ -448,6 +573,7 @@ mod tests {
             white_space_collapse: 0,
             word_break: 0,
             line_break: crate::css::css_enums::line_break::AUTO,
+            line_break_language: crate::layout::text_chunker::LineBreakLanguage::Other,
             font_variant_emoji: 0,
             frozen_font_list: std::sync::Arc::new(libgfx_rust::font::FrozenFontList::empty()),
             splits_at_orientation_changes: false,
@@ -462,23 +588,18 @@ mod tests {
             can_break_after: true,
             text_type: 0,
         };
-        let original = arena
-            .text_content(node)
-            .unwrap()
-            .text_chunks(&key, || vec![chunk.clone()]);
-        let hit = arena
-            .text_content(node)
-            .unwrap()
-            .text_chunks(&key, || panic!("matching chunks should be cached"));
+        let original = text_chunks(&arena, &key, &|| vec![chunk.clone()]);
+        let hit = text_chunks(&arena, &key, &|| panic!("matching chunks should be cached"));
         assert!(Arc::ptr_eq(&original, &hit));
         drop(hit);
         let original_weak = Arc::downgrade(&original);
-        let replacement = arena.text_content(node).unwrap().text_chunks(
+        let replacement = text_chunks(
+            &arena,
             &TextChunkCacheKey {
                 should_wrap_lines: false,
                 ..key.clone()
             },
-            Vec::new,
+            &Vec::new,
         );
         assert!(replacement.is_empty());
         assert_eq!(&**original, std::slice::from_ref(&chunk));
@@ -498,6 +619,7 @@ mod tests {
         };
         let published_hello = published_text(&published);
         arena.set_text_content(node, content("hello", 0, 5, Vec::new()));
+        scratch.apply_memo_invalidations(&mut arena);
         assert_eq!(Arc::strong_count(&replacement), 2);
         // The same content keeps the rendered text the publication shares.
         assert!(std::sync::Arc::ptr_eq(
@@ -505,6 +627,7 @@ mod tests {
             &published_text(&arena.publish_paint_facts().text)
         ));
         arena.set_text_content(node, content("goodbye", 0, 7, Vec::new()));
+        scratch.apply_memo_invalidations(&mut arena);
         assert_eq!(Arc::strong_count(&replacement), 1);
         // A publication keeps the rendered text it was made with.
         assert_eq!(
@@ -515,14 +638,12 @@ mod tests {
             published_text(&arena.publish_paint_facts().text).text,
             "goodbye".encode_utf16().collect::<Vec<_>>()
         );
-        let new_chunks = arena
-            .text_content(node)
-            .unwrap()
-            .text_chunks(&key, || vec![chunk.clone()]);
+        let new_chunks = text_chunks(&arena, &key, &|| vec![chunk.clone()]);
         assert_eq!(&**new_chunks, std::slice::from_ref(&chunk));
         drop(replacement);
         assert!(replacement_weak.upgrade().is_none());
         let _ = arena.free_subtree(node);
+        scratch.apply_memo_invalidations(&mut arena);
         assert_eq!(Arc::strong_count(&new_chunks), 1);
     }
 
@@ -588,13 +709,13 @@ mod tests {
         arena.write_shape(node).set_parent(parent);
         let sharp_s_first = || content("SSS", 0, 2, vec![edit(0, 1, 0, 2)]);
         arena.set_text_content(node, sharp_s_first());
-        let epoch = arena.data(parent).fragment_cache_epoch.get();
+        let epoch = arena.data(parent).fragment_cache_epoch;
         assert_eq!(arena.rendered_text_offset_for_dom_offset(node, 1, Start), 2);
         arena.set_text_content(node, sharp_s_first());
-        assert_eq!(arena.data(parent).fragment_cache_epoch.get(), epoch);
+        assert_eq!(arena.data(parent).fragment_cache_epoch, epoch);
 
         arena.set_text_content(node, content("SSS", 0, 2, vec![edit(1, 1, 1, 2)]));
-        assert_ne!(arena.data(parent).fragment_cache_epoch.get(), epoch);
+        assert_ne!(arena.data(parent).fragment_cache_epoch, epoch);
         assert_eq!(arena.rendered_text_offset_for_dom_offset(node, 1, Start), 1);
         assert_eq!(arena.dom_offset_for_rendered_text_offset(node, 2, End), 2);
     }
@@ -619,7 +740,7 @@ mod tests {
         original.rendering_key = Some(key.clone());
         arena.set_text_content(node, original);
         let storage = arena.text_content(node).unwrap().text.as_ptr();
-        let epoch = arena.data(node).fragment_cache_epoch.get();
+        let epoch = arena.data(node).fragment_cache_epoch;
 
         arena.invalidate_text_content(node);
         assert!(arena.text_content(node).unwrap().rendering_key.is_none());
@@ -632,7 +753,7 @@ mod tests {
 
         assert_eq!(arena.text_content(node).unwrap().rendering_key.as_ref(), Some(&new_key));
         assert_eq!(arena.text_content(node).unwrap().text.as_ptr(), storage);
-        assert_eq!(arena.data(node).fragment_cache_epoch.get(), epoch);
+        assert_eq!(arena.data(node).fragment_cache_epoch, epoch);
         assert!(arena.pending_text_nodes_for_content_sync().is_empty());
     }
 

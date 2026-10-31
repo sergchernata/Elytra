@@ -89,6 +89,17 @@ void CanonicalTraversable::set_has_system_focus(bool has_system_focus, RefPtr<We
     });
 }
 
+// https://html.spec.whatwg.org/multipage/interaction.html#user-attention
+bool CanonicalTraversable::has_user_attention() const
+{
+    // A top-level traversable has user attention when its system visibility state is "visible", and it either has
+    // system focus or user agent widgets directly related to it can receive keyboard input channeled from the
+    // operating system.
+    // FIXME: Also give the traversable user attention while a user agent widget related to it, such as the location bar,
+    //        can receive keyboard input.
+    return m_system_visibility_state == Web::HTML::VisibilityState::Visible && m_has_system_focus;
+}
+
 void CanonicalTraversable::set_focused_navigable(CanonicalNavigable& navigable, WebContentPage& requesting_page)
 {
     if (m_focused_navigable_id == navigable.id())
@@ -402,6 +413,9 @@ void CanonicalTraversable::release_page_if_unused(NonnullRefPtr<WebContentPage> 
         return;
     if (auto* bidi = WebDriverBiDi::the())
         bidi->push_session_state_for_client(page->client());
+    if (auto view = this->view(); view.has_value())
+        view->did_release_page({}, page);
+    page->client().revoke_audio_playback(page->id());
     // A page left hosting none of the tab's documents goes on representing the tab to a process holding part of
     // another tab of its group, whose documents can hold the tab's WindowProxies.
     if (page->client().holds_part_of_a_tab_in_the_group_of(*this)) {

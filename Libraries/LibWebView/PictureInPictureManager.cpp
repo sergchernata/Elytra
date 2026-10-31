@@ -92,6 +92,11 @@ bool PictureInPictureManager::document_has_open_window(CanonicalNavigable const&
     });
 }
 
+bool PictureInPictureManager::last_window_closed_with_video_stopped(CanonicalNavigable const& navigable) const
+{
+    return m_last_closed_with_video_stopped && m_last_closed_navigable.ptr() == &navigable;
+}
+
 // A window closes once the document it was opened for is no longer active, as that document's unloading steps close it.
 void PictureInPictureManager::active_documents_did_change()
 {
@@ -142,6 +147,8 @@ void PictureInPictureManager::window_did_close(PictureInPictureWindow& window, P
     if (!index.has_value())
         return;
     auto page = m_windows[*index].page;
+    m_last_closed_navigable = m_windows[*index].navigable; // Fork hook (Arc)
+    m_last_closed_with_video_stopped = video_keeps_playing == PictureInPictureWindow::VideoKeepsPlaying::No;
     retire_window(*index);
 
     if (page->is_open())

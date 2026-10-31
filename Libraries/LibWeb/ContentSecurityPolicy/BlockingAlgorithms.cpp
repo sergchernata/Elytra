@@ -6,7 +6,6 @@
  */
 
 #include <AK/AnyOf.h>
-#include <LibGC/Heap.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/ContentSecurityPolicy/Directives/DirectiveOperations.h>
@@ -19,14 +18,13 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Fetch/Fetching/ClientContextSnapshots.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/PolicyContainers.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
-#include <LibWeb/TrustedTypes/TrustedScript.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
 #include <LibWeb/WebAssembly/WebAssembly.h>
 #include <LibWebCommon/Fetch/Infrastructure/URL.h>
@@ -34,35 +32,57 @@
 
 namespace Web::ContentSecurityPolicy {
 
-// AD-HOC: A client another process hosts has its global object there, and its violations belong to that global, so
-//         none is reported here.
-// FIXME: Report those violations in the process hosting the client's environment.
-static bool may_report_violations_for(Fetch::Infrastructure::Request const& request)
+static Optional<RemoteViolationDirective> remote_violation_directive(Utf16FlyString const& directive)
 {
-    return !Fetch::Fetching::remote_client(request);
+    if (directive == Directives::Names::FrameSrc)
+        return RemoteViolationDirective::FrameSrc;
+    if (directive == Directives::Names::ObjectSrc)
+        return RemoteViolationDirective::ObjectSrc;
+    if (directive == Directives::Names::FormAction)
+        return RemoteViolationDirective::FormAction;
+    return {};
+}
+
+static Utf16FlyString const& directive_name(RemoteViolationDirective directive)
+{
+    switch (directive) {
+    case RemoteViolationDirective::FrameSrc:
+        return Directives::Names::FrameSrc;
+    case RemoteViolationDirective::ObjectSrc:
+        return Directives::Names::ObjectSrc;
+    case RemoteViolationDirective::FormAction:
+        return Directives::Names::FormAction;
+    }
+    VERIFY_NOT_REACHED();
 }
 
 // AD-HOC: A client another process hosts has its global object there, so its page reports the violation to that
 //         process, by the violated policy's index in the client's CSP list.
-// FIXME: WebContent's page drops the violation.
-static void report_a_violation_of_a_remote_client(Page& page, NonnullRefPtr<Fetch::Infrastructure::Request> const& request, Policy const& policy)
+static void report_a_violation_of_a_remote_client(Page& page, Fetch::Infrastructure::Request const& request, Policy const& policy, Utf16FlyString const& directive)
 {
-    // NB: Request's policy container is a clone of the client's, which lists the policies in the same order.
-    auto const& policies = request->policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list.policies();
+    // NB: Request's policy container is a copy of the client's, which lists the policies in the same order.
+    auto const& policies = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list.policies();
     auto policy_index = policies.find_first_index_if([&](auto const& candidate) { return candidate.ptr() == &policy; });
-    if (!policy_index.has_value())
-        return;
+    VERIFY(policy_index.has_value());
 
-    auto effective_directive = Directives::get_the_effective_directive_for_request(request);
-    VERIFY(effective_directive.has_value());
-    page.client().page_did_report_violation_of_remote_client(*policy_index, effective_directive->view().to_utf8_but_should_be_ported_to_utf16(), request->url());
+    if (auto const& navigation = request.remote_client_navigation(); navigation.has_value()) {
+        // NB: The UI process checks a navigation's report against the directives the navigation can violate, and
+        //     reports the URL the navigation started with, upgraded to https when the request's URL is.
+        auto url_is_https = request.url().scheme() == "https"sv;
+        if (auto remote_directive = remote_violation_directive(directive); remote_directive.has_value())
+            page.client().page_did_report_navigation_violation_of_remote_client(*navigation, *policy_index, *remote_directive, url_is_https);
+        return;
+    }
+    page.client().page_did_report_violation_of_remote_client(*policy_index, directive.view().to_utf8_but_should_be_ported_to_utf16(), request.url());
 }
 
 ViolationReporter violation_reporter_for_request(JS::Realm& realm, NonnullRefPtr<Fetch::Infrastructure::Request> request)
 {
     return [&realm, request](NonnullRefPtr<Policy const> policy) {
         if (Fetch::Fetching::remote_client(request)) {
-            report_a_violation_of_a_remote_client(Bindings::principal_host_defined_page(realm), request, policy);
+            auto effective_directive = Directives::get_the_effective_directive_for_request(request);
+            VERIFY(effective_directive.has_value());
+            report_a_violation_of_a_remote_client(Bindings::principal_host_defined_page(realm), request, policy, *effective_directive);
             return;
         }
         auto violation = Violation::create_a_violation_object_for_request_and_policy(request, move(policy));
@@ -70,8 +90,38 @@ ViolationReporter violation_reporter_for_request(JS::Realm& realm, NonnullRefPtr
     };
 }
 
+static bool policy_governs_directive(Policy const& policy, Utf16FlyString const& directive)
+{
+    auto governing_directives = Directives::get_fetch_directive_fallback_list(directive);
+    if (governing_directives.is_empty())
+        governing_directives.append(directive);
+    return any_of(governing_directives, [&](auto const& governing_directive) {
+        return policy.contains_directive_with_name(governing_directive);
+    });
+}
+
+// AD-HOC: A fetch in another process found the violation of a policy of a client this process hosts. The report is
+//         that process's claim, so it is reported only for a policy of the client governing its directive.
+void report_a_violation_found_in_another_process(HTML::EnvironmentSettingsObject& settings, u64 policy_index, Utf16FlyString const& directive, URL::URL resource)
+{
+    // NB: The other process's copy of the client's CSP list lists its policies in the same order, and the list only
+    //     grows while the client keeps its document, so while it does, policy_index names the violated policy.
+    auto const& policies = settings.policy_container()->csp_list.policies();
+    if (policy_index >= policies.size() || !policy_governs_directive(policies[policy_index], directive))
+        return;
+
+    auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(settings.global_object(), policies[policy_index], directive.view().to_utf8_but_should_be_ported_to_utf16());
+    violation->set_resource(move(resource));
+    violation->report_a_violation(settings.realm());
+}
+
+void report_a_violation_found_in_another_process(HTML::EnvironmentSettingsObject& settings, u64 policy_index, RemoteViolationDirective directive, URL::URL resource)
+{
+    report_a_violation_found_in_another_process(settings, policy_index, directive_name(directive), move(resource));
+}
+
 // https://w3c.github.io/webappsec-csp/#should-block-navigation-request
-Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_content_security_policy(NonnullRefPtr<Fetch::Infrastructure::Request> navigation_request, Directives::Directive::NavigationType navigation_type)
+Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_content_security_policy(NonnullRefPtr<Fetch::Infrastructure::Request> navigation_request, Directives::Directive::NavigationType navigation_type, Page& page)
 {
     // 1. Let result be "Allowed".
     auto result = Directives::Directive::Result::Allowed;
@@ -88,7 +138,9 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
-            if (may_report_violations_for(*navigation_request)) {
+            if (Fetch::Fetching::remote_client(*navigation_request)) {
+                report_a_violation_of_a_remote_client(page, *navigation_request, policy, directive.name());
+            } else {
                 // 2. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on navigation request’s
                 //    client’s global object, policy, and directive’s name.
                 auto& realm = client->realm();
@@ -135,7 +187,9 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
                 if (Directives::inline_check(directive, nullptr, Directives::Directive::InlineType::Navigation, policy, serialized_url_utf16.utf16_view()) == Directives::Directive::Result::Allowed)
                     continue;
 
-                if (may_report_violations_for(*navigation_request)) {
+                if (Fetch::Fetching::remote_client(*navigation_request)) {
+                    report_a_violation_of_a_remote_client(page, *navigation_request, policy, directive_name);
+                } else {
                     // 3. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global,
                     //    policy, and directive on navigation request’s client’s global object, policy, and directive-name.
                     auto& realm = client->realm();
@@ -162,7 +216,7 @@ Directives::Directive::Result should_navigation_request_of_type_be_blocked_by_co
 // https://w3c.github.io/webappsec-csp/#should-block-navigation-response
 Directives::Directive::Result should_navigation_response_to_navigation_request_of_type_in_target_be_blocked_by_content_security_policy(
     RefPtr<Fetch::Infrastructure::Request> navigation_request,
-    GC::Ref<Fetch::Infrastructure::Response> navigation_response,
+    GC::Ref<Fetch::Infrastructure::ResponseView> navigation_response,
     PolicyList const& response_csp_list,
     Directives::Directive::NavigationType navigation_type,
     GC::Ref<HTML::LocalNavigable> target)
@@ -196,7 +250,7 @@ Directives::Directive::Result should_navigation_response_to_navigation_request_o
         // 1. For each directive of policy:
         for (auto const& directive : policy->directives()) {
             // 1. If directive’s navigation response check returns "Allowed" when executed upon navigation request, type, navigation response, target, "response", and policy skip to the next directive.
-            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response, target_container_document_origins, Directives::Directive::CheckType::Response, policy);
+            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response->record(), target_container_document_origins, Directives::Directive::CheckType::Response, policy);
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
@@ -230,21 +284,20 @@ Directives::Directive::Result should_navigation_response_to_navigation_request_o
         // 1. For each directive of policy:
         for (auto const& directive : policy->directives()) {
             // 1. If directive’s navigation response check returns "Allowed" when executed upon navigation request, type, navigation response, target, "source", and policy skip to the next directive.
-            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response, target_container_document_origins, Directives::Directive::CheckType::Source, policy);
+            auto directive_result = Directives::navigation_response_check(directive, *navigation_request, navigation_type, navigation_response->record(), target_container_document_origins, Directives::Directive::CheckType::Source, policy);
             if (directive_result == Directives::Directive::Result::Allowed)
                 continue;
 
-            if (may_report_violations_for(*navigation_request)) {
-                // 2. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on navigation request’s client’s global object, policy, and directive’s name.
-                auto& realm = client->realm();
-                auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(client->global_object(), policy, directive.name().view().to_utf8_but_should_be_ported_to_utf16());
+            // 2. Otherwise, let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on navigation request’s client’s global object, policy, and directive’s name.
+            // NB: No directive's navigation response check acts on the navigation request's own policies.
+            auto& realm = client->realm();
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(client->global_object(), policy, directive.name().view().to_utf8_but_should_be_ported_to_utf16());
 
-                // 3. Set violation’s resource to navigation request’s URL.
-                violation->set_resource(navigation_request->url());
+            // 3. Set violation’s resource to navigation request’s URL.
+            violation->set_resource(navigation_request->url());
 
-                // 4. Execute § 5.5 Report a violation on violation.
-                violation->report_a_violation(realm);
-            }
+            // 4. Execute § 5.5 Report a violation on violation.
+            violation->report_a_violation(realm);
 
             // 5. If policy’s disposition is "enforce", then set result to "Blocked".
             if (policy->disposition() == Policy::Disposition::Enforce)
@@ -326,31 +379,30 @@ Directives::Directive::Result should_elements_inline_type_behavior_be_blocked_by
 // https://w3c.github.io/webappsec-csp/#can-compile-strings
 JS::ThrowCompletionOr<void> ensure_csp_does_not_block_string_compilation(JS::Realm& realm, ReadonlySpan<Utf16String> parameter_strings, Utf16View body_string, Utf16View code_string, JS::CompilationType compilation_type, ReadonlySpan<JS::Value> parameter_args, JS::Value body_arg)
 {
-    Utf16String source_string;
+    // 1. Let sourceString be codeString.
+    auto source_string = Utf16String::from_utf16(code_string);
 
-    // 1. If compilationType is "TIMER", then:
-    if (compilation_type == JS::CompilationType::Timer) {
-        // 1. Let sourceString be codeString.
-        source_string = Utf16String::from_utf16(code_string);
-    }
-    // 2. Else:
-    else {
+    // 2. If compilationType is not "TIMER", then:
+    if (compilation_type != JS::CompilationType::Timer) {
         // 1. Let compilationSink be "Function" if compilationType is "FUNCTION", and "eval" otherwise.
         auto const compilation_sink = compilation_type == JS::CompilationType::Function ? TrustedTypes::InjectionSink::Function : TrustedTypes::InjectionSink::Eval;
 
         // 2. Let isTrusted be true if bodyArg implements TrustedScript, and false otherwise.
         auto is_trusted = TrustedTypes::trusted_script_value_matches(body_arg, body_string.to_utf8_but_should_be_ported_to_utf16());
 
-        // 3. If isTrusted is true then:
-        // NOTE: trusted_script_value_matches() also performs the data equality check from this step.
-
-        // 4. If isTrusted is true, then:
+        // 3. If isTrusted is true, then:
         if (is_trusted) {
-            // 1. Assert: parameterArgs’ [list/size=] is equal to [parameterStrings]' size.
+            // 1. Assert: bodyString is equal to bodyArg’s data.
+            // NB: trusted_script_value_matches() also performs the data equality check from this step.
+
+            // 2. Assert: parameterArgs’ size is equal to parameterStrings’ size.
             VERIFY(parameter_args.size() == parameter_strings.size());
 
-            // 2. For each index of the range 0 to |parameterArgs]' [list/size=], verify that the argument implements
-            //    TrustedScript and parameterStrings[index] is equal to arg's data.
+            // 3. For each index of the range 0 to parameterArgs’ size:
+            //    1. Let arg be parameterArgs[index].
+            //    2. If arg implements TrustedScript, then:
+            //       1. Assert: parameterStrings[index] is equal to arg’s data.
+            //    3. Otherwise, set isTrusted to false.
             Vector<String> utf8_parameter_strings;
             utf8_parameter_strings.ensure_capacity(parameter_strings.size());
             for (auto const& parameter_string : parameter_strings)
@@ -358,30 +410,26 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_string_compilation(JS::Rea
             is_trusted = TrustedTypes::trusted_script_values_match(parameter_args, utf8_parameter_strings);
         }
 
-        // 5. Let sourceToValidate be a new TrustedScript object created in realm whose data is set to codeString
-        //    if isTrusted is true, and codeString otherwise.
-        auto const source_to_validate = is_trusted
-            ? TrustedTypes::TrustedScriptOrString(GC::Heap::the().allocate<TrustedTypes::TrustedScript>(Utf16String::from_utf16(code_string)))
-            : Utf16String::from_utf16(code_string);
+        // 4. If isTrusted is false, then:
+        if (!is_trusted) {
+            // 1. Set sourceString to the result of executing the get trusted type compliant string algorithm,
+            //    with TrustedScript, realm, codeString, compilationSink, and 'script'.
+            auto maybe_source_string = TrustedTypes::get_trusted_type_compliant_string(
+                TrustedTypes::TrustedTypeName::TrustedScript,
+                realm.global_object(),
+                source_string,
+                compilation_sink,
+                TrustedTypes::Script.view());
 
-        // 6. Let sourceString be the result of executing the Get Trusted Type compliant string algorithm,
-        //    with TrustedScript, realm, sourceToValidate, compilationSink, and 'script'.
-        auto maybe_source_string = TrustedTypes::get_trusted_type_compliant_string(
-            TrustedTypes::TrustedTypeName::TrustedScript,
-            realm.global_object(),
-            source_to_validate,
-            compilation_sink,
-            TrustedTypes::Script.view());
+            // 2. If the algorithm throws an error, throw an EvalError.
+            if (maybe_source_string.is_error())
+                return realm.vm().throw_completion<JS::EvalError>("Blocked by Content Security Policy"_utf16);
+            source_string = maybe_source_string.release_value();
 
-        // 7. If the algorithm throws an error, throw an EvalError.
-        if (maybe_source_string.is_error()) {
-            return realm.vm().throw_completion<JS::EvalError>("Blocked by Content Security Policy"_utf16);
+            // 3. If sourceString is not equal to codeString, throw an EvalError.
+            if (source_string != code_string)
+                return realm.vm().throw_completion<JS::EvalError>("Blocked by Content Security Policy"_utf16);
         }
-        source_string = maybe_source_string.release_value();
-
-        // 8. If sourceString is not equal to codeString, throw an EvalError.
-        if (source_string != code_string)
-            return realm.vm().throw_completion<JS::EvalError>("Blocked by Content Security Policy"_utf16);
     }
 
     // 3. Let result be "Allowed".
@@ -414,43 +462,49 @@ JS::ThrowCompletionOr<void> ensure_csp_does_not_block_string_compilation(JS::Rea
                 maybe_source_list = maybe_default_src->value();
         }
 
-        // 3. If source-list is not null, and does not contain a source expression which is an ASCII case-insensitive
-        //    match for the string "'unsafe-eval'", then:
+        // 3. If source-list is not null:
         if (maybe_source_list.has_value()) {
             auto const& source_list = maybe_source_list.value();
 
-            auto maybe_unsafe_eval = source_list.find_if([](auto const& directive_value) {
-                return directive_value.equals_ignoring_ascii_case(Directives::KeywordSources::UnsafeEval.view());
+            // 1. Let trustedTypesRequired be the result of executing does sink type require trusted types?, with realm, 'script', and false.
+            auto const trusted_types_required = TrustedTypes::does_sink_require_trusted_types(global, TrustedTypes::Script.view(), TrustedTypes::IncludeReportOnlyPolicies::No);
+
+            // 2. If trustedTypesRequired is true and source-list contains a source expression which is an ASCII case-insensitive match for the string "'trusted-types-eval'", then skip the following steps.
+            if (trusted_types_required && any_of(source_list, [](auto const& value) {
+                    return value.equals_ignoring_ascii_case(Directives::KeywordSources::TrustedTypesEval.view());
+                }))
+                continue;
+
+            // 3. If source-list contains a source expression which is an ASCII case-insensitive match for the string "'unsafe-eval'", then skip the following steps.
+            if (any_of(source_list, [](auto const& value) {
+                    return value.equals_ignoring_ascii_case(Directives::KeywordSources::UnsafeEval.view());
+                }))
+                continue;
+
+            // 4. Let violation be the result of executing § 2.4.1 Create a violation object for global, policy, and directive on global, policy, and "script-src".
+            auto script_src_string = Directives::Names::ScriptSrc.view().to_utf8_but_should_be_ported_to_utf16();
+            auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(global, policy, script_src_string);
+
+            // 5. Set violation’s resource to "eval".
+            violation->set_resource(Violation::Resource::Eval);
+
+            // 6. If source-list contains the expression "'report-sample'", then set violation’s sample to the substring of sourceString containing its first 40 characters.
+            // FIXME: Should this be case insensitive?
+            auto maybe_report_sample = source_list.find_if([](auto const& directive_value) {
+                return directive_value.equals_ignoring_ascii_case(Directives::KeywordSources::ReportSample.view());
             });
 
-            if (maybe_unsafe_eval.is_end()) {
-                // 1. Let violation be the result of executing § 2.4.1 Create a violation object for global, policy,
-                //    and directive on global, policy, and "script-src".
-                auto script_src_string = Directives::Names::ScriptSrc.view().to_utf8_but_should_be_ported_to_utf16();
-                auto violation = Violation::create_a_violation_object_for_global_policy_and_directive(global, policy, script_src_string);
-
-                // 2. Set violation’s resource to "eval".
-                violation->set_resource(Violation::Resource::Eval);
-
-                // 3. If source-list contains the expression "'report-sample'", then set violation’s sample to the
-                //    substring of sourceString containing its first 40 characters.
-                // FIXME: Should this be case insensitive?
-                auto maybe_report_sample = source_list.find_if([](auto const& directive_value) {
-                    return directive_value.equals_ignoring_ascii_case(Directives::KeywordSources::ReportSample.view());
-                });
-
-                if (!maybe_report_sample.is_end()) {
-                    auto source_view = source_string.substring_view(0, min(source_string.length_in_code_units(), 40));
-                    violation->set_sample(Utf16String::from_utf16(source_view));
-                }
-
-                // 4. Execute § 5.5 Report a violation on violation.
-                violation->report_a_violation(realm);
-
-                // 5. If policy’s disposition is "enforce", then set result to "Blocked".
-                if (policy->disposition() == Policy::Disposition::Enforce)
-                    result = Directives::Directive::Result::Blocked;
+            if (!maybe_report_sample.is_end()) {
+                auto source_view = source_string.substring_view(0, min(source_string.length_in_code_units(), 40));
+                violation->set_sample(Utf16String::from_utf16(source_view));
             }
+
+            // 7. Execute § 5.5 Report a violation on violation.
+            violation->report_a_violation(realm);
+
+            // 8. If policy’s disposition is "enforce", then set result to "Blocked".
+            if (policy->disposition() == Policy::Disposition::Enforce)
+                result = Directives::Directive::Result::Blocked;
         }
     }
 

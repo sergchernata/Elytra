@@ -61,6 +61,7 @@
 #include <LibWebView/HelperProcess.h>
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/Menu.h>
+#include <LibWebView/PermissionManager.h>
 #include <LibWebView/PictureInPictureWindow.h>
 #include <LibWebView/ProcessType.h>
 #include <LibWebView/RequestServerManager.h>
@@ -157,6 +158,20 @@ struct ApplicationSettingsObserver final : public SettingsObserver {
     virtual void content_blocker_settings_changed() override
     {
         Application::the().content_blocker_settings_changed({});
+    }
+
+    virtual void geolocation_settings_changed() override
+    {
+        Application::the().location_policy_changed({});
+    }
+};
+
+struct ApplicationPermissionManagerObserver final : public PermissionManagerObserver {
+    AK_ALLOC_WITH_KMALLOC;
+
+    virtual void permissions_changed(PermissionManager const& manager) override
+    {
+        Application::the().permissions_changed({}, manager);
     }
 };
 
@@ -1215,6 +1230,8 @@ ErrorOr<NonnullRefPtr<WebContentClient>> Application::create_web_content_client(
 
     TRY(client->request_server_site_bindings().connect(session));
     client->async_set_site_compatibility_data(m_site_compatibility_data);
+    // A process learns a site's permissions only when it shows that site and asks; at launch, just the defaults.
+    client->async_set_permission_snapshot(client->session().permission_manager->snapshot_for({}));
     connect_to_image_decoder(*client, move(image_decoder));
 
     // NB: A WebDriver BiDi session gives its state to every process hosting web content when it changes.
@@ -1267,6 +1284,9 @@ NonnullRefPtr<BrowsingSession> Application::session_for_new_view(IsPrivate is_pr
         return *session;
 
     auto session = BrowsingSession::create(IsPrivate::Yes);
+    session->permission_manager = PermissionManager::create_for_private_session(*the().m_default_session->permission_manager);
+    session->permission_manager->register_observer(*the().m_permission_manager_observer);
+    session->permission_manager->on_deadlines_changed = [] { the().schedule_permission_expiry(); };
     the().m_private_session = session;
     return session;
 }
@@ -1334,6 +1354,11 @@ void Application::did_create_profile_session(BrowsingSession& session)
 {
     the().m_profile_sessions.remove_all_matching([](auto const& weak) { return !weak.strong_ref(); });
     the().m_profile_sessions.append(session.make_weak_ptr());
+    // Its site permissions reach its pages, and expire, as the default session's do.
+    if (session.permission_manager && the().m_permission_manager_observer) {
+        session.permission_manager->register_observer(*the().m_permission_manager_observer);
+        session.permission_manager->on_deadlines_changed = [] { the().schedule_permission_expiry(); };
+    }
 }
 
 // Fork hook (Arc profiles): a new web view's session is the profile chosen for new views, if any. Windows and the
@@ -1585,6 +1610,15 @@ void Application::update_compositor_context_visibility(Web::CompositorContextId 
     m_compositor_client->async_set_context_visibility(context_id, context_visibility);
 }
 
+void Application::update_compositor_context_presents_from_cpu_memory(Web::CompositorContextId context_id, bool presents_from_cpu_memory)
+{
+    if (!can_send_compositor_process_ipc(m_compositor_client))
+        return;
+    VERIFY(m_compositor_client);
+
+    m_compositor_client->async_set_context_presents_from_cpu_memory(context_id, presents_from_cpu_memory);
+}
+
 bool Application::handle_and_dispatch_key_event_in_compositor(Web::CompositorContextId context_id, Web::KeyEvent const& event, bool allow_keyboard_scroll)
 {
     if (!can_send_compositor_process_ipc(m_compositor_presentation_client))
@@ -1758,6 +1792,13 @@ ErrorOr<void> Application::launch_services()
         if (m_devtools)
             notify_devtools_of_storage_change(jar, change);
     };
+
+    m_default_session->permission_manager = PermissionManager::create_for_ordinary_session(LexicalPath::join(profile().paths().config, "Permissions.json"sv).string());
+    m_permission_manager_observer = make<ApplicationPermissionManagerObserver>();
+    m_default_session->permission_manager->register_observer(*m_permission_manager_observer);
+    m_default_session->permission_manager->on_deadlines_changed = [this] { schedule_permission_expiry(); };
+    update_permission_defaults();
+    schedule_permission_expiry();
 
     m_settings_observer = make<ApplicationSettingsObserver>();
     m_bookmark_store_observer = make<ApplicationBookmarkStoreObserver>();
@@ -1967,9 +2008,9 @@ ErrorOr<void> Application::launch_compositor_process()
         compositor_reported_gpu_device_identity(move(identity));
     };
 
+    m_reported_compositor_gpu_presentation_unavailable = false;
     Optional<u64> gpu_presentation_adapter_luid;
 #ifdef USE_DIRECTX
-    m_reported_compositor_gpu_presentation_unavailable = false;
     gpu_presentation_adapter_luid = Gfx::default_dxgi_adapter_luid();
 #endif
     auto presentation_or_error = m_compositor_client->try_create_presentation_connection(!platform_reports_scroll_momentum(), platform_scrolls_elastically(), gpu_presentation_adapter_luid);
@@ -2873,14 +2914,13 @@ void Application::initialize_actions()
             });
     }));
 
-    m_toggle_bookmark_bar_action = Action::create_checkable("Show Bookmarks Bar"sv, ActionID::ToggleBookmarksBar, [this]() {
+    m_toggle_bookmark_bar_action = Action::create("Show Bookmarks Bar"sv, ActionID::ToggleBookmarksBar, [this]() {
         auto appearance = m_settings->appearance();
         appearance.show_bookmarks_bar = appearance.show_bookmarks_bar == WebView::ShowBookmarksBar::Always
             ? WebView::ShowBookmarksBar::Never
             : WebView::ShowBookmarksBar::Always;
         m_settings->set_appearance(appearance);
     });
-    m_toggle_bookmark_bar_action->set_checked(m_settings->appearance().show_bookmarks_bar == ShowBookmarksBar::Always);
 
     m_bookmarks_menu->add_separator();
     m_bookmarks_menu_static_size = m_bookmarks_menu->size();
@@ -3016,6 +3056,104 @@ void Application::apply_view_options(Badge<ViewImplementation>, ViewImplementati
     page.async_debug_request("navigator-compatibility-mode"sv, m_navigator_compatibility_mode);
 }
 
+bool Application::sites_can_ask_for_location() const
+{
+    // NB: Tests get their positions from emulation, so they need no provider.
+    auto has_location_source = Core::GeolocationProvider::is_available() || web_content_options().is_test_mode == IsTestMode::Yes;
+    return settings().location_policy() == LocationPolicy::Ask && has_location_source;
+}
+
+void Application::permissions_changed(Badge<ApplicationPermissionManagerObserver>, PermissionManager const& manager)
+{
+    // A revoked site loses what it was using before its pages hear of the change.
+    ViewImplementation::for_each_view([&](ViewImplementation& view) {
+        if (view.session().permission_manager.ptr() == &manager)
+            view.revoke_geolocation_without_permission();
+        return IterationDecision::Continue;
+    });
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        if (client.session().permission_manager.ptr() == &manager)
+            client.update_audio_capture_permission();
+        return IterationDecision::Continue;
+    });
+
+    // Each process hears only about the sites it asked about, which are sites it shows.
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        if (client.session().permission_manager.ptr() == &manager)
+            client.async_set_permission_snapshot(manager.snapshot_for(client.permission_origins()));
+        return IterationDecision::Continue;
+    });
+    WorkerProcessManager::the().update_permission_snapshot(manager);
+
+    schedule_permission_expiry();
+}
+
+void Application::schedule_permission_expiry()
+{
+    Optional<UnixDateTime> deadline;
+    auto consider = [&](PermissionManager const& manager) {
+        if (auto next = manager.next_deadline(); next.has_value() && (!deadline.has_value() || *next < *deadline))
+            deadline = next;
+    };
+    consider(*m_default_session->permission_manager);
+    if (auto private_session = m_private_session.strong_ref())
+        consider(*private_session->permission_manager);
+    for (auto const& weak : m_profile_sessions) { // Fork hook (Arc profiles)
+        if (auto profile_session = weak.strong_ref(); profile_session && profile_session->permission_manager)
+            consider(*profile_session->permission_manager);
+    }
+
+    if (!deadline.has_value()) {
+        if (m_permission_expiry_timer)
+            m_permission_expiry_timer->stop();
+        return;
+    }
+
+    auto delay = max(*deadline - UnixDateTime::now(), AK::Duration::zero());
+    if (!m_permission_expiry_timer) {
+        m_permission_expiry_timer = Core::Timer::create_single_shot(AK::Duration::zero(), [this] {
+            m_default_session->permission_manager->run_expiry();
+            if (auto private_session = m_private_session.strong_ref())
+                private_session->permission_manager->run_expiry();
+            for (auto const& weak : m_profile_sessions) { // Fork hook (Arc profiles)
+                if (auto profile_session = weak.strong_ref(); profile_session && profile_session->permission_manager)
+                    profile_session->permission_manager->run_expiry();
+            }
+            schedule_permission_expiry();
+        });
+    }
+    // NB: The timer's resolution is a millisecond, so wait one more to land at or after the deadline.
+    m_permission_expiry_timer->restart(delay + AK::Duration::from_milliseconds(1));
+}
+
+void Application::location_policy_changed(Badge<ApplicationSettingsObserver>)
+{
+    update_permission_defaults();
+}
+
+void Application::update_os_location_authorization()
+{
+    auto denied = m_geolocation_provider && m_geolocation_provider->authorization() == Core::GeolocationAuthorization::Denied;
+    m_default_session->permission_manager->set_os_denies_geolocation(denied);
+}
+
+Core::GeolocationAuthorization Application::geolocation_authorization()
+{
+    if (!sites_can_ask_for_location())
+        return Core::GeolocationAuthorization::Unknown;
+    auto provider = ensure_geolocation_provider();
+    if (provider.is_error())
+        return Core::GeolocationAuthorization::Unknown;
+    return provider.value()->authorization();
+}
+
+void Application::update_permission_defaults()
+{
+    // NB: A private session reads its defaults from the ordinary one.
+    auto state = sites_can_ask_for_location() ? Web::Permissions::EffectiveState::Prompt : Web::Permissions::EffectiveState::Denied;
+    m_default_session->permission_manager->set_global_default(Web::Permissions::PermissionName::Geolocation, state);
+}
+
 void Application::languages_changed(Badge<ApplicationSettingsObserver>)
 {
     WorkerProcessManager::the().update_preferred_languages(m_settings->languages());
@@ -3079,7 +3217,6 @@ void Application::update_website_color_scheme()
 void Application::appearance_changed(Badge<ApplicationSettingsObserver>)
 {
     m_toggle_menu_bar_action->set_checked(m_settings->appearance().show_menu_bar);
-    m_toggle_bookmark_bar_action->set_checked(m_settings->appearance().show_bookmarks_bar == ShowBookmarksBar::Always);
     update_website_color_scheme();
 
     switch (m_settings->appearance().show_bookmarks_bar) {
@@ -3226,8 +3363,13 @@ void Application::set_spell_checker(OwnPtr<SpellChecker> spell_checker)
 
 ErrorOr<NonnullRawPtr<Core::GeolocationProvider>> Application::ensure_geolocation_provider()
 {
-    if (!m_geolocation_provider)
+    if (!m_geolocation_provider) {
+        if (!should_use_os_geolocation())
+            return Error::from_string_literal("The OS location provider is disabled");
         m_geolocation_provider = TRY(Core::GeolocationProvider::create());
+        m_geolocation_provider->on_authorization_change = [this] { update_os_location_authorization(); };
+        update_os_location_authorization();
+    }
 
     return NonnullRawPtr { *m_geolocation_provider };
 }
@@ -4170,14 +4312,14 @@ void Application::evaluate_javascript_in_debugger_frame(DevTools::TabDescription
     view->evaluate_javascript_in_debugger_frame(frame_id, source_text, move(on_complete));
 }
 
-void Application::retrieve_debugger_object_properties(DevTools::TabDescription const& description, u64 object_id, OnDebuggerObjectPropertiesReceived on_complete) const
+void Application::retrieve_debugger_object_properties(DevTools::TabDescription const& description, u64 object_id, DebuggerObjectScope scope, OnDebuggerObjectPropertiesReceived on_complete) const
 {
     auto view = ViewImplementation::find_view_by_id(description.id);
     if (!view.has_value()) {
         on_complete("Unable to locate tab"_string);
         return;
     }
-    view->retrieve_debugger_object_properties(object_id, move(on_complete));
+    view->retrieve_debugger_object_properties(object_id, scope, move(on_complete));
 }
 
 void Application::set_debugger_breakpoint(DevTools::TabDescription const& description, DebuggerBreakpointLocation location, DebuggerBreakpointOptions options, OnDebuggerBreakpointOperationComplete on_complete) const
@@ -4210,6 +4352,17 @@ void Application::retrieve_debugger_source_positions(DevTools::TabDescription co
     view->retrieve_debugger_source_positions(source_id, move(on_complete));
 }
 
+void Application::complete_console_input(DevTools::TabDescription const& description, String const& input, OnConsoleInputCompleted on_complete) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value()) {
+        on_complete(DevTools::DevToolsDelegate::ConsoleInputCompletion {});
+        return;
+    }
+
+    view->complete_js_console_input(input, move(on_complete));
+}
+
 void Application::resolve_dom_node_url(DevTools::TabDescription const& description, Optional<Web::UniqueNodeID> node_id, String const& url, OnResolvedURLReceived on_complete) const
 {
     auto view = ViewImplementation::find_view_by_id(description.id);
@@ -4229,7 +4382,7 @@ void Application::evaluate_javascript(DevTools::TabDescription const& descriptio
         return;
     }
 
-    view->on_received_js_console_result = [&view = *view, on_complete = move(on_complete)](JsonValue result) {
+    view->on_received_js_console_result = [&view = *view, on_complete = move(on_complete)](DebuggerValue result) {
         view.on_received_js_console_result = nullptr;
         on_complete(move(result));
     };
@@ -4332,6 +4485,24 @@ void Application::stop_listening_for_navigation_events(DevTools::TabDescription 
         view->remove_navigation_listener(listener_id.value());
         m_navigation_listener_ids.remove(description.id);
     }
+}
+
+void Application::listen_for_inspect_element_requests(DevTools::TabDescription const& description, OnInspectElementRequest on_inspect_element_request) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value())
+        return;
+
+    view->on_inspect_element_request = move(on_inspect_element_request);
+}
+
+void Application::stop_listening_for_inspect_element_requests(DevTools::TabDescription const& description) const
+{
+    auto view = ViewImplementation::find_view_by_id(description.id);
+    if (!view.has_value())
+        return;
+
+    view->on_inspect_element_request = nullptr;
 }
 
 void Application::did_connect_devtools_client(DevTools::TabDescription const& description) const

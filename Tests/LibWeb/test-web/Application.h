@@ -12,7 +12,6 @@
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <LibWebView/Application.h>
-#include <errno.h>
 
 namespace TestWeb {
 
@@ -28,10 +27,13 @@ public:
 
     virtual bool should_coordinate_browser_process() const override { return false; }
     virtual bool should_capture_web_content_output() const override { return true; }
+    // A test's position is emulated, so the OS is never asked for one, nor for leave to get one: the machine's own
+    // Location Services setting would otherwise read as a denial for every site a test allowed.
+    virtual bool should_use_os_geolocation() const override { return false; }
     // Tests cover elastic overscroll on every platform, whichever of them the browser enables it on.
     virtual bool platform_scrolls_elastically() const override { return true; }
 
-    virtual ErrorOr<LexicalPath> default_path_for_downloaded_file(ByteString const&) const override { return Error::from_errno(ECANCELED); }
+    virtual ErrorOr<LexicalPath> default_path_for_downloaded_file(ByteString const&) const override;
 
     ErrorOr<void> launch_test_fixtures();
 
@@ -42,6 +44,7 @@ public:
 
     ByteString test_root_path;
     ByteString results_directory { "test-dumps/results"sv };
+    Optional<ByteString> downloads_directory;
     size_t test_concurrency { 1 };
     Vector<ByteString> test_globs;
 

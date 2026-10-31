@@ -12,7 +12,6 @@
 #include <AK/Time.h>
 #include <LibRequests/Request.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/Fetch/BodyInit.h>
 #include <LibWeb/Fetch/Infrastructure/ClientContextSnapshot.h>
 #include <LibWeb/Fetch/Infrastructure/FetchParams.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
@@ -50,13 +49,11 @@ void NetworkContinuation::finalize()
 void NetworkContinuation::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(fetch_params);
-    visitor.visit(response);
-    visitor.visit(global_object);
+    visitor.visit(controller);
     visitor.visit_possible_values(m_callback.raw_capture_range());
 }
 
-void NetworkContinuation::invoke(NetworkContinuationAction action, GC::Ptr<Response> response)
+void NetworkContinuation::invoke(NetworkContinuationAction action, RefPtr<Response> response)
 {
     m_callback(action, response);
     m_callback = nullptr;
@@ -71,9 +68,9 @@ void NetworkContinuation::clear_blocked_state()
     phase = {};
     intercepts = {};
     fetch_params = nullptr;
+    controller = nullptr;
     original_request = nullptr;
     response = nullptr;
-    global_object = nullptr;
 }
 
 static HashMap<String, GC::Root<NetworkContinuation>>& blocked_requests()
@@ -93,11 +90,11 @@ static GC::Ptr<NetworkContinuation> blocked_request(Request const& request)
 
 static GC::Ptr<NetworkContinuation> blocked_request(FetchController const& controller)
 {
-    auto fetch_params = controller.fetch_params();
+    auto fetch_params = controller.original_fetch_params();
     if (!fetch_params)
         return nullptr;
     auto blocked = blocked_request(*fetch_params->request());
-    return blocked && blocked->fetch_params->controller().ptr() == &controller ? blocked : nullptr;
+    return blocked && blocked->controller.ptr() == &controller ? blocked : nullptr;
 }
 
 static void share_blocked_request_identity(FetchParams const& fetch_params)
@@ -106,25 +103,25 @@ static void share_blocked_request_identity(FetchParams const& fetch_params)
         fetch_params.request()->set_webdriver_bidi_network_request(blocked->fetch_params->request()->webdriver_bidi_network_request());
 }
 
-static void stop_response_transport(FetchParams const& fetch_params, Response const& response)
+static void stop_response_transport(FetchController& controller, Response const& response)
 {
     response.release_request_transfer_lease();
-    fetch_params.controller()->stop_body_transport();
+    controller.stop_body_transport();
 }
 
-static void resume_blocked_request(String id, NetworkContinuationAction action, GC::Ptr<Fetch::Infrastructure::Response> response)
+static void resume_blocked_request(String id, NetworkContinuationAction action, RefPtr<Fetch::Infrastructure::Response> response)
 {
     auto it = blocked_requests().find(id);
     if (it == blocked_requests().end())
         return;
     GC::Ptr<NetworkContinuation> continuation = it->value.ptr();
-    auto fetch_params = continuation->fetch_params;
+    auto controller = continuation->controller;
     auto original_response = continuation->response;
     // NB: Remove the entry before stopping transport or invoking a continuation, which can reenter Fetch.
     blocked_requests().remove(it);
     continuation->clear_blocked_state();
     if (action == NetworkContinuationAction::Fail && original_response)
-        stop_response_transport(*fetch_params, *original_response);
+        stop_response_transport(*controller, *original_response);
     continuation->invoke(action, response);
 }
 
@@ -252,7 +249,7 @@ JsonArray get_network_intercepts(FetchParams const& fetch_params, StringView pha
     // NB: An existing request keeps its original context. A request first observed after instrumentation was
     //     enabled can still discover its context, and blocking must use that same context.
     auto navigable = request_navigable(*request);
-    if (!navigable || fetch_params.is_canceled() || fetch_params.controller()->state() == FetchController::State::Stopped)
+    if (!navigable || fetch_params.is_canceled() || fetch_params.control_block().state() == FetchControlBlock::State::Stopped)
         return intercepts;
     if (!state)
         initialize_network_request(*request, navigable);
@@ -463,8 +460,8 @@ static JsonObject get_the_response_data(Response const& response, FetchTimingInf
     if (timings.final_connection_timing_info().has_value())
         protocol = timings.final_connection_timing_info()->alpn_negotiated_protocol;
     if (protocol.is_empty()) {
-        if (auto const& network_request = response.request_server_request(); network_request.has_value() && network_request->request)
-            protocol = network_request->request->http_version();
+        if (auto const& network_transport = response.network_transport(); network_transport.has_value())
+            protocol = network_transport->handle->http_version();
     }
     if (protocol.is_empty())
         protocol = url.has_value() ? url->scheme().to_byte_string() : ByteString {};
@@ -484,7 +481,7 @@ static JsonObject get_the_response_data(Response const& response, FetchTimingInf
     auto mime_type = extract_mime_type(response.header_list());
     result.set("mimeType"sv, mime_type.has_value() ? mime_type->essence() : String {});
     auto body_info = response.body_info();
-    if (auto body = response.body(); body && body->source().has_value() && body_info.decoded_size == 0) {
+    if (auto body = response.body(); body.has_value() && body->source().has_value() && body_info.decoded_size == 0) {
         body_info.decoded_size = body->source()->size();
         if (url.has_value() && url->scheme() == "data"sv)
             body_info.encoded_size = body_info.decoded_size;
@@ -525,21 +522,21 @@ static JsonObject process_a_network_event(HTML::Navigable const& navigable, Requ
     return params;
 }
 
-void block_network_request(JS::Object& global_object, FetchParams const& fetch_params, GC::Ptr<Fetch::Infrastructure::Response> response, String phase, JsonArray intercepts, GC::Ref<NetworkContinuation> continuation, RefPtr<Fetch::Infrastructure::Request> original_request)
+void block_network_request(FetchParams const& fetch_params, RefPtr<Fetch::Infrastructure::Response> response, String phase, JsonArray intercepts, GC::Ref<NetworkContinuation> continuation, RefPtr<Fetch::Infrastructure::Request> original_request)
 {
     auto request = fetch_params.request();
     // NB: Cancellation runs through the controller's original parameters, rather than a prepared HTTP clone.
     //     Bind both requests to the same identity before exposing a blocked request.
-    if (auto original_params = fetch_params.controller()->fetch_params()) {
+    if (auto original_params = fetch_params.controller()->original_fetch_params()) {
         synchronize_network_request(*original_params->request(), *request);
         if (!original_request)
             original_request = original_params->request();
     }
     initialize_network_request(*request);
     auto state = request->webdriver_bidi_network_request();
-    if (fetch_params.is_canceled() || fetch_params.controller()->state() == FetchController::State::Stopped) {
+    if (fetch_params.is_canceled() || fetch_params.control_block().state() == FetchControlBlock::State::Stopped) {
         if (response)
-            stop_response_transport(fetch_params, *response);
+            stop_response_transport(*fetch_params.controller(), *response);
         continuation->invoke(NetworkContinuationAction::Fail, Response::network_error("Intercepted fetch was stopped"_string));
         return;
     }
@@ -554,9 +551,9 @@ void block_network_request(JS::Object& global_object, FetchParams const& fetch_p
     continuation->phase = move(phase);
     continuation->intercepts = move(intercepts);
     continuation->fetch_params = fetch_params;
+    continuation->controller = fetch_params.controller();
     continuation->original_request = original_request;
     continuation->response = response;
-    continuation->global_object = global_object;
     if (original_request)
         original_request->set_webdriver_bidi_network_request(state);
     blocked_requests().set(state->id, GC::make_root(continuation));
@@ -672,7 +669,7 @@ static ErrorOr<JsonValue, Error> continue_network_request_impl(StringView method
             // NB: A replacement body has no RequestServer transport to transfer to a new navigation process.
             if (blocked->response) {
                 blocked->response->release_request_transfer_lease();
-                blocked->fetch_params->controller()->stop_body_transport();
+                blocked->controller->stop_body_transport();
             }
             auto replacement = Response::create();
             replacement->set_url_list(response->url_list());
@@ -680,12 +677,12 @@ static ErrorOr<JsonValue, Error> continue_network_request_impl(StringView method
             replacement->set_status_message(response->status_message());
             replacement->set_header_list(response->header_list());
             response = replacement;
-            auto bytes = overrides.body.release_value();
-            auto body = Fetch::safely_extract_body(HTML::relevant_realm(*blocked->global_object), ReadonlyBytes { bytes.bytes() }).body;
-            response->set_body(body);
+            auto body = ResponseBody::from_bytes(Core::ImmutableBytes::adopt(overrides.body.release_value()));
+            auto length = *body.length();
+            response->set_body(move(body));
             auto info = response->body_info();
-            info.encoded_size = *body->length();
-            info.decoded_size = *body->length();
+            info.encoded_size = length;
+            info.decoded_size = length;
             response->set_body_info(info);
         }
     }

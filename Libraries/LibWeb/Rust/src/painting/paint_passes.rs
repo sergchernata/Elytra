@@ -80,7 +80,7 @@ pub(crate) fn prepare_for_clock_tick(
     // Recording reads overflow, and measuring it notes a flip in scrollability for the check below.
     arena.measure_scrollable_overflow();
     if arena.svg_paint_resources().needs_sync()
-        || arena.paint_state().borrow().root_background_source
+        || arena.paint_state().root_background_source
             != Some(crate::layout::viewport_propagation::root_background_source(arena))
     {
         return Err(VisualContextsNeedHost(
@@ -88,7 +88,7 @@ pub(crate) fn prepare_for_clock_tick(
         ));
     }
     let (inputs, compositor_animations) = {
-        let mut paint_state = arena.paint_state().borrow_mut();
+        let paint_state = arena.paint_state_mut();
         let state = &mut paint_state.visual_context;
         let (Some(inputs), Some(tree)) = (state.last_tree_inputs, state.tree.as_deref()) else {
             return Err(VisualContextsNeedHost("no visual context tree"));
@@ -112,7 +112,7 @@ pub(crate) fn prepare_for_clock_tick(
     // The boxes the compositor animations drive nodes of, as the tree before the update holds them, which a tree of a
     // new structure gives other nodes.
     let before = (!compositor_animations.is_empty()).then(|| {
-        let tree = arena.paint_state().borrow().visual_context.tree.clone();
+        let tree = arena.paint_state().visual_context.tree.clone();
         (
             arena.visual_context_node_handles_snapshot(),
             tree.expect("the tree is there"),
@@ -123,31 +123,35 @@ pub(crate) fn prepare_for_clock_tick(
     if outcome.performed_full_build {
         return Err(VisualContextsNeedHost("a full visual context tree build"));
     }
-    let paintable_rows = arena.paintable_rows();
-    let mut paint_state = arena.paint_state().borrow_mut();
-    let state = &mut paint_state.visual_context;
-    let tree = state.tree.as_mut().expect("an incremental update keeps the tree");
-    if !outcome.structural_epoch_changed {
-        return Ok(Some(ClockTickVisualContexts {
-            tree: tree.clone(),
-            restructured_scroll_offsets: None,
-        }));
-    }
-    // The update dropped the animations, which name nodes of the old structure: each goes on driving the nodes of its
-    // box in the new one. An animation of a box that has no node of its kind any more drives nothing the frame shows,
-    // as the tick gave the box a style of its own for what it animates.
-    if let Some((handles_before, tree_before)) = before {
-        let animations =
-            carry_visual_animations_to_new_nodes(arena, &handles_before, &tree_before, tree, &compositor_animations)?;
-        Arc::make_mut(tree).set_visual_animations(animations);
-    }
-    let tree = tree.clone();
-    // The host refreshes its own copy of the scroll state still.
-    let scroll_offsets = scroll_state_snapshot(&paintable_rows, state, inputs.device_pixels_per_css_pixel);
-    Ok(Some(ClockTickVisualContexts {
-        tree,
-        restructured_scroll_offsets: Some(scroll_offsets),
-    }))
+    arena.with_visual_context_state_lent(|arena, state| {
+        let tree = state.tree.as_mut().expect("an incremental update keeps the tree");
+        if !outcome.structural_epoch_changed {
+            return Ok(Some(ClockTickVisualContexts {
+                tree: tree.clone(),
+                restructured_scroll_offsets: None,
+            }));
+        }
+        // The update dropped the animations, which name nodes of the old structure: each goes on driving the nodes of its
+        // box in the new one. An animation of a box that has no node of its kind any more drives nothing the frame shows,
+        // as the tick gave the box a style of its own for what it animates.
+        if let Some((handles_before, tree_before)) = before {
+            let animations = carry_visual_animations_to_new_nodes(
+                arena,
+                &handles_before,
+                &tree_before,
+                tree,
+                &compositor_animations,
+            )?;
+            Arc::make_mut(tree).set_visual_animations(animations);
+        }
+        let tree = tree.clone();
+        // The host refreshes its own copy of the scroll state still.
+        let scroll_offsets = scroll_state_snapshot(&arena.paintable_rows(), state, inputs.device_pixels_per_css_pixel);
+        Ok(Some(ClockTickVisualContexts {
+            tree,
+            restructured_scroll_offsets: Some(scroll_offsets),
+        }))
+    })
 }
 
 /// The compositor animations `animations`, which drive nodes of `tree_before`, whose boxes `handles_before` held, driving
@@ -214,7 +218,7 @@ fn keep_nodes_compositor_animations_drive(arena: &mut LayoutNodeArena) {
     use crate::layout::node_data::CompositorAnimationFrameKind;
     use crate::painting::host::FfiVisualAnimationTargetKind;
     let (dirty, animations) = {
-        let paint_state = arena.paint_state().borrow();
+        let paint_state = arena.paint_state();
         let state = &paint_state.visual_context;
         let Some(tree) = state.tree.as_deref().filter(|tree| tree.has_visual_animations()) else {
             return;
@@ -270,7 +274,7 @@ impl PendingPreparation {
     /// sticky constraints.
     pub(crate) fn prepare(
         self,
-        arena: &LayoutNodeArena,
+        arena: &mut LayoutNodeArena,
         sticky_inputs: Option<&FfiVisualContextTreeInputs>,
     ) -> RenderingPreparation {
         prepare_for_rendering(arena, self.root_background_source, sticky_inputs)
@@ -282,8 +286,8 @@ impl PendingPreparation {
 pub(crate) fn rendering_preparation_pending(arena: &LayoutNodeArena) -> Option<PendingPreparation> {
     let root_background_source = crate::layout::viewport_propagation::root_background_source(arena);
     let overflow = &arena.scrollable_overflow;
-    let pending = arena.paint_state().borrow().root_background_source != Some(root_background_source)
-        || overflow.full_layout_commit.get()
+    let pending = arena.paint_state().root_background_source != Some(root_background_source)
+        || overflow.full_layout_commit
         || overflow.measurement_awaits_preparation()
         || arena.scrollable_overflow_recalculation_is_scheduled()
         || !arena.scrollable_overflow_is_measured();
@@ -305,34 +309,32 @@ pub(crate) fn pending_preparation(read: &BegunRead, host: &DocumentHost) -> Opti
 /// Prepares `arena` for rendering. The sticky constraints the new overflow moved are refreshed with `sticky_inputs`, the
 /// inputs of the visual context tree, unless there are none: a visual context update is pending, which refreshes them.
 pub(crate) fn prepare_for_rendering(
-    arena: &LayoutNodeArena,
+    arena: &mut LayoutNodeArena,
     root_background_source: RootBackgroundSource,
     sticky_inputs: Option<&FfiVisualContextTreeInputs>,
 ) -> RenderingPreparation {
-    let background_source_changed = arena
-        .paint_state()
-        .borrow_mut()
-        .update_root_background_source(arena, root_background_source);
+    let background_source_changed = arena.update_root_background_source(root_background_source);
     // This measures all overflow left unmeasured, including the root's: the root background covers
     // the viewport united with it, so a flip in its scrollability is seen here rather than while
     // recording holds the paint state.
     let clamped_scroll_offsets = crate::painting::scrollable_overflow::update_scrollable_overflow(arena);
-    let changed = arena.scrollable_overflow.geometry_changed.replace(false);
-    let flipped = arena.scrollable_overflow.scrollability_changed.replace(false);
+    let changed = std::mem::replace(&mut arena.scrollable_overflow.geometry_changed, false);
+    let flipped = std::mem::replace(&mut arena.scrollable_overflow.scrollability_changed, false);
     let mut visual_context_values_changed = false;
     if let Some(inputs) = sticky_inputs.filter(|_| changed && !flipped) {
-        let rows = arena.paintable_rows();
-        let mut state = arena.paint_state().borrow_mut();
-        let state = &mut state.visual_context;
-        if let Some(tree) = state.tree.as_mut() {
-            visual_context_values_changed = crate::painting::visual_context::refresh::refresh_sticky_constraints(
-                &rows,
-                &state.scroll_state,
-                tree,
-                inputs,
-            );
-        }
-        state.needs_to_refresh_scroll_state = true;
+        visual_context_values_changed = arena.with_visual_context_state_lent(|arena, state| {
+            let mut values_changed = false;
+            if let Some(tree) = state.tree.as_mut() {
+                values_changed = crate::painting::visual_context::refresh::refresh_sticky_constraints(
+                    &arena.paintable_rows(),
+                    &state.scroll_state,
+                    tree,
+                    inputs,
+                );
+            }
+            state.needs_to_refresh_scroll_state = true;
+            values_changed
+        });
     }
     RenderingPreparation {
         outcome: FfiRenderingPreparationOutcome {
@@ -345,19 +347,18 @@ pub(crate) fn prepare_for_rendering(
 }
 
 pub(crate) fn refresh_scroll_state(
-    arena: &LayoutNodeArena,
+    arena: &mut LayoutNodeArena,
     device_pixels_per_css_pixel: f64,
 ) -> Option<Vec<FloatPoint>> {
     arena.measure_scrollable_overflow();
-    let paintable_rows = arena.paintable_rows();
-    let mut paint_state = arena.paint_state().borrow_mut();
-    let state = &mut paint_state.visual_context;
-    if !state.needs_to_refresh_scroll_state {
-        return None;
-    }
-    let snapshot = scroll_state_snapshot(&paintable_rows, state, device_pixels_per_css_pixel);
-    state.needs_to_refresh_scroll_state = false;
-    Some(snapshot)
+    arena.with_visual_context_state_lent(|arena, state| {
+        if !state.needs_to_refresh_scroll_state {
+            return None;
+        }
+        let snapshot = scroll_state_snapshot(&arena.paintable_rows(), state, device_pixels_per_css_pixel);
+        state.needs_to_refresh_scroll_state = false;
+        Some(snapshot)
+    })
 }
 
 /// The device scroll offsets of the nodes of `state`'s tree, refreshed from the rows where they may have moved.
@@ -377,8 +378,8 @@ fn scroll_state_snapshot(
     snapshot
 }
 
-pub(crate) fn update_visual_viewport_transform(arena: &LayoutNodeArena, inputs: &FfiVisualContextTreeInputs) {
-    let mut paint_state = arena.paint_state().borrow_mut();
+pub(crate) fn update_visual_viewport_transform(arena: &mut LayoutNodeArena, inputs: &FfiVisualContextTreeInputs) {
+    let paint_state = arena.paint_state_mut();
     if let Some(tree) = &mut paint_state.visual_context.tree {
         std::sync::Arc::make_mut(tree).set_visual_viewport_transform(
             crate::painting::visual_context::node_values::visual_viewport_transform_data(inputs),
@@ -395,7 +396,7 @@ pub(crate) fn update_accumulated_visual_contexts(
     if !arena.paintable_row_is_populated(viewport) {
         return FfiVisualContextUpdateOutcome::default();
     }
-    let mut state = std::mem::take(&mut arena.paint_state().borrow_mut().visual_context);
+    let mut state = std::mem::take(&mut arena.paint_state_mut().visual_context);
     state.release_quarantined_slots_while_no_handle_is_retained();
 
     let mut scope = state.dirty_boxes.scope;
@@ -426,7 +427,7 @@ pub(crate) fn update_accumulated_visual_contexts(
     }
 
     while scope != VisualContextUpdateScope::FreshTree {
-        let result = update_visual_context_tree(&arena.paintable_rows(), viewport, inputs, scope, &mut state);
+        let result = update_visual_context_tree(&mut arena.paintable_rows_mut(), viewport, inputs, scope, &mut state);
         match result {
             IncrementalUpdateResult::Applied(mut outcome) => {
                 super::ffi::apply_walk_assignments(arena, &mut outcome);
@@ -448,7 +449,7 @@ pub(crate) fn update_accumulated_visual_contexts(
                     requires_display_list_recording: outcome.delta.requires_display_list_recording,
                     structural_epoch: state.structural_epoch(),
                 };
-                arena.paint_state().borrow_mut().visual_context = state;
+                arena.paint_state_mut().visual_context = state;
                 return outcome;
             }
             IncrementalUpdateResult::NeedsFullBuild(fallback_scope) => {
@@ -460,7 +461,7 @@ pub(crate) fn update_accumulated_visual_contexts(
 
     let outcome = fresh_visual_context_tree_build(arena, viewport, inputs, &mut state);
     state.last_tree_inputs = Some(inputs);
-    arena.paint_state().borrow_mut().visual_context = state;
+    arena.paint_state_mut().visual_context = state;
     outcome
 }
 
@@ -484,7 +485,7 @@ fn fresh_visual_context_tree_build(
     state.tree = Some(std::sync::Arc::new(fresh_tree.tree));
     state.dirty_boxes.clear();
     let mut outcome = match update_visual_context_tree(
-        &arena.paintable_rows(),
+        &mut arena.paintable_rows_mut(),
         viewport,
         inputs,
         VisualContextUpdateScope::FreshTree,
@@ -500,7 +501,7 @@ fn fresh_visual_context_tree_build(
     super::ffi::apply_walk_assignments(arena, &mut outcome);
     arena.rebuild_all_stacking_context_entries_from_records(viewport);
     arena.take_line_roots_needing_fragment_ownership();
-    crate::painting::fragment_ownership::assign_fragment_ownership(&arena.paintable_rows(), viewport);
+    crate::painting::fragment_ownership::assign_fragment_ownership(&mut arena.paintable_rows_mut(), viewport);
     state.quarantined_slots_are_releasable = false;
     debug_assert_every_live_node_is_owned(
         &arena.paintable_rows(),
@@ -545,15 +546,14 @@ pub(crate) enum ResolvedSvgPaintResource {
 
 /// What the host resolves of the enrolled SVG paint resources, if they changed since they were
 /// resolved last. A row that went away, or whose filters name no SVG filter any more, leaves them.
-pub(crate) fn svg_paint_resource_requests(arena: &LayoutNodeArena) -> Option<Vec<SvgPaintResourceRequest>> {
-    let resources = arena.svg_paint_resources();
-    if !resources.take_needs_sync() {
+pub(crate) fn svg_paint_resource_requests(arena: &mut LayoutNodeArena) -> Option<Vec<SvgPaintResourceRequest>> {
+    if !arena.svg_paint_resources_mut().take_needs_sync() {
         return None;
     }
     let mut requests = Vec::new();
-    for (slot, kind) in resources.enrolled_entries() {
+    for (slot, kind) in arena.svg_paint_resources().enrolled_entries() {
         let Some(style) = arena.node_style_if_live(slot) else {
-            resources.forget_slot(slot);
+            arena.svg_paint_resources_mut().forget_slot(slot);
             continue;
         };
         if matches!(kind, SvgPaintResourceKind::Fill | SvgPaintResourceKind::Stroke) {
@@ -567,7 +567,7 @@ pub(crate) fn svg_paint_resource_requests(arena: &LayoutNodeArena) -> Option<Vec
             SvgPaintResourceKind::Fill | SvgPaintResourceKind::Stroke => unreachable!(),
         };
         if !crate::painting::css_filter::contains_url(filter_list) {
-            resources.withdraw(slot, kind);
+            arena.svg_paint_resources_mut().withdraw(slot, kind);
             continue;
         }
         let urls = filter_list
@@ -593,22 +593,25 @@ pub(crate) fn svg_paint_resource_requests(arena: &LayoutNodeArena) -> Option<Vec
 /// Publishes what the host resolved of the enrolled SVG paint resources, and answers whether any
 /// changed.
 pub(crate) fn publish_resolved_svg_paint_resources(
-    arena: &LayoutNodeArena,
+    arena: &mut LayoutNodeArena,
     resolved: Vec<ResolvedSvgPaintResource>,
 ) -> bool {
     use crate::painting::record::damage::PaintDamage;
-    let resources = arena.svg_paint_resources();
     let mut any_changed = false;
     for resolved in resolved {
         match resolved {
             ResolvedSvgPaintResource::PaintServer { slot, kind, published } => {
-                if arena.slot_is_live(slot) && resources.publish_paint_server(slot, kind, published) {
+                if arena.slot_is_live(slot)
+                    && arena
+                        .svg_paint_resources_mut()
+                        .publish_paint_server(slot, kind, published)
+                {
                     any_changed = true;
                     arena.push_paint_damage(slot, PaintDamage::SVG | PaintDamage::SCOPE_PREAMBLE);
                 }
             }
             ResolvedSvgPaintResource::Filter { slot, kind, published } => {
-                if !arena.slot_is_live(slot) || !resources.publish_filter(slot, kind, published) {
+                if !arena.slot_is_live(slot) || !arena.svg_paint_resources_mut().publish_filter(slot, kind, published) {
                     continue;
                 }
                 any_changed = true;

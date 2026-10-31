@@ -28,6 +28,7 @@
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/SelectorMatching.h>
+#include <LibWeb/CSS/Sizing.h>
 #include <LibWeb/CSS/StyleEngineInput.h>
 #include <LibWeb/CSS/StyleValues/ColorFunctionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
@@ -579,7 +580,7 @@ WebIDL::ExceptionOr<void> HTMLInputElement::run_input_activation_behavior(DOM::E
     return {};
 }
 
-void HTMLInputElement::did_edit_text_node(Utf16FlyString const& input_type, Optional<Utf16String> const& data)
+void HTMLInputElement::did_edit_text_node(Utf16FlyString const& input_type, Optional<Utf16String> const& data, Utf16View)
 {
     m_dirty_value = true;
     m_has_uncommitted_changes = true;
@@ -1208,6 +1209,8 @@ void HTMLInputElement::create_text_input_shadow_tree()
                 align-items: center;
                 white-space: pre;
                 border: none;
+                flex: 1;
+                min-width: 0;
             )~~~"sv);
         }
         set_own_inline_style(*element, *style);
@@ -1558,6 +1561,10 @@ void HTMLInputElement::create_range_input_shadow_tree()
 
 void HTMLInputElement::user_interaction_did_change_input_value(Utf16FlyString const& input_type, Optional<Utf16String> const& data)
 {
+    // NB: Range interactions bypass text editing; keep their pending change for focus loss.
+    if (type_state() == TypeAttributeState::Range)
+        m_has_uncommitted_changes = true;
+
     // https://html.spec.whatwg.org/multipage/input.html#common-input-element-events
     // For input elements without a defined input activation behavior, but to which these events apply,
     // Although HTML specifies queuing this event, Blink, WebKit, and Gecko dispatch it
@@ -1606,7 +1613,7 @@ void HTMLInputElement::did_receive_focus()
 
     if (has_selectable_text()) {
         if (document().last_focus_trigger() == FocusTrigger::Key)
-            MUST(select());
+            set_the_selection_range(0, NumericLimits<WebIDL::UnsignedLong>::max());
         else
             document().get_selection()->remove_all_ranges();
     }
@@ -1622,7 +1629,13 @@ void HTMLInputElement::did_lose_focus()
     if (m_placeholder_text_node)
         m_placeholder_text_node->set_needs_repaint(InvalidateDisplayList::PaintCommands);
 
-    commit_pending_changes();
+    // NB: Removal discards pending changes, as does switching to a type to which change does not apply.
+    if (!is_connected() || !change_event_applies()) {
+        m_has_uncommitted_changes = false;
+        return;
+    }
+    if (m_has_uncommitted_changes)
+        commit_pending_changes();
 }
 
 void HTMLInputElement::form_associated_element_attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_)
@@ -2713,11 +2726,13 @@ WebIDL::UnsignedLong HTMLInputElement::height() const
             return *height;
     }
 
-    // ...or else the natural height and height of the image, in CSS pixels, if an image is available but not being rendered
-    if (auto height = intrinsic_height(); height.has_value() && *height > 0)
-        return height->to_int();
+    // https://html.spec.whatwg.org/multipage/input.html#input-img-dimensions
+    // If an image is available, then set naturalDimensions to the result of applying the default sizing algorithm
+    // with that image's natural width, natural height, and natural aspect ratio, if any, using a default object size
+    // of 300 by 150.
+    if (is_image_available())
+        return CSS::run_default_sizing_algorithm({}, {}, { intrinsic_width(), intrinsic_height(), intrinsic_aspect_ratio() }, { 300, 150 }).height().to_int();
 
-    // ...or else 0, if the image is not available or does not have intrinsic dimensions.
     return 0;
 }
 
@@ -2749,11 +2764,13 @@ WebIDL::UnsignedLong HTMLInputElement::width() const
             return *width;
     }
 
-    // ...or else the natural width and height of the image, in CSS pixels, if an image is available but not being rendered
-    if (auto width = intrinsic_width(); width.has_value() && *width > 0)
-        return width->to_int();
+    // https://html.spec.whatwg.org/multipage/input.html#input-img-dimensions
+    // If an image is available, then set naturalDimensions to the result of applying the default sizing algorithm
+    // with that image's natural width, natural height, and natural aspect ratio, if any, using a default object size
+    // of 300 by 150.
+    if (is_image_available())
+        return CSS::run_default_sizing_algorithm({}, {}, { intrinsic_width(), intrinsic_height(), intrinsic_aspect_ratio() }, { 300, 150 }).width().to_int();
 
-    // ...or else 0, if the image is not available or does not have intrinsic dimensions.
     return 0;
 }
 

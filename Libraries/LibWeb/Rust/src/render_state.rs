@@ -66,6 +66,9 @@ impl RenderState {
         arena
             .arena_mut()
             .share_svg_paint_resources_enrolled(shared.svg_paint_resources_enrolled);
+        arena
+            .arena_mut()
+            .share_first_letter_styles_derived(shared.first_letter_styles_derived);
         arena.arena_mut().set_style_engine(engine);
         Self {
             arena,
@@ -89,9 +92,12 @@ impl RenderState {
         if let Some(streamed) = self.streamed_marks.take() {
             marks.fold(streamed);
         }
-        *self.arena.arena().layout_tree_update_marks().borrow_mut() = marks;
+        *self.arena.arena_mut().layout_tree_update_marks_mut() = marks;
         let answer = job(self);
-        (answer, Some(self.arena.arena().layout_tree_update_marks().take()))
+        (
+            answer,
+            Some(std::mem::take(self.arena.arena_mut().layout_tree_update_marks_mut())),
+        )
     }
 
     /// Applies `changes`, writes the host streamed to the state beside its task, into marks of their own, which the
@@ -99,9 +105,9 @@ impl RenderState {
     /// its writes wait in its queue.
     fn apply_streamed(&mut self, changes: Vec<ArenaChange>) {
         let streamed = self.streamed_marks.take().unwrap_or_default();
-        *self.arena.arena().layout_tree_update_marks().borrow_mut() = streamed;
+        *self.arena.arena_mut().layout_tree_update_marks_mut() = streamed;
         self.apply(changes);
-        self.streamed_marks = Some(self.arena.arena().layout_tree_update_marks().take());
+        self.streamed_marks = Some(std::mem::take(self.arena.arena_mut().layout_tree_update_marks_mut()));
     }
 
     /// A fork of the state, as it is now: a copy of it that the render clock may write and present from while the host
@@ -210,6 +216,14 @@ impl RenderState {
         (unsafe { self.engine.get_mut() }, self.arena.arena())
     }
 
+    /// The style engine to read, beside the layout arena to write.
+    pub(crate) fn engine_ref_and_arena_mut(
+        &mut self,
+    ) -> (&crate::css::style::StyleEngine, &mut crate::layout::LayoutNodeArena) {
+        // SAFETY: As for a change. The arena only links the engine, and its caller changes the engine through neither.
+        (unsafe { self.engine.get() }, self.arena.arena_mut())
+    }
+
     /// The layout arena.
     pub(crate) fn arena_mut(&mut self) -> &mut crate::layout::LayoutNodeArena {
         self.arena.arena_mut()
@@ -237,7 +251,7 @@ impl RenderState {
         };
         // What applying the rows owes the host, the host's install of the rows makes good again.
         let work = OwedHostWork::default();
-        let Ok(applied) = self.arena.arena().apply_flight_style_rows(HostCalls(&work), rows) else {
+        let Ok(applied) = self.arena.arena_mut().apply_flight_style_rows(HostCalls(&work), rows) else {
             return (Vec::new(), None);
         };
         (applied, self.run_round(round, work))
@@ -345,6 +359,10 @@ pub(crate) enum ArenaChange {
     /// [`crate::layout::LayoutNodeArena::reinherit_anonymous_descendants`]), which owes their layout
     /// nodes the records they take, paid once the job that applies it is done.
     ReinheritAnonymousDescendants(crate::layout::node_data::NodeSlotId),
+    /// The anonymous boxes that give the text of a `display: contents` element its style take it again.
+    ReinheritDisplayContentsText(crate::css::style::tree::StyleNodeID),
+    /// The `::first-letter` boxes whose element containing the letter took another style take their style again.
+    RefreshFirstLetterStyles,
     /// A removed node's box leaves its parent's box in place, or the parent is marked for a rebuild, as the render state
     /// finds the boxes (see [`crate::layout::box_removal`]), which owes the host what it pays once the job that applies
     /// it is done.
@@ -398,6 +416,16 @@ impl ArenaChange {
                     );
                 }
             }
+            Self::ReinheritDisplayContentsText(element) => owed.push(
+                crate::layout::layout_changes::LayoutWrite::ReinheritDisplayContentsText { element }
+                    .apply(arena)
+                    .host_work,
+            ),
+            Self::RefreshFirstLetterStyles => owed.push(
+                crate::layout::layout_changes::LayoutWrite::RefreshFirstLetterStyles
+                    .apply(arena)
+                    .host_work,
+            ),
             Self::RemoveBox(removal) => removal.apply(arena, owed),
             Self::Paint(change) => change.apply(arena),
             Self::Style(change) => change.apply(state.engine_mut()),
@@ -423,6 +451,8 @@ impl ArenaChange {
             | Self::Paint(_)
             | Self::DetachForRemoval(_)
             | Self::ReinheritAnonymousDescendants(_)
+            | Self::ReinheritDisplayContentsText(_)
+            | Self::RefreshFirstLetterStyles
             | Self::RemoveBox(_) => false,
         }
     }
@@ -436,9 +466,12 @@ impl ArenaChange {
             Self::Layout(change) => (false, change.may_move_facts()),
             Self::Style(change) => (change.may_move_facts(), change.may_move_facts()),
             Self::Engine(write) => (write.may_move_facts(), write.may_move_facts()),
-            Self::DetachForRemoval(_) | Self::ReinheritAnonymousDescendants(_) | Self::RemoveBox(_) | Self::Rule(_) => {
-                (true, true)
-            }
+            Self::DetachForRemoval(_)
+            | Self::ReinheritAnonymousDescendants(_)
+            | Self::ReinheritDisplayContentsText(_)
+            | Self::RefreshFirstLetterStyles
+            | Self::RemoveBox(_)
+            | Self::Rule(_) => (true, true),
         };
         Moves {
             rows: self.row_write(),
@@ -454,7 +487,9 @@ impl ArenaChange {
             Self::Layout(change) => change.row_write(),
             Self::Paint(change) => change.row_write(),
             Self::DetachForRemoval(_) | Self::RemoveBox(_) => RowWrite::Identities,
-            Self::ReinheritAnonymousDescendants(_) => RowWrite::NamedStyles,
+            Self::ReinheritAnonymousDescendants(_)
+            | Self::ReinheritDisplayContentsText(_)
+            | Self::RefreshFirstLetterStyles => RowWrite::NamedStyles,
             Self::Style(_) | Self::Engine(_) | Self::Rule(_) => RowWrite::None,
         }
     }
@@ -565,7 +600,11 @@ impl ChangeQueue {
             ArenaChange::Layout(crate::layout::layout_changes::LayoutChange::SetNodeStyle { node, .. }) => {
                 self.styled_rows.borrow_mut().insert(*node);
             }
-            ArenaChange::ReinheritAnonymousDescendants(_) => self.restyles_anonymous_rows.set(true),
+            ArenaChange::ReinheritAnonymousDescendants(_)
+            | ArenaChange::ReinheritDisplayContentsText(_)
+            | ArenaChange::RefreshFirstLetterStyles => {
+                self.restyles_anonymous_rows.set(true);
+            }
             _ => {}
         }
         let (moves, change) = (self.moves.get(), change.moves());
@@ -894,6 +933,14 @@ const _: () = {
     assert_send::<ArenaChange>();
 };
 
+// A shared borrow of the layout arena changes nothing in it: every field is plain, written only through `&mut`, and the
+// style engine it links is reached through a shared borrow only as the engine's retained state. So the layout passes of a
+// stage may share the arena across threads, which the compiler checks here.
+const _: () = {
+    const fn assert_sync<T: Sync + ?Sized>() {}
+    assert_sync::<crate::layout::LayoutNodeArena>();
+};
+
 // Only a forced read waits for a frame in flight.
 impl crate::stage_thread::Flown for Landing {
     type JoinRight = ForcedRead;
@@ -1095,7 +1142,7 @@ mod tests {
             let viewport = arena.allocate_for_test().slot;
             arena.write_shape(viewport).set_kind(NodeKind::Viewport);
             arena.populate_paintable_row(viewport);
-            arena.scrollable_overflow.viewport.set(Some(viewport));
+            arena.scrollable_overflow.viewport = Some(viewport);
             // The viewport had scrollable overflow before it was laid out again, and a read measures it first since.
             arena
                 .committed_side_data_mut(viewport)
@@ -1113,7 +1160,7 @@ mod tests {
         document_host_note_paint_preparation_is_current(host);
         measure();
         assert!(!document_host_paint_preparation_is_current(host));
-        assert!(host.with_arena_for_test(|arena| arena.scrollable_overflow.scrollability_changed.get()));
+        assert!(host.with_arena_for_test(|arena| arena.scrollable_overflow.scrollability_changed));
 
         // A read that measures nothing leaves the preparation as it is.
         document_host_note_paint_preparation_is_current(host);
@@ -1174,7 +1221,7 @@ mod tests {
         host.fresh_rows(ScriptForcedRead::for_test());
 
         host.with_arena_untold_for_test(|arena| {
-            let shape = arena.write_shape(row);
+            let mut shape = arena.write_shape(row);
             shape.set_style(StylePayloadsRef::new(NonNull::dangling().as_ptr()));
             shape.mark();
         });

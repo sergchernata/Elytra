@@ -92,7 +92,8 @@ All sizes are in logical pixels.
 
 | Element | Size | Notes |
 |---|---|---|
-| Inactive tab | 28 px tall | 6 px radius, 3 px inset on each side |
+| Inactive tab | No fill at rest | Content laid out in the same 30 px row as the active tab |
+| Hovered tab | 30 px tall | The active tab's exact outline (full slot width, 8 px top radius, flush with the toolbar) in the `hover` fill, without the feet. Hover previews the shape the tab takes when selected; nothing inside it moves. Drawn under the active tab, so a neighboring foot overlaps it cleanly. |
 | Active tab | 30 px tall | 8 px top radius plus an 8 px inverted "foot" on each side where it joins the toolbar. 5 px of strip shows above it. Its contents are vertically centered in it, which puts them on the shared center line. |
 | End insets | Favicon 7 px from the left edge; × glyph 11 px from the right edge | Rule: each end item is as far from the tab's side as it is from the tab's top (the 16 px favicon sits 7 px down, the 8 px × glyph 11 px down). Padding: active 0 6 px 0 7 px; inactive 3 px inset + 0 3 px 0 4 px, so favicons and × never move when a tab becomes active. |
 | Favicon to title | 8 px | |
@@ -120,7 +121,7 @@ All sizes are in logical pixels.
 | Rest | No fill, 1 px inside hairline: black 14% in light, white 16% in dark and private, 45% in increased contrast. Never a gray fill at rest (it reads as stuck hover) and never a colored ring (it reads as focus). |
 | Hover | Hover fill (black 9% / white 12%) plus the hairline |
 | Menu open | Pressed fill (black 12% / white 16%) plus the hairline |
-| Clear space | 28 px to the traffic lights and 28 px to the first favicon |
+| Clear space | 24 px on both sides: from the traffic lights to the button, and from the button to the first tab's straight left edge (the active tab's foot reaches 8 px closer). On Windows and Linux, where the button comes first, 24 px to the first tab. |
 | Purpose | Opens the Ladybird menu. Belongs to the window, not to a tab, so it lives in the tab strip (or the sidebar header). |
 
 ### Sidebar (vertical tabs)
@@ -426,10 +427,10 @@ Don't invent new shadows. Pick a level.
 | State | Look |
 |---|---|
 | Default | Favicon and title; the close slot is reserved but empty |
-| Hover | `hover` fill; the × fades into its slot |
+| Hover | The active tab's shape in `hover` fill, no feet; the × fades into its slot |
 | Active | Joins the toolbar; title in full `text` color, weight 400 |
 | Dragging | Stays in the strip with a Lift shadow, flat (no tilt), slides sideways only |
-| Loading | Accent ring (24 px) around the favicon. The favicon shrinks to 10 px inside the ring so square icons never touch it. |
+| Loading | Accent ring (20 px, 1.5 px line) around the favicon, reaching only 2 px past the favicon slot so the title keeps about 6 px of room and nothing moves. The favicon shrinks to 10 px inside the ring so square icons never touch it. |
 | Playing audio / muted | 20 px speaker button left of the close slot; click to mute. Muted keeps the struck speaker. In sidebar rows (13 px titles) the speaker is a 16 px glyph in a 22 px button, in the `icon` color, so it matches the × in weight. In the collapsed sidebar rail, the speaker is an 18 px round badge with a 13 px glyph, overlapping the favicon's bottom-right corner by about 7 px, on an opaque toolbar-colored backing with a hairline ring; it is clickable. |
 | Needs attention | A 7 px accent dot on the favicon's corner; clears on visit |
 | Pinned | Favicon only, 44 px wide |

@@ -84,22 +84,6 @@ pub struct FfiPhysicalResizeAxes {
     pub vertical: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-pub struct FfiScrollbarData {
-    pub gutter_rect: FfiCssPixelRect,
-    pub thumb_rect: FfiCssPixelRect,
-    pub track_rect: FfiCssPixelRect,
-    pub thumb_travel_to_scroll_ratio: f64,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-pub struct FfiOptionalScrollbarData {
-    pub has_value: bool,
-    pub value: FfiScrollbarData,
-}
-
 /// # Safety
 ///
 /// `host` must be a live document host, on its document's thread.
@@ -389,7 +373,7 @@ pub(super) fn apply_walk_assignments(
 #[unsafe(no_mangle)]
 pub extern "C" fn render_state_sticky_spatial_node_index(host: &DocumentHost, paintable: NodeSlotId) -> u32 {
     read_arena(host, node_read(), paintable, |arena, paintable| {
-        let paint_state = arena.paint_state().borrow();
+        let paint_state = arena.paint_state();
         paint_state
             .visual_context
             .scroll_state
@@ -503,7 +487,7 @@ impl FfiPresentedRecording {
 
     /// What the host reads of the last recording the document took in.
     pub(crate) fn of_last_recording(arena: &LayoutNodeArena) -> Self {
-        let paint_state = arena.paint_state().borrow();
+        let paint_state = arena.paint_state();
         let recording = paint_state.last_recording.as_deref();
         Self {
             is_identical_to_published_recording: recording
@@ -1155,7 +1139,7 @@ pub extern "C" fn render_state_main_visual_context_tree_retain(
         return tree;
     }
     read_arena(host, read, (), |arena, ()| {
-        retain(arena.paint_state().borrow().visual_context.tree.as_ref())
+        retain(arena.paint_state().visual_context.tree.as_ref())
     })
 }
 
@@ -1165,7 +1149,7 @@ pub extern "C" fn render_state_has_visual_context_tree(
     read: &crate::render_state::BegunRead,
 ) -> bool {
     read_arena(host, read, (), |arena, ()| {
-        let paint_state = arena.paint_state().borrow();
+        let paint_state = arena.paint_state();
         paint_state.visual_context.tree.is_some()
     })
 }
@@ -1182,7 +1166,7 @@ pub extern "C" fn render_state_visual_context_tree_structural_epoch(
     });
     known.unwrap_or_else(|| {
         read_arena(host, read, (), |arena, ()| {
-            let paint_state = arena.paint_state().borrow();
+            let paint_state = arena.paint_state();
             paint_state.visual_context.structural_epoch()
         })
     })
@@ -1194,7 +1178,7 @@ pub extern "C" fn render_state_visual_context_tree_has_visual_animations(
     read: &crate::render_state::BegunRead,
 ) -> bool {
     read_arena(host, read, (), |arena, ()| {
-        let paint_state = arena.paint_state().borrow();
+        let paint_state = arena.paint_state();
         paint_state
             .visual_context
             .tree
@@ -1226,7 +1210,7 @@ pub unsafe extern "C" fn render_state_background_color_animation_keyframe_colors
             read,
             (effect_node_index, context, push_keyframe_color),
             |arena, (effect_node_index, context, push_keyframe_color)| {
-                let paint_state = arena.paint_state().borrow();
+                let paint_state = arena.paint_state();
                 let Some(tree) = paint_state.visual_context.tree.as_deref() else {
                     return;
                 };
@@ -1279,7 +1263,7 @@ pub unsafe extern "C" fn compositor_animation_effect_build(
             node_read(),
             (layout_node, kind),
             |arena, (layout_node, kind)| {
-                let tree = arena.paint_state().borrow().visual_context.tree.clone();
+                let tree = arena.paint_state().visual_context.tree.clone();
                 arena.paintable_visual_animation_target_indices(layout_node, tree.as_deref(), kind)
             },
         )
@@ -1437,11 +1421,11 @@ mod tests {
             let viewport = arena.allocate_for_test().slot;
             arena.write_shape(viewport).set_kind(NodeKind::Viewport);
             arena.populate_paintable_row(viewport);
-            arena.scrollable_overflow.viewport.set(Some(viewport));
+            arena.scrollable_overflow.viewport = Some(viewport);
             let root = arena.allocate_for_test().slot;
             arena.populate_paintable_row(root);
             {
-                let mut state = arena.paint_state().borrow_mut();
+                let state = arena.paint_state_mut();
                 state.root_background_source = Some(RootBackgroundSource {
                     root_layout_node: root,
                     ..Default::default()
@@ -1469,10 +1453,7 @@ mod tests {
                 .into(),
                 has_scrollable_overflow: true,
             };
-            arena
-                .paintable_side_data(viewport)
-                .overflow_measured_this_commit
-                .set(true);
+            arena.paintable_side_data_mut(viewport).overflow_measured_this_commit = true;
             arena.note_publishing_paint_recording_started();
             arena.clear_paint_damage_consumed_by_published_recording();
 
@@ -1482,8 +1463,8 @@ mod tests {
             let source = crate::painting::paint_read::PaintSource::over_rows(&rows.paintable, &absolute_rects);
             let rect = crate::painting::paintable_geometry::scrollable_overflow_rect(&source, viewport);
             assert_eq!(rect, Some(CssPixelRect::default()));
-            assert!(arena.scrollable_overflow.geometry_changed.get());
-            assert!(arena.scrollable_overflow.scrollability_changed.get());
+            assert!(arena.scrollable_overflow.geometry_changed);
+            assert!(arena.scrollable_overflow.scrollability_changed);
             assert!(arena.paint_damage_of_row(root).contains(PaintDamage::DRAW_BACKGROUND));
             assert!(
                 arena
@@ -1491,7 +1472,7 @@ mod tests {
                     .contains(PaintDamage::SCROLL_METADATA)
             );
             assert!(
-                arena.paint_state().borrow().visual_context.dirty_boxes.boxes[&viewport]
+                arena.paint_state().visual_context.dirty_boxes.boxes[&viewport]
                     .contains(VisualContextBoxDirtyKind::ScrollableOverflowFlipped)
             );
         }
@@ -1503,7 +1484,7 @@ mod tests {
         let viewport = arena.allocate_for_test().slot;
         arena.write_shape(viewport).set_kind(NodeKind::Viewport);
         arena.populate_paintable_row(viewport);
-        arena.scrollable_overflow.viewport.set(Some(viewport));
+        arena.scrollable_overflow.viewport = Some(viewport);
         let root = arena.allocate_for_test().slot;
         arena.write_shape(root).set_kind(NodeKind::BlockContainer);
         arena.populate_paintable_row(root);
@@ -1520,11 +1501,11 @@ mod tests {
             .into(),
             has_scrollable_overflow: true,
         };
-        arena.paintable_side_data(root).overflow_measured_this_commit.set(true);
-        arena.paint_state().borrow_mut().visual_context.dirty_boxes.clear();
+        arena.paintable_side_data_mut(root).overflow_measured_this_commit = true;
+        arena.paint_state_mut().visual_context.dirty_boxes.clear();
 
         let outcome = crate::painting::paint_passes::prepare_for_rendering(
-            &arena,
+            &mut arena,
             RootBackgroundSource {
                 root_layout_node: root,
                 ..Default::default()
@@ -1539,12 +1520,12 @@ mod tests {
         .outcome;
         assert!(outcome.requires_visual_context_update);
         assert!(
-            arena.paint_state().borrow().visual_context.dirty_boxes.boxes[&root]
+            arena.paint_state().visual_context.dirty_boxes.boxes[&root]
                 .contains(VisualContextBoxDirtyKind::ScrollableOverflowFlipped)
         );
 
         // Recording reads the root's overflow while it holds the paint state.
-        let _paint_state = arena.paint_state().borrow();
+        let _paint_state = arena.paint_state();
         let canvas_rect = crate::painting::record::paint::background_resolution::root_background_canvas_rect(
             &arena.paintable_rows(),
             root,

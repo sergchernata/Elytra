@@ -6,9 +6,9 @@ PASS: append block child before wrapped after pseudo-element | preserve parent
 PASS: append block child before wrapped after pseudo-element | preserve before
 PASS: append block child before wrapped after pseudo-element | layout tree builds=1
 PASS: append block child before wrapped after pseudo-element | incremental tree matches full rebuild
-PASS: fall back when block insertion splits generated inline wrapper | rebuild parent
-PASS: fall back when block insertion splits generated inline wrapper | layout tree builds=1
-PASS: fall back when block insertion splits generated inline wrapper | incremental tree matches full rebuild
+PASS: rebuild child list when block insertion splits generated inline wrapper | preserve parent
+PASS: rebuild child list when block insertion splits generated inline wrapper | layout tree builds=1
+PASS: rebuild child list when block insertion splits generated inline wrapper | incremental tree matches full rebuild
 PASS: prepend block child in block flow | preserve parent
 PASS: prepend block child in block flow | preserve after
 PASS: prepend block child in block flow | layout tree builds=1
@@ -117,12 +117,16 @@ PASS: boxless insertion beside anonymous inline run | preserve parent
 PASS: boxless insertion beside anonymous inline run | preserve before
 PASS: boxless insertion beside anonymous inline run | layout tree builds=1
 PASS: boxless insertion beside anonymous inline run | incremental tree matches full rebuild
-PASS: fall back for inline child among block children | rebuild parent
-PASS: fall back for inline child among block children | layout tree builds=1
-PASS: fall back for inline child among block children | incremental tree matches full rebuild
-PASS: fall back for block child among inline children | rebuild parent
-PASS: fall back for block child among inline children | layout tree builds=1
-PASS: fall back for block child among inline children | incremental tree matches full rebuild
+PASS: rebuild child list for inline child among block children | preserve parent
+PASS: rebuild child list for inline child among block children | preserve before
+PASS: rebuild child list for inline child among block children | preserve after
+PASS: rebuild child list for inline child among block children | layout tree builds=1
+PASS: rebuild child list for inline child among block children | incremental tree matches full rebuild
+PASS: rebuild child list for block child among inline children | preserve parent
+PASS: rebuild child list for block child among inline children | preserve before
+PASS: rebuild child list for block child among inline children | preserve after
+PASS: rebuild child list for block child among inline children | layout tree builds=1
+PASS: rebuild child list for block child among inline children | incremental tree matches full rebuild
 PASS: append block child after anonymous inline run | preserve parent
 PASS: append block child after anonymous inline run | preserve before
 PASS: append block child after anonymous inline run | layout tree builds=1
@@ -131,9 +135,165 @@ PASS: append positioned in-flow block child after anonymous inline run | preserv
 PASS: append positioned in-flow block child after anonymous inline run | preserve before
 PASS: append positioned in-flow block child after anonymous inline run | layout tree builds=1
 PASS: append positioned in-flow block child after anonymous inline run | incremental tree matches full rebuild
-PASS: fall back for block child before anonymous inline run | rebuild parent
-PASS: fall back for block child before anonymous inline run | layout tree builds=1
-PASS: fall back for block child before anonymous inline run | incremental tree matches full rebuild
+PASS: append relative block child after whitespace | preserve parent
+PASS: append relative block child after whitespace | preserve before
+PASS: append relative block child after whitespace | layout tree builds=1
+PASS: append relative block child after whitespace | incremental tree matches full rebuild
+PASS: append sticky block child after whitespace | preserve parent
+PASS: append sticky block child after whitespace | preserve before
+PASS: append sticky block child after whitespace | layout tree builds=1
+PASS: append sticky block child after whitespace | incremental tree matches full rebuild
+PASS: insert relative block child after whitespace | preserve parent
+PASS: insert relative block child after whitespace | preserve before
+PASS: insert relative block child after whitespace | preserve after
+PASS: insert relative block child after whitespace | layout tree builds=1
+PASS: insert relative block child after whitespace | incremental tree matches full rebuild
+PASS: append relative item after whitespace in flex | preserve parent
+PASS: append relative item after whitespace in flex | preserve before
+PASS: append relative item after whitespace in flex | layout tree builds=1
+PASS: append relative item after whitespace in flex | incremental tree matches full rebuild
+PASS: append absolute block child after whitespace | preserve parent
+PASS: append absolute block child after whitespace | preserve before
+PASS: append absolute block child after whitespace | layout tree builds=1
+PASS: append absolute block child after whitespace | incremental tree matches full rebuild
+PASS: append floated block child after whitespace | preserve parent
+PASS: append floated block child after whitespace | preserve before
+PASS: append floated block child after whitespace | layout tree builds=1
+PASS: append floated block child after whitespace | incremental tree matches full rebuild
+PASS: append absolute block child between whitespace and blocks | preserve parent
+PASS: append absolute block child between whitespace and blocks | preserve before
+PASS: append absolute block child between whitespace and blocks | layout tree builds=1
+PASS: append absolute block child between whitespace and blocks | incremental tree matches full rebuild
+PASS: append block and whitespace ending in absolute block child | preserve parent
+PASS: append block and whitespace ending in absolute block child | preserve before
+PASS: append block and whitespace ending in absolute block child | layout tree builds=1
+PASS: append block and whitespace ending in absolute block child | incremental tree matches full rebuild
+PASS: append absolute block child after whitespace and anonymous inline run | preserve parent
+PASS: append absolute block child after whitespace and anonymous inline run | preserve before
+PASS: append absolute block child after whitespace and anonymous inline run | preserve inline
+PASS: append absolute block child after whitespace and anonymous inline run | layout tree builds=1
+PASS: append absolute block child after whitespace and anonymous inline run | incremental tree matches full rebuild
+PASS: rebuild child list for absolute block child after whitespace before existing child | preserve parent
+PASS: rebuild child list for absolute block child after whitespace before existing child | preserve before
+PASS: rebuild child list for absolute block child after whitespace before existing child | preserve after
+PASS: rebuild child list for absolute block child after whitespace before existing child | layout tree builds=1
+PASS: rebuild child list for absolute block child after whitespace before existing child | incremental tree matches full rebuild
+PASS: append ordered list subtree | preserve parent
+PASS: append ordered list subtree | preserve before
+PASS: append ordered list subtree | layout tree builds=1
+PASS: append ordered list subtree | incremental tree matches full rebuild
+PASS: append unordered list subtree after whitespace | preserve parent
+PASS: append unordered list subtree after whitespace | preserve before
+PASS: append unordered list subtree after whitespace | layout tree builds=1
+PASS: append unordered list subtree after whitespace | incremental tree matches full rebuild
+PASS: append subtree with its own counter | preserve parent
+PASS: append subtree with its own counter | preserve before
+PASS: append subtree with its own counter | layout tree builds=1
+PASS: append subtree with its own counter | incremental tree matches full rebuild
+PASS: append block child incrementing a preceding counter | preserve parent
+PASS: append block child incrementing a preceding counter | preserve before
+PASS: append block child incrementing a preceding counter | layout tree builds=1
+PASS: append block child incrementing a preceding counter | incremental tree matches full rebuild
+PASS: append ordered list subtree before a sibling of the parent | preserve parent
+PASS: append ordered list subtree before a sibling of the parent | preserve before
+PASS: append ordered list subtree before a sibling of the parent | layout tree builds=1
+PASS: append ordered list subtree before a sibling of the parent | incremental tree matches full rebuild
+PASS: append counter increment before a sibling of the parent | preserve parent
+PASS: append counter increment before a sibling of the parent | preserve before
+PASS: append counter increment before a sibling of the parent | layout tree builds=1
+PASS: append counter increment before a sibling of the parent | incremental tree matches full rebuild
+PASS: rebuild child list when appended counter subtree is followed by generated content | preserve parent
+PASS: rebuild child list when appended counter subtree is followed by generated content | preserve before
+PASS: rebuild child list when appended counter subtree is followed by generated content | layout tree builds=1
+PASS: rebuild child list when appended counter subtree is followed by generated content | incremental tree matches full rebuild
+PASS: fall back when appending a list-item increment after a reversed list | rebuild parent
+PASS: fall back when appending a list-item increment after a reversed list | layout tree builds=1
+PASS: fall back when appending a list-item increment after a reversed list | incremental tree matches full rebuild
+PASS: fall back when appending a subtree that opens a quote | rebuild parent
+PASS: fall back when appending a subtree that opens a quote | layout tree builds=1
+PASS: fall back when appending a subtree that opens a quote | incremental tree matches full rebuild
+PASS: append text after block child | preserve parent
+PASS: append text after block child | preserve before
+PASS: append text after block child | layout tree builds=1
+PASS: append text after block child | incremental tree matches full rebuild
+PASS: append text after anonymous inline run | preserve parent
+PASS: append text after anonymous inline run | preserve before
+PASS: append text after anonymous inline run | preserve inline
+PASS: append text after anonymous inline run | layout tree builds=1
+PASS: append text after anonymous inline run | incremental tree matches full rebuild
+PASS: append text and inline child after block child | preserve parent
+PASS: append text and inline child after block child | preserve before
+PASS: append text and inline child after block child | layout tree builds=1
+PASS: append text and inline child after block child | incremental tree matches full rebuild
+PASS: rebuild child list for text before existing block child | preserve parent
+PASS: rebuild child list for text before existing block child | preserve before
+PASS: rebuild child list for text before existing block child | preserve after
+PASS: rebuild child list for text before existing block child | layout tree builds=1
+PASS: rebuild child list for text before existing block child | incremental tree matches full rebuild
+PASS: rebuild child list for text before appended block child | preserve parent
+PASS: rebuild child list for text before appended block child | preserve before
+PASS: rebuild child list for text before appended block child | layout tree builds=1
+PASS: rebuild child list for text before appended block child | incremental tree matches full rebuild
+PASS: rebuild child list for block child before anonymous inline run | preserve parent
+PASS: rebuild child list for block child before anonymous inline run | preserve before
+PASS: rebuild child list for block child before anonymous inline run | preserve inline
+PASS: rebuild child list for block child before anonymous inline run | layout tree builds=1
+PASS: rebuild child list for block child before anonymous inline run | incremental tree matches full rebuild
+PASS: rebuild child list around a table child | preserve parent
+PASS: rebuild child list around a table child | preserve before
+PASS: rebuild child list around a table child | preserve after
+PASS: rebuild child list around a table child | layout tree builds=1
+PASS: rebuild child list around a table child | incremental tree matches full rebuild
+PASS: rebuild child list around an absolute inline table child | preserve parent
+PASS: rebuild child list around an absolute inline table child | preserve before
+PASS: rebuild child list around an absolute inline table child | preserve after
+PASS: rebuild child list around an absolute inline table child | layout tree builds=1
+PASS: rebuild child list around an absolute inline table child | incremental tree matches full rebuild
+PASS: rebuild child list around an svg child | preserve parent
+PASS: rebuild child list around an svg child | preserve before
+PASS: rebuild child list around an svg child | preserve after
+PASS: rebuild child list around an svg child | layout tree builds=1
+PASS: rebuild child list around an svg child | incremental tree matches full rebuild
+PASS: rebuild child list around inline generated content | preserve parent
+PASS: rebuild child list around inline generated content | preserve before
+PASS: rebuild child list around inline generated content | preserve after
+PASS: rebuild child list around inline generated content | layout tree builds=1
+PASS: rebuild child list around inline generated content | incremental tree matches full rebuild
+PASS: rebuild child list of a list item | preserve parent
+PASS: rebuild child list of a list item | preserve before
+PASS: rebuild child list of a list item | preserve after
+PASS: rebuild child list of a list item | layout tree builds=1
+PASS: rebuild child list of a list item | incremental tree matches full rebuild
+PASS: rebuild child list of an inside list item | preserve parent
+PASS: rebuild child list of an inside list item | preserve before
+PASS: rebuild child list of an inside list item | preserve after
+PASS: rebuild child list of an inside list item | layout tree builds=1
+PASS: rebuild child list of an inside list item | incremental tree matches full rebuild
+PASS: rebuild child list for absolute child after whitespace in flex | preserve parent
+PASS: rebuild child list for absolute child after whitespace in flex | preserve before
+PASS: rebuild child list for absolute child after whitespace in flex | preserve after
+PASS: rebuild child list for absolute child after whitespace in flex | layout tree builds=1
+PASS: rebuild child list for absolute child after whitespace in flex | incremental tree matches full rebuild
+PASS: rebuild child list around a float in an inline run | preserve parent
+PASS: rebuild child list around a float in an inline run | preserve before
+PASS: rebuild child list around a float in an inline run | preserve inline
+PASS: rebuild child list around a float in an inline run | layout tree builds=1
+PASS: rebuild child list around a float in an inline run | incremental tree matches full rebuild
+PASS: rebuild child list while a kept child gains children | preserve parent
+PASS: rebuild child list while a kept child gains children | preserve before
+PASS: rebuild child list while a kept child gains children | preserve after
+PASS: rebuild child list while a kept child gains children | layout tree builds=1
+PASS: rebuild child list while a kept child gains children | incremental tree matches full rebuild
+PASS: rebuild nested child lists | preserve parent
+PASS: rebuild nested child lists | preserve before
+PASS: rebuild nested child lists | preserve after
+PASS: rebuild nested child lists | preserve inner
+PASS: rebuild nested child lists | layout tree builds=1
+PASS: rebuild nested child lists | incremental tree matches full rebuild
+PASS: rebuild child list while a kept child is restyled | preserve parent
+PASS: rebuild child list while a kept child is restyled | preserve after
+PASS: rebuild child list while a kept child is restyled | layout tree builds=1
+PASS: rebuild child list while a kept child is restyled | incremental tree matches full rebuild
 PASS: append floated block child after anonymous inline run | preserve parent
 PASS: append floated block child after anonymous inline run | preserve before
 PASS: append floated block child after anonymous inline run | preserve inline

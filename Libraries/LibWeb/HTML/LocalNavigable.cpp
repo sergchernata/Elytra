@@ -49,6 +49,7 @@
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CheckUnloadingCanceledState.h>
 #include <LibWeb/HTML/DocumentState.h>
@@ -74,6 +75,7 @@
 #include <LibWeb/HTML/RemoteNavigable.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/SourceSnapshotParams.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -92,7 +94,6 @@
 #include <LibWeb/Painting/PaintableTypes.h>
 #include <LibWeb/Painting/PaintingRustBridge.h>
 #include <LibWeb/Painting/ScrollSnap.h>
-#include <LibWeb/Painting/Scrollbar.h>
 #include <LibWeb/Platform/Timer.h>
 #include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/CompositionEvent.h>
@@ -156,7 +157,7 @@ struct NavigationParamsFetchStateHolder : public JS::Cell {
     {
     }
 
-    GC::Ptr<Fetch::Infrastructure::Response> response;
+    GC::Ptr<Fetch::Infrastructure::ResponseView> response;
     Optional<URL::Origin> response_origin;
     GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller;
     OpenerPolicyEnforcementResult coop_enforcement_result;
@@ -479,7 +480,7 @@ static Optional<u64> response_content_length(HTTP::HeaderList const& headers)
     return {};
 }
 
-void LocalNavigable::start_download_for_response(GC::Ref<Fetch::Infrastructure::Response> response, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller)
+void LocalNavigable::start_download_for_response(GC::Ref<Fetch::Infrastructure::ResponseView> response, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller)
 {
     auto active_window = this->active_window();
     if (!active_window) {
@@ -526,7 +527,7 @@ void LocalNavigable::start_download_for_response(GC::Ref<Fetch::Infrastructure::
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#handle-as-a-download
-void LocalNavigable::handle_as_a_download(GC::Ref<Fetch::Infrastructure::Response> response, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin)
+void LocalNavigable::handle_as_a_download(GC::Ref<Fetch::Infrastructure::ResponseView> response, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController> fetch_controller, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin)
 {
     if (!response->body())
         return;
@@ -537,34 +538,33 @@ void LocalNavigable::handle_as_a_download(GC::Ref<Fetch::Infrastructure::Respons
     start_download_for_response(response, download_url, move(suggested_filename), fetch_controller);
 }
 
-static void stop_or_resume_response_body_delivery(LocalNavigable::NavigationParamsVariant const& navigation_params)
+// AD-HOC: Stopping the fetch controller, or the network transport of a body adopted without one, is an implementation
+//         hook for tearing down a network body when no spec consumer remains.
+static void stop_response_body_delivery(NavigationParams const& navigation_params)
 {
-    // AD-HOC: FetchController::stop_fetch() is an implementation hook for tearing down a paused network body when no
-    //         spec consumer remains.
-    auto const* nav_params = navigation_params.get_pointer<GC::Ref<NavigationParams>>();
-    if (!nav_params)
-        return;
-
-    if ((*nav_params)->fetch_controller)
-        (*nav_params)->fetch_controller->stop_fetch();
-    else
-        (*nav_params)->response->resume_body_delivery();
+    stop_body_delivery(navigation_params.body_delivery());
 }
 
-static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> navigation_params, bool source_allows_downloading, Optional<URL::Origin> interface_origin, Optional<ReadonlyBytes> initial_data = {})
+static void stop_response_body_delivery(LocalNavigable::NavigationParamsVariant const& navigation_params)
+{
+    if (auto const* nav_params = navigation_params.get_pointer<GC::Ref<NavigationParams>>())
+        stop_response_body_delivery(**nav_params);
+}
+
+static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> navigation_params, bool source_allows_downloading, Optional<URL::Origin> interface_origin)
 {
     auto response = navigation_params->response;
     if (!response || !response->body())
         return true;
 
     JsonValue network_response = navigation_params->webdriver_bidi_network_response;
-    if (WebDriver::BiDi::g_network_events_enabled && response->request_server_request().has_value() && !network_response.is_object() && navigation_params->request) {
+    if (WebDriver::BiDi::g_network_events_enabled && response->network_transport().has_value() && !network_response.is_object() && navigation_params->request) {
         RefPtr<Fetch::Infrastructure::FetchTimingInfo> timing_info = navigation_params->fetch_timing_info;
         if (navigation_params->fetch_controller)
-            timing_info = navigation_params->fetch_controller->timing_info();
+            timing_info = navigation_params->fetch_controller->full_timing_info();
         if (timing_info) {
             auto metadata = WebDriver::BiDi::network_response_for_navigation(
-                *navigation_params->request, *timing_info, *response);
+                *navigation_params->request, *timing_info, *response->record());
             if (metadata.has_value())
                 network_response = metadata.release_value();
         }
@@ -579,7 +579,7 @@ static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> nav
         if (network_response.is_object() && navigation_params->navigable)
             WebDriver::BiDi::network_navigation_response_finished(
                 *navigation_params->navigable, network_response.as_object(),
-                *response, nullptr, "Navigation download was rejected"sv);
+                *response->record(), nullptr, "Navigation download was rejected"sv);
     };
 
     // FIXME: Implement the WebDriver BiDi download will begin/end hooks.
@@ -587,10 +587,7 @@ static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> nav
     auto target_allows_downloading = !has_flag(navigation_params->final_sandboxing_flag_set, SandboxingFlagSet::SandboxedDownloads);
     if (!source_allows_downloading || !target_allows_downloading) {
         report_download_rejected();
-        if (navigation_params->fetch_controller)
-            navigation_params->fetch_controller->stop_fetch();
-        else
-            response->resume_body_delivery();
+        stop_response_body_delivery(*navigation_params);
         return true;
     }
 
@@ -598,25 +595,30 @@ static bool handle_navigation_response_as_download(GC::Ref<NavigationParams> nav
     auto active_window = navigation_params->navigable->active_window();
     if (!active_window) {
         report_download_rejected();
-        stop_or_resume_response_body_delivery(navigation_params);
+        stop_response_body_delivery(*navigation_params);
         return true;
     }
 
     auto download_url = response->url().value_or(navigation_params->request ? navigation_params->request->current_url() : URL::about_blank());
-    if (auto const& request_server_request = response->request_server_request(); request_server_request.has_value()) {
+    if (auto const& network_transport = response->network_transport(); network_transport.has_value()) {
+        auto const& lease = network_transport->handle->transfer_lease();
+        // A request that another client adopted has no lease to hand over.
+        if (!lease.has_value()) {
+            report_download_rejected();
+            stop_response_body_delivery(*navigation_params);
+            return true;
+        }
         auto suggested_filename = suggested_download_filename(download_url, *response->header_list(), {}, interface_origin);
-        auto response_body_will_be_transferred_in_full = request_server_request->request && request_server_request->request->has_file_backed_response_body();
-        ByteBuffer initial_data_buffer;
-        if (initial_data.has_value() && !initial_data->is_empty() && !response_body_will_be_transferred_in_full)
-            initial_data_buffer = MUST(ByteBuffer::copy(*initial_data));
 
-        auto download_id = navigation_params->navigable->page().client().page_did_start_download(navigation_params->navigable->id(), navigation_params->id, download_url, suggested_filename, response_content_length(*response->header_list()), request_server_request->client_id, request_server_request->request_id, move(initial_data_buffer),
+        // A download the UI process starts reads the bytes released here before the rest of the request.
+        ByteBuffer initial_data;
+        for (auto const& received : response->release_body_for_transfer())
+            initial_data.append(received.bytes());
+
+        auto download_id = navigation_params->navigable->page().client().page_did_start_download(navigation_params->navigable->id(), navigation_params->id, download_url, suggested_filename, response_content_length(*response->header_list()), lease->source_client_id, lease->source_request_id, move(initial_data),
             move(network_response));
         if (!download_id.has_value()) {
-            if (navigation_params->fetch_controller)
-                navigation_params->fetch_controller->stop_fetch();
-            else
-                response->resume_body_delivery();
+            stop_response_body_delivery(*navigation_params);
             return true;
         }
 
@@ -1524,6 +1526,7 @@ ReplicatedNavigableState LocalNavigable::replicated_state() const
         .opener_policy = m_active_document->opener_policy(),
         .active_browsing_context_is_auxiliary = active_browsing_context_is_auxiliary(),
         .opener_navigable_id = browsing_context.opener_navigable_id(),
+        .one_permitted_sandboxed_navigator_navigable_id = browsing_context.one_permitted_sandboxed_navigator_navigable_id(),
         .active_document_is_completely_loaded = m_active_document->is_completely_loaded(),
         .is_closing = m_closing,
         .container = container_state(),
@@ -1545,6 +1548,13 @@ GC::Ptr<Navigable> LocalNavigable::active_browsing_context_opener_navigable() co
     return m_active_document->browsing_context()->opener_navigable();
 }
 
+GC::Ptr<Navigable> LocalNavigable::active_browsing_context_one_permitted_sandboxed_navigator() const
+{
+    if (!m_active_document || !m_active_document->browsing_context())
+        return nullptr;
+    return m_active_document->browsing_context()->one_permitted_sandboxed_navigator_navigable();
+}
+
 ReplicatedContainerState LocalNavigable::container_state() const
 {
     // A local root's container lives with its parent's document in another process, which reports it.
@@ -1557,7 +1567,14 @@ ReplicatedContainerState LocalNavigable::container_state() const
 void LocalNavigable::set_root_container_state(ReplicatedContainerState state)
 {
     VERIFY(is_local_root() && parent());
+    auto used_color_scheme_changed = m_root_container_state.used_color_scheme != state.used_color_scheme;
     m_root_container_state = move(state);
+
+    // The container's used color scheme decides whether the canvas is opaque.
+    if (used_color_scheme_changed && m_active_document) {
+        m_needs_to_record_display_list = true;
+        m_active_document->set_needs_repaint(Badge<HTML::LocalNavigable> {}, InvalidateDisplayList::No);
+    }
 }
 
 void LocalNavigable::set_closing(bool value)
@@ -1817,56 +1834,12 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
     //    agent's configuration and abilities — it is determined by the rules given for the first applicable option
     //    from the following list:
     if (!chosen) {
-        // NB: Steps 2 to 6 of the "create a new top-level traversable" branch below only read state, and the owner
-        //     needs their result to create the traversable, so they run before the request. Step 1 stays in the
-        //     branch: activation is consumed only once a traversable was created.
-
-        // 2. Set windowType to "new and unrestricted".
-        auto new_window_type = WindowType::NewAndUnrestricted;
-        auto new_no_opener = no_opener;
-        auto new_name = name;
-
-        // 3. Let currentDocument be currentNavigable's active document.
-        // 4. If currentDocument's opener policy's value is "same-origin" or "same-origin-plus-COEP",
-        //    and currentDocument's origin is not same origin with currentDocument's relevant settings object's top-level origin, then:
-        auto current_document_for_opener_policy = active_document();
-        if (current_document_for_opener_policy
-            && (current_document_for_opener_policy->opener_policy().value == OpenerPolicyValue::SameOrigin || current_document_for_opener_policy->opener_policy().value == OpenerPolicyValue::SameOriginPlusCOEP)
-            && !current_document_for_opener_policy->origin().is_same_origin(relevant_settings_object(*current_document_for_opener_policy).top_level_origin.value())) {
-
-            // 1. Set noopener to true.
-            new_no_opener = TokenizedFeature::NoOpener::Yes;
-
-            // 2. Set name to "_blank".
-            new_name = u"_blank"sv;
-
-            // 3. Set windowType to "new with no opener".
-            new_window_type = WindowType::NewWithNoOpener;
-        }
-        // NOTE: In the presence of an opener policy,
-        //       nested documents that are cross-origin with their top-level browsing context's active document always set noopener to true.
-
-        // 5. Let targetName be the empty string.
-        Utf16String new_target_name;
-
-        // 6. If name is not an ASCII case-insensitive match for "_blank", then set targetName to name.
-        if (!new_name.equals_ignoring_ascii_case(u"_blank"sv))
-            new_target_name = Utf16String::from_utf16(new_name);
-
+        // NB: The UI process runs the "create a new top-level traversable" branch below for the traversable it creates,
+        //     and returns windowType. The renderer runs it too, for its page of the traversable.
         auto request_new_web_view = [&] {
             TokenizedFeature::Map empty_window_features;
             auto hints = web_view_hints_from_tokenised_features(window_features.has_value() ? *window_features : empty_window_features, page());
-            Optional<CrossProcessId> opener_navigable_id;
-            Optional<URL::URL> opener_base_url;
-            if (new_no_opener == TokenizedFeature::NoOpener::No) {
-                opener_navigable_id = id();
-                opener_base_url = active_document()->base_url();
-            }
-            // NB: The UI process creates chosen's active browsing context with the popup sandboxing flag set.
-            auto popup_sandboxing_flag_set = has_flag(sandboxing_flag_set, SandboxingFlagSet::SandboxPropagatesToAuxiliaryBrowsingContexts)
-                ? sandboxing_flag_set
-                : SandboxingFlagSet {};
-            return page().client().page_did_request_new_web_view(activate_tab, hints, opener_navigable_id, move(opener_base_url), new_target_name, popup_sandboxing_flag_set);
+            return page().client().page_did_request_new_web_view(activate_tab, hints, id(), Utf16String::from_utf16(name), no_opener, active_document()->base_url());
         };
 
         // --> If currentNavigable's active window does not have transient activation and the user agent has been configured to
@@ -1887,10 +1860,29 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
             // 1. Consume user activation of currentNavigable's active window.
             active_window()->consume_user_activation();
 
-            // 2 to 6. Computed above, before the traversable's owner was asked to create it.
-            no_opener = new_no_opener;
-            name = new_name;
-            window_type = new_window_type;
+            // 2. Set windowType to "new and unrestricted".
+            // NB: The UI process runs steps 2 to 4, as it creates the traversable with or without an opener, and returns
+            //     windowType.
+            window_type = new_web_view.window_type;
+
+            // 3. Let currentDocument be currentNavigable's active document.
+            // 4. If currentDocument's opener policy's value is "same-origin" or "same-origin-plus-COEP",
+            //    and currentDocument's origin is not same origin with currentDocument's relevant settings object's top-level origin, then:
+            if (window_type == WindowType::NewWithNoOpener) {
+                // 1. Set noopener to true.
+                no_opener = TokenizedFeature::NoOpener::Yes;
+
+                // 2. Set name to "_blank".
+                name = u"_blank"sv;
+
+                // 3. Set windowType to "new with no opener".
+            }
+            // NOTE: In the presence of an opener policy,
+            //       nested documents that are cross-origin with their top-level browsing context's active document always set noopener to true.
+
+            // 5. Let targetName be the empty string.
+            // 6. If name is not an ASCII case-insensitive match for "_blank", then set targetName to name.
+            // NB: The UI process gives chosen its target name.
 
             auto create_new_traversable = [&](GC::Ptr<BrowsingContext> opener) {
                 return LocalTraversableNavigable::create_for_new_web_view(move(new_web_view), opener);
@@ -1906,12 +1898,14 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
                 // 1. Set chosen to the result of creating a new top-level traversable given currentNavigable's active browsing context, targetName, and currentNavigable.
                 // FIXME: "and currentNavigable", which is the openerNavigableForWebDriver parameter.
                 chosen = create_new_traversable(active_browsing_context());
-
-                // 2. If sandboxingFlagSet's sandboxed navigation browsing context flag is set,
-                //    then set chosen's active browsing context's one permitted sandboxed navigator to currentNavigable's active browsing context.
-                if (has_flag(sandboxing_flag_set, SandboxingFlagSet::SandboxedNavigation))
-                    as<LocalNavigable>(*chosen).active_browsing_context()->set_the_one_permitted_sandboxed_navigator(active_browsing_context().ptr());
             }
+
+            // 8.2. If sandboxingFlagSet's sandboxed navigation browsing context flag is set,
+            //      then set chosen's active browsing context's one permitted sandboxed navigator to currentNavigable's active browsing context.
+            // AD-HOC: For a noopener popup too, or a sandboxed document could not navigate the popup a target=_blank link
+            //         opens. See https://github.com/whatwg/html/issues/12297
+            if (has_flag(sandboxing_flag_set, SandboxingFlagSet::SandboxedNavigation))
+                as<LocalNavigable>(*chosen).active_browsing_context()->set_the_one_permitted_sandboxed_navigator(active_browsing_context().ptr());
 
             // 9. If sandboxingFlagSet's sandbox propagates to auxiliary browsing contexts flag is set,
             //     then all the flags that are set in sandboxingFlagSet must be set in chosen's active browsing context's popup sandboxing flag set.
@@ -2159,11 +2153,11 @@ static GC::Ref<NavigationParams> create_navigation_params_from_a_srcdoc_resource
     //    URL: about:srcdoc
     //    header list: (`Content-Type`, `text/html`)
     //    body: the UTF-8 encoding of documentResource, as a body
-    auto response = Fetch::Infrastructure::Response::create(vm);
+    auto response = Fetch::Infrastructure::Response::create();
     response->url_list().append(URL::about_srcdoc());
     response->header_list()->append({ "Content-Type"sv, "text/html"sv });
     auto document_resource_utf8 = MUST(document_resource.get<Utf16String>().utf16_view().to_utf8());
-    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, document_resource_utf8.bytes()));
+    response->set_body(Fetch::Infrastructure::byte_sequence_as_response_body(document_resource_utf8.bytes()));
 
     // 3. Let responseOrigin be the result of determining the origin given response's URL, targetSnapshotParams's sandboxing flags, and entry's document state's origin.
     auto response_origin = determine_the_origin(response->url(), target_snapshot_params.sandboxing_flags, origin);
@@ -2222,7 +2216,7 @@ static GC::Ref<NavigationParams> create_navigation_params_from_a_srcdoc_resource
         move(navigation_id),
         navigable,
         nullptr,
-        response,
+        Fetch::Infrastructure::ResponseView::create(realm, response),
         nullptr,
         nullptr,
         move(coop_enforcement_result),
@@ -2275,7 +2269,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
                 //         specification assumes the parent environment is still available here, but browser engines
                 //         abandon this stale detached frame navigation instead of continuing it against a discarded
                 //         parent.
-                state_holder->response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Parent document is no longer active"_string);
+                state_holder->response = Fetch::Infrastructure::ResponseView::network_error("Parent document is no longer active"_string);
                 fetch_completion_steps->function()();
                 return;
             }
@@ -2297,8 +2291,8 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
     }
 
     // 3. If the result of should navigation request of type be blocked by Content Security Policy? given request and cspNavigationType is "Blocked", then set response to a network error and break. [CSP]
-    if (ContentSecurityPolicy::should_navigation_request_of_type_be_blocked_by_content_security_policy(state_holder->request, state_holder->csp_navigation_type) == ContentSecurityPolicy::Directives::Directive::Result::Blocked) {
-        state_holder->response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Blocked by Content Security Policy"_string);
+    if (ContentSecurityPolicy::should_navigation_request_of_type_be_blocked_by_content_security_policy(state_holder->request, state_holder->csp_navigation_type, state_holder->navigable->page()) == ContentSecurityPolicy::Directives::Directive::Result::Blocked) {
+        state_holder->response = Fetch::Infrastructure::ResponseView::network_error("Blocked by Content Security Policy"_string);
         fetch_completion_steps->function()();
         return;
     }
@@ -2313,7 +2307,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
         // FIXME: Let processEarlyHintsResponse be the following algorithm given a response earlyResponse:
 
         // Let processResponse be the following algorithm given a response fetchedResponse:
-        auto process_response = [state_holder](GC::Ref<Fetch::Infrastructure::Response> fetch_response) {
+        auto process_response = [state_holder](GC::Ref<Fetch::Infrastructure::ResponseView> fetch_response) {
             // 1. Set response to fetchedResponse.
             state_holder->response = fetch_response;
             VERIFY(state_holder->continuation_steps);
@@ -2414,7 +2408,7 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
             if (state_holder->final_sandbox_flags != SandboxingFlagSet {} && state_holder->response_coop.value != OpenerPolicyValue::UnsafeNone) {
                 // AD-HOC: Stop the fetch, as nothing will consume the response this replaces.
                 state_holder->fetch_controller->stop_fetch();
-                state_holder->response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Opener policy on a sandboxed navigation response"_string);
+                state_holder->response = Fetch::Infrastructure::ResponseView::network_error("Opener policy on a sandboxed navigation response"_string);
                 fetch_completion_steps->function()();
                 return;
             }
@@ -2436,10 +2430,10 @@ static void perform_navigation_params_fetch(JS::Realm& realm, GC::Ref<Navigation
             if (auto parent = state_holder->navigable->parent()) {
                 auto container_document_origin = parent->active_document_origin();
                 if (container_document_origin.has_value()
-                    && Fetch::Fetching::cross_origin_resource_policy_check(*container_document_origin, state_holder->navigable->container_document_embedder_policy(), *state_holder->response, Fetch::Fetching::ForNavigation::Yes) == Fetch::Infrastructure::RequestOrResponseBlocking::Blocked) {
+                    && Fetch::Fetching::cross_origin_resource_policy_check(*container_document_origin, state_holder->navigable->container_document_embedder_policy(), *state_holder->response->record(), Fetch::Fetching::ForNavigation::Yes) == Fetch::Infrastructure::RequestOrResponseBlocking::Blocked) {
                     // AD-HOC: Stop the fetch, as nothing will consume the response this replaces.
                     state_holder->fetch_controller->stop_fetch();
-                    state_holder->response = Fetch::Infrastructure::Response::network_error(realm.vm(), "Blocked by Cross-Origin-Resource-Policy"_string);
+                    state_holder->response = Fetch::Infrastructure::ResponseView::network_error("Blocked by Cross-Origin-Resource-Policy"_string);
                     fetch_completion_steps->function()();
                     return;
                 }
@@ -2549,8 +2543,12 @@ static void create_navigation_params_by_fetching(
     //    traversable for user prompts: navigable's top-level traversable
     auto request = Fetch::Infrastructure::Request::create();
     request->set_url(entry.url);
-    if (source_snapshot_params->fetch_client.has_value())
-        request->set_client(Fetch::Fetching::request_client(*source_snapshot_params->fetch_client));
+    if (source_snapshot_params->fetch_client.has_value()) {
+        auto const& fetch_client = *source_snapshot_params->fetch_client;
+        request->set_client(Fetch::Fetching::request_client(fetch_client));
+        if (fetch_client.has<NonnullRefPtr<RemoteEnvironmentSettings const>>() && navigation_id.has_value())
+            request->set_remote_client_navigation(RemoteClientNavigation { navigable->id(), *navigation_id });
+    }
     request->set_destination(Fetch::Infrastructure::Request::Destination::Document);
     request->set_credentials_mode(Fetch::Infrastructure::Request::CredentialsMode::Include);
     request->set_use_url_credentials(true);
@@ -2985,7 +2983,7 @@ void LocalNavigable::populate_session_history_entry_document(NavigationPopulatio
 
     auto received_navigation_params = GC::create_function(heap(), [this, response_steps, respond_without_an_active_window](GC::Ref<InternalNavigationResult> result) {
         if (!active_window()) {
-            stop_or_resume_response_body_delivery(result->navigation_params);
+            stop_response_body_delivery(result->navigation_params);
             respond_without_an_active_window();
             return;
         }
@@ -3044,7 +3042,7 @@ static void load_document_or_handle_download(GC::Ref<NavigationParams> navigatio
 {
     // AD-HOC: Match other browsers and show a UA error page for an empty HTTP error response to a top-level navigation.
     if (navigation_params->navigable->is_top_level_traversable() && navigation_params->response->status() >= 400 && navigation_params->response->status() <= 599 && sniff_bytes.is_empty()) {
-        stop_or_resume_response_body_delivery(navigation_params);
+        stop_response_body_delivery(*navigation_params);
 
         if (navigation_params->reserved_environment)
             navigation_params->reserved_environment->discard_environment();
@@ -3071,7 +3069,7 @@ static void load_document_or_handle_download(GC::Ref<NavigationParams> navigatio
     output.document = load_document(navigation_params, sniff_bytes);
 
     if (!output.document) {
-        output.download_handled = handle_navigation_response_as_download(navigation_params, source_allows_downloading, source_interface_origin, sniff_bytes);
+        output.download_handled = handle_navigation_response_as_download(navigation_params, source_allows_downloading, source_interface_origin);
         output.save_extra_document_state = false;
     } else {
         navigation_params->response->resume_body_delivery();
@@ -3091,7 +3089,7 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
     GC::Ptr<GC::Function<void(GC::Ptr<PopulateSessionHistoryEntryDocumentOutput>)>> completion_steps)
 {
     if (!active_window()) {
-        stop_or_resume_response_body_delivery(navigation_params);
+        stop_response_body_delivery(navigation_params);
         return;
     }
     if (auto* params = navigation_params.get_pointer<GC::Ref<NavigationParams>>())
@@ -3103,7 +3101,7 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
         // NB: A reload history job keeps the traversal marker while its document is populated.
         auto is_reload_traversal = navigation_timing_type == Bindings::NavigationTimingType::Reload && ongoing_navigation().has<Traversal>();
         if (navigation_id.has_value() && ongoing_navigation() != navigation_id && !is_reload_traversal) {
-            stop_or_resume_response_body_delivery(navigation_params);
+            stop_response_body_delivery(navigation_params);
             if (completion_steps)
                 completion_steps->function()(nullptr);
             return;
@@ -3167,10 +3165,7 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
                 // 1. Run the environment discarding steps for navigationParams's reserved environment.
                 navigation_params.visit(
                     [](GC::Ref<NavigationParams> const& it) {
-                        if (it->fetch_controller)
-                            it->fetch_controller->stop_fetch();
-                        else
-                            it->response->resume_body_delivery();
+                        stop_response_body_delivery(*it);
                         it->reserved_environment->discard_environment();
                     },
                     [](auto const&) { });
@@ -3206,20 +3201,20 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
 
             // Get sniff bytes for MIME type detection. For streaming responses where bytes
             // haven't arrived yet, we must wait asynchronously.
-            auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<Fetch::Infrastructure::FetchBody::SniffBytes> { Fetch::Infrastructure::FetchBody::SniffBytes {} };
+            auto sniff_bytes = body ? body->sniff_bytes_if_available() : Optional<Fetch::Infrastructure::Body::SniffBytes> { Fetch::Infrastructure::Body::SniffBytes {} };
             if (!sniff_bytes.has_value()) {
                 // Async path: bytes not yet available, wait for them
                 nav_params->response->resume_body_delivery_up_to(Fetch::Infrastructure::MAX_SNIFF_BYTES);
                 body->wait_for_sniff_bytes(GC::create_function(heap(),
-                    [output, nav_params, navigation_params, completion_steps, source_allows_downloading, source_interface_origin, url](Fetch::Infrastructure::FetchBody::SniffBytes sniff_bytes) {
+                    [output, nav_params, navigation_params, completion_steps, source_allows_downloading, source_interface_origin, url](Fetch::Infrastructure::Body::SniffBytes sniff_bytes) {
                         // AD-HOC: The document may have been destroyed between when the fetch started and when the
                         //         bytes arrived. A response that failed mid-sniff must not be loaded as a document
                         //         off its partial bytes either.
-                        if (nav_params->navigable->active_browsing_context() && sniff_bytes.outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Complete) {
+                        if (nav_params->navigable->active_browsing_context() && sniff_bytes.outcome == Fetch::Infrastructure::Body::SniffOutcome::Complete) {
                             load_document_or_handle_download(nav_params, sniff_bytes.bytes, url, source_allows_downloading, source_interface_origin, *output);
                         } else {
-                            stop_or_resume_response_body_delivery(navigation_params);
-                            if (sniff_bytes.outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Failed)
+                            stop_response_body_delivery(navigation_params);
+                            if (sniff_bytes.outcome == Fetch::Infrastructure::Body::SniffOutcome::Failed)
                                 output->save_extra_document_state = false;
                         }
                         output->navigation_params = navigation_params;
@@ -3231,21 +3226,26 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
             }
 
             // Sync path: bytes available immediately
-            if (sniff_bytes->outcome == Fetch::Infrastructure::FetchBody::SniffOutcome::Complete) {
+            if (sniff_bytes->outcome == Fetch::Infrastructure::Body::SniffOutcome::Complete) {
                 load_document_or_handle_download(nav_params, sniff_bytes->bytes, url, source_allows_downloading, source_interface_origin, *output);
             } else {
-                stop_or_resume_response_body_delivery(navigation_params);
+                stop_response_body_delivery(navigation_params);
                 output->save_extra_document_state = false;
             }
         } else {
-            stop_or_resume_response_body_delivery(navigation_params);
+            stop_response_body_delivery(navigation_params);
         }
 
         output->navigation_params = navigation_params;
         report_a_document_with_an_origin_of_its_own(*this, output);
         if (completion_steps)
             completion_steps->function()(output);
-    }));
+    }),
+        Task::Priority::Normal,
+        // A task its document drops unrun stops the body it would have handed on.
+        GC::create_function(heap(), [navigation_params] {
+            stop_response_body_delivery(navigation_params);
+        }));
 }
 
 void LocalNavigable::create_navigation_params_for_navigation(NavigationPopulationRequest request, GC::Ref<SourceSnapshotParams> source_snapshot_params, NavigationParamsVariant navigation_params, Bindings::NavigationTimingType navigation_timing_type)
@@ -3253,7 +3253,7 @@ void LocalNavigable::create_navigation_params_for_navigation(NavigationPopulatio
     auto navigation_id = request.navigation_id;
 
     if (!active_window()) {
-        stop_or_resume_response_body_delivery(navigation_params);
+        stop_response_body_delivery(navigation_params);
         return;
     }
 
@@ -3264,13 +3264,13 @@ void LocalNavigable::create_navigation_params_for_navigation(NavigationPopulatio
 
     auto received_navigation_params = GC::create_function(heap(), [this, request, navigation_id](GC::Ref<InternalNavigationResult> result) mutable {
         if (!active_window() || ongoing_navigation() != navigation_id) {
-            stop_or_resume_response_body_delivery(result->navigation_params);
+            stop_response_body_delivery(result->navigation_params);
             return;
         }
 
         create_navigation_population_result(*active_window(), result, GC::create_function(heap(), [this, request = move(request), navigation_id, result](NavigationPopulationResult population_result) mutable {
             if (!active_window() || ongoing_navigation() != navigation_id) {
-                stop_or_resume_response_body_delivery(result->navigation_params);
+                stop_response_body_delivery(result->navigation_params);
                 return;
             }
             page().client().navigation_params_creation_finished(*this, move(request), move(population_result));
@@ -4063,10 +4063,10 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     //     header list: «(`Content-Type`, `text/html;charset=utf-8`)»
     //     body: the UTF-8 encoding of result, as a body
     auto result_utf8 = MUST(result->to_utf8());
-    auto response = Fetch::Infrastructure::Response::create(vm);
+    auto response = Fetch::Infrastructure::Response::create();
     response->url_list().append(active_document()->url());
     response->header_list()->append({ "Content-Type"sv, "text/html;charset=utf-8"sv });
-    response->set_body(Fetch::Infrastructure::byte_sequence_as_body(realm, result_utf8.bytes()));
+    response->set_body(Fetch::Infrastructure::byte_sequence_as_response_body(result_utf8.bytes()));
 
     // 12. Let policyContainer be targetNavigable's active document's policy container.
     auto const& policy_container = active_document()->policy_container();
@@ -4111,7 +4111,7 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
         navigation_id,
         this,
         nullptr,
-        response,
+        Fetch::Infrastructure::ResponseView::create(realm, response),
         nullptr,
         nullptr,
         move(coop_enforcement_result),
@@ -4129,6 +4129,7 @@ GC::Ptr<DOM::Document> LocalNavigable::evaluate_javascript_url(URL::URL const& u
     //     obtains for it is the active document's: the origins are the same, or share the site that keys the agent
     //     cluster, since an origin-keyed window cannot set document.domain.
     navigation_params->agent_cluster_id = active_document()->relevant_settings_object().agent_cluster_id();
+    navigation_params->agent_cluster_is_origin_keyed = as<WindowEnvironmentSettingsObject>(active_document()->relevant_settings_object()).agent_cluster_is_origin_keyed();
     navigation_params->agent_cluster_cross_origin_isolation_mode = active_document()->relevant_settings_object().agent_cluster_cross_origin_isolation_mode();
 
     // 17. Return the result of loading an HTML document given navigationParams.
@@ -4169,7 +4170,7 @@ void LocalNavigable::navigate_to_a_javascript_url(NonnullRefPtr<Fetch::Infrastru
     // 5. If the result of should navigation request of type be blocked by Content Security Policy? given request and cspNavigationType is "Blocked", then return.
     // NB: This can change request's URL, as the require-trusted-types-for pre-navigation check passes the script source
     //     through the default policy.
-    if (ContentSecurityPolicy::should_navigation_request_of_type_be_blocked_by_content_security_policy(request, csp_navigation_type) == ContentSecurityPolicy::Directives::Directive::Result::Blocked) {
+    if (ContentSecurityPolicy::should_navigation_request_of_type_be_blocked_by_content_security_policy(request, csp_navigation_type, page()) == ContentSecurityPolicy::Directives::Directive::Result::Blocked) {
         finish_loading_without_navigation();
         return;
     }
@@ -5057,7 +5058,7 @@ bool LocalNavigable::set_scroll_offset_for(Web::AsyncScrollNodeStableID stable_n
     return Painting::set_scroll_offset(*layout_node, scroll_offset) == Painting::ScrollHandled::Yes;
 }
 
-RefPtr<Painting::Scrollbar> LocalNavigable::scrollbar_dragged_by_compositor(Layout::BegunRead const& read, Web::ScrollbarDraggedByCompositor const& scrollbar)
+DOM::Element* LocalNavigable::element_whose_scrollbar_is_dragged_by_compositor(Layout::BegunRead const& read, Web::ScrollbarDraggedByCompositor const& scrollbar)
 {
     auto document = active_document();
     if (!document)
@@ -5065,8 +5066,7 @@ RefPtr<Painting::Scrollbar> LocalNavigable::scrollbar_dragged_by_compositor(Layo
     auto* scrolling_box = layout_node_for_async_scroll_node(read, *document, scrollbar.scroller_stable_node_id);
     if (!scrolling_box || !Painting::has_committed_box(*scrolling_box))
         return nullptr;
-    auto direction = scrollbar.vertical ? Painting::ScrollDirection::Vertical : Painting::ScrollDirection::Horizontal;
-    return document->chrome_widget_registry().get_or_create_scrollbar(document->layout_node_arena(), Painting::committed_row_slot(*scrolling_box), direction);
+    return element_for_async_scroll_node_stable_id(*document, scrollbar.scroller_stable_node_id);
 }
 
 // NB: A scroll the compositor reports can arrive while layout is out of date, so this reads the committed layout.
@@ -6842,7 +6842,9 @@ bool LocalNavigable::commit_frame(PaintConfig paint_config)
 
     // Hit testing can publish a display list before the next frame. Give both paths the same canvas fill so that
     // switching between them does not force another recording. Screenshots can supply their own fill rectangle.
-    if (is_local_root() && !paint_config.canvas_fill_rect.has_value())
+    // NB: Only the top-level traversable fills its canvas. A local root under a remote parent is an iframe in another
+    //     process, and its canvas stays transparent like that of a same-process iframe.
+    if (is_top_level_traversable() && !paint_config.canvas_fill_rect.has_value())
         paint_config.canvas_fill_rect = Gfx::IntRect { {}, page().css_to_device_rect(viewport_rect()).size().to_type<int>() };
 
     // A frame is left to the next rendering update while the compositor cannot be reached.
@@ -7981,12 +7983,10 @@ bool LocalNavigable::has_inclusive_ancestor_with_visibility_hidden() const
     return false;
 }
 
-UserScrollGestureHold::UserScrollGestureHold(LocalNavigable& navigable, TakesOverMomentum takes_over_momentum, Optional<Web::AsyncScrollNodeStableID> held_box)
+UserScrollGestureHold::UserScrollGestureHold(LocalNavigable& navigable, TakesOverMomentum takes_over_momentum)
     : m_navigable(navigable)
     , m_takes_over_momentum(takes_over_momentum)
 {
-    if (held_box.has_value())
-        hold(held_box.value());
 }
 
 UserScrollGestureHold::~UserScrollGestureHold()

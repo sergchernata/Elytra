@@ -75,6 +75,7 @@ mod column;
 pub mod compiler;
 mod computed;
 mod container_queries;
+pub(crate) use container_queries::ContainerUnitBases;
 mod custom_property_cascade;
 mod custom_property_environments;
 #[cfg(test)]
@@ -824,6 +825,8 @@ pub struct RetainedState {
     /// computed half of the eventual base style record; custom properties and metadata remain
     /// separate inputs until that record is complete.
     computed_group_sets: crate::fork::ForkShared<ComputedGroupSets>,
+    /// How many epochs of style record views the host has open. No computed record is reclaimed while one is.
+    style_record_view_epoch_depth: u32,
     /// The stores behind the custom-property environments live records are published with.
     custom_property_environments: crate::fork::ForkShared<custom_property_environments::CustomPropertyEnvironments>,
     /// The nodes whose engine-computed record substituted a custom property into a winner: what
@@ -1094,6 +1097,12 @@ pub struct RetainedState {
     diagnostic_plan_capture: Option<DiagnosticPlanCapture>,
 }
 
+#[derive(Clone, Copy)]
+struct DeferredElementStyleInput {
+    reaction: u8,
+    inherited_style_groups: u8,
+}
+
 /// Host-facing engine state: C++ ownership and journal intake.
 /// Never reachable from an evaluation step.
 #[derive(Clone)]
@@ -1110,7 +1119,7 @@ pub struct HostState {
     deferred_geometry_journal: NormalizationJournal,
     flushing_deferred_geometry_journal: bool,
     /// Exact element reactions retained across rootless flushes until a style root can consume them.
-    deferred_element_style_inputs: Vec<NormalizedInput>,
+    deferred_element_style_inputs: std::collections::BTreeMap<StyleNodeID, DeferredElementStyleInput>,
     /// Whether the deferred element style inputs moved since the document's host last took them.
     deferred_element_style_inputs_moved: bool,
     /// Whether the deferred element style inputs are owed to the next transaction, as opposed to
@@ -1162,3 +1171,6 @@ impl std::ops::DerefMut for StyleEngine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod container_query_tests;

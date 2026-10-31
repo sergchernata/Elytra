@@ -29,6 +29,7 @@ set(SOURCES
     Bindings/OptionConstructor.cpp
     Bindings/PlatformObject.cpp
     Bindings/RustBindingsServices.cpp
+    Bindings/RustEventTarget.cpp
     Bindings/StylePropertyMapReadOnlyIterator.cpp
     Bindings/PrincipalHostDefined.cpp
     Bindings/Wrappable.cpp
@@ -354,11 +355,11 @@ set(SOURCES
     Fetch/Engine/FetchByteChannel.cpp
     Fetch/Engine/FetchExecutor.cpp
     Fetch/Engine/InlineFetchExecutor.cpp
+    Fetch/Engine/NetworkTransportHandle.cpp
     Fetch/Engine/WholeBodyTransport.cpp
     Fetch/Fetching/BodyStreamPullSource.cpp
     Fetch/Fetching/Checks.cpp
     Fetch/Fetching/ClientContextSnapshots.cpp
-    Fetch/Fetching/FetchedDataReceiver.cpp
     Fetch/Fetching/NetworkBodyPump.cpp
     Fetch/Fetching/Fetching.cpp
     Fetch/Fetching/PendingResponse.cpp
@@ -368,6 +369,7 @@ set(SOURCES
     Fetch/HeadersIterator.cpp
     Fetch/Infrastructure/FetchAlgorithms.cpp
     Fetch/Infrastructure/FetchController.cpp
+    Fetch/Infrastructure/FetchControllerRegistry.cpp
     Fetch/Infrastructure/FetchParams.cpp
     Fetch/Infrastructure/FetchRecord.cpp
     Fetch/Infrastructure/FetchTimingInfo.cpp
@@ -377,6 +379,7 @@ set(SOURCES
     Fetch/Infrastructure/HTTP/MIME.cpp
     Fetch/Infrastructure/HTTP/Requests.cpp
     Fetch/Infrastructure/HTTP/Responses.cpp
+    Fetch/Infrastructure/HTTP/ResponseView.cpp
     Fetch/Infrastructure/IncrementalReadLoopReadRequest.cpp
     Fetch/Infrastructure/KeepaliveQuotaAccountant.cpp
     Fetch/Infrastructure/MimeTypeBlocking.cpp
@@ -391,8 +394,6 @@ set(SOURCES
     FileAPI/BlobURLStore.cpp
     FileAPI/File.cpp
     FileAPI/FileList.cpp
-    FileAPI/FileReader.cpp
-    FileAPI/FileReaderSync.cpp
     Gamepad/EventNames.cpp
     Gamepad/Gamepad.cpp
     Gamepad/GamepadButton.cpp
@@ -627,6 +628,8 @@ set(SOURCES
     HTML/SanitizerConfiguration.cpp
     HTML/Scripting/Agent.cpp
     HTML/Scripting/ClassicScript.cpp
+    HTML/Scripting/ConsoleInputCompletion.cpp
+    HTML/Scripting/DevToolsObjectTable.cpp
     HTML/Scripting/Environments.cpp
     HTML/Scripting/ExceptionReporter.cpp
     HTML/Scripting/FetchClient.cpp
@@ -656,6 +659,7 @@ set(SOURCES
     HTML/Storage.cpp
     HTML/StorageEvent.cpp
     HTML/StructuredSerialize.cpp
+    HTML/StructuredSerializeRustIntegration.cpp
     HTML/SubmitEvent.cpp
     HTML/SupportedImageTypes.cpp
     HTML/SyntaxHighlighter/SyntaxHighlighter.cpp
@@ -693,25 +697,9 @@ set(SOURCES
     HTML/Worklet.cpp
     HTML/WorkletGlobalScope.cpp
     HTML/XMLSerializer.cpp
-    IndexedDB/Inspection.cpp
-    IndexedDB/IDBCursor.cpp
-    IndexedDB/IDBDatabase.cpp
     IndexedDB/IDBFactory.cpp
-    IndexedDB/IDBIndex.cpp
-    IndexedDB/IDBKeyRange.cpp
-    IndexedDB/IDBObjectStore.cpp
-    IndexedDB/IDBOpenDBRequest.cpp
-    IndexedDB/IDBRecord.cpp
-    IndexedDB/IDBRequest.cpp
-    IndexedDB/IDBTransaction.cpp
-    IndexedDB/IDBVersionChangeEvent.cpp
-    IndexedDB/Internal/Algorithms.cpp
-    IndexedDB/Internal/Database.cpp
-    IndexedDB/Internal/Index.cpp
-    IndexedDB/Internal/Key.cpp
-    IndexedDB/Internal/MutationLog.cpp
-    IndexedDB/Internal/ObjectStore.cpp
-    IndexedDB/Internal/RequestList.cpp
+    IndexedDB/Inspection.cpp
+    IndexedDB/RustIntegration.cpp
     Infra/ByteSequences.cpp
     Infra/JSON.cpp
     Extensions/ExtensionBridge.cpp
@@ -793,7 +781,6 @@ set(SOURCES
     Painting/CompositorAnimationEffectState.cpp
     Painting/PaintingRustBridge.cpp
     Painting/ResizeHandle.cpp
-    Painting/Scrollbar.cpp
     Painting/Scrolling.cpp
     Painting/ScrollSnap.cpp
     Painting/SvgPaintResources.cpp
@@ -874,6 +861,7 @@ set(SOURCES
     SVG/SVGAnimatedRect.cpp
     SVG/SVGAnimatedString.cpp
     SVG/SVGAnimatedTransformList.cpp
+    SVG/SVGAnimateElement.cpp
     SVG/SVGAnimateMotionElement.cpp
     SVG/SVGAnimationElement.cpp
     SVG/SVGCircleElement.cpp
@@ -956,6 +944,7 @@ set(SOURCES
     SVG/SVGUseElement.cpp
     SVG/SVGViewElement.cpp
     SVG/TagNames.cpp
+    SVG/TimeEvent.cpp
     TrustedTypes/InjectionSink.cpp
     TrustedTypes/RequireTrustedTypesForDirective.cpp
     TrustedTypes/TrustedHTML.cpp
@@ -1005,6 +994,7 @@ set(SOURCES
     WebAudio/AudioNode.cpp
     WebAudio/AudioParam.cpp
     WebAudio/AudioParamTimeline.cpp
+    WebAudio/AudioProcessingEvent.cpp
     WebAudio/AudioScheduledSourceNode.cpp
     WebAudio/BaseAudioContext.cpp
     WebAudio/BiquadFilterNode.cpp
@@ -1039,6 +1029,8 @@ set(SOURCES
     WebAudio/Rendering/RenderGraph.cpp
     WebAudio/Rendering/RenderNode.cpp
     WebAudio/Rendering/RenderNodes.cpp
+    WebAudio/Rendering/ScriptProcessorPipe.cpp
+    WebAudio/Rendering/ScriptProcessorRenderNode.cpp
     WebAudio/ScriptProcessorNode.cpp
     WebAudio/StereoPannerNode.cpp
     WebAudio/WaveShaperNode.cpp

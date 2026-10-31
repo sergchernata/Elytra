@@ -1,16 +1,18 @@
+ladybird_test_suite(LibGC)
+
 set(TEST_SOURCES
     TestBlockAllocator.cpp
     TestExternalEntityTable.cpp
     TestGCContainers.cpp
+    TestGCEphemeron.cpp
     TestGCFreeList.cpp
     TestGCHeapGroup.cpp
     TestGCIdleCollection.cpp
     TestGCIncrementalSweep.cpp
-    TestPrimitiveStorage.cpp
     TestGCVisitor.cpp
     TestNanBoxedValue.cpp
+    TestPrimitiveStorage.cpp
 )
 
-foreach(source IN LISTS TEST_SOURCES)
-    ladybird_test("${source}" LibGC LIBS LibGC)
-endforeach()
+target_sources(TestLibGC PRIVATE ${TEST_SOURCES})
+target_link_libraries(TestLibGC PRIVATE LibGC)

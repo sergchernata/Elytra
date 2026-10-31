@@ -83,7 +83,7 @@ void lifecycle_events(Harness& harness)
 void update_event(Harness& harness)
 {
     auto directory = ByteString::formatted("{}/management-2", harness.directory);
-    MUST(FileSystem::copy_file_or_directory(directory, fixture("management"sv), FileSystem::RecursionMode::Allowed));
+    MUST(copy_recursively(directory, fixture("management"sv)));
     auto manifest_path = ByteString::formatted("{}/manifest.json", directory);
     auto manifest = MUST(MUST(Core::File::open(manifest_path, Core::File::OpenMode::Read))->read_until_eof());
     auto updated = StringView { manifest }.replace("\"version\": \"1.0\""sv, "\"version\": \"2.0\""sv, ReplaceMode::FirstOnly);

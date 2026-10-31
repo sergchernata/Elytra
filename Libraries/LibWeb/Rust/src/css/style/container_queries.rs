@@ -69,21 +69,38 @@ impl ContainerVerdict {
 /// nearest flat-tree ancestor that accepts size queries on that axis as of the last layout commit,
 /// zero while that container has no box, and the viewport's size when there is no such container.
 #[derive(Clone, Copy)]
-pub(super) struct ContainerUnitBasis {
+pub(crate) struct ContainerUnitBasis {
     basis: f64,
     /// The container the basis is read from, or none for the viewport.
     container: Option<StyleNodeID>,
     container_has_no_box: bool,
 }
 
+impl ContainerUnitBasis {
+    /// The container the basis is read from, or none for the viewport.
+    pub(crate) fn container(&self) -> Option<StyleNodeID> {
+        self.container
+    }
+
+    /// Whether the container has no box as of the last layout commit, so its queries are evaluated again after the
+    /// next layout gives it one.
+    pub(crate) fn container_has_no_box(&self) -> bool {
+        self.container_has_no_box
+    }
+}
+
 /// The bases of both physical axes, width and height.
 #[derive(Clone, Copy)]
-pub(super) struct ContainerUnitBases([ContainerUnitBasis; 2]);
+pub(crate) struct ContainerUnitBases([ContainerUnitBasis; 2]);
 
 impl ContainerUnitBases {
+    pub(crate) fn width_and_height(&self) -> [ContainerUnitBasis; 2] {
+        self.0
+    }
+
     /// Resolve a context's container-relative lengths against these bases; one read from the
     /// viewport is a viewport dependency.
-    pub(super) fn apply_to(&self, length: &mut crate::css::style_compute::FfiLengthResolutionContext) {
+    pub(crate) fn apply_to(&self, length: &mut crate::css::style_compute::FfiLengthResolutionContext) {
         let [width, height] = self.0;
         length.has_container_width_basis = true;
         length.has_container_height_basis = true;
@@ -201,10 +218,21 @@ impl RetainedState {
         to_color(value, &input)
     }
 
-    /// The basis of one physical axis for a subject's container-relative lengths. A
-    /// pseudo-element's are its originating element's.
-    fn container_unit_basis(&self, subject: StyleNodeID, axis_is_horizontal: bool) -> ContainerUnitBasis {
-        let mut ancestor = self.tree.flat_tree_parent(subject);
+    /// The basis of one physical axis for a subject's container-relative lengths.
+    fn container_unit_basis(
+        &self,
+        subject: StyleNodeID,
+        axis_is_horizontal: bool,
+        subject_is_pseudo_element: bool,
+    ) -> ContainerUnitBasis {
+        // https://drafts.csswg.org/css-conditional-5/#container-queries
+        // For other pseudo-elements, query containers can be established by inclusive flat tree ancestors
+        // of their originating element.
+        let mut ancestor = if subject_is_pseudo_element {
+            Some(subject)
+        } else {
+            self.tree.flat_tree_parent(subject)
+        };
         while let Some(node) = ancestor {
             ancestor = self.tree.flat_tree_parent(node);
             let Some(inputs) = self.container_query_inputs(node) else {
@@ -219,7 +247,7 @@ impl RetainedState {
                 } else {
                     inputs.is_size_container
                 };
-            if !eligible {
+            if !eligible || !inputs.size_queries_available {
                 continue;
             }
             let snapshot = self.layout_style_snapshot(node).unwrap_or_default();
@@ -251,10 +279,14 @@ impl RetainedState {
     }
 
     /// The bases of both physical axes for a subject's container-relative lengths.
-    pub(super) fn container_unit_bases(&self, subject: StyleNodeID) -> ContainerUnitBases {
+    pub(crate) fn container_unit_bases(
+        &self,
+        subject: StyleNodeID,
+        subject_is_pseudo_element: bool,
+    ) -> ContainerUnitBases {
         ContainerUnitBases([
-            self.container_unit_basis(subject, true),
-            self.container_unit_basis(subject, false),
+            self.container_unit_basis(subject, true, subject_is_pseudo_element),
+            self.container_unit_basis(subject, false, subject_is_pseudo_element),
         ])
     }
 
@@ -304,6 +336,7 @@ impl RetainedState {
             node,
             self.state_container_unit_mask(node, state) | substituted_units,
             inline_axis_is_horizontal,
+            pseudo,
         );
     }
 
@@ -315,6 +348,7 @@ impl RetainedState {
         node: StyleNodeID,
         unit_mask: u8,
         inline_axis_is_horizontal: bool,
+        subject_is_pseudo_element: bool,
     ) {
         let (reads_width, reads_height) =
             crate::css::style_compute::container_relative_axes_read(unit_mask, inline_axis_is_horizontal);
@@ -326,7 +360,7 @@ impl RetainedState {
             if !reads {
                 continue;
             }
-            let basis = self.container_unit_basis(node, axis_is_horizontal);
+            let basis = self.container_unit_basis(node, axis_is_horizontal, subject_is_pseudo_element);
             match basis.container {
                 Some(container) => {
                     verdict
@@ -443,7 +477,7 @@ impl RetainedState {
                         .assigned_style_record(candidate)
                         .map(|record| record.raw())
                         .or_else(|| self.held_style_records.get(&candidate).copied())?;
-                    any_element_row = self.container_query_input_row(style_record, true);
+                    any_element_row = self.container_query_input_row(candidate, style_record, true);
                     any_element_row.as_ref()?
                 }
                 None => continue,
@@ -480,7 +514,7 @@ impl RetainedState {
             let mut length = self.record_length_resolution_context(&view)?;
             // A container-relative length in the query resolves against the container's own query
             // container, the nearest above it eligible for the axis, or the viewport.
-            let bases = self.container_unit_bases(candidate);
+            let bases = self.container_unit_bases(candidate, false);
             bases.apply_to(&mut length);
             let mut resolved_viewport_relative_length = false;
             length.subject_inline_axis_is_horizontal = inline_axis_horizontal;
@@ -534,7 +568,7 @@ impl RetainedState {
             }
             let facts = FfiContainerFacts {
                 container_available: true,
-                size_available: snapshot.has_committed_box,
+                size_available: snapshot.has_committed_box && inputs.size_queries_available,
                 width: crate::css::css_pixels::CssPixels::from_raw(snapshot.content_width_raw).to_double(),
                 height: crate::css::css_pixels::CssPixels::from_raw(snapshot.content_height_raw).to_double(),
                 // The host applies the container's new style to its box before its descendants are

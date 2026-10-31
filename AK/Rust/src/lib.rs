@@ -73,6 +73,7 @@ unsafe extern "C" {
         read: *mut usize,
     ) -> u8;
     fn ladybird_encode_base64_to_utf16(data: *const u8, length: usize, url: bool, omit_padding: bool) -> usize;
+    fn ladybird_release_unused_allocator_memory();
     fn ladybird_convert_to_decimal_exponential_form(
         value: f64,
         sign: *mut bool,
@@ -92,6 +93,7 @@ unsafe extern "C" {
 // A raw string is never zero, which is what lets `Option` of an owner stay one word, the same as
 // `AK::Optional<AK::Utf16String>`.
 #[repr(transparent)]
+#[derive(Debug)]
 struct OwnedUtf16String {
     raw: NonZeroUsize,
 }
@@ -156,6 +158,7 @@ pub struct Utf16String(OwnedUtf16String);
 
 /// A one-word Rust owner for the same interned storage as `AK::Utf16FlyString`.
 #[repr(transparent)]
+#[derive(Debug)]
 pub struct Utf16FlyString(OwnedUtf16String);
 
 const _: () = assert!(size_of::<OwnedUtf16String>() == size_of::<usize>());
@@ -417,6 +420,13 @@ impl Utf16String {
     }
 }
 
+/// Gives the memory the calling thread freed back to the system. The allocator otherwise keeps it until the thread
+/// allocates again, so a thread that made large transient allocations calls this once it goes idle.
+pub fn release_unused_allocator_memory() {
+    // SAFETY: Takes no arguments, and any thread may call it.
+    unsafe { ladybird_release_unused_allocator_memory() }
+}
+
 pub fn validate_utf16(string: &[u16]) -> bool {
     // SAFETY: The slice remains alive for the duration of the call.
     unsafe { ladybird_utf16_validate(string.as_ptr(), string.len()) }
@@ -595,6 +605,19 @@ pub fn encode_base64(input: &[u8], alphabet: Base64Alphabet, omit_padding: bool)
 }
 
 impl Utf16FlyString {
+    /// Retains a borrowed raw `AK::Utf16FlyString` reference.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a valid, nonzero fly-string representation that remains live for this call.
+    #[inline]
+    pub unsafe fn from_raw_borrowed(raw: usize) -> Self {
+        // SAFETY: The caller keeps the string alive while adding a reference.
+        unsafe { reference_utf16_string(raw) };
+        // SAFETY: The new reference is transferred to the returned owner.
+        unsafe { Self::from_raw_owned(raw) }
+    }
+
     /// Creates a string through AK's authoritative UTF-8 fly-string table.
     pub fn from_utf8(string: &str) -> Self {
         if let Some(raw) = utf16_short_string_raw(string) {

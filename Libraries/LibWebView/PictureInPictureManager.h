@@ -42,6 +42,9 @@ public:
 
     // Fork hook (Arc): a window opened or closed (the sidebar's player shows while none is open for its tab).
     static inline void (*on_windows_changed)() = nullptr;
+    // Fork hook (Arc): whether the last window closed was the navigable's, closed with its video stopped (Close, not
+    // Minimize). Its sound lingers a moment after, so the sidebar can't tell from that.
+    bool last_window_closed_with_video_stopped(CanonicalNavigable const&) const;
 
 private:
     struct Window {
@@ -60,6 +63,8 @@ private:
     void window_page_did_close(PictureInPictureWindow&);
 
     Vector<Window> m_windows;
+    WeakPtr<CanonicalNavigable> m_last_closed_navigable;      // Fork hook (Arc)
+    bool m_last_closed_with_video_stopped { false };          // Fork hook (Arc)
     Vector<NonnullOwnPtr<PictureInPictureWindow>> m_retired_windows;
 };
 

@@ -105,6 +105,7 @@ pub struct PublishedContentFacts {
     pub counters_are_none: bool,
     pub content_is_keyword: bool,
     pub content_is_strings_only: bool,
+    pub opens_or_closes_quotes: bool,
 }
 
 unsafe extern "C" {
@@ -727,7 +728,13 @@ impl RetainedState {
 
     /// Record which principal box the element asks for.
     pub fn set_element_box_kind(&mut self, node: StyleNodeID, box_kind: super::bridge::ElementBoxKind) {
+        if self.element_box_kind(node) == box_kind {
+            return;
+        }
         self.computed_group_sets.set_box_kind(node, box_kind);
+        if let Some(&style_record) = self.held_style_records.get(&node) {
+            self.set_element_container_query_inputs(node, style_record);
+        }
     }
 
     /// Which principal box the element asks for. A text node and a retired identity ask for
@@ -809,6 +816,7 @@ impl RetainedState {
             counters_are_none: view.counter_properties_are_none(),
             content_is_keyword: view.content_is_keyword(),
             content_is_strings_only: view.content_is_strings_only(),
+            opens_or_closes_quotes: view.content_opens_or_closes_quotes(),
         })
     }
 
@@ -921,10 +929,19 @@ impl RetainedState {
 
     /// The language tag a text node's transform reads: the one its DOM parent element resolves to.
     /// A text node under a shadow root or the document has no element above it and reads none.
-    fn text_language_tag(&self, node: StyleNodeID) -> &[u16] {
+    pub(crate) fn text_language_tag(&self, node: StyleNodeID) -> &[u16] {
         self.tree
             .text_parent(node)
             .filter(|&parent| self.tree.host_of(parent).is_none() && !self.tree.is_relation_only(parent))
+            .map_or(&[], |parent| self.facts.language_tag_of(parent))
+    }
+
+    /// Text directly under a shadow root uses its host's language for line breaking.
+    pub(crate) fn text_line_break_language_tag(&self, node: StyleNodeID) -> &[u16] {
+        self.tree
+            .text_parent(node)
+            .map(|parent| self.tree.host_of(parent).unwrap_or(parent))
+            .filter(|&parent| !self.tree.is_relation_only(parent))
             .map_or(&[], |parent| self.facts.language_tag_of(parent))
     }
 
@@ -1421,6 +1438,18 @@ impl RetainedState {
         } else {
             self.held_style_records.insert(node, style_record)
         };
+        // NB: Font-relative size queries can change even when the container's box keeps the same dimensions.
+        let font_inputs_changed = self.size_container_queries.is_queried_container(node)
+            && previous.is_some_and(|previous| {
+                let Some(previous) = self.computed_group_sets.style_record_payloads(previous) else {
+                    return false;
+                };
+                let Some(current) = self.computed_group_sets.style_record_payloads(style_record) else {
+                    return false;
+                };
+                let font_group = crate::css::computed_value_types::STYLE_GROUP_INDEX_FONT;
+                previous.get(font_group) != current.get(font_group)
+            });
         if previous != Some(style_record) {
             if style_record != 0 {
                 self.computed_group_sets.pin_style_record(style_record);
@@ -1430,6 +1459,9 @@ impl RetainedState {
             }
         }
         self.set_element_container_query_inputs(node, style_record);
+        if font_inputs_changed {
+            self.size_container_queries.note_font_input_change(node);
+        }
         // A `rem` the host resolves reads the font of the record it holds for the document element,
         // which it can install in the middle of a style update.
         if self.computed_group_sets.adjustment_facts(node) & bridge::element_adjustment_fact::IS_DOCUMENT_ELEMENT != 0 {
@@ -1482,9 +1514,18 @@ impl RetainedState {
     /// with. A record without its box group makes it none, and so does one naming no container
     /// type or name: such an element holds no row.
     pub(super) fn set_element_container_query_inputs(&mut self, node: StyleNodeID, style_record: u64) {
-        match self.container_query_input_row(style_record, false) {
+        let supports_size_queries = |row: &tree::ContainerQueryInputRow| {
+            row.size_queries_available && (row.is_size_container || row.is_inline_size_container)
+        };
+        let was_available = self.container_query_inputs(node).is_some_and(supports_size_queries);
+        let row = self.container_query_input_row(node, style_record, false);
+        let is_available = row.as_ref().is_some_and(supports_size_queries);
+        match row {
             Some(row) => self.container_query_inputs.set(node, row),
             None => self.container_query_inputs.clear(node),
+        }
+        if was_available != is_available {
+            self.size_container_queries.note_availability_change(node);
         }
     }
 
@@ -1493,6 +1534,7 @@ impl RetainedState {
     /// or name.
     pub(super) fn container_query_input_row(
         &self,
+        node: StyleNodeID,
         style_record: u64,
         any_element: bool,
     ) -> Option<tree::ContainerQueryInputRow> {
@@ -1520,8 +1562,48 @@ impl RetainedState {
                 ak::Utf16StringUnits::Utf16(units) => units.to_vec(),
             })
             .collect();
+        use super::bridge::ElementBoxKind;
+        let display = values.display();
+        let box_kind = self.element_box_kind(node);
+        let native_box_is_suppressed = values.appearance() == crate::css::css_enums::appearance::NONE
+            && box_kind.is_suppressed_by_appearance_none();
+        let has_atomic_principal_box = self.element_construction_facts(node)
+            & super::bridge::element_construction_fact::IS_HTML_INPUT_ELEMENT
+            != 0
+            || (!native_box_is_suppressed
+                && matches!(
+                    box_kind,
+                    ElementBoxKind::FieldSet
+                        | ElementBoxKind::Legend
+                        | ElementBoxKind::Audio
+                        | ElementBoxKind::Video
+                        | ElementBoxKind::Canvas
+                        | ElementBoxKind::NavigableContainerViewport
+                        | ElementBoxKind::TextArea
+                        | ElementBoxKind::Image
+                        | ElementBoxKind::SvgSvg
+                        | ElementBoxKind::SvgForeignObject
+                        | ElementBoxKind::InputButton
+                        | ElementBoxKind::InputCheckBox
+                        | ElementBoxKind::InputRadioButton
+                        | ElementBoxKind::InputRange
+                        | ElementBoxKind::InputText
+                ));
+        let non_atomic_inline = display.is_inline_outside()
+            && (display.is_ruby_inside() || (display.is_flow_inside() && !has_atomic_principal_box));
+        // https://drafts.csswg.org/css-conditional-5/#size-container
+        // If the query container does not have a principal box, or the principal box is not a layout containment box,
+        // or the query container does not support container size queries on the relevant axes,
+        // then the result of evaluating the size feature is unknown.
+        let size_queries_available = box_kind != ElementBoxKind::NoBox
+            && !display.is_none()
+            && !display.is_contents()
+            && !display.is_table_inside()
+            && !(display.is_internal() && !display.is_table_caption())
+            && !non_atomic_inline;
         Some(tree::ContainerQueryInputRow {
             style_record,
+            size_queries_available,
             names,
             is_size_container: box_values.is_size_container,
             is_inline_size_container: box_values.is_inline_size_container,
@@ -1993,6 +2075,7 @@ impl StyleEngine {
                 specified_values: crate::fork::ForkShared::new(SpecifiedValues::new()),
                 winner_groups: crate::fork::ForkShared::new(WinnerGroups::new()),
                 computed_group_sets: Default::default(),
+                style_record_view_epoch_depth: 0,
                 custom_property_environments: Default::default(),
                 nodes_with_substituted_records: HashSet::default(),
                 custom_declaration_reads: HashMap::default(),
@@ -2095,7 +2178,7 @@ impl StyleEngine {
                 journal: NormalizationJournal::new(),
                 deferred_geometry_journal: NormalizationJournal::new(),
                 flushing_deferred_geometry_journal: false,
-                deferred_element_style_inputs: Vec::new(),
+                deferred_element_style_inputs: Default::default(),
                 deferred_element_style_inputs_moved: false,
                 deferred_element_style_inputs_are_pending: false,
                 environment_move_changed_names: Default::default(),
@@ -2300,15 +2383,10 @@ impl StyleEngine {
     /// the merged inherited style groups in the next, or zero when nothing was folded.
     /// The reaction the element `node` owes as an element style input the engine defers, if it owes one.
     pub(crate) fn deferred_element_style_reaction(&self, node: StyleNodeID) -> Option<u8> {
-        let index = self
-            .host
+        self.host
             .deferred_element_style_inputs
-            .binary_search_by_key(&InputKey::ElementStyleInput(node), |pending| pending.key)
-            .ok()?;
-        match self.host.deferred_element_style_inputs[index].new {
-            InputValue::ElementStyleInput { reaction, .. } => Some(reaction),
-            _ => None,
-        }
+            .get(&node)
+            .map(|pending| pending.reaction)
     }
 
     pub fn absorb_element_style_input(
@@ -2318,19 +2396,12 @@ impl StyleEngine {
         inherited_style_groups: u8,
         absorbs_any: bool,
     ) -> u32 {
-        let Ok(index) = self
-            .host
-            .deferred_element_style_inputs
-            .binary_search_by_key(&InputKey::ElementStyleInput(node), |pending| pending.key)
-        else {
-            return 0;
-        };
-        let InputValue::ElementStyleInput {
+        let Some(&DeferredElementStyleInput {
             reaction: pending_reaction,
             inherited_style_groups: pending_inherited_style_groups,
-        } = self.host.deferred_element_style_inputs[index].new
+        }) = self.host.deferred_element_style_inputs.get(&node)
         else {
-            unreachable!();
+            return 0;
         };
         // A descendant recompute asks nothing of the element its own reaction does not answer, and
         // the applied reaction carries what it asks of the descendants to the element's children.
@@ -2340,7 +2411,7 @@ impl StyleEngine {
         {
             return 0;
         }
-        self.host.deferred_element_style_inputs.remove(index);
+        self.host.deferred_element_style_inputs.remove(&node);
         self.host.deferred_element_style_inputs_moved = true;
         u32::from(reaction | pending_reaction)
             | (u32::from(inherited_style_groups | pending_inherited_style_groups) << 8)
@@ -2357,28 +2428,14 @@ impl StyleEngine {
             self.host
                 .deferred_element_style_inputs
                 .iter()
-                .filter_map(|input| match (input.key, input.new) {
-                    (
-                        InputKey::ElementStyleInput(node),
-                        InputValue::ElementStyleInput {
-                            reaction,
-                            inherited_style_groups,
-                        },
-                    ) => Some((node, reaction, inherited_style_groups)),
-                    _ => None,
-                })
+                .map(|(&node, pending)| (node, pending.reaction, pending.inherited_style_groups))
                 .collect(),
         )
     }
 
     /// Drop the style input an element owes: C++ computed the element's style, which answers it.
     pub fn consume_element_style_input(&mut self, node: StyleNodeID) {
-        if let Ok(index) = self
-            .host
-            .deferred_element_style_inputs
-            .binary_search_by_key(&InputKey::ElementStyleInput(node), |pending| pending.key)
-        {
-            self.host.deferred_element_style_inputs.remove(index);
+        if self.host.deferred_element_style_inputs.remove(&node).is_some() {
             self.host.deferred_element_style_inputs_moved = true;
         }
     }
@@ -2386,26 +2443,15 @@ impl StyleEngine {
     /// Drop the style input an element owes but the descendant recompute it carries: a demand
     /// answers the element's own style, which reaches none of its descendants.
     pub(super) fn consume_element_style_input_but_descendants(&mut self, node: StyleNodeID) {
-        let Ok(index) = self
-            .host
-            .deferred_element_style_inputs
-            .binary_search_by_key(&InputKey::ElementStyleInput(node), |pending| pending.key)
-        else {
+        let Some(pending) = self.host.deferred_element_style_inputs.get_mut(&node) else {
             return;
         };
         self.host.deferred_element_style_inputs_moved = true;
-        let InputValue::ElementStyleInput {
-            reaction,
-            inherited_style_groups,
-        } = &mut self.host.deferred_element_style_inputs[index].new
-        else {
-            unreachable!();
-        };
-        if *reaction & transaction::STYLE_REACTION_RECOMPUTE_DESCENDANT_STYLES != 0 {
-            *reaction = transaction::STYLE_REACTION_RECOMPUTE_DESCENDANT_STYLES;
-            *inherited_style_groups = 0;
+        if pending.reaction & transaction::STYLE_REACTION_RECOMPUTE_DESCENDANT_STYLES != 0 {
+            pending.reaction = transaction::STYLE_REACTION_RECOMPUTE_DESCENDANT_STYLES;
+            pending.inherited_style_groups = 0;
         } else {
-            self.host.deferred_element_style_inputs.remove(index);
+            self.host.deferred_element_style_inputs.remove(&node);
         }
     }
 
@@ -3367,6 +3413,7 @@ impl RetainedState {
             specified_values: _,
             winner_groups,
             computed_group_sets,
+            style_record_view_epoch_depth: _,
             custom_property_environments: _,
             nodes_with_substituted_records,
             custom_declaration_reads,
@@ -3526,12 +3573,9 @@ impl RetainedState {
 }
 
 impl HostState {
-    /// Whether `node` still owes a deferred style input. The deferred inputs are kept sorted by
-    /// key, so this is a binary search.
+    /// Whether `node` still owes a deferred style input.
     pub(super) fn owes_element_style_input(&self, node: StyleNodeID) -> bool {
-        self.deferred_element_style_inputs
-            .binary_search_by_key(&InputKey::ElementStyleInput(node), |pending| pending.key)
-            .is_ok()
+        self.deferred_element_style_inputs.contains_key(&node)
     }
 }
 

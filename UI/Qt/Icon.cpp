@@ -275,6 +275,7 @@ static constexpr auto RELOAD_ICON_PATH = "M12.89 9.04A5 5 0 1 1 8 3c1.4 0 2.74.5
 static constexpr auto STOP_ICON_PATH = "M4 4l8 8M12 4l-8 8"sv;
 static constexpr auto SITE_SETTINGS_ICON_PATH = "M2.5 5h6M12.5 5h1M2.5 11h1M7.5 11h6M12.1 5a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0M7.1 11a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0"sv;
 static constexpr auto MICROPHONE_ICON_PATH = "M8 2.5a2 2 0 0 1 2 2v3.5a2 2 0 0 1-4 0V4.5a2 2 0 0 1 2-2zM4.5 7.5a3.5 3.5 0 0 0 7 0M8 11v2.5"sv;
+static constexpr auto LOCATION_ICON_PATH = "M8 14.2C5.1 10.9 3.6 8.6 3.6 6.7a4.4 4.4 0 0 1 8.8 0c0 1.9-1.5 4.2-4.4 7.5zM9.6 6.7a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0"sv;
 static constexpr auto SELECT_AREA_ICON_PATH = "M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"sv;
 static constexpr auto CHECK_CIRCLE_ICON_PATH = "M14.5 8a6.5 6.5 0 1 1-13 0a6.5 6.5 0 1 1 13 0M5.2 8.2l2 2 3.8-4.2"sv;
 static constexpr auto STAR_ICON_PATH = "M8 2.3l1.75 3.55 3.9.57-2.83 2.75.67 3.88L8 11.22l-3.49 1.83.67-3.88L2.35 6.42l3.9-.57z"sv;
@@ -362,6 +363,8 @@ static StringView chrome_icon_path(ChromeIcon icon)
         return SITE_SETTINGS_ICON_PATH;
     case ChromeIcon::Microphone:
         return MICROPHONE_ICON_PATH;
+    case ChromeIcon::Location:
+        return LOCATION_ICON_PATH;
     case ChromeIcon::SelectArea:
         return SELECT_AREA_ICON_PATH;
     case ChromeIcon::CheckCircle:
@@ -431,9 +434,6 @@ static Optional<PixelSnappedChromeIcon> pixel_snapped_chrome_icon(ChromeIcon ico
         return PixelSnappedChromeIcon { "M2.5 5.5H5l3.5-3v11L5 10.5H2.5zM10.9 5.3Q12.6 6.4 12.6 8T10.9 10.7"sv };
     case ChromeIcon::VolumeMuted:
         return PixelSnappedChromeIcon { "M2.5 5.5H5l3.5-3v11L5 10.5H2.5zM10 6l4 4M14 6l-4 4"sv };
-    case ChromeIcon::Sidebar:
-    case ChromeIcon::SidebarRight:
-        return PixelSnappedChromeIcon { "M3.5 3.5h9a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1zM6.5 3.5v9"sv };
     case ChromeIcon::Download:
         return PixelSnappedChromeIcon { "M7.5 2v7.5M4.5 6.5l3 3 3-3M2.5 12.5h10"sv };
     default:
@@ -497,9 +497,20 @@ static QPixmap create_chrome_icon_pixmap(ChromeIcon icon, QPainterPath const& pa
         else if (design_size == TOOLBAR_ICON_SIZE)
             stroke_width = TOOLBAR_ICON_STROKE_WIDTH;
 
-        painter.setPen(QPen(opaque_color, stroke_width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        painter.setBrush(icon == ChromeIcon::StarFilled ? QBrush(opaque_color) : QBrush(Qt::NoBrush));
-        painter.drawPath(path);
+        if (icon == ChromeIcon::Sidebar || icon == ChromeIcon::SidebarRight) {
+            // Fill the combined outline once so antialiased edges do not accumulate where the divider meets the frame.
+            QPainterPathStroker stroker;
+            stroker.setWidth(stroke_width);
+            stroker.setCapStyle(Qt::RoundCap);
+            stroker.setJoinStyle(Qt::RoundJoin);
+            auto stroke = stroker.createStroke(path);
+            stroke.setFillRule(Qt::WindingFill);
+            painter.fillPath(stroke.simplified(), opaque_color);
+        } else {
+            painter.setPen(QPen(opaque_color, stroke_width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(icon == ChromeIcon::StarFilled ? QBrush(opaque_color) : QBrush(Qt::NoBrush));
+            painter.drawPath(path);
+        }
     }
 
     if (color.alpha() != 255) {

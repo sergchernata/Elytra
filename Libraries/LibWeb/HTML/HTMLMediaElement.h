@@ -17,6 +17,7 @@
 #include <LibCompositing/DisplayList/DisplayListResourceIds.h>
 #include <LibCompositing/Video/VideoFrameHold.h>
 #include <LibCore/Forward.h>
+#include <LibGC/ActivityRoot.h>
 #include <LibGC/RootVector.h>
 #include <LibGfx/Rect.h>
 #include <LibJS/Forward.h>
@@ -152,13 +153,13 @@ public:
 
     void toggle_fullscreen();
 
-    void page_mute_state_changed(Badge<Page>);
-
     double effective_media_volume() const;
     bool is_playing_audio() const { return m_is_playing_audio; }
 
     GC::Ref<AudioTrackList> audio_tracks() const { return *m_audio_tracks; }
     GC::Ref<VideoTrackList> video_tracks() const { return *m_video_tracks; }
+
+    GC::Ptr<MediaSourceExtensions::MediaSource> attached_media_source() const { return m_attached_media_source; }
     GC::Ref<TextTrackList> text_tracks() const { return *m_text_tracks; }
     enum class TimeMarchesOnReason : u8 {
         NormalPlayback,
@@ -236,6 +237,7 @@ protected:
     virtual void finalize() override;
     virtual void visit_edges(Cell::Visitor&) override;
 
+    virtual WebIDL::ExceptionOr<void> cloned(DOM::Node&, bool) const override;
     virtual void attribute_changed(Utf16FlyString const& name, Optional<Utf16String> const& old_value, Optional<Utf16String> const& value, Optional<Utf16FlyString> const& namespace_) override;
     virtual void removed_from(IsSubtreeRoot, DOM::Node* old_ancestor, DOM::Node& old_root) override;
     virtual void adopted_from(DOM::Document&) override;
@@ -276,7 +278,7 @@ private:
     void add_current_video_sink(Media::VideoSinkHandle);
     void release_active_video_sink();
 
-    Optional<Utf16String> verify_response_or_get_failure_reason(GC::Ref<Fetch::Infrastructure::Response>, ByteRange const&);
+    Optional<Utf16String> verify_response_or_get_failure_reason(GC::Ref<Fetch::Infrastructure::ResponseView>, ByteRange const&);
     bool should_hold_screen_wake_lock() const;
     void update_screen_wake_lock();
 
@@ -337,6 +339,12 @@ private:
 
     bool is_eligible_for_autoplay() const;
     bool is_allowed_to_play() const;
+
+    void set_network_state(NetworkState);
+    void set_can_autoplay(bool);
+    void set_delaying_the_load_event(bool);
+    bool should_be_kept_alive() const;
+    void update_activity_root();
 
     enum class PlaybackDirection : u8 {
         Forwards,
@@ -466,6 +474,8 @@ private:
 
     // https://html.spec.whatwg.org/multipage/media.html#delaying-the-load-event-flag
     Optional<DOM::DocumentLoadEventDelayer> m_delaying_the_load_event;
+
+    GC::ActivityRoot m_activity_root;
 
     bool m_running_time_update_event_handler { false };
     Optional<MonotonicTime> m_last_time_update_event_time;

@@ -28,7 +28,7 @@ class RequestClient;
 
 class ResponseData {
 public:
-    // A slice of a whole mapped body.
+    // A slice of a whole body, delivered with that whole body.
     struct FileBackedSlice {
         Core::ImmutableBytes slice;
         Core::ImmutableBytes payload;
@@ -100,6 +100,7 @@ public:
     void resume_body_delivery_up_to(size_t);
     void release_transfer_lease();
     [[nodiscard]] bool has_transfer_lease() const { return m_transfer_lease.has_value(); }
+    [[nodiscard]] Optional<RequestTransferLeaseKey> const& transfer_lease() const { return m_transfer_lease; }
     [[nodiscard]] bool has_file_backed_response_body() const;
 
     // Whether RequestServer has reported the request finished. Its response body may still be undelivered; e.g. while
@@ -125,8 +126,13 @@ public:
 
     Function<void()> on_requires_network;
 
+    enum class TeardownReason : u8 {
+        Stopped,
+        Transferred,
+    };
+
     // Invoked at most once, when the request drops its delivery callbacks without a finish: a stop() or a transfer.
-    Function<void()> on_teardown;
+    Function<void(TeardownReason)> on_teardown;
 
     void did_finish(Badge<RequestClient>, u64 total_size, RequestTimingInfo const& timing_info, Optional<NetworkError> const& network_error);
     void did_receive_headers(Badge<RequestClient>, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, Optional<Core::ImmutableBytes> javascript_bytecode, Optional<u64> javascript_bytecode_cache_vary_key, CacheState cache_state, ByteString http_version);

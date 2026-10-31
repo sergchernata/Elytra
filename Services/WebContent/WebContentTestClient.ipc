@@ -5,6 +5,7 @@
 #include <LibWebCommon/HTML/Scripting/EnvironmentId.h>
 #include <LibWebCommon/HTML/SessionHistoryEntryDescriptor.h>
 #include <LibWebCommon/Page/PageId.h>
+#include <LibWebCommon/Permissions/Permissions.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 
 endpoint WebContentTestClient routed by Web::PageId page_id
@@ -17,10 +18,17 @@ endpoint WebContentTestClient routed by Web::PageId page_id
     did_store_hsts_policy_for_testing(String domain, HTTP::HSTS::ParsedHSTSPolicy policy) => ()
     [NotRouted] did_request_clear_storage_for_testing(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id) => ()
     did_simulate_worker_request_server_connection_loss(Web::PageId page_id) => ()
+
+    [NotRouted] set_permission_for_testing(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String name, String state) => (Web::Permissions::PermissionSnapshot snapshot)
+    [NotRouted] set_next_permission_prompt_outcome_for_testing(Web::PageId page_id, String name, String outcome, bool held) => ()
+    [NotRouted] release_held_permission_prompt_for_testing(Web::PageId page_id, u32 waiters) => ()
+    [NotRouted] advance_permission_clock_for_testing(Web::PageId page_id, u64 milliseconds) => (Web::Permissions::PermissionSnapshot snapshot)
     [NotRouted] did_spoof_document_origin_for_testing(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, URL::Origin origin) => ()
 
     [NotRouted] did_request_ui_process_session_history_for_testing(Web::PageId page_id) => (String session_history)
     [NotRouted] did_request_site_isolation_process_tree_for_testing(Web::PageId page_id) => (String process_tree)
+    [NotRouted] did_request_tab_is_playing_audio_for_testing(Web::PageId page_id) => (bool is_playing_audio)
+    [NotRouted] did_request_tab_audibility_change_count_for_testing(Web::PageId page_id) => (u64 change_count)
     [NotRouted] did_request_has_populated_document_for_testing(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id) => (bool has_populated_document)
     did_request_crash_of_remote_frame_processes_for_testing(Web::PageId page_id) =|
     did_request_stop_loading_for_testing(Web::PageId page_id) =|
@@ -38,5 +46,6 @@ endpoint WebContentTestClient routed by Web::PageId page_id
     set_virtual_gamepad_axis(Web::Gamepad::GamepadHandle handle, i32 axis, i16 value) =|
     disconnect_virtual_gamepad(Web::Gamepad::GamepadHandle handle) =|
     pump_gamepad_events() => (Vector<Web::Gamepad::GamepadChangeEvent> events)
+    reset_gamepad_access_for_testing(Web::PageId page_id) =|
     get_virtual_gamepad_received_rumble_effects(Web::Gamepad::GamepadHandle handle) => (Vector<Web::Gamepad::ReceivedDualRumbleEffect> dual_rumble_effects, Vector<Web::Gamepad::ReceivedTriggerRumbleEffect> trigger_rumble_effects)
 }

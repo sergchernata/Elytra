@@ -330,15 +330,6 @@ pub(crate) fn original_component_values_source(
     Some(source)
 }
 
-pub(crate) fn trim_ascii_whitespace(value: &[u16]) -> &[u16] {
-    let value = trim_ascii_whitespace_start(value);
-    let end = value
-        .iter()
-        .rposition(|unit| !matches!(*unit, 0x09 | 0x0a | 0x0c | 0x0d | 0x20))
-        .map_or(0, |position| position + 1);
-    &value[..end]
-}
-
 pub(crate) fn trim_ascii_whitespace_start(value: &[u16]) -> &[u16] {
     let start = value
         .iter()
@@ -1124,10 +1115,27 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
             url,
             url_type,
             url_modifiers,
-            ..
+            resource_context,
         } => {
             sink.push_ascii(if *url_type == 0 { "url(" } else { "src(" });
-            serialize_url_text(sink, url);
+            // NB: Image values retain their base URL separately from their source text. CSSOM exposes the resolved URL.
+            let resolved_url = if mode.is_resolved()
+                && resource_context.has_base_url
+                && !url.is_empty()
+                && !url.is_fragment()
+                && liburl_rust::basic_parse(url.url_input(), liburl_rust::BasicParseOptions::new()).is_none()
+            {
+                std::str::from_utf8(resource_context.base_url.ascii_bytes())
+                    .ok()
+                    .and_then(|base| liburl_rust::basic_parse(base, liburl_rust::BasicParseOptions::new()))
+                    .and_then(|base| {
+                        liburl_rust::basic_parse(url.url_input(), liburl_rust::BasicParseOptions::new().base_url(&base))
+                    })
+                    .map(|url| RetainedString::from_ascii(url.into()))
+            } else {
+                None
+            };
+            serialize_url_text(sink, resolved_url.as_ref().unwrap_or(url));
             for modifier in url_modifiers.as_slice() {
                 sink.push_ascii(" ");
                 serialize_request_url_modifier(sink, modifier);
@@ -1393,6 +1401,7 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
             y2,
             number_of_intervals,
             step_position,
+            ..
         } => {
             use crate::css::css_enums::step_position as step_position_enum;
             match kind {
@@ -1582,10 +1591,15 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
                 sink.push_ascii("repeating-");
             }
             sink.push_ascii("conic-gradient(");
-            let has_from_angle = from_angle.optional_data().is_some();
+            // https://drafts.csswg.org/css-images-4/#conic-gradients
+            // The entire gradient is rotated by this angle. If omitted, defaults to 0deg.
+            let from_angle = from_angle
+                .optional_data()
+                .filter(|angle| !matches!(angle, StyleValueData::Angle { value, .. } if *value == 0.0));
+            let has_from_angle = from_angle.is_some();
             let position = position.data();
             let has_at_position = !position_is_center(position, mode);
-            if let Some(from_angle) = from_angle.optional_data() {
+            if let Some(from_angle) = from_angle {
                 sink.push_ascii("from ");
                 serialize_style_value(sink, from_angle, mode);
             }
@@ -1823,6 +1837,7 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
             property,
             transform_function,
             values,
+            ..
         } => {
             use crate::css::property_metadata::property_id;
             let entries = values.as_slice();
@@ -3513,6 +3528,7 @@ fn serialize_shorthand(
         property_id::BORDER,
         property_id::BACKGROUND_POSITION,
         property_id::FONT,
+        property_id::FONT_SYNTHESIS,
         property_id::FONT_VARIANT,
         property_id::GRID,
         property_id::GRID_AREA,

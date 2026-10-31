@@ -2,6 +2,8 @@ set(SOURCES
     AccessibilityTreeManager.cpp
     Application.cpp
     ApplyHistoryStep.cpp
+    AudibilityHold.cpp
+    AudioServerAudibility.cpp
     AudioServerControlClient.cpp
     Autocomplete.cpp
     AutocompleteMuxer.cpp
@@ -59,6 +61,7 @@ set(SOURCES
     OmniboxEngagement.cpp
     PictureInPictureManager.cpp
     PictureInPictureWindow.cpp
+    PermissionManager.cpp
     Process.cpp
     ProcessManager.cpp
     ProcessSnapshot.cpp

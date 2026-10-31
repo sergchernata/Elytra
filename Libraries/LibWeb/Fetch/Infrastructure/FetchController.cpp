@@ -5,9 +5,8 @@
  */
 
 #include <LibGC/Heap.h>
-#include <LibGC/Weak.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibRequests/Request.h>
+#include <LibWeb/Fetch/Engine/NetworkTransportHandle.h>
 #include <LibWeb/Fetch/Fetching/PendingResponse.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
@@ -23,40 +22,90 @@ namespace Web::Fetch::Infrastructure {
 
 GC_DEFINE_ALLOCATOR(FetchController);
 
-FetchController::FetchController() = default;
-
-void FetchController::finalize()
+FetchController::FetchController(FetchControllerRegistry& registry)
+    : m_registry(registry)
+    , m_token(registry.add({}, *this))
+    , m_control_block(FetchControlBlock::create())
 {
-    // A discarded response can leave an ongoing controller without a stop or end-of-body task.
-    end_rendering_pending_operation(this);
-    Base::finalize();
 }
 
-GC::Ref<FetchController> FetchController::create()
+GC::Ref<FetchController> FetchController::create(FetchControllerRegistry& registry)
 {
-    return GC::Heap::the().allocate<FetchController>();
+    return GC::Heap::the().allocate<FetchController>(registry);
 }
 
 void FetchController::visit_edges(JS::Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_report_timing_steps);
+    if (m_awaited_network_completion.has_value())
+        visitor.visit(m_awaited_network_completion->steps);
     visitor.visit(m_next_manual_redirect_steps);
-    visitor.visit(m_fetch_params);
+    visitor.visit(m_algorithms);
+    visitor.visit(m_task_destination);
     visitor.visit(m_pending_preloaded_response);
     visitor.visit(m_stop_steps);
     visitor.visit(m_pending_responses);
 }
 
-void FetchController::set_pending_request(RefPtr<Requests::Request> const& request)
+void FetchController::finalize()
 {
-    m_pending_request = request;
-    m_has_started_request |= !!request;
-    if (request && m_fetch_params && m_fetch_params->request()->destination() == Request::Destination::Font) {
-        request->on_requires_network = GC::weak_callback(*this, [](auto& controller) {
-            controller.m_requires_network = true;
-        });
-    }
+    // A discarded response can leave an ongoing controller without a stop or end-of-body task.
+    end_rendering_pending_operation(this);
+    Base::finalize();
+    if (m_registry)
+        m_registry->remove({}, m_token);
+}
+
+void FetchController::set_algorithms(Badge<FetchParams>, GC::Ref<FetchAlgorithms const> algorithms)
+{
+    VERIFY(!m_algorithms);
+    m_algorithms = algorithms;
+    m_control_block->set_body_intent({}, algorithms->body_intent());
+}
+
+void FetchController::retarget(TaskDestination task_destination, Engine::BodyIntent body_intent)
+{
+    m_task_destination = move(task_destination);
+    m_control_block->set_body_intent({}, body_intent);
+}
+
+void FetchController::set_original_fetch_params(Badge<FetchParams>, FetchParams const& fetch_params)
+{
+    m_original_fetch_params = fetch_params;
+}
+
+void FetchController::report_webdriver_bidi_fetch_error(StringView error_text) const
+{
+    if (!WebDriver::BiDi::g_network_events_enabled)
+        return;
+    if (auto fetch_params = m_original_fetch_params.strong_ref())
+        WebDriver::BiDi::network_fetch_error(*fetch_params, error_text);
+}
+
+void FetchController::cancel_webdriver_bidi_network_interception() const
+{
+    if (!WebDriver::BiDi::is_active())
+        return;
+    if (auto fetch_params = original_fetch_params())
+        WebDriver::BiDi::cancel_network_interception(*fetch_params);
+}
+
+RefPtr<FetchParams> FetchController::original_fetch_params() const
+{
+    return m_original_fetch_params.strong_ref();
+}
+
+GC::Ref<FetchAlgorithms const> FetchController::algorithms() const
+{
+    VERIFY(m_algorithms);
+    return *m_algorithms;
+}
+
+void FetchController::set_network_transport(Engine::NetworkTransportHandle& network_transport)
+{
+    set_body_transport(network_transport);
+    m_control_block->set_has_started_request({});
 }
 
 void FetchController::set_body_transport(Engine::FetchBodyDeliveryGate::Transport& body_transport)
@@ -94,32 +143,37 @@ void FetchController::process_next_manual_redirect() const
     m_next_manual_redirect_steps->function()();
 }
 
+void FetchController::when_network_completes_body(Engine::FetchByteChannel const& body, GC::Ref<GC::Function<void()>> steps)
+{
+    m_awaited_network_completion = AwaitedNetworkCompletion { body, steps };
+}
+
+void FetchController::did_complete_network_body(Engine::FetchByteChannel const& body)
+{
+    if (!m_awaited_network_completion.has_value() || m_awaited_network_completion->body.ptr() != &body)
+        return;
+    auto steps = m_awaited_network_completion.release_value().steps;
+    steps->function()();
+}
+
 // https://fetch.spec.whatwg.org/#extract-full-timing-info
 NonnullRefPtr<FetchTimingInfo> FetchController::extract_full_timing_info() const
 {
     // 1. Assert: this’s full timing info is not null.
-    VERIFY(m_full_timing_info);
+    auto full_timing_info = m_control_block->full_timing_info();
+    VERIFY(full_timing_info);
 
     // 2. Return this’s full timing info.
-    return *m_full_timing_info;
-}
-
-RefPtr<FetchTimingInfo> FetchController::timing_info() const
-{
-    if (!m_fetch_params)
-        return nullptr;
-    return m_fetch_params->timing_info();
+    return full_timing_info.release_nonnull();
 }
 
 // https://fetch.spec.whatwg.org/#fetch-controller-abort
 void FetchController::abort(JS::Realm& realm, Optional<JS::Value> error)
 {
     // 1. Set controller’s state to "aborted".
-    m_state = State::Aborted;
-    if (WebDriver::BiDi::g_network_events_enabled && m_fetch_params)
-        WebDriver::BiDi::network_fetch_error(*m_fetch_params, "Fetch was aborted"sv);
-    else if (WebDriver::BiDi::is_active() && m_fetch_params)
-        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
+    m_control_block->set_state({}, State::Aborted);
+    report_webdriver_bidi_fetch_error("Fetch was aborted"sv);
+    cancel_webdriver_bidi_network_interception();
 
     // 2. Let fallbackError be an "AbortError" DOMException.
     auto fallback_error = WebIDL::AbortError::create("Fetch was aborted"_utf16);
@@ -146,23 +200,21 @@ void FetchController::abort(JS::Realm& realm, Optional<JS::Value> error)
 void FetchController::terminate()
 {
     // To terminate a fetch controller controller, set controller’s state to "terminated".
-    m_state = State::Terminated;
-    if (WebDriver::BiDi::g_network_events_enabled && m_fetch_params)
-        WebDriver::BiDi::network_fetch_error(*m_fetch_params, "Fetch was terminated"sv);
-    else if (WebDriver::BiDi::is_active() && m_fetch_params)
-        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
+    m_control_block->set_state({}, State::Terminated);
+    report_webdriver_bidi_fetch_error("Fetch was terminated"sv);
+    cancel_webdriver_bidi_network_interception();
 
     stop_request();
 }
 
 void FetchController::stop_fetch()
 {
-    if (m_state == State::Aborted || m_state == State::Terminated)
+    if (state() == State::Aborted || state() == State::Terminated)
         return;
 
-    m_state = State::Stopped;
-    if (WebDriver::BiDi::is_active() && m_fetch_params)
-        WebDriver::BiDi::cancel_network_interception(*m_fetch_params);
+    m_control_block->set_state({}, State::Stopped);
+    report_webdriver_bidi_fetch_error("Fetch was stopped"sv);
+    cancel_webdriver_bidi_network_interception();
 
     // AD-HOC: Some HTML elements need to stop an ongoing fetching process without causing any network error to be raised
     //         (which abort() and terminate() will both do). This is tricky because the fetch process runs across several
@@ -176,11 +228,8 @@ void FetchController::stop_fetch()
         });
     });
 
-    if (m_fetch_params) {
-        // NB: Nobody reads a stopped fetch's body.
-        auto fetch_algorithms = FetchAlgorithms::create(FetchAlgorithms::Input { Engine::BodyIntent::DrainAndDiscard });
-        m_fetch_params->set_algorithms(fetch_algorithms);
-    }
+    if (m_algorithms)
+        m_algorithms = FetchAlgorithms::create(FetchAlgorithms::Input { m_control_block->body_intent() });
 
     stop_request();
 
@@ -199,16 +248,13 @@ void FetchController::stop_fetch()
 void FetchController::stop_request()
 {
     end_rendering_pending_operation(this);
-    VERIFY(m_state != State::Ongoing);
+    VERIFY(state() != State::Ongoing);
+    m_awaited_network_completion.clear();
     stop_body_transport();
 }
 
 void FetchController::stop_body_transport()
 {
-    if (m_pending_request) {
-        m_pending_request->stop();
-        m_pending_request = nullptr;
-    }
     if (auto body_transport = m_body_transport.strong_ref()) {
         m_body_transport = nullptr;
         body_transport->stop();

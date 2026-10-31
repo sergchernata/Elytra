@@ -7,7 +7,7 @@
 use core::cell::Cell;
 use core::ptr::NonNull;
 
-use super::capi::{GCVisitor, gc_visitor_visit_cell, gc_visitor_visit_values};
+use super::capi::{GCVisitor, gc_visitor_visit_cell, gc_visitor_visit_ephemeron, gc_visitor_visit_values};
 use crate::layout::cell::Gc;
 use crate::layout::value::Value;
 
@@ -35,6 +35,12 @@ impl Visitor {
     pub fn visit_values(&mut self, values: &[Value]) {
         // SAFETY: The visitor is live, and Value is a NaN-boxed u64.
         unsafe { gc_visitor_visit_values(self.0.as_ptr(), values.as_ptr().cast(), values.len()) };
+    }
+
+    /// Visits a value that is reachable only while `key` is, such as a WeakMap entry's.
+    pub fn visit_ephemeron<T>(&mut self, key: Gc<T>, value: &Value) {
+        // SAFETY: The visitor is live, a Gc points to a live cell, and Value is a NaN-boxed u64.
+        unsafe { gc_visitor_visit_ephemeron(self.0.as_ptr(), key.as_ptr().cast(), core::ptr::from_ref(value).cast()) };
     }
 }
 
@@ -161,7 +167,15 @@ macro_rules! impl_trace_for_tuples {
     };
 }
 
-impl_trace_for_tuples!((A, B), (A, B, C), (A, B, C, D), (A, B, C, D, E));
+impl_trace_for_tuples!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+);
 
 // SAFETY: A Gc reaches exactly its cell.
 unsafe impl<T> Trace for Gc<T> {
@@ -175,6 +189,16 @@ unsafe impl<T: Trace> Trace for Option<T> {
     fn trace(&self, visitor: &mut Visitor) {
         if let Some(value) = self {
             value.trace(visitor);
+        }
+    }
+}
+
+// SAFETY: Forwards to the contained value or error.
+unsafe impl<T: Trace, E: Trace> Trace for Result<T, E> {
+    fn trace(&self, visitor: &mut Visitor) {
+        match self {
+            Ok(value) => value.trace(visitor),
+            Err(error) => error.trace(visitor),
         }
     }
 }

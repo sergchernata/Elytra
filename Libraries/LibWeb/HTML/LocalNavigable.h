@@ -44,7 +44,6 @@
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
 #include <LibWeb/HTML/TargetSnapshotParams.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
-#include <LibWeb/HTML/WindowType.h>
 #include <LibWeb/InvalidateDisplayList.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Painting/ScrollSnap.h>
@@ -61,6 +60,7 @@
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
 #include <LibWebCommon/HTML/UserAgentInitiated.h>
 #include <LibWebCommon/HTML/VisibilityState.h>
+#include <LibWebCommon/HTML/WindowType.h>
 #include <LibWebCommon/PixelUnits.h>
 
 namespace Web::Painting {
@@ -155,6 +155,7 @@ public:
     virtual Optional<u64> browsing_context_group_id() const override;
     virtual bool active_browsing_context_is_auxiliary() const override;
     virtual GC::Ptr<Navigable> active_browsing_context_opener_navigable() const override;
+    virtual GC::Ptr<Navigable> active_browsing_context_one_permitted_sandboxed_navigator() const override;
     virtual ReplicatedContainerState container_state() const override;
     ReplicatedNavigableState replicated_state() const;
     HostedNavigableState hosted_state() const;
@@ -180,7 +181,7 @@ public:
     GC::Ptr<Navigable> find_a_navigable_by_target_name(Utf16View name);
     bool is_familiar_with(Navigable&);
 
-    void handle_as_a_download(GC::Ref<Fetch::Infrastructure::Response>, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController>, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin);
+    void handle_as_a_download(GC::Ref<Fetch::Infrastructure::ResponseView>, URL::URL const& fallback_url, GC::Ptr<Fetch::Infrastructure::FetchController>, Optional<ByteString> proposed_filename, Optional<URL::Origin> interface_origin);
 
     void inform_the_navigation_api_about_aborting_navigation();
 
@@ -420,7 +421,9 @@ public:
     };
     void note_user_scroll_gesture_of(Web::AsyncScrollNodeStableID, Optional<CSSPixelPoint> scroll_offset_at_gesture_start, UserScrollMovedBox, SnapPositionSelection = SnapPositionSelection::AtGestureEnd);
     void note_user_scroll_input_intent(Compositing::SnapSelectionStrategy::Type);
-    RefPtr<Painting::Scrollbar> scrollbar_dragged_by_compositor(Layout::BegunRead const& read, Web::ScrollbarDraggedByCompositor const&);
+    // The element whose scrollbar the compositor drags, or the element generating the pseudo-element whose scrollbar
+    // it drags, as long as the box the compositor scrolls is still there.
+    DOM::Element* element_whose_scrollbar_is_dragged_by_compositor(Layout::BegunRead const& read, Web::ScrollbarDraggedByCompositor const&);
     // Returns false if the scroller is not in this navigable's active document.
     bool set_overlay_scrollbar_hidden(Web::AsyncScrollNodeStableID, bool vertical, bool hidden);
     void note_user_scroll_gesture_phase(Web::ScrollGesturePhase);
@@ -486,7 +489,7 @@ private:
     void clear_parent_compositor_context();
     void destroy_compositor_context();
 
-    void start_download_for_response(GC::Ref<Fetch::Infrastructure::Response>, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController>);
+    void start_download_for_response(GC::Ref<Fetch::Infrastructure::ResponseView>, URL::URL const& download_url, ByteString suggested_filename, GC::Ptr<Fetch::Infrastructure::FetchController>);
 
     // A request toward the position a scroll is already headed for joins that scroll rather than restarting it, so one
     // scroll can owe more than one promise.
@@ -759,8 +762,8 @@ private:
     static FinishedScroll finished_scroll(MainThreadSmoothScroll const&);
 };
 
-// Held user input, such as a pressed key or a grabbed scrollbar thumb, keeps the gesture of each box it holds going until
-// it is released.
+// Held user input, such as a pressed key or a scrollbar thumb the compositor drags, keeps the gesture of each box it
+// holds going until it is released.
 class WEB_API UserScrollGestureHold {
     AK_MAKE_NONCOPYABLE(UserScrollGestureHold);
     AK_MAKE_NONMOVABLE(UserScrollGestureHold);
@@ -773,7 +776,7 @@ public:
         No,
         Yes,
     };
-    explicit UserScrollGestureHold(LocalNavigable&, TakesOverMomentum = TakesOverMomentum::No, Optional<Web::AsyncScrollNodeStableID> held_box = {});
+    explicit UserScrollGestureHold(LocalNavigable&, TakesOverMomentum = TakesOverMomentum::No);
     ~UserScrollGestureHold();
 
     void hold(Web::AsyncScrollNodeStableID);

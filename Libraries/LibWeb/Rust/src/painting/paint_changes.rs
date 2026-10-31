@@ -64,12 +64,6 @@ pub(crate) enum PaintChange {
         element: StyleNodeID,
         style_records: HighlightStyleRecords,
     },
-    /// Whether the scrollbar of the row in `direction` is drawn enlarged, as it is while the user hovers or drags it.
-    SetScrollbarEnlarged {
-        node: NodeSlotId,
-        direction: ScrollDirection,
-        enlarged: bool,
-    },
     /// Whether the overlay scrollbar of the row in `direction` has faded out, so that it takes no pointer input.
     SetScrollbarHidden {
         node: NodeSlotId,
@@ -99,8 +93,6 @@ pub(crate) enum PaintChange {
         node: NodeSlotId,
         kind: VisualContextBoxDirtyKind,
     },
-    /// Every row paints again.
-    InvalidateAllPaintCaches,
     /// The visual context tree is built again whole before it is published next.
     RequestFullVisualContextRebuild(super::visual_context::dirty::VisualContextUpdateScope),
     /// The SVG paint resources the rows enrolled may have changed: they are synced again before they are painted next.
@@ -142,7 +134,7 @@ impl PaintChange {
                 }
                 let selection =
                     super::selection::apply(&mut arena.paintable_rows_mut(), &entries, start_offset, end_offset);
-                arena.paint_state().borrow_mut().selection = Some(Arc::new(selection));
+                arena.paint_state_mut().selection = Some(Arc::new(selection));
             }
             Self::ClearSelection { viewport } => {
                 if arena.paintable_row_is_populated(viewport) {
@@ -168,25 +160,6 @@ impl PaintChange {
             Self::SyncHighlightPseudoStyles { element, style_records } => {
                 super::selection::sync_highlight_pseudo_styles(arena, element, style_records);
             }
-            Self::SetScrollbarEnlarged {
-                node,
-                direction,
-                enlarged,
-            } => {
-                let mut rows = arena.paintable_rows_mut();
-                if !rows.paintable_row_is_populated(node) {
-                    return;
-                }
-                let flag = match direction {
-                    ScrollDirection::Horizontal => PaintableFlag::HorizontalScrollbarEnlarged,
-                    ScrollDirection::Vertical => PaintableFlag::VerticalScrollbarEnlarged,
-                };
-                if rows.paintable_data(node).has_flag(flag) == enlarged {
-                    return;
-                }
-                rows.paintable_data_mut(node).set_flag(flag, enlarged);
-                rows.push_paint_damage(node, PaintDamage::DRAW_OVERLAY | PaintDamage::HIT_OVERLAY);
-            }
             Self::SetScrollbarHidden {
                 node,
                 direction,
@@ -211,18 +184,17 @@ impl PaintChange {
             }
             Self::SetReplacedPaintFacts { target, facts } => arena.set_replaced_paint_facts(target, facts),
             Self::SupersededReplacedPaintFacts => {}
-            Self::PublishImageMapAreas { node, areas } => arena.image_map_areas().publish(node, areas),
+            Self::PublishImageMapAreas { node, areas } => arena.image_map_areas_mut().publish(node, areas),
             Self::NoteVisualContextBoxDirty { node, kind } => {
                 if arena.paintable_row_is_populated(node) {
                     arena.note_visual_context_box_dirty(node, kind);
                 }
             }
-            Self::InvalidateAllPaintCaches => arena.push_all_paint_damage(),
             Self::RequestFullVisualContextRebuild(scope) => arena.request_full_visual_context_rebuild(scope),
             Self::SvgPaintResourcesChanged => {
-                arena.svg_paint_resources().note_changed();
+                arena.svg_paint_resources_mut().note_changed();
             }
-            Self::SetRecordingTraceEnabled(enabled) => arena.paint_state().borrow_mut().trace_recordings = enabled,
+            Self::SetRecordingTraceEnabled(enabled) => arena.paint_state_mut().trace_recordings = enabled,
             Self::TakeInRecording {
                 output,
                 hit_test_list_changed,
@@ -333,21 +305,6 @@ pub extern "C" fn render_state_sync_highlight_pseudo_styles(
             search_text_current_style_record,
             spelling_error_style_record,
         ],
-    };
-    queue(host, change);
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn render_state_set_scrollbar_enlarged(
-    host: &DocumentHost,
-    node: NodeSlotId,
-    direction: ScrollDirection,
-    enlarged: bool,
-) {
-    let change = PaintChange::SetScrollbarEnlarged {
-        node,
-        direction,
-        enlarged,
     };
     queue(host, change);
 }
@@ -534,11 +491,6 @@ pub extern "C" fn render_state_note_visual_context_style_change(
         VisualContextBoxDirtyKind::StyleValueChange
     };
     queue(host, PaintChange::NoteVisualContextBoxDirty { node, kind });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn render_state_invalidate_all_paint_caches(host: &DocumentHost) {
-    queue(host, PaintChange::InvalidateAllPaintCaches);
 }
 
 #[unsafe(no_mangle)]

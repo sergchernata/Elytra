@@ -50,7 +50,14 @@ SUPPORTED_TYPE_EXTENDED_ATTRIBUTES = {
 }
 
 # The integer types, with the Rust type of their values.
-INTEGER_TYPES = {"long": "i32", "unsigned long": "u32", "long long": "i64", "unsigned long long": "u64"}
+INTEGER_TYPES = {
+    "short": "i16",
+    "unsigned short": "u16",
+    "long": "i32",
+    "unsigned long": "u32",
+    "long long": "i64",
+    "unsigned long long": "u64",
+}
 
 # The floating point types, with the Rust type of their values.
 FLOATING_POINT_TYPES = {"float": "f32", "unrestricted float": "f32", "double": "f64", "unrestricted double": "f64"}
@@ -68,6 +75,10 @@ PLAIN_DATA_TYPES = {
 
 # The unions that the bindings runtime has a type for, by the name of the typedef that names the union.
 RUNTIME_UNION_TYPES = {"ArrayBufferView": "ArrayBufferView", "BufferSource": "BufferSource"}
+
+# The unions that no typedef names and more than one interface's IDL uses, whose enums the bindings runtime defines,
+# by their type name.
+SHARED_UNNAMED_UNIONS = {"DOMStringOrDOMStringSequence": "crate::bindings::conversions"}
 
 DECIMAL_LITERAL = re.compile(r"-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?")
 
@@ -111,6 +122,20 @@ def rust_integer_literal(literal: Optional[str], idl_type_name: str) -> Optional
 
 def is_implemented_in_rust(interface: Optional[Interface]) -> bool:
     return interface is not None and interface.extended_attributes.get("ImplementedIn") == "Rust"
+
+
+# The interfaces implemented in C++ that an interface implemented in Rust can inherit from
+# (Libraries/LibWeb/Bindings/RustEventTarget.h).
+CPP_PARENT_INTERFACES = ("EventTarget", "Event")
+
+
+def cpp_ancestor(interface: Interface, context: GenerationContext) -> Optional[Interface]:
+    """The interface implemented in C++ that the interface inherits from, through any number of interfaces
+    implemented in Rust, if any."""
+    ancestor = context.interfaces.get(interface.parent_name)
+    while ancestor is not None and is_implemented_in_rust(ancestor):
+        ancestor = context.interfaces.get(ancestor.parent_name)
+    return ancestor
 
 
 def resolved_dictionary(idl_type: IDLType, context: GenerationContext) -> Optional[Dictionary]:
@@ -356,8 +381,11 @@ def rust_union_path(idl_type: IDLUnionType, context: GenerationContext, what: st
     if len(names) > 1:
         raise UnsupportedByRustBindings(f"{what} has the union type {idl_type}, which the typedefs {names} all name")
     if not names:
+        type_name = idl_type_name(idl_type.without_nullable(), what)
+        if type_name in SHARED_UNNAMED_UNIONS:
+            return f"{SHARED_UNNAMED_UNIONS[type_name]}::{type_name}"
         idl_path = unnamed_union_idl_path(idl_type, context, what)
-        return f"{rust_module_path(idl_path)}::{idl_type_name(idl_type.without_nullable(), what)}"
+        return f"{rust_module_path(idl_path)}::{type_name}"
     name = names[0]
     for module in context.modules:
         if any(typedef.name == name for typedef in module.typedefs):
@@ -430,7 +458,7 @@ def rust_type(idl_type: IDLType, context: GenerationContext, what: str, is_resul
         return f"Option<{rust_type(optional_member, context, what)}>"
     if isinstance(idl_type, IDLUnionType):
         for member_type in union_member_types(idl_type, context):
-            rust_type(member_type, context, what)
+            rust_type(member_type, context, what, is_result)
         return rust_union_path(idl_type, context, what)
     raise UnsupportedByRustBindings(f"{what} has the type {idl_type}, which the Rust bindings do not convert yet")
 

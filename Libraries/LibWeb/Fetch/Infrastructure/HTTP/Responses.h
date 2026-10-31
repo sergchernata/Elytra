@@ -9,20 +9,18 @@
 #include <AK/ByteString.h>
 #include <AK/Error.h>
 #include <AK/Forward.h>
+#include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
+#include <AK/RefCounted.h>
 #include <AK/Time.h>
 #include <AK/Utf16String.h>
 #include <AK/Vector.h>
 #include <LibCore/ImmutableBytes.h>
-#include <LibGC/Ptr.h>
 #include <LibHTTP/HeaderList.h>
-#include <LibJS/Forward.h>
-#include <LibJS/Heap/Cell.h>
-#include <LibRequests/Forward.h>
-#include <LibRequests/Request.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Fetch/Engine/FetchBodyDeliveryGate.h>
+#include <LibWeb/Fetch/Engine/NetworkTransportHandle.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWebCommon/Fetch/Infrastructure/HTTP/ResponseCacheState.h>
@@ -31,10 +29,7 @@
 namespace Web::Fetch::Infrastructure {
 
 // https://fetch.spec.whatwg.org/#concept-response
-class WEB_API Response : public JS::Cell {
-    GC_CELL(Response, JS::Cell);
-    GC_DECLARE_ALLOCATOR(Response);
-
+class WEB_API Response : public RefCounted<Response> {
 public:
     using CacheState = ResponseCacheState;
 
@@ -62,23 +57,16 @@ public:
     };
 
     // RequestServer bookkeeping is transport state, not JS-visible response data.
-    struct RequestServerRequest {
-        // The request itself pauses and resumes the body's delivery.
-        struct DeliveredByRequest { };
-
-        int client_id { -1 };
-        u64 request_id { 0 };
-        RefPtr<Requests::Request> request;
-        // A body paced by a FetchByteChannel is released from the navigation hold through its delivery gate.
-        Variant<DeliveredByRequest, NonnullRefPtr<Engine::FetchBodyDeliveryGate>> body_delivery { DeliveredByRequest {} };
+    struct NetworkTransport {
+        NonnullRefPtr<Engine::NetworkTransportHandle> handle;
+        NonnullRefPtr<Engine::FetchBodyDeliveryGate> body_delivery_gate;
+        NonnullRefPtr<Engine::FetchByteChannel> body_channel;
     };
 
-    [[nodiscard]] static GC::Ref<Response> create();
-    [[nodiscard]] static GC::Ref<Response> create(JS::VM&);
-    [[nodiscard]] static GC::Ref<Response> aborted_network_error();
-    [[nodiscard]] static GC::Ref<Response> network_error(String message);
-    [[nodiscard]] static GC::Ref<Response> network_error(JS::VM&, String message);
-    [[nodiscard]] static GC::Ref<Response> appropriate_network_error(FetchParams const&);
+    [[nodiscard]] static NonnullRefPtr<Response> create();
+    [[nodiscard]] static NonnullRefPtr<Response> aborted_network_error();
+    [[nodiscard]] static NonnullRefPtr<Response> network_error(String message);
+    [[nodiscard]] static NonnullRefPtr<Response> appropriate_network_error(FetchParams const&);
 
     virtual ~Response() = default;
 
@@ -101,8 +89,8 @@ public:
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const { return m_header_list; }
     virtual void set_header_list(NonnullRefPtr<HTTP::HeaderList> header_list) { m_header_list = move(header_list); }
 
-    [[nodiscard]] virtual GC::Ptr<Body> body() const { return m_body; }
-    virtual void set_body(GC::Ptr<Body> body) { m_body = body; }
+    [[nodiscard]] virtual Optional<ResponseBody const&> body() const { return m_body; }
+    virtual void set_body(Optional<ResponseBody> body) { m_body = move(body); }
 
     [[nodiscard]] virtual Optional<CacheState> const& cache_state() const { return m_cache_state; }
     virtual void set_cache_state(Optional<CacheState> cache_state) { m_cache_state = move(cache_state); }
@@ -141,9 +129,10 @@ public:
     [[nodiscard]] Optional<URL::URL const&> url() const;
     [[nodiscard]] ErrorOr<Optional<URL::URL>> location_url(Optional<StringView> request_fragment) const;
 
-    [[nodiscard]] GC::Ref<Response> clone(JS::Realm&) const;
+    [[nodiscard]] NonnullRefPtr<Response> clone() const;
 
-    [[nodiscard]] GC::Ref<Response> unsafe_response();
+    [[nodiscard]] NonnullRefPtr<Response const> unsafe_response() const;
+    [[nodiscard]] NonnullRefPtr<Response> unsafe_response();
 
     [[nodiscard]] bool is_cors_same_origin() const;
     [[nodiscard]] bool is_cors_cross_origin() const;
@@ -151,16 +140,18 @@ public:
     // Non-standard
     [[nodiscard]] Optional<String> const& network_error_message() const { return m_network_error_message; }
     MonotonicTime monotonic_response_time() const { return m_monotonic_response_time; }
-    [[nodiscard]] virtual Optional<RequestServerRequest> const& request_server_request() const { return m_request_server_request; }
-    virtual void set_request_server_request(RequestServerRequest request) { m_request_server_request = move(request); }
+    [[nodiscard]] virtual Optional<NetworkTransport> const& network_transport() const { return m_network_transport; }
+    virtual void set_network_transport(NetworkTransport network_transport) { m_network_transport = move(network_transport); }
     virtual void release_request_transfer_lease() const;
     virtual void resume_body_delivery() const;
     virtual void resume_body_delivery_up_to(size_t) const;
 
+    // Stops this process taking the body, and returns the bytes that a process adopting its request reads before the
+    // rest.
+    virtual Vector<Core::ImmutableBytes> release_body_for_transfer() const;
+
 protected:
     explicit Response(NonnullRefPtr<HTTP::HeaderList>);
-
-    virtual void visit_edges(JS::Cell::Visitor&) override;
 
 private:
     // https://fetch.spec.whatwg.org/#concept-response-type
@@ -189,7 +180,7 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-response-body
     // A response has an associated body (null or a body). Unless stated otherwise it is null.
-    GC::Ptr<Body> m_body;
+    Optional<ResponseBody> m_body;
 
     // https://fetch.spec.whatwg.org/#concept-response-cache-state
     // A response has an associated cache state (the empty string, "local", or "validated"). Unless stated otherwise, it is the empty string.
@@ -234,7 +225,7 @@ private:
     Optional<Core::ImmutableBytes> m_javascript_bytecode_cache;
     Optional<u64> m_javascript_bytecode_cache_vary_key;
     Optional<NonnullRefPtr<HTTP::HeaderList>> m_javascript_bytecode_cache_memory_cache_request_headers;
-    Optional<RequestServerRequest> m_request_server_request;
+    Optional<NetworkTransport> m_network_transport;
 
 public:
     [[nodiscard]] ByteString const& method() const { return m_method; }
@@ -243,10 +234,8 @@ public:
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response
 class FilteredResponse : public Response {
-    GC_CELL(FilteredResponse, Response);
-
 public:
-    FilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
+    FilteredResponse(NonnullRefPtr<Response>, NonnullRefPtr<HTTP::HeaderList>);
     virtual ~FilteredResponse() = 0;
 
     [[nodiscard]] virtual Type type() const override { return m_internal_response->type(); }
@@ -267,8 +256,8 @@ public:
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_internal_response->header_list(); }
     virtual void set_header_list(NonnullRefPtr<HTTP::HeaderList> header_list) override { m_internal_response->set_header_list(header_list); }
 
-    [[nodiscard]] virtual GC::Ptr<Body> body() const override { return m_internal_response->body(); }
-    virtual void set_body(GC::Ptr<Body> body) override { m_internal_response->set_body(body); }
+    [[nodiscard]] virtual Optional<ResponseBody const&> body() const override { return m_internal_response->body(); }
+    virtual void set_body(Optional<ResponseBody> body) override { m_internal_response->set_body(move(body)); }
 
     [[nodiscard]] virtual Optional<CacheState> const& cache_state() const override { return m_internal_response->cache_state(); }
     virtual void set_cache_state(Optional<CacheState> cache_state) override { m_internal_response->set_cache_state(move(cache_state)); }
@@ -293,63 +282,53 @@ public:
 
     [[nodiscard]] virtual RedirectTaint redirect_taint() const override { return m_internal_response->redirect_taint(); }
     virtual void set_redirect_taint(RedirectTaint redirect_taint) override { m_internal_response->set_redirect_taint(redirect_taint); }
-    [[nodiscard]] virtual Optional<RequestServerRequest> const& request_server_request() const override { return m_internal_response->request_server_request(); }
-    virtual void set_request_server_request(RequestServerRequest request) override { m_internal_response->set_request_server_request(move(request)); }
+    [[nodiscard]] virtual Optional<NetworkTransport> const& network_transport() const override { return m_internal_response->network_transport(); }
+    virtual void set_network_transport(NetworkTransport network_transport) override { m_internal_response->set_network_transport(move(network_transport)); }
     virtual void release_request_transfer_lease() const override { m_internal_response->release_request_transfer_lease(); }
     virtual void resume_body_delivery() const override { m_internal_response->resume_body_delivery(); }
     virtual void resume_body_delivery_up_to(size_t byte_count) const override { m_internal_response->resume_body_delivery_up_to(byte_count); }
+    virtual Vector<Core::ImmutableBytes> release_body_for_transfer() const override { return m_internal_response->release_body_for_transfer(); }
 
-    [[nodiscard]] GC::Ref<Response> internal_response() const { return m_internal_response; }
-
-protected:
-    virtual void visit_edges(JS::Cell::Visitor&) override;
+    [[nodiscard]] NonnullRefPtr<Response const> internal_response() const { return m_internal_response; }
+    [[nodiscard]] NonnullRefPtr<Response> internal_response() { return m_internal_response; }
 
 private:
     // https://fetch.spec.whatwg.org/#concept-internal-response
-    GC::Ref<Response> m_internal_response;
+    NonnullRefPtr<Response> m_internal_response;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-basic
 class WEB_API BasicFilteredResponse final : public FilteredResponse {
-    GC_CELL(BasicFilteredResponse, FilteredResponse);
-    GC_DECLARE_ALLOCATOR(BasicFilteredResponse);
-
 public:
-    [[nodiscard]] static GC::Ref<BasicFilteredResponse> create(GC::Ref<Response>);
+    [[nodiscard]] static NonnullRefPtr<BasicFilteredResponse> create(NonnullRefPtr<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::Basic; }
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
 
 private:
-    BasicFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
+    BasicFilteredResponse(NonnullRefPtr<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
     NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-cors
 class WEB_API CORSFilteredResponse final : public FilteredResponse {
-    GC_CELL(CORSFilteredResponse, FilteredResponse);
-    GC_DECLARE_ALLOCATOR(CORSFilteredResponse);
-
 public:
-    [[nodiscard]] static GC::Ref<CORSFilteredResponse> create(GC::Ref<Response>);
+    [[nodiscard]] static NonnullRefPtr<CORSFilteredResponse> create(NonnullRefPtr<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::CORS; }
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
 
 private:
-    CORSFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
+    CORSFilteredResponse(NonnullRefPtr<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
     NonnullRefPtr<HTTP::HeaderList> m_header_list;
 };
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque
 class WEB_API OpaqueFilteredResponse final : public FilteredResponse {
-    GC_CELL(OpaqueFilteredResponse, FilteredResponse);
-    GC_DECLARE_ALLOCATOR(OpaqueFilteredResponse);
-
 public:
-    [[nodiscard]] static GC::Ref<OpaqueFilteredResponse> create(GC::Ref<Response>);
+    [[nodiscard]] static NonnullRefPtr<OpaqueFilteredResponse> create(NonnullRefPtr<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::Opaque; }
     [[nodiscard]] virtual Vector<URL::URL> const& url_list() const override { return m_url_list; }
@@ -357,10 +336,10 @@ public:
     [[nodiscard]] virtual Status status() const override { return 0; }
     [[nodiscard]] virtual ByteString const& status_message() const override { return m_method; }
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
-    [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
+    [[nodiscard]] virtual Optional<ResponseBody const&> body() const override { return {}; }
 
 private:
-    OpaqueFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
+    OpaqueFilteredResponse(NonnullRefPtr<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
     Vector<URL::URL> m_url_list;
     ByteString const m_method;
@@ -369,20 +348,17 @@ private:
 
 // https://fetch.spec.whatwg.org/#concept-filtered-response-opaque-redirect
 class WEB_API OpaqueRedirectFilteredResponse final : public FilteredResponse {
-    GC_CELL(OpaqueRedirectFilteredResponse, FilteredResponse);
-    GC_DECLARE_ALLOCATOR(OpaqueRedirectFilteredResponse);
-
 public:
-    [[nodiscard]] static GC::Ref<OpaqueRedirectFilteredResponse> create(GC::Ref<Response>);
+    [[nodiscard]] static NonnullRefPtr<OpaqueRedirectFilteredResponse> create(NonnullRefPtr<Response>);
 
     [[nodiscard]] virtual Type type() const override { return Type::OpaqueRedirect; }
     [[nodiscard]] virtual Status status() const override { return 0; }
     [[nodiscard]] virtual ByteString const& status_message() const override { return m_method; }
     virtual NonnullRefPtr<HTTP::HeaderList> const& header_list() const override { return m_header_list; }
-    [[nodiscard]] virtual GC::Ptr<Body> body() const override { return nullptr; }
+    [[nodiscard]] virtual Optional<ResponseBody const&> body() const override { return {}; }
 
 private:
-    OpaqueRedirectFilteredResponse(GC::Ref<Response>, NonnullRefPtr<HTTP::HeaderList>);
+    OpaqueRedirectFilteredResponse(NonnullRefPtr<Response>, NonnullRefPtr<HTTP::HeaderList>);
 
     ByteString const m_method;
     NonnullRefPtr<HTTP::HeaderList> m_header_list;

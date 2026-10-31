@@ -2,8 +2,7 @@ Harness status: OK
 
 Found 51 tests
 
-49 Pass
-2 Fail
+51 Pass
 Pass	webkitAlignContent found on CSSStyleDeclaration
 Pass	webkitAlignItems found on CSSStyleDeclaration
 Pass	webkitAlignSelf found on CSSStyleDeclaration
@@ -16,8 +15,8 @@ Pass	webkitAnimationIterationCount found on CSSStyleDeclaration
 Pass	webkitAnimationName found on CSSStyleDeclaration
 Pass	webkitAnimationPlayState found on CSSStyleDeclaration
 Pass	webkitAnimationTimingFunction found on CSSStyleDeclaration
-Fail	webkitBackfaceVisibility found on CSSStyleDeclaration
-Fail	WebKitBackgroundClip found on CSSStyleDeclaration
+Pass	webkitBackfaceVisibility found on CSSStyleDeclaration
+Pass	webkitBackgroundClip found on CSSStyleDeclaration
 Pass	webkitBackgroundOrigin found on CSSStyleDeclaration
 Pass	webkitBackgroundSize found on CSSStyleDeclaration
 Pass	webkitBorderBottomLeftRadius found on CSSStyleDeclaration

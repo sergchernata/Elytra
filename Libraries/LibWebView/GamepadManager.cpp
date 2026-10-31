@@ -7,10 +7,14 @@
 #include <AK/AnyOf.h>
 #include <AK/NeverDestroyed.h>
 #include <LibCore/Timer.h>
+#include <LibWebCommon/Gamepad/GamepadInput.h>
 #include <LibWebCommon/Gamepad/GamepadStateBuffer.h>
 #include <LibWebView/Application.h>
+#include <LibWebView/CanonicalDocument.h>
+#include <LibWebView/CanonicalTraversable.h>
 #include <LibWebView/GamepadManager.h>
 #include <LibWebView/WebContentClient.h>
+#include <LibWebView/WebContentPage.h>
 
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
@@ -147,7 +151,8 @@ bool GamepadManager::ensure_sdl_initialized()
 
 void GamepadManager::update_polling_state()
 {
-    bool should_poll = m_sdl_initialized && !m_in_test_mode && any_of(m_consumers, [](auto const& entry) { return entry.value->receives_real_devices; });
+    // A process waiting for a gesture needs the polling that finds it.
+    bool should_poll = m_sdl_initialized && !m_in_test_mode && any_of(m_consumers, [](auto const& entry) { return !entry.value->pages_using_gamepads.is_empty(); });
 
     if (!should_poll) {
         if (m_poll_timer)
@@ -170,13 +175,13 @@ GamepadManager::Consumer* GamepadManager::ensure_consumer(WebContentClient& clie
     if (auto existing_consumer = m_consumers.get(&client); existing_consumer.has_value())
         return *existing_consumer;
 
-    auto state_buffer = Core::AnonymousBuffer::create_with_size(sizeof(Web::Gamepad::SharedGamepadStateBuffer), Core::AnonymousBuffer::Sealability::Sealable);
+    auto state_buffer = Core::AnonymousBuffer::create_with_size(sizeof(Web::Gamepad::SharedGamepadStateBuffer));
     if (state_buffer.is_error()) {
         dbgln("Failed to allocate a shared gamepad state buffer: {}", state_buffer.error());
         return nullptr;
     }
 
-    auto new_consumer = make<Consumer>();
+    auto new_consumer = make<Consumer>(client);
     new_consumer->state_buffer = state_buffer.release_value();
     new (new_consumer->state_buffer.data<void>()) Web::Gamepad::SharedGamepadStateBuffer {};
     auto consumer_buffer = Web::Gamepad::GamepadStateBuffer::create(new_consumer->state_buffer);
@@ -191,21 +196,36 @@ GamepadManager::Consumer* GamepadManager::ensure_consumer(WebContentClient& clie
     return consumer;
 }
 
-void GamepadManager::client_did_start_using_gamepads(WebContentClient& client)
+void GamepadManager::page_did_start_using_gamepads(WebContentPage& page)
 {
     if (!ensure_sdl_initialized())
         return;
 
+    auto& client = page.client();
     auto* consumer = ensure_consumer(client);
-    if (!consumer || consumer->receives_real_devices)
+    if (!consumer)
         return;
 
     drain_sdl_events();
     publish_changed_input_states();
 
-    consumer->receives_real_devices = true;
-    fill_vacant_slots(client, *consumer);
+    // A gamepad the user is still interacting with shows a gesture for the page too.
+    consumer->pages_using_gamepads.set(page.id());
+    for (auto& entry : m_devices) {
+        if (entry.value->announced)
+            announce_devices_after_gamepad_user_gesture(*consumer, *entry.value);
+    }
+    notify_consumers_of_state_changes();
 
+    update_polling_state();
+}
+
+void GamepadManager::page_closed(WebContentPage& page)
+{
+    auto consumer = m_consumers.get(&page.client());
+    if (!consumer.has_value())
+        return;
+    (*consumer)->pages_using_gamepads.remove(page.id());
     update_polling_state();
 }
 
@@ -392,6 +412,17 @@ Vector<Web::Gamepad::GamepadChangeEvent> GamepadManager::pump_gamepad_events(Web
     return move((*consumer)->buffered_virtual_gamepad_events);
 }
 
+// The renderer forgets only this page's use of gamepads, so the other pages of the process stay registered.
+void GamepadManager::reset_access_for_testing(WebContentPage& page)
+{
+    auto consumer = m_consumers.get(&page.client());
+    if (!consumer.has_value())
+        return;
+    (*consumer)->pages_using_gamepads.remove(page.id());
+    (*consumer)->has_seen_gamepad_user_gesture = false;
+    update_polling_state();
+}
+
 Vector<Web::Gamepad::ReceivedDualRumbleEffect> GamepadManager::virtual_gamepad_received_rumble_effects(WebContentClient& client, Web::Gamepad::GamepadHandle handle)
 {
     auto* device = virtual_device_owned_by_client(client, handle);
@@ -441,9 +472,16 @@ void GamepadManager::publish_changed_input_states()
         if (m_scratch_state == device.last_published_state)
             continue;
         device.last_published_state = m_scratch_state;
+        for (auto& consumer_entry : m_consumers)
+            announce_devices_after_gamepad_user_gesture(*consumer_entry.value, device);
         publish_device_state(device);
     }
 
+    notify_consumers_of_state_changes();
+}
+
+void GamepadManager::notify_consumers_of_state_changes()
+{
     for (auto& entry : m_consumers) {
         if (exchange(entry.value->has_pending_state_changes, false))
             entry.key->async_gamepad_states_changed();
@@ -452,13 +490,38 @@ void GamepadManager::publish_changed_input_states()
 
 void GamepadManager::publish_device_state(Device const& device)
 {
+    auto contains_gamepad_user_gesture = device.contains_gamepad_user_gesture();
+
     for (auto& entry : m_consumers) {
         auto& consumer = *entry.value;
-        if (auto slot_index = slot_index_for_device(consumer, device.description.handle); slot_index.has_value()) {
-            Web::Gamepad::publish_gamepad_state_to_slot(shared_state_slot(consumer, *slot_index), device.last_published_state);
+        if (auto slot_index = consumer.slot_index_for_device(device.description.handle); slot_index.has_value()) {
+            Web::Gamepad::publish_gamepad_state_to_slot(consumer.shared_state_slot(*slot_index), device.last_published_state);
             consumer.has_pending_state_changes = true;
+
+            // The activation is in place before the process learns of the state that gave it.
+            if (contains_gamepad_user_gesture)
+                consumer.notify_about_user_activation_for_gamepad_user_gesture();
         }
     }
+}
+
+// https://github.com/w3c/gamepad/pull/230
+// The activation notification steps that updating a gamepad's state runs for each document it belongs to. The UI
+// process runs them, as the gesture is input it received.
+void GamepadManager::Consumer::notify_about_user_activation_for_gamepad_user_gesture() const
+{
+    HashTable<Web::HTML::CrossProcessId> notified_document_ids;
+    client.for_each_page([&](WebContentPage& page) {
+        page.for_each_navigable_with_a_hosted_active_document([&](CanonicalNavigable const& navigable) {
+            // Only the documents allowed to use gamepads have them, so only those start the steps. The steps then reach
+            // their ancestors and same-origin descendants whatever those may use.
+            if (navigable.active_document_is_fully_active_descendant_of_a_top_level_traversable_with_user_attention()
+                && navigable.active_document().is_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature::Gamepad))
+                navigable.run_activation_notification_steps_for_active_document(notified_document_ids);
+            return IterationDecision::Continue;
+        });
+        return IterationDecision::Continue;
+    });
 }
 
 void GamepadManager::device_connected(u32 sdl_joystick_id)
@@ -504,44 +567,87 @@ void GamepadManager::announce_device(Device& device)
     device.announced = true;
 
     for (auto& entry : m_consumers) {
-        if (consumer_may_receive_device(*entry.value, *entry.key, device))
-            announce_device_to_consumer(device, *entry.key, *entry.value);
+        if (entry.value->may_receive_device(device))
+            announce_device_to_consumer(device, *entry.value);
+        else
+            announce_devices_after_gamepad_user_gesture(*entry.value, device);
     }
 }
 
-bool GamepadManager::consumer_may_receive_device(Consumer const& consumer, WebContentClient const& client, Device const& device)
+// A process learns of the gamepads once the user interacts with one while a page of the process that uses them has the
+// user's attention, so that it cannot fingerprint gamepads the user never used with it.
+void GamepadManager::announce_devices_after_gamepad_user_gesture(Consumer& consumer, Device const& device)
 {
-    if (device.virtual_device_owner)
-        return device.virtual_device_owner == &client;
-    return consumer.receives_real_devices;
+    if (consumer.has_seen_gamepad_user_gesture)
+        return;
+    if (!device.may_be_announced_to(consumer.client) || !device.contains_gamepad_user_gesture())
+        return;
+    if (!consumer.has_page_that_may_receive_gamepads())
+        return;
+
+    consumer.has_seen_gamepad_user_gesture = true;
+    fill_vacant_slots(consumer);
 }
 
-void GamepadManager::fill_vacant_slots(WebContentClient& client, Consumer& consumer)
+bool GamepadManager::Device::contains_gamepad_user_gesture() const
+{
+    return Web::Gamepad::contains_gamepad_user_gesture(description, last_published_state);
+}
+
+bool GamepadManager::Device::may_be_announced_to(WebContentClient const& client) const
+{
+    return !virtual_device_owner || virtual_device_owner == &client;
+}
+
+bool GamepadManager::Consumer::has_page_that_may_receive_gamepads() const
+{
+    return any_of(pages_using_gamepads, [&](Web::PageId page_id) {
+        auto* page = client.page(page_id);
+        if (!page)
+            return false;
+
+        auto may_receive_gamepads = false;
+        page->for_each_navigable_with_a_hosted_active_document([&](CanonicalNavigable const& navigable) {
+            may_receive_gamepads = navigable.active_document_is_fully_active_descendant_of_a_top_level_traversable_with_user_attention()
+                && navigable.active_document().is_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature::Gamepad);
+            return may_receive_gamepads ? IterationDecision::Break : IterationDecision::Continue;
+        });
+        return may_receive_gamepads;
+    });
+}
+
+bool GamepadManager::Consumer::may_receive_device(Device const& device) const
+{
+    return has_seen_gamepad_user_gesture && device.may_be_announced_to(client);
+}
+
+void GamepadManager::fill_vacant_slots(Consumer& consumer)
 {
     for (auto& entry : m_devices) {
         if (!consumer.slot_handles.contains_slow(0))
             return;
         auto& device = *entry.value;
-        if (!device.announced || slot_index_for_device(consumer, device.description.handle).has_value())
+        if (!device.announced || consumer.slot_index_for_device(device.description.handle).has_value())
             continue;
-        if (consumer_may_receive_device(consumer, client, device))
-            announce_device_to_consumer(device, client, consumer);
+        if (consumer.may_receive_device(device))
+            announce_device_to_consumer(device, consumer);
     }
 }
 
-void GamepadManager::announce_device_to_consumer(Device const& device, WebContentClient& client, Consumer& consumer)
+void GamepadManager::announce_device_to_consumer(Device const& device, Consumer& consumer)
 {
-    auto slot_index = allocate_shared_state_slot(consumer, device.description.handle);
+    auto slot_index = consumer.allocate_shared_state_slot(device.description.handle);
     if (!slot_index.has_value()) {
         dbgln("All {} shared gamepad state slots are occupied; '{}' is not announced to this WebContent process", Web::Gamepad::MAX_SHARED_GAMEPADS, device.description.id);
         return;
     }
-    Web::Gamepad::publish_gamepad_state_to_slot(shared_state_slot(consumer, *slot_index), device.last_published_state);
+    Web::Gamepad::publish_gamepad_state_to_slot(consumer.shared_state_slot(*slot_index), device.last_published_state);
+    consumer.has_pending_state_changes = true;
 
     if (device.virtual_device_owner)
         consumer.buffered_virtual_gamepad_events.append(Web::Gamepad::GamepadConnectedEvent { device.description });
     else
-        client.async_gamepad_connected(device.description);
+        consumer.client.async_gamepad_connected(device.description);
 }
 
 void GamepadManager::remove_device(Web::Gamepad::GamepadHandle handle)
@@ -553,18 +659,18 @@ void GamepadManager::remove_device(Web::Gamepad::GamepadHandle handle)
 
     for (auto& entry : m_consumers) {
         auto& consumer = *entry.value;
-        auto slot_index = slot_index_for_device(consumer, handle);
+        auto slot_index = consumer.slot_index_for_device(handle);
         if (!slot_index.has_value())
             continue;
-        Web::Gamepad::clear_gamepad_state_slot(shared_state_slot(consumer, *slot_index));
+        Web::Gamepad::clear_gamepad_state_slot(consumer.shared_state_slot(*slot_index));
         consumer.slot_handles[*slot_index] = 0;
 
         if (device.virtual_device_owner)
             consumer.buffered_virtual_gamepad_events.append(Web::Gamepad::GamepadDisconnectedEvent { handle });
         else
-            entry.key->async_gamepad_disconnected(handle);
+            consumer.client.async_gamepad_disconnected(handle);
 
-        fill_vacant_slots(*entry.key, consumer);
+        fill_vacant_slots(consumer);
     }
 
     SDL_CloseGamepad(device.sdl_gamepad);
@@ -669,22 +775,22 @@ void GamepadManager::read_current_state(Device const& device, Web::Gamepad::Game
     }
 }
 
-Optional<size_t> GamepadManager::allocate_shared_state_slot(Consumer& consumer, Web::Gamepad::GamepadHandle handle)
+Optional<size_t> GamepadManager::Consumer::allocate_shared_state_slot(Web::Gamepad::GamepadHandle handle)
 {
-    auto slot_index = consumer.slot_handles.first_index_of(0);
+    auto slot_index = slot_handles.first_index_of(0);
     if (slot_index.has_value())
-        consumer.slot_handles[*slot_index] = handle;
+        slot_handles[*slot_index] = handle;
     return slot_index;
 }
 
-Optional<size_t> GamepadManager::slot_index_for_device(Consumer const& consumer, Web::Gamepad::GamepadHandle handle)
+Optional<size_t> GamepadManager::Consumer::slot_index_for_device(Web::Gamepad::GamepadHandle handle) const
 {
-    return consumer.slot_handles.first_index_of(handle);
+    return slot_handles.first_index_of(handle);
 }
 
-Web::Gamepad::SharedGamepadStateSlot& GamepadManager::shared_state_slot(Consumer& consumer, size_t slot_index)
+Web::Gamepad::SharedGamepadStateSlot& GamepadManager::Consumer::shared_state_slot(size_t slot_index)
 {
-    return reinterpret_cast<Web::Gamepad::SharedGamepadStateBuffer*>(consumer.state_buffer.data<void>())->slots[slot_index];
+    return reinterpret_cast<Web::Gamepad::SharedGamepadStateBuffer*>(state_buffer.data<void>())->slots[slot_index];
 }
 
 GamepadManager::Device* GamepadManager::device_for_handle(Web::Gamepad::GamepadHandle handle)
@@ -705,7 +811,7 @@ GamepadManager::Device* GamepadManager::virtual_device_owned_by_client(WebConten
 GamepadManager::Device* GamepadManager::device_announced_to_client(WebContentClient& client, Web::Gamepad::GamepadHandle handle)
 {
     auto consumer = m_consumers.get(&client);
-    if (!consumer.has_value() || !slot_index_for_device(**consumer, handle).has_value())
+    if (!consumer.has_value() || !(*consumer)->slot_index_for_device(handle).has_value())
         return nullptr;
     return device_for_handle(handle);
 }

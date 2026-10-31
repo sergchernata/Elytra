@@ -1,0 +1,8 @@
+Harness status: OK
+
+Found 3 tests
+
+3 Pass
+Pass	setting document.domain must give sync access
+Pass	parent: originAgentCluster must equal true
+Pass	child: originAgentCluster must equal true

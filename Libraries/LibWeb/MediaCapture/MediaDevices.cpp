@@ -491,6 +491,14 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, O
                 auto& realm = WebIDL::promise_realm(*promise);
                 HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
+                // AD-HOC: The user may have taken the permission away while the device list was fetched, and no track
+                //         is created for a document that may no longer capture.
+                auto& document = media_devices->m_window->associated_document();
+                if (!document.is_fully_active() || PermissionsAPI::permission_state(PermissionsAPI::PermissionDescriptor { "microphone"_utf16 }, HTML::relevant_settings_object(*media_devices->m_window)) != PermissionsAPI::PermissionState::Granted) {
+                    WebIDL::reject_promise(*promise, WebIDL::NotAllowedError::create("Permission denied"_utf16));
+                    return;
+                }
+
                 Vector<Audio::AudioDeviceInfo> final_set;
                 for (auto const& device : Audio::AudioDevices::the().input_devices()) {
                     auto device_id = Utf16String::from_utf8_with_replacement_character(device.dom_device_id.view());
@@ -545,6 +553,7 @@ void MediaDevices::queue_get_user_media_task(GC::Ref<WebIDL::Promise> promise, O
 
                 // 11.11 For each track in stream, tie track source to MediaDevices with track.[[Source]] and mediaDevices.
                 media_devices->m_media_stream_track_sources.append(track);
+                track->set_media_devices({}, *media_devices);
                 track->on_audio_capture_revoked = [media_devices = GC::Weak<MediaDevices>(media_devices), track = GC::Weak<MediaStreamTrack>(track)] {
                     if (!media_devices.ptr() || !track.ptr())
                         return;
@@ -821,6 +830,40 @@ void MediaDevices::end_tracks_of_removed_devices()
         return true;
     });
     end_tracks(move(tracks_to_end));
+}
+
+// https://w3c.github.io/mediacapture-main/#dfn-device-permission-revocation-algorithm
+void MediaDevices::end_tracks_without_permission()
+{
+    // NB: A track's source is the microphone, the one device Ladybird captures from, so every live track ends once the
+    //     document may no longer use it.
+    auto& settings = HTML::relevant_settings_object(*m_window);
+    if (PermissionsAPI::permission_state(PermissionsAPI::PermissionDescriptor { "microphone"_utf16 }, settings) == PermissionsAPI::PermissionState::Granted)
+        return;
+
+    GC::RootVector<GC::Ref<MediaStreamTrack>> tracks_to_end;
+    m_media_stream_track_sources.remove_all_matching([&](GC::Weak<MediaStreamTrack> const& weak_track) {
+        auto track = weak_track.ptr();
+        if (!track || track->track_ready_state() == MediaStreamTrackState::Ended)
+            return true;
+        tracks_to_end.append(*track);
+        return true;
+    });
+    end_tracks(move(tracks_to_end));
+}
+
+// A clone of a microphone track captures from the microphone too, so it ends with the permission like its original. A
+// clone made once the permission is gone (from an ended listener of another track, e.g.) ends at once.
+void MediaDevices::track_was_cloned(Badge<MediaStreamTrack>, MediaStreamTrack& clone)
+{
+    auto& settings = HTML::relevant_settings_object(*m_window);
+    if (PermissionsAPI::permission_state(PermissionsAPI::PermissionDescriptor { "microphone"_utf16 }, settings) != PermissionsAPI::PermissionState::Granted) {
+        GC::RootVector<GC::Ref<MediaStreamTrack>> tracks_to_end;
+        tracks_to_end.append(clone);
+        end_tracks(move(tracks_to_end));
+        return;
+    }
+    m_media_stream_track_sources.append(clone);
 }
 
 void MediaDevices::end_tracks(GC::RootVector<GC::Ref<MediaStreamTrack>> tracks_to_end)

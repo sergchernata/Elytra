@@ -5,7 +5,7 @@
  */
 
 use super::CssPixels;
-use super::geometry::AvailableSize;
+use super::geometry::{AvailableSize, Side};
 use super::layout_node_arena::LayoutNodeArena;
 use super::node_data::NodeSlotId;
 use super::{formatting_context, inline_formatting_context, used_values};
@@ -46,8 +46,6 @@ impl PartialEq for GlyphRunRecord {
 pub struct LineRecord {
     pub rect: used_values::FfiCssPixelRect,
     pub fragment_count: u32,
-    pub(crate) layout_fragment_count: usize,
-    pub(crate) first_fragment_node: Option<NodeSlotId>,
     pub(crate) is_empty: bool,
     pub(crate) horizontal_extent: CssPixels,
     pub(crate) reusable_atomic_prefix: bool,
@@ -475,6 +473,12 @@ impl InlineContent {
             rect.y = mirror_in_line(piece.line_index, rect.y, rect.height);
             piece.border_box_rect = to_physical(rect);
             piece.relpos_delta = delta_to_physical(piece.relpos_delta);
+            // https://drafts.csswg.org/css-break-3/#break-decoration
+            // NB: Painting reads physical edge bits, just as it reads the physical piece rectangle.
+            piece.present_edges = [Side::Top, Side::Right, Side::Bottom, Side::Left]
+                .into_iter()
+                .filter(|side| piece.present_edges & (1 << *side as u8) != 0)
+                .fold(0, |edges, side| edges | (1 << frame.physical_side(side) as u8));
         }
         content
     }

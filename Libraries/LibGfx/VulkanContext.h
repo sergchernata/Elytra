@@ -20,6 +20,9 @@ struct VulkanContext {
     VkInstance instance { VK_NULL_HANDLE };
     VkPhysicalDevice physical_device { VK_NULL_HANDLE };
     GpuDeviceIdentity device_identity;
+    // Whether this is the device the context was asked to prefer, which tells the context's user that whoever asked
+    // can import the memory it shares in any layout this device renders to.
+    bool is_preferred_device { false };
     VkDevice logical_device { VK_NULL_HANDLE };
     VkQueue graphics_queue { VK_NULL_HANDLE };
     uint32_t graphics_queue_family { 0 };
@@ -37,7 +40,8 @@ struct VulkanContext {
 #    endif
 };
 
-ErrorOr<VulkanContext> create_vulkan_context();
+// The preferred device is picked when it is present, since memory the context shares can only be imported on the same one.
+ErrorOr<VulkanContext> create_vulkan_context(Optional<GpuDeviceIdentity> const& preferred_device = {});
 GpuDeviceIdentity gpu_device_identity_of(VkPhysicalDevice);
 
 }

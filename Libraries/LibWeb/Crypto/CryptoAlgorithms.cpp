@@ -174,14 +174,14 @@ static StringView key_format_to_string(KeyFormat format)
 AlgorithmMethods::~AlgorithmMethods() = default;
 
 // https://w3c.github.io/webcrypto/#big-integer
-static ::Crypto::UnsignedBigInteger big_integer_from_api_big_integer(GC::Ptr<JS::Uint8Array> const& big_integer)
+static JS::ThrowCompletionOr<::Crypto::UnsignedBigInteger> big_integer_from_api_big_integer(JS::VM& vm, GC::Ptr<JS::Uint8Array> const& big_integer)
 {
     // The BigInteger typedef is a Uint8Array that holds an arbitrary magnitude unsigned integer
     // **in big-endian order**. Values read from the API SHALL have minimal typed array length
     // (that is, at most 7 leading zero bits, except the value 0 which shall have length 8 bits).
     // The API SHALL accept values with any number of leading zero bits, including the empty array, which represents zero.
 
-    auto buffer = MUST(WebIDL::get_buffer_source_copy(*big_integer));
+    auto buffer = TRY_OR_THROW_OOM(vm, WebIDL::get_buffer_source_copy(*big_integer));
     if (!buffer.is_empty())
         return ::Crypto::UnsignedBigInteger::import_data(buffer);
     return ::Crypto::UnsignedBigInteger(0);
@@ -370,11 +370,35 @@ static WebIDL::ExceptionOr<void> validate_jwk_key_ops(JS::Realm&, JsonWebKey con
     return {};
 }
 
-static WebIDL::ExceptionOr<ByteBuffer> generate_random_key(JS::VM& vm, u16 const size_in_bits)
+// NB: Keeps only the bytes that hold the first length_in_bits bits of data, and zeroes the unused low-order bits of
+//     the last byte when the length is not a whole number of bytes.
+static void keep_first_bits(ByteBuffer& data, size_t length_in_bits)
 {
-    auto key_buffer = TRY_OR_THROW_OOM(vm, ByteBuffer::create_uninitialized(size_in_bits / 8));
+    auto length_in_bytes = ceil_div(length_in_bits, static_cast<size_t>(8));
+    VERIFY(length_in_bytes <= data.size());
+    data.resize(length_in_bytes);
+
+    if (auto remainder_bits = length_in_bits % 8; remainder_bits != 0)
+        data[length_in_bytes - 1] &= ~(0xff >> remainder_bits);
+}
+
+static WebIDL::ExceptionOr<ByteBuffer> generate_random_key(JS::VM& vm, u32 const size_in_bits)
+{
+    auto key_buffer = TRY_OR_THROW_OOM(vm, ByteBuffer::create_uninitialized(ceil_div(size_in_bits, 8u)));
     fill_with_random(key_buffer);
+    keep_first_bits(key_buffer, size_in_bits);
     return key_buffer;
+}
+
+// NB: Our KMAC implementation is byte-oriented, so it cannot use keys with a partial last byte. OpenSSL also only
+//     accepts KMAC keys of up to 512 bytes.
+static WebIDL::ExceptionOr<void> validate_kmac_key_length(WebIDL::UnsignedLong length_in_bits)
+{
+    if (length_in_bits % 8 != 0)
+        return WebIDL::NotSupportedError::create("KMAC key length must be a multiple of 8"_utf16);
+    if (length_in_bits > 512 * 8)
+        return WebIDL::NotSupportedError::create("KMAC key length must not exceed 4096 bits"_utf16);
+    return {};
 }
 
 AlgorithmParams::~AlgorithmParams() = default;
@@ -510,7 +534,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> RsaKeyGenParams::from_valu
 
     public_exponent = static_cast<JS::Uint8Array&>(public_exponent_value.as_object());
 
-    return adopt_own<AlgorithmParams>(*new RsaKeyGenParams { modulus_length, big_integer_from_api_big_integer(public_exponent) });
+    return adopt_own<AlgorithmParams>(*new RsaKeyGenParams { modulus_length, TRY(big_integer_from_api_big_integer(vm, public_exponent)) });
 }
 
 RsaHashedKeyGenParams::~RsaHashedKeyGenParams() = default;
@@ -534,7 +558,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> RsaHashedKeyGenParams::fro
     auto hash_value = TRY(object.get("hash"_utf16_fly_string));
     auto hash = TRY(hash_algorithm_identifier_from_value(realm, hash_value));
 
-    return adopt_own<AlgorithmParams>(*new RsaHashedKeyGenParams { modulus_length, big_integer_from_api_big_integer(public_exponent), hash });
+    return adopt_own<AlgorithmParams>(*new RsaHashedKeyGenParams { modulus_length, TRY(big_integer_from_api_big_integer(vm, public_exponent)), hash });
 }
 
 RsaHashedImportParams::~RsaHashedImportParams() = default;
@@ -8081,10 +8105,11 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CryptoKey>, CryptoKeyPair>> HMAC::generate_k
     }
 
     // 3. Generate a key of length length bits.
-    auto key_data = MUST(generate_random_key(realm.vm(), length));
-
     // 4. If the key generation step fails, then throw an OperationError.
-    // NOTE: Currently key generation must succeed
+    auto key_data_or_error = generate_random_key(realm.vm(), length);
+    if (key_data_or_error.is_error())
+        return WebIDL::OperationError::create("Failed to generate key"_utf16);
+    auto key_data = key_data_or_error.release_value();
 
     // 5. Let key be a new CryptoKey object representing the generated key.
     auto key = CryptoKey::create(move(key_data));
@@ -8250,9 +8275,7 @@ WebIDL::ExceptionOr<GC::Ref<CryptoKey>> HMAC::import_key(JS::Realm& realm, Web::
     }
 
     // 9. Let key be a new CryptoKey object representing an HMAC key with the first length bits of data.
-    auto length_in_bytes = length / 8;
-    if (data.size() > length_in_bytes)
-        data = MUST(data.slice(0, length_in_bytes));
+    keep_first_bits(data, length);
     auto key = CryptoKey::create(move(data));
 
     // 10. Set the [[type]] internal slot of key to "secret".
@@ -8538,6 +8561,17 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CryptoKey>, CryptoKeyPair>> MLDSA::generate_
     return Variant<GC::Ref<CryptoKey>, CryptoKeyPair> { result };
 }
 
+static ErrorOr<::Crypto::PK::MLDSA::KeyPairType> generate_mldsa_key_pair_from_seed(Utf16String const& name, ByteBuffer const& seed)
+{
+    if (name == "ML-DSA-44"sv)
+        return ::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA44, seed);
+    if (name == "ML-DSA-65"sv)
+        return ::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA65, seed);
+    if (name == "ML-DSA-87"sv)
+        return ::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA87, seed);
+    VERIFY_NOT_REACHED();
+}
+
 // https://wicg.github.io/webcrypto-modern-algos/#ml-dsa-operations-import-key
 WebIDL::ExceptionOr<GC::Ref<CryptoKey>> MLDSA::import_key(JS::Realm& realm, AlgorithmParams const& params, KeyFormat key_format, CryptoKey::ImportKeyData key_data, bool extractable, Vector<KeyUsage> const& usages)
 {
@@ -8704,15 +8738,10 @@ WebIDL::ExceptionOr<GC::Ref<CryptoKey>> MLDSA::import_key(JS::Realm& realm, Algo
 
         // 4. Let privateKey be the result of performing the ML-DSA.KeyGen_internal function described in Section 6.1
         //    of [FIPS-204] with the parameter set indicated by the name member of normalizedAlgorithm, using data as ξ.
-        auto const [_, private_key] = [&] {
-            if (params.name == "ML-DSA-44"sv)
-                return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA44, data));
-            if (params.name == "ML-DSA-65"sv)
-                return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA65, data));
-            if (params.name == "ML-DSA-87"sv)
-                return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA87, data));
-            VERIFY_NOT_REACHED();
-        }();
+        auto maybe_key_pair = generate_mldsa_key_pair_from_seed(params.name, data);
+        if (maybe_key_pair.is_error())
+            return WebIDL::OperationError::create(Utf16String::formatted("Key generation failed: {}", maybe_key_pair.release_error()));
+        auto const private_key = maybe_key_pair.release_value().private_key;
 
         // 5. Let key be a new CryptoKey that represents the ML-DSA private key identified by privateKey.
         key = CryptoKey::create(private_key);
@@ -8768,18 +8797,15 @@ WebIDL::ExceptionOr<GC::Ref<CryptoKey>> MLDSA::import_key(JS::Realm& realm, Algo
             // 1. If the priv attribute of jwk does not contain a valid base64url encoded seed
             //    representing an ML-DSA private key, then throw a DataError.
             auto const seed = TRY(base64_url_bytes_decode(realm, jwk->priv.value()));
+            if (seed.size() * 8 != 256)
+                return WebIDL::DataError::create("Seed must be 256 bits long"_utf16);
 
             // 2. Let key be a new CryptoKey object that represents the ML-DSA private key
             //    identified by interpreting the priv attribute of jwk as a base64url encoded seed.
-            auto const [public_key, private_key] = [&] {
-                if (params.name == "ML-DSA-44"sv)
-                    return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA44, seed));
-                if (params.name == "ML-DSA-65"sv)
-                    return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA65, seed));
-                if (params.name == "ML-DSA-87"sv)
-                    return MUST(::Crypto::PK::MLDSA::generate_key_pair(::Crypto::PK::MLDSA87, seed));
-                VERIFY_NOT_REACHED();
-            }();
+            auto maybe_key_pair = generate_mldsa_key_pair_from_seed(params.name, seed);
+            if (maybe_key_pair.is_error())
+                return WebIDL::DataError::create(Utf16String::formatted("Invalid seed: {}", maybe_key_pair.release_error()));
+            auto const [public_key, private_key] = maybe_key_pair.release_value();
             key = CryptoKey::create(private_key);
 
             // 3. Set the [[type]] internal slot of key to "private".
@@ -10415,9 +10441,14 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CryptoKey>, CryptoKeyPair>> KMAC::generate_k
         length = normalized_algorithm.length.value();
     }
 
+    TRY(validate_kmac_key_length(length));
+
     // 3. Generate a key of length bits.
     // 4. If key generation fails, throw an OperationError.
-    auto key_data = MUST(generate_random_key(realm.vm(), length));
+    auto key_data_or_error = generate_random_key(realm.vm(), length);
+    if (key_data_or_error.is_error())
+        return WebIDL::OperationError::create("Failed to generate key"_utf16);
+    auto key_data = key_data_or_error.release_value();
 
     // 5. Let key be a new CryptoKey object representing the generated key.
     auto key = CryptoKey::create(move(key_data));
@@ -10533,11 +10564,11 @@ WebIDL::ExceptionOr<GC::Ref<CryptoKey>> KMAC::import_key(JS::Realm& realm, Algor
         length = requested_length;
     }
 
-    // 6. Let key be a new CryptoKey object representing a KMAC key with the first length bits of data.
-    auto length_in_bytes = length / 8;
-    if (data.size() > length_in_bytes)
-        data = MUST(data.slice(0, length_in_bytes));
+    TRY(validate_kmac_key_length(length));
 
+    // 6. Let key be a new CryptoKey object representing a KMAC key with the first length bits of the Keccak decoding
+    //    of data.
+    // NB: The length is a multiple of 8 and less than 8 bits shorter than data, so the key is all of data.
     auto key = CryptoKey::create(move(data));
 
     // 7. Set the [[type]] internal slot of key to "secret".

@@ -18,12 +18,9 @@
 
 namespace Core {
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::create_with_size(size_t size, Sealability sealability)
+ErrorOr<AnonymousBuffer> AnonymousBuffer::create_with_size(size_t size)
 {
-    auto allow_sealing = sealability == Sealability::Sealable
-        ? Core::System::AllowSealing::Yes
-        : Core::System::AllowSealing::No;
-    auto fd = TRY(Core::System::anon_create(size, O_CLOEXEC, allow_sealing));
+    auto fd = TRY(Core::System::anon_create(size, O_CLOEXEC, Core::System::AllowSealing::Yes));
     return create_from_anon_fd(fd, size);
 }
 
@@ -33,12 +30,12 @@ ErrorOr<AnonymousBuffer> AnonymousBuffer::create_from_anon_fd(int fd, size_t siz
     return AnonymousBuffer(move(impl));
 }
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(Sealability sealability) const
+ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot() const
 {
-    return snapshot(0, size(), sealability);
+    return snapshot(0, size());
 }
 
-ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size, Sealability sealability) const
+ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size) const
 {
     if (!is_valid())
         return Error::from_string_literal("Cannot snapshot an invalid anonymous buffer");
@@ -63,7 +60,7 @@ ErrorOr<AnonymousBuffer> AnonymousBuffer::snapshot(size_t offset, size_t size, S
 
     TRY(validate_backing_size());
 
-    auto copy = TRY(create_with_size(size, sealability));
+    auto copy = TRY(create_with_size(size));
     if (size == 0)
         return copy;
 
@@ -110,10 +107,30 @@ ErrorOr<void> AnonymousBuffer::validate_backing_size() const
     if (!is_valid())
         return Error::from_string_literal("Cannot validate the backing store of an invalid anonymous buffer");
 
+#if defined(AK_OS_LINUX)
+    // Sealed first, or the holder could shrink it after the check.
+    auto seals = TRY(Core::System::fcntl(fd(), F_GET_SEALS, static_cast<uintptr_t>(0)));
+    if (!(seals & F_SEAL_SHRINK))
+        TRY(Core::System::fcntl(fd(), F_ADD_SEALS, F_SEAL_SHRINK));
+#endif
+
     auto file_status = TRY(Core::System::fstat(fd()));
     if (file_status.st_size < 0 || static_cast<u64>(file_status.st_size) < size())
         return Error::from_string_literal("Anonymous buffer is smaller than its claimed size");
     return {};
+}
+
+void AnonymousBuffer::populate_for_reading() const
+{
+    if (!is_valid() || size() == 0)
+        return;
+    auto* data = const_cast<void*>(m_impl->data());
+#if defined(AK_OS_LINUX) && defined(MADV_POPULATE_READ)
+    // Kernels before 5.14 refuse this advice.
+    (void)madvise(data, size(), MADV_POPULATE_READ);
+#else
+    (void)madvise(data, size(), MADV_WILLNEED);
+#endif
 }
 
 ErrorOr<NonnullRefPtr<AnonymousBufferImpl>> AnonymousBufferImpl::create(int fd, size_t size)

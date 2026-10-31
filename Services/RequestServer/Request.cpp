@@ -34,6 +34,7 @@ namespace RequestServer {
 extern OwnPtr<ResourceSubstitutionMap> g_resource_substitution_map;
 
 static long s_connect_timeout_seconds = 90L;
+static constexpr long s_alternative_service_connect_timeout_seconds = 2L;
 
 static constexpr size_t max_response_header_count = 1000;
 static AK::Duration s_wait_for_cache_timeout = AK::Duration::from_seconds(10);
@@ -852,6 +853,16 @@ void Request::handle_fetch_complete(int result_code)
             transfer_headers_to_client_if_needed();
     }
 
+    // https://fetch.spec.whatwg.org/#concept-http-network-fetch
+    // 11. If bytes is failure, then terminate fetchParams’s controller.
+    // NB: A decoding failure is a body error after the response headers arrived. Expose that response even if libcurl
+    //     could not produce a single decoded byte, after storing its cookies and HSTS policy.
+    if (result_code == CURLE_BAD_CONTENT_ENCODING) {
+        if (defer_until_response_cookies_and_hsts_policy_are_stored([this, result_code] { handle_fetch_complete(result_code); }))
+            return;
+        transfer_headers_to_client_if_needed();
+    }
+
     m_curl_result_code = result_code;
 
     if (m_response_buffer.is_eof())
@@ -1473,12 +1484,17 @@ void Request::handle_fetch_state()
     set_option(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     set_option(CURLOPT_CONNECTTIMEOUT, s_connect_timeout_seconds);
 
-    // https://www.rfc-editor.org/rfc/rfc7838#section-2.4
-    // If the connection to the alternative service does not negotiate the expected protocol (for example, ALPN fails to
-    // negotiate h2, or an Upgrade request to h2c is not accepted), the connection to the alternative service MUST be
-    // considered to have failed.
-    if (m_alternative_service.has_value())
+    if (m_alternative_service.has_value()) {
+        // https://www.rfc-editor.org/rfc/rfc7838#section-2.4
+        // If the connection to the alternative service does not negotiate the expected protocol (for example, ALPN
+        // fails to negotiate h2, or an Upgrade request to h2c is not accepted), the connection to the alternative
+        // service MUST be considered to have failed.
         set_option(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3ONLY);
+
+        // NB: Advertised HTTP/3 is often unreachable (e.g. UDP blocked along the path). Give up on the alternative
+        //     quickly so the request falls back to the origin instead of waiting out the full connect timeout.
+        set_option(CURLOPT_CONNECTTIMEOUT, s_alternative_service_connect_timeout_seconds);
+    }
 
     // Nobody waits on a background revalidation, so nothing else would ever notice one whose connection silently died.
     // While it lives, it holds its cache entry open and every request for the same URL waits on it, so give up on it

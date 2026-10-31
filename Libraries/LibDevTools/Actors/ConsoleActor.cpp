@@ -12,6 +12,7 @@
 #include <LibDevTools/Actors/ThreadActor.h>
 #include <LibDevTools/DevToolsDelegate.h>
 #include <LibDevTools/DevToolsServer.h>
+#include <LibWebCommon/DOM/NodeType.h>
 
 namespace DevTools {
 
@@ -61,14 +62,72 @@ ConsoleActor::ConsoleActor(DevToolsServer& devtools, String name, WeakPtr<TabAct
 
 ConsoleActor::~ConsoleActor() = default;
 
+// The client selects the element of an inspectObject event's grip in its Inspector, resolving the grip's
+// contentDomReference to a node actor through the walker's getNodeActorFromContentDomReference request.
+void ConsoleActor::inspect_element(Web::UniqueNodeID node_id)
+{
+    auto tab = m_tab.strong_ref();
+    if (!tab)
+        return;
+
+    JsonObject preview;
+    preview.set("kind"sv, "DOMNode"sv);
+    preview.set("nodeType"sv, to_underlying(Web::DOM::NodeType::ELEMENT_NODE));
+
+    JsonObject content_dom_reference;
+    content_dom_reference.set("browsingContextId"sv, tab->description().id);
+    content_dom_reference.set("id"sv, node_id.value());
+
+    JsonObject grip;
+    grip.set("type"sv, "object"sv);
+    grip.set("preview"sv, move(preview));
+    grip.set("contentDomReference"sv, move(content_dom_reference));
+
+    JsonObject message;
+    message.set("type"sv, "inspectObject"sv);
+    message.set("objectActor"sv, move(grip));
+    message.set("inspectFromAnnotation"sv, "browser-context-menu"sv);
+    send_message(move(message));
+}
+
 void ConsoleActor::handle_message(Message const& message)
 {
     JsonObject response;
 
     if (message.type == "autocomplete"sv) {
-        response.set("matches"sv, JsonArray {});
-        response.set("matchProp"sv, String {});
-        send_response(message, move(response));
+        auto text = get_required_parameter<String>(message, "text"sv);
+        if (!text.has_value())
+            return;
+
+        // The client asks for the completions at the cursor, a UTF-16 offset into the text, so only the text before it
+        // is completed.
+        auto input = text.release_value();
+        if (auto cursor = message.data.get_integer<size_t>("cursor"sv); cursor.has_value()) {
+            auto utf16_input = Utf16String::from_utf8(input);
+            if (*cursor < utf16_input.length_in_code_units())
+                input = utf16_input.substring_view(0, *cursor).to_utf8_but_should_be_ported_to_utf16();
+        }
+
+        auto tab = m_tab.strong_ref();
+        if (!tab) {
+            response.set("matches"sv, JsonValue {});
+            send_response(message, move(response));
+            return;
+        }
+
+        devtools().delegate().complete_console_input(tab->description(), input,
+            async_handler(message, [](auto&, DevToolsDelegate::ConsoleInputCompletion completion, auto& response) {
+                if (completion.matches.has_value()) {
+                    JsonArray matches;
+                    for (auto& match : *completion.matches)
+                        matches.must_append(move(match));
+                    response.set("matches"sv, move(matches));
+                } else {
+                    response.set("matches"sv, JsonValue {});
+                }
+                response.set("matchProp"sv, move(completion.match_prop));
+                response.set("isElementAccess"sv, false);
+            }));
         return;
     }
 
@@ -135,8 +194,11 @@ void ConsoleActor::handle_message(Message const& message)
 
         if (auto tab = m_tab.strong_ref()) {
             devtools().delegate().evaluate_javascript(tab->description(), *text,
-                async_handler({}, [result_id, input = *text](auto&, auto result, auto& response) {
-                    received_console_result(response, move(result_id), move(input), move(result));
+                async_handler<ConsoleActor>({}, [result_id, input = *text](auto& self, auto result, auto& response) {
+                    // The console holds the objects of its results, so they stay expandable after the debugger resumes.
+                    auto thread = self.m_thread.strong_ref();
+                    auto serialized = thread ? thread->serialize_debugger_value(result, WebView::DebuggerObjectScope::Console) : JsonValue {};
+                    received_console_result(response, move(result_id), move(input), move(serialized));
                 }));
         }
 

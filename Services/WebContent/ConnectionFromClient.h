@@ -84,7 +84,6 @@ public:
     Queue<Web::QueuedInputEvent>& input_event_queue() { return m_input_event_queue; }
     void update_input_method_state(Web::PageId page_id);
 
-    void notify_started_using_gamepads();
     void pump_and_dispatch_gamepad_events();
 
 private:
@@ -121,6 +120,7 @@ private:
     virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;
     virtual void connect_to_compositor_process(IPC::TransportHandle handle, IPC::TransportHandle render_clock_handle) override;
     virtual void set_site_compatibility_data(JsonValue data) override;
+    virtual void set_permission_snapshot(Web::Permissions::PermissionSnapshot snapshot) override;
     virtual void compositor_process_reconnected() override;
     virtual void update_system_theme(Web::PageId page_id, Core::AnonymousBuffer) override;
     virtual void update_screen_rects(Web::PageId page_id, Vector<Web::DevicePixelRect>, Vector<Web::DevicePixelRect>, u32) override;
@@ -134,6 +134,7 @@ private:
     virtual void create_navigation_params(Web::PageId page_id, Web::HTML::NavigationPopulationRequest) override;
     virtual void cancel_navigation_params_creation(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Utf16String navigation_id) override;
     virtual void deliver_posted_message(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::MessageDescriptor) override;
+    virtual void report_violation_of_environment(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, u64 policy_index, Web::ContentSecurityPolicy::RemoteViolationDirective, URL::URL resource) override;
     virtual void close_traversable_from_script(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id) override;
     virtual void run_focusing_steps_for_navigable(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::FocusTrigger) override;
     virtual void focus_window_of_navigable(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id) override;
@@ -172,6 +173,7 @@ private:
     virtual void mouse_event_in_hosted_root(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::MouseEvent) override;
     virtual void drag_event(Web::PageId page_id, Web::DragEvent) override;
     virtual void pinch_event(Web::PageId page_id, Web::PinchEvent) override;
+    virtual void pinch_event_in_hosted_root(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::PinchEvent) override;
     virtual void debug_request(Web::PageId page_id, ByteString, ByteString) override;
     virtual void get_source(Web::PageId page_id) override;
     virtual void inspect_dom_tree(Web::PageId page_id) override;
@@ -224,9 +226,10 @@ private:
     virtual void remove_debugger_breakpoint(Web::PageId page_id, u64 request_id, WebView::DebuggerBreakpointLocation) override;
     virtual void get_debugger_environments(Web::PageId page_id, u64 request_id, u64 frame_id) override;
     virtual void evaluate_javascript_in_debugger_frame(Web::PageId page_id, u64 request_id, u64 frame_id, Utf16String source_text) override;
-    virtual void get_debugger_object_properties(Web::PageId page_id, u64 request_id, u64 object_id) override;
+    virtual void get_debugger_object_properties(Web::PageId page_id, u64 request_id, u64 object_id, WebView::DebuggerObjectScope scope) override;
     virtual void get_debugger_source_positions(Web::PageId page_id, u64 request_id, Web::HTML::ScriptRegistry::Identifier) override;
     virtual void resolve_dom_node_url(Web::PageId page_id, u64 request_id, Optional<Web::UniqueNodeID> node_id, String url) override;
+    virtual void complete_js_console_input(Web::PageId page_id, u64 request_id, String input) override;
 
     virtual void set_listen_for_dom_mutations(Web::PageId page_id, bool) override;
     virtual void set_has_devtools_client(Web::PageId page_id, bool has_devtools_client) override;
@@ -257,10 +260,11 @@ private:
     virtual void set_writing_suggestions_available(Web::PageId page_id, bool available) override;
     virtual void set_geolocation_emulated_position(Web::PageId page_id, WebView::GeolocationPositionData, Optional<u16> error_code) override;
     virtual void geolocation_position_response(Web::PageId page_id, u64 request_id, WebView::GeolocationPositionData, Optional<u16> error_code) override;
-    virtual void permission_request_completed(Web::PageId page_id, u64 request_id, bool granted) override;
+    virtual void permission_request_completed(Web::PageId page_id, u64 request_id, Web::Permissions::EffectiveState state) override;
     virtual void set_has_focus(Web::PageId page_id, bool) override;
     virtual void set_focused_navigable(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id) override;
     virtual void consume_user_activation(Web::PageId page_id, Web::HTML::UserActivationConsumption) override;
+    virtual void notify_about_user_activation(Web::PageId page_id, Web::HTML::CrossProcessId document_id) override;
     virtual void set_is_scripting_enabled(Web::PageId page_id, bool) override;
     virtual void set_zoom_level(Web::PageId page_id, double zoom_level) override;
     virtual void set_maximum_frames_per_second(Web::PageId page_id, double) override;
@@ -305,8 +309,6 @@ private:
     virtual void exit_picture_in_picture(Web::PageId page_id) override;
     virtual void toggle_playing_media(Web::PageId page_id) override;
     virtual void toggle_media_controls_state(Web::PageId page_id) override;
-
-    virtual void set_page_mute_state(Web::PageId page_id, Web::HTML::MuteState mute_state) override;
 
     virtual void take_document_screenshot(Web::PageId page_id) override;
     virtual void take_dom_node_screenshot(Web::PageId page_id, Web::UniqueNodeID node_id) override;
@@ -371,13 +373,12 @@ private:
     NonnullOwnPtr<PageHost> m_page_host;
     OwnPtr<DevToolsDebugger> m_devtools_debugger;
 
-    bool m_did_notify_started_using_gamepads { false };
-
     HashMap<int, Web::FileRequest> m_requested_files {};
     int last_id { 0 };
 
     void enqueue_input_event(Web::QueuedInputEvent);
     void enqueue_mouse_event(Web::PageId page_id, Optional<Web::HTML::CrossProcessId> navigable_id, Web::MouseEvent);
+    void enqueue_pinch_event(Web::PageId page_id, Optional<Web::HTML::CrossProcessId> navigable_id, Web::PinchEvent);
 
     Queue<Web::QueuedInputEvent> m_input_event_queue;
     bool m_enable_test_mode { false };

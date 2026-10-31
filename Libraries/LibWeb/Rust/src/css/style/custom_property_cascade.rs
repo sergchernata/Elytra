@@ -28,6 +28,7 @@ use crate::css::custom_properties::{
     VarResolutionInputs, prepare_var_resolution_environment,
 };
 use crate::css::parser::component_value::{ComponentKind, ComponentValue};
+use crate::css::parser::value_parser::component_values_from_source;
 use crate::css::rule::CompiledFunction;
 use crate::css::style_value::{
     RetainedStyleValueData, StyleValueData, custom_property_references, utf16_equals_ascii_case_insensitive,
@@ -1307,8 +1308,10 @@ impl RetainedState {
         node: StyleNodeID,
         mut length: crate::css::style_compute::FfiLengthResolutionContext,
         color_scheme: u8,
+        subject_is_pseudo_element: bool,
     ) -> RegisteredValueContext {
-        self.container_unit_bases(node).apply_to(&mut length);
+        self.container_unit_bases(node, subject_is_pseudo_element)
+            .apply_to(&mut length);
         RegisteredValueContext { length, color_scheme }
     }
 
@@ -1318,13 +1321,14 @@ impl RetainedState {
         &self,
         node: StyleNodeID,
         record: computed::FinalStyleRecordID,
+        subject_is_pseudo_element: bool,
     ) -> Option<RegisteredValueContext> {
         let view = self.computed_group_sets.style_record_view(record.raw())?;
         let length = self.record_length_resolution_context(&view)?;
         let table = view.longhand_table?;
         let color_scheme = u8::try_from(table.effective_color_scheme())
             .unwrap_or(self.document_style_computation_inputs.preferred_color_scheme);
-        Some(self.registered_value_context(node, length, color_scheme))
+        Some(self.registered_value_context(node, length, color_scheme, subject_is_pseudo_element))
     }
 
     /// What a registered custom property computes against where the caller brings nothing
@@ -1346,7 +1350,9 @@ impl RetainedState {
                     .and_then(|parent| self.computed_group_sets.assigned_style_record(parent))
             }),
         };
-        if let Some(context) = record.and_then(|record| self.record_registered_value_context(node, record)) {
+        if let Some(context) =
+            record.and_then(|record| self.record_registered_value_context(node, record, pseudo.is_some()))
+        {
             return context;
         }
         use crate::css::style_compute::{FfiFontMetrics, FfiLengthResolutionContext};
@@ -1378,6 +1384,7 @@ impl RetainedState {
                 zoom: 1.0,
             },
             inputs.preferred_color_scheme,
+            pseudo.is_some(),
         )
     }
 
@@ -1697,7 +1704,14 @@ impl RetainedState {
             .then(|| {
                 registered
                     // A backing element supplies its font; query containers belong to its originating element.
-                    .map(|registered| self.registered_value_context(node, registered.length, registered.color_scheme))
+                    .map(|registered| {
+                        self.registered_value_context(
+                            node,
+                            registered.length,
+                            registered.color_scheme,
+                            pseudo.is_some(),
+                        )
+                    })
                     .unwrap_or_else(|| self.standing_registered_value_context(node, pseudo))
             });
         // A custom function call reads the definitions its scope sees, with the blocks of
@@ -1765,12 +1779,7 @@ impl RetainedState {
             if parent.is_some_and(|parent| parent.value_is_identical(name.raw.raw(), value.pointer().cast())) {
                 continue;
             }
-            values.push((
-                name.raw.raw(),
-                name.text.clone(),
-                declared.important,
-                value.pointer().cast(),
-            ));
+            values.push((name.raw.raw(), declared.important, value.pointer().cast()));
         }
         if values.is_empty() {
             if let Some(effects) = container_effects {
@@ -1855,6 +1864,7 @@ impl RetainedState {
                 node,
                 reads.container_unit_mask,
                 length.subject_inline_axis_is_horizontal,
+                pseudo.is_some(),
             );
         }
         if let Some(effects) = container_effects {
@@ -2052,22 +2062,12 @@ impl RetainedState {
         // The readers resolve as declared, over the element's environment, beside the animated values.
         let values = readers
             .iter()
-            .map(|(name, declared, value)| {
-                (
-                    name.raw.raw(),
-                    name.text.clone(),
-                    declared.important,
-                    value.pointer().cast(),
-                )
-            })
-            .chain(animated.iter().map(|(name, value)| {
-                (
-                    name.raw(),
-                    Arc::from(name.to_utf16().as_ref()),
-                    false,
-                    value.pointer().cast(),
-                )
-            }))
+            .map(|(name, declared, value)| (name.raw.raw(), declared.important, value.pointer().cast()))
+            .chain(
+                animated
+                    .iter()
+                    .map(|(name, value)| (name.raw(), false, value.pointer().cast())),
+            )
             .collect();
         // SAFETY: The base store is live for the sample, and the values are live for the call.
         let base = unsafe { super::environment_move::retained_store(base) };
@@ -2310,7 +2310,14 @@ fn substitute_against_stores(
         NativeVarResolution::Resolved {
             source,
             contains_attr_tainted_values,
-        } => parse_substituted_value(&parse_context, property, &source, contains_attr_tainted_values),
+        } => {
+            // FIXME: Preserve the resolved components rather than retokenizing their normalized serialization.
+            let Ok(values) = component_values_from_source(source.as_slice()) else {
+                crate::css::ffi_stats::bump(crate::css::ffi_stats::FfiOp::SubstitutionParse);
+                return invalid();
+            };
+            parse_substituted_value(&parse_context, property, &source, &values, contains_attr_tainted_values)
+        }
         NativeVarResolution::Invalid | NativeVarResolution::NotHandled => invalid(),
     }
 }

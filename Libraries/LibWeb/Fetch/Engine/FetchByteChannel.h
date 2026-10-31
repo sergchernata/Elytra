@@ -37,7 +37,7 @@ public:
 
     virtual void consumer_cancelled() = 0;
 
-    // Called for a delivery no honest transport could have made.
+    // Called for a delivery or an ending no honest transport could have made.
     virtual void misbehaved(StringView reason);
 };
 
@@ -58,16 +58,17 @@ public:
         ByteBuffer message;
     };
     struct ConsumerCancelled { };
-    using State = Variant<Open, Closed, Errored, ConsumerCancelled>;
+    struct Transferred { };
+    using State = Variant<Open, Closed, Errored, ConsumerCancelled, Transferred>;
 
-    // Snapshotted atomically with the removal of the bytes.
+    // Snapshotted atomically with the bytes taken or peeked.
     struct TakeResult {
         Vector<Core::ImmutableBytes> taken;
         State state { Open {} };
         u64 buffered_byte_count { 0 };
     };
 
-    [[nodiscard]] static NonnullRefPtr<FetchByteChannel> create(Watermarks, NonnullRefPtr<FetchByteChannelConsumerSink>, NonnullRefPtr<FetchByteChannelProducerSink>);
+    [[nodiscard]] static NonnullRefPtr<FetchByteChannel> create(Watermarks, NonnullRefPtr<FetchByteChannelProducerSink>);
 
     // The credit the producer should hand the transport before the first write.
     [[nodiscard]] u64 initial_credit() const { return m_watermarks.high; }
@@ -90,18 +91,50 @@ public:
     TerminateResult close();
     TerminateResult error(Errored);
 
+    // The bytes of a transport that delivers slices of one whole body. The first handed over while the channel is open
+    // is kept until it errors, is cancelled or is transferred.
+    void keep_whole_body(Core::ImmutableBytes);
+    [[nodiscard]] Optional<Core::ImmutableBytes> whole_body() const;
+
     // Consumer side.
+    // The consumer attaches its sink once, before any arm_waiter() call.
+    void attach_consumer(NonnullRefPtr<FetchByteChannelConsumerSink>);
     [[nodiscard]] TakeResult take_up_to(u64 limit);
     [[nodiscard]] TakeResult take_all();
 
     // Either side may cancel; the producer hears of it unless it has already ended the body.
     TerminateResult cancel();
 
-    // Returns the ticket the wake will carry; a wake already due fires before this returns, outside the lock.
-    WakeTicket arm_waiter();
+    // Ends an open or closed channel for a body that moves to another process, returning its undrained bytes. The
+    // transport hears nothing, and later writes and endings do nothing.
+    [[nodiscard]] Vector<Core::ImmutableBytes> transfer_out();
+
+    // Returns up to limit bytes from the front of the buffer, removing none and granting no credit.
+    [[nodiscard]] TakeResult peek_up_to(u64 limit);
+
+    // A waiter fires once the channel buffers at least byte_count bytes, or ends.
+    struct BufferedAtLeast {
+        u64 byte_count;
+    };
+    // A waiter fires only once the channel ends: closes, errors, or is cancelled or transferred.
+    struct EndOnly { };
+    // Fires as BufferedAtLeast does, and keeps a copy of the first byte_count bytes and the state from the moment it
+    // is due, for take_prefix().
+    struct PrefixOf {
+        u64 byte_count;
+    };
+    using WakeOn = Variant<BufferedAtLeast, EndOnly, PrefixOf>;
+
+    // Each call adds a waiter that fires at most once, and returns the ticket its wake will carry; a wake already due
+    // fires before this returns, outside the lock. Waiters due at the same time fire in the order they were added.
+    WakeTicket arm_waiter(WakeOn = BufferedAtLeast { 1 });
+    void disarm_waiter(WakeTicket);
+
+    // What a PrefixOf waiter kept, once. A cancellation, a transfer or disarming its ticket drops it unread.
+    [[nodiscard]] Optional<TakeResult> take_prefix(WakeTicket);
 
 private:
-    FetchByteChannel(Watermarks, NonnullRefPtr<FetchByteChannelConsumerSink>, NonnullRefPtr<FetchByteChannelProducerSink>);
+    FetchByteChannel(Watermarks, NonnullRefPtr<FetchByteChannelProducerSink>);
 
     // Sink calls decided under the lock and made after it is released, in order.
     struct Wake {
@@ -121,12 +154,25 @@ private:
     void seal_copied_tail_locked();
     [[nodiscard]] TakeResult take_locked(u64 limit, PendingNotifications&);
     [[nodiscard]] TerminateResult terminate_locked(State, PendingNotifications&);
-    void wake_armed_waiter_locked(PendingNotifications&);
+    [[nodiscard]] bool is_due_locked(WakeOn const&) const;
+    void wake_due_waiters_locked(PendingNotifications&);
+    void keep_prefix_locked(WakeTicket, WakeOn const&);
     void dispatch(PendingNotifications const&);
 
+    struct ArmedWaiter {
+        WakeTicket ticket { 0 };
+        WakeOn wake_on;
+    };
+
+    // A compact copy, so it holds none of the chunks' storage.
+    struct KeptPrefix {
+        WakeTicket ticket { 0 };
+        TakeResult prefix;
+    };
+
     Watermarks const m_watermarks;
-    NonnullRefPtr<FetchByteChannelConsumerSink> const m_consumer_sink;
     NonnullRefPtr<FetchByteChannelProducerSink> const m_producer_sink;
+    RefPtr<FetchByteChannelConsumerSink> m_consumer_sink;
 
     mutable Mutex m_mutex;
     Vector<Core::ImmutableBytes> m_chunks;
@@ -136,8 +182,9 @@ private:
     u64 m_outstanding_transport_credit { 0 };
     State m_state { Open {} };
     bool m_transport_ended { false };
-    bool m_waiter_armed { false };
-    WakeTicket m_armed_ticket { 0 };
+    Optional<Core::ImmutableBytes> m_whole_body;
+    Vector<ArmedWaiter, 2> m_armed_waiters;
+    Vector<KeptPrefix, 1> m_kept_prefixes;
     u64 m_next_ticket { 1 };
 };
 

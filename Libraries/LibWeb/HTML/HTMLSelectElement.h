@@ -102,7 +102,15 @@ public:
 
     void did_select_item(Optional<u32> const& id);
 
-    void update_selectedness();
+    // NB: Returns whether the selectedness changed, in which case the select's selectedcontent was also updated.
+    bool update_selectedness();
+
+    // https://html.spec.whatwg.org/multipage/form-elements.html#reset-a-select%27s-selectedness
+    enum class HasChanged : u8 {
+        No,
+        Yes,
+    };
+    void reset_selectedness(HasChanged);
 
     void clone_selected_option_into_select_button();
 
@@ -159,6 +167,8 @@ private:
     bool m_is_open { false };
     Vector<GC::Ref<HTMLOptionElement>> m_select_item_option_elements;
     GC::Ptr<DOM::Element> m_inner_text_element;
+    GC::Ptr<DOM::Element> m_selected_label_element;
+    GC::Ptr<DOM::Element> m_label_sizer_element;
     GC::Ptr<DOM::Element> m_chevron_icon_element;
     bool m_chevron_icon_hidden { false };
 

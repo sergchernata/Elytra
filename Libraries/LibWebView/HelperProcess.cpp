@@ -7,6 +7,7 @@
 #include <AK/Enumerate.h>
 #include <AK/NeverDestroyed.h>
 #include <AK/ScopeGuard.h>
+#include <AK/StringBuilder.h>
 #include <LibCore/ElapsedTimer.h>
 #include <LibCore/File.h>
 #include <LibCore/Process.h>
@@ -537,6 +538,20 @@ ErrorOr<NonnullRefPtr<WebView::CompositorClient>> launch_compositor_process()
         arguments.append("--force-cpu-painting"sv);
     if (web_content_options.force_fontconfig == WebView::ForceFontconfig::Yes)
         arguments.append("--force-fontconfig"sv);
+    if (auto gpu_device = WebView::Application::the().platform_presentation_gpu_device(); gpu_device.has_value()) {
+        arguments.append("--gpu-device"sv);
+        arguments.append(gpu_device->to_byte_string());
+    }
+    if (auto modifiers = WebView::Application::the().platform_presentation_drm_format_modifiers(); !modifiers.is_empty()) {
+        StringBuilder builder;
+        for (auto modifier : modifiers) {
+            if (!builder.is_empty())
+                builder.append(',');
+            builder.appendff("{:x}", modifier);
+        }
+        arguments.append("--drm-format-modifiers"sv);
+        arguments.append(builder.to_byte_string());
+    }
     if (auto server = mach_server_name(); server.has_value()) {
         arguments.append("--mach-server-name"sv);
         arguments.append(server.value());
@@ -694,11 +709,12 @@ ErrorOr<void> ensure_audio_server_is_running(RefPtr<AudioServerControlClient>& c
     return {};
 }
 
-ErrorOr<IPC::TransportHandle> connect_new_audio_server_client(RefPtr<AudioServerControlClient>& controller, u64 owner_child_id, u64 audio_tab_id)
+ErrorOr<IPC::TransportHandle> connect_new_audio_server_client(AudioServerControlClient& controller, u64 audio_tab_id)
 {
-    TRY(ensure_audio_server_is_running(controller, owner_child_id));
+    if (!controller.is_open())
+        return Error::from_string_literal("The AudioServer is gone");
 
-    auto response = controller->send_sync_but_allow_failure<Messages::AudioServerControl::ConnectNewClient>(audio_tab_id);
+    auto response = controller.send_sync_but_allow_failure<Messages::AudioServerControl::ConnectNewClient>(audio_tab_id);
     if (!response || !response->handle().has_value())
         return Error::from_string_literal("Failed to connect to AudioServer");
     return response->take_handle().release_value();

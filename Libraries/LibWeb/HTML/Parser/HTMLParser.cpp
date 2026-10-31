@@ -195,6 +195,7 @@ extern "C" void ladybird_html_parser_set_script_source_line(void*, size_t, size_
 extern "C" void ladybird_html_parser_mark_script_already_started(void*, size_t);
 extern "C" void ladybird_html_parser_process_meta_element(void*, size_t);
 extern "C" size_t ladybird_html_parser_parent_node(size_t);
+extern "C" bool ladybird_html_parser_element_cannot_be_inserted(size_t, size_t);
 extern "C" size_t ladybird_html_parser_node_index(size_t);
 extern "C" size_t ladybird_html_parser_create_element(void*, size_t, RustFfiHtmlNamespace, u16 const*, size_t, size_t, RustFfiHtmlParserAttribute const*, size_t, bool, size_t, bool);
 extern "C" void ladybird_html_parser_append_child(size_t, size_t);
@@ -2419,6 +2420,12 @@ static RefPtr<CSS::StyleValue const> parse_current_dimension_value(double value,
 // https://html.spec.whatwg.org/multipage/common-microsyntaxes.html#rules-for-parsing-dimension-values
 RefPtr<CSS::StyleValue const> parse_dimension_value(Utf16View input)
 {
+    double unclamped_value;
+    return parse_dimension_value(input, unclamped_value);
+}
+
+RefPtr<CSS::StyleValue const> parse_dimension_value(Utf16View input, double& unclamped_value)
+{
     // 1. Let input be the string being parsed.
     // 2. Let position be a position variable for input, initially pointing at the start of input.
     size_t position = 0;
@@ -2440,6 +2447,7 @@ RefPtr<CSS::StyleValue const> parse_dimension_value(Utf16View input)
         ++position;
     }
 
+    unclamped_value = integer_value;
     double value = min(integer_value, CSSPixels::max_dimension_value);
 
     // 6. If position is past the end of input, then return value as a length.
@@ -2466,7 +2474,9 @@ RefPtr<CSS::StyleValue const> parse_dimension_value(Utf16View input)
 
             // 2. Add the value of the code point at position within input,
             //    interpreted as a base-ten digit (0..9) and divided by divisor, to value.
-            value += (code_unit_at(input, position) - '0') / divisor;
+            auto fraction = (code_unit_at(input, position) - '0') / divisor;
+            value += fraction;
+            unclamped_value += fraction;
 
             // 3. Advance position by 1.
             ++position;
@@ -3115,6 +3125,28 @@ extern "C" size_t ladybird_html_parser_parent_node(size_t node)
 {
     auto* parent = node_from_html_parser_ffi(node).parent();
     return reinterpret_cast<size_t>(parent);
+}
+
+// https://html.spec.whatwg.org/multipage/parsing.html#insert-an-element-at-the-adjusted-insertion-location
+// NB: The conditions of step 2.
+extern "C" bool ladybird_html_parser_element_cannot_be_inserted(size_t target_parent, size_t element)
+{
+    auto& target_parent_node = node_from_html_parser_ffi(target_parent);
+    auto& element_node = node_from_html_parser_ffi(element);
+
+    // - element's parent is non-null;
+    if (element_node.parent())
+        return true;
+
+    // - element is a host-including inclusive ancestor of targetParent; or
+    if (element_node.is_host_including_inclusive_ancestor_of(target_parent_node))
+        return true;
+
+    // - targetParent is a Document node that already has an element child,
+    if (is<DOM::Document>(target_parent_node) && target_parent_node.has_child_of_type<DOM::Element>())
+        return true;
+
+    return false;
 }
 
 extern "C" size_t ladybird_html_parser_node_index(size_t node)

@@ -21,7 +21,7 @@
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
-#include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/ResponseView.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/ReferrerPolicy/AbstractOperations.h>
 
@@ -146,7 +146,7 @@ void StyleSheetImport::fetch()
         return;
     }
 
-    // AD-HOC: Track pending import rules to block rendering until they are done.
+    // NB: Track pending import rules for stylesheet load accounting.
     m_document->add_pending_css_import_rule({}, *this);
     set_loading_state(StyleSheetState::LoadingState::Loading);
 
@@ -220,7 +220,7 @@ void StyleSheetImport::fetch()
             }
             Parser::Parser::parse_stylesheet_off_thread(
                 Parser::ParsingParams { *document }, decoded_or_error.release_value(),
-                [strong_this, parent_style_sheet, document = GC::make_root(document), url = move(url), is_cors_same_origin = response->is_cors_same_origin(), referrer_policy = ReferrerPolicy::parse_a_referrer_policy_from_a_referrer_policy_header(response->unsafe_response()), finish_loading = move(finish_loading)](Parser::RustStyleSheetParse parsed) mutable {
+                [strong_this, parent_style_sheet, document = GC::make_root(document), url = move(url), is_cors_same_origin = response->is_cors_same_origin(), referrer_policy = ReferrerPolicy::parse_a_referrer_policy_from_a_referrer_policy_header(*response->unsafe_response()->record()), finish_loading = move(finish_loading)](Parser::RustStyleSheetParse parsed) mutable {
                     ScopeGuard guard = move(finish_loading);
                     // NB: The sheet records its referrer policy as it is created, before its own imports start to load.
                     auto imported_style_sheet = StyleSheetState::create(parsed.native_rules(), document.ptr(), strong_this->m_media_list.retain(), move(url), referrer_policy);

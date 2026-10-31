@@ -12,6 +12,7 @@
 #include <AK/JsonObject.h>
 #include <AK/JsonParser.h>
 #include <AK/Random.h>
+#include <LibCore/DirIterator.h>
 #include <LibCore/Directory.h>
 #include <LibCore/Environment.h>
 #include <LibCore/EventLoop.h>
@@ -113,6 +114,25 @@ inline String string_in(JsonObject const& report, StringView key)
 inline URL::URL url(StringView string)
 {
     return URL::Parser::basic_parse(string).release_value();
+}
+
+// A copy of a folder, and everything in it, (or of a file) at a path where nothing is yet.
+inline ErrorOr<void> copy_recursively(ByteString const& destination, ByteString const& source)
+{
+    if (!FileSystem::is_directory(source)) {
+        auto file = TRY(Core::File::open(source, Core::File::OpenMode::Read));
+        auto source_stat = TRY(Core::System::fstat(file->fd()));
+        return FileSystem::copy_file(destination, source, source_stat, *file);
+    }
+    TRY(Core::System::mkdir(destination, 0755));
+    Core::DirIterator iterator(source, Core::DirIterator::SkipParentAndBaseDir);
+    if (iterator.has_error())
+        return iterator.error();
+    while (iterator.has_next()) {
+        auto name = iterator.next_path();
+        TRY(copy_recursively(ByteString::formatted("{}/{}", destination, name), ByteString::formatted("{}/{}", source, name)));
+    }
+    return {};
 }
 
 inline ByteString write_temporary_file(ByteString const& directory, StringView name, StringView contents)

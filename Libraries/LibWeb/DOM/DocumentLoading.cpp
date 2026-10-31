@@ -47,7 +47,7 @@
 
 namespace Web {
 
-static void add_pdf_viewer_ready_listener(DOM::Document& document, GC::Ref<Fetch::Infrastructure::Response> response)
+static void add_pdf_viewer_ready_listener(DOM::Document& document, GC::Ref<Fetch::Infrastructure::ResponseView> response)
 {
     auto& realm = document.relevant_settings_object().realm();
     auto js_response = Fetch::Response::create(response, Fetch::Headers::Guard::Response);
@@ -133,7 +133,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     // FIXME: The additional check for a non-empty body fixes issues with loading javascript urls in iframes, which
     //        default to an "about:blank" url. Is this a spec bug?
     if (document->url().to_string() == "about:blank"_string
-        && navigation_params.response->body()->length().value_or(0) == 0) {
+        && navigation_params.response->body_length().value_or(0) == 0) {
         TRY(document->populate_with_html_head_and_body());
         if (navigation_params.navigable && navigation_params.navigable->is_top_level_traversable())
             document->set_supported_color_schemes({ "light"_utf16_fly_string, "dark"_utf16_fly_string });
@@ -143,7 +143,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     // AD-HOC: For about:srcdoc, the body bytes are always immediately available in the response source (the srcdoc
     //         string was inlined when the navigation params were created). Bypass the async body-reading pipeline
     //         and set up a deferred parser directly, so the document is parsed as soon as scripts may run for it.
-    else if (auto const& source = navigation_params.response->body()->source();
+    else if (auto source = navigation_params.response->body_source();
         source.has_value() && document->url() == URL::about_srcdoc()) {
         auto mime_type = Fetch::Infrastructure::extract_mime_type(navigation_params.response->header_list());
         auto url = navigation_params.response->url().value();
@@ -319,12 +319,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_text_document(HTML::Navi
 
             // 5. User agents may add content to the head element of document, e.g., linking to a style sheet, providing
             //    script, or giving the document a title.
-            auto title_basename = LexicalPath::basename(url.to_byte_string());
-            auto title = utf16_string_from_url_ascii(title_basename.view());
-            auto title_element = MUST(DOM::create_element(document, HTML::TagNames::title, Namespace::HTML));
-            MUST(document->head()->append_child(title_element));
-            auto title_text = DOM::Text::create(document, move(title));
-            MUST(title_element->append_child(*title_text));
+            // NB: Leave the head empty so the document text consists only of the response body.
         };
         if (document->ready_to_run_scripts()) {
             run_text_parser();

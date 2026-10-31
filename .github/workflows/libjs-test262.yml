@@ -18,7 +18,7 @@ jobs:
     runs-on: 'blacksmith-16vcpu-ubuntu-2404'
     if: github.repository == 'LadybirdBrowser/ladybird'
     container:
-      image: ghcr.io/ladybirdbrowser/ladybird-ci:2026.10.16
+      image: ghcr.io/ladybirdbrowser/ladybird-ci:2026.10.29
 
     steps:
       - name: Checkout LadybirdBrowser/ladybird
@@ -88,6 +88,7 @@ jobs:
           cmake --preset Release -B libjs-test262/Build \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
+            -DENABLE_CI_BASELINE_CPU=ON \
             -DWASM_SPEC_TEST_SKIP_FORMATTING=ON \
             -DINCLUDE_WASM_SPEC_TESTS=ON \
             -DENABLE_GUI_TARGETS=OFF

@@ -28,10 +28,10 @@ public:
 
     using ProcessRequestBodyChunkLengthFunction = Function<void(u64)>;
     using ProcessRequestEndOfBodyFunction = Function<void()>;
-    using ProcessEarlyHintsResponseFunction = Function<void(GC::Ref<Infrastructure::Response>)>;
-    using ProcessResponseFunction = Function<void(GC::Ref<Infrastructure::Response>)>;
-    using ProcessResponseEndOfBodyFunction = Function<void(GC::Ref<Infrastructure::Response>)>;
-    using ProcessResponseConsumeBodyFunction = Function<void(GC::Ref<Infrastructure::Response>, BodyBytes)>;
+    using ProcessEarlyHintsResponseFunction = Function<void(GC::Ref<Infrastructure::ResponseView>)>;
+    using ProcessResponseFunction = Function<void(GC::Ref<Infrastructure::ResponseView>)>;
+    using ProcessResponseEndOfBodyFunction = Function<void(GC::Ref<Infrastructure::ResponseView>)>;
+    using ProcessResponseConsumeBodyFunction = Function<void(GC::Ref<Infrastructure::ResponseView>, BodyBytes)>;
 
     using ProcessRequestBodyChunkLengthHeapFunction = GC::Ref<GC::Function<ProcessRequestBodyChunkLengthFunction::FunctionType>>;
     using ProcessRequestEndOfBodyHeapFunction = GC::Ref<GC::Function<ProcessRequestEndOfBodyFunction::FunctionType>>;
@@ -63,7 +63,6 @@ public:
     };
 
     [[nodiscard]] static GC::Ref<FetchAlgorithms> create(Input);
-    [[nodiscard]] GC::Ref<FetchAlgorithms> with_body_intent(Engine::BodyIntent) const;
 
     Engine::BodyIntent body_intent() const { return m_body_intent; }
     Optional<RequestBodyReader> const& request_body_reader() const { return m_request_body_reader; }

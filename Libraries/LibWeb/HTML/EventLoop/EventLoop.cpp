@@ -29,6 +29,7 @@
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/FrameCompletion.h>
 #include <LibWeb/HTML/EventLoop/RenderingSchedulerCounters.h>
+#include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/ListOfAvailableImages.h>
@@ -41,7 +42,7 @@
 #include <LibWeb/HTML/WorkletGlobalScope.h>
 #include <LibWeb/HighResolutionTime/Performance.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
-#include <LibWeb/IndexedDB/Internal/Algorithms.h>
+#include <LibWeb/IndexedDB/IDBFactory.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Layout/NodeArena.h>
 #include <LibWeb/Layout/TreeBuilderRustFFI.h>
@@ -213,8 +214,11 @@ void EventLoop::process()
         // FIXME: 4. If oldestTask's document is not null, then record task start time given taskStartTime and oldestTask's document.
 
         // AD-HOC: While a task runs, the render clock's lanes tick the animations the last rendering update planned for.
-        if (oldest_task->source() != Task::Source::Rendering)
+        //         A task that runs beside a rendering update in flight comes after the whole of it.
+        if (oldest_task->source() != Task::Source::Rendering) {
             note_clock_lanes(ClockAnimations::Run);
+            note_script_ran_beside_rendering_update_in_flight();
+        }
 
         // 5. Set the event loop's currently running task to oldestTask.
         m_currently_running_task = oldest_task.ptr();
@@ -504,7 +508,7 @@ void EventLoop::process_input_events() const
                     return page.handle_drag_and_drop_event(*root, drag_event.type, drag_event.position, drag_event.screen_position, drag_event.button, drag_event.buttons, drag_event.modifiers, move(drag_event.files));
                 },
                 [&](Web::PinchEvent& pinch_event) {
-                    return page.handle_pinch_event(*root, pinch_event.position, pinch_event.modifiers, pinch_event.scale_delta, pinch_event.async_zoom_performed_default_action);
+                    return page.handle_pinch_event(*root, pinch_event, &remote_target);
                 });
 
             finish_handling_coalesced_input_events(event);
@@ -513,6 +517,12 @@ void EventLoop::process_input_events() const
             // the viewport of the navigable it hosts, and finishes it.
             if (remote_target.has_value()) {
                 record_routing(input_event_id(event.event), InputRoutingDecision::ForwardedToRemoteFrame);
+                if (auto const* pinch_event = event.event.get_pointer<Web::PinchEvent>()) {
+                    auto forwarded_pinch_event = *pinch_event;
+                    forwarded_pinch_event.position = page.css_to_device_point(remote_target->position);
+                    page_client.forward_pinch_event_to_remote_navigable(event.page_id, remote_target->navigable_id, forwarded_pinch_event);
+                    continue;
+                }
                 auto mouse_event = event.event.get<Web::MouseEvent>().clone_without_browser_data();
                 mouse_event.position = page.css_to_device_point(remote_target->position);
                 page_client.forward_mouse_event_to_remote_navigable(event.page_id, remote_target->navigable_id, move(mouse_event));
@@ -573,6 +583,23 @@ struct EventLoop::RenderingUpdateInFlight {
     // ends before them, and they run as its frame is taken in, beside the tasks after it or in the next rendering update,
     // which may begin beside the frame.
     bool ended() const { return held_tasks == HeldTasks::None && docs.size() == 1; }
+    // Whether script of `document` ran beside the update.
+    bool ran_script_of_beside(DOM::Document const& document) const
+    {
+        if (!script_ran_beside)
+            return false;
+        if (held_for_testing)
+            return true;
+        switch (least_held_tasks) {
+        case HeldTasks::None:
+            return true;
+        case HeldTasks::OfLastDocument:
+            return &document != docs.last().ptr();
+        case HeldTasks::All:
+            return false;
+        }
+        VERIFY_NOT_REACHED();
+    }
 
     Vector<GC::Root<DOM::Document>> docs;
     double frame_timestamp { 0 };
@@ -585,6 +612,10 @@ struct EventLoop::RenderingUpdateInFlight {
     // Whether the first round of the doc's layout flew: after the transaction, once the event loop took it in, or in its
     // place, where the update had no style to change.
     bool layout_flew { false };
+    // The fewest tasks the update held back at any time while it flew.
+    HeldTasks least_held_tasks { HeldTasks::None };
+    // Whether a task, or a step of the next rendering update that runs script, ran beside the update.
+    bool script_ran_beside { false };
 };
 
 // The end of a rendering update, once its last step has run.
@@ -654,6 +685,9 @@ static HeldTasks tasks_rendering_update_holds(Vector<GC::Root<DOM::Document>> co
 {
     if (any_of(docs, [](auto const& document) { return document->has_intersection_observation_targets(); }))
         return HeldTasks::All;
+    // The focus fixup of every doc whose focused area is not its viewport reads that area as the update leaves it.
+    if (any_of(docs.span().slice(0, docs.size() - 1), [](auto const& document) { return focus_fixup_rule_may_apply(*document); }))
+        return HeldTasks::All;
     // The lanes of a doc the update took in present nothing until it seals their plan, which its tasks would hold up.
     auto lanes_wait = [&](DOM::Document const& document) {
         auto* arena = document.layout_node_arena_if_created();
@@ -662,7 +696,7 @@ static HeldTasks tasks_rendering_update_holds(Vector<GC::Root<DOM::Document>> co
     if (any_of(docs.span().slice(0, docs.size() - 1), [&](auto const& document) { return lanes_wait(*document); }))
         return HeldTasks::All;
     auto& document = *docs.last();
-    if (document.has_resize_observers())
+    if (document.has_resize_observers() || focus_fixup_rule_may_apply(document))
         return HeldTasks::OfLastDocument;
     if (lanes_wait(document))
         return HeldTasks::OfLastDocument;
@@ -677,7 +711,7 @@ static HeldTasks tasks_rendering_update_holds(Vector<GC::Root<DOM::Document>> co
     return HeldTasks::None;
 }
 
-static void update_style_and_layout_for_rendering(DOM::Document&);
+static void update_style_and_layout_for_rendering(DOM::Document&, u64 update_serial);
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering
 // NB: The documents step 3 of update the rendering keeps.
@@ -958,7 +992,9 @@ void EventLoop::update_the_rendering()
 
     // FIXME: 15. Let unsafeStyleAndLayoutStartTime be the unsafe shared current time.
 
-    // AD-HOC: The rest of the last rendering update runs before anything of this one's style and layout.
+    // AD-HOC: The rest of the last rendering update runs before anything of this one's style and layout, and after
+    //         the steps of this one that ran script.
+    note_script_ran_beside_rendering_update_in_flight();
     finish_ended_rendering_update_in_flight();
 
     // AD-HOC: A doc the update took the lanes of in, which was not renderable or which script left unrenderable since,
@@ -995,7 +1031,7 @@ void EventLoop::update_the_rendering()
                     m_running_rendering_task = false;
                     auto layout_held_for_testing = style_taken_in == StyleTakenIn::Yes && exchange(m_holds_next_layout_for_testing, false) ? LayoutHeldForTesting::Yes : LayoutHeldForTesting::No;
                     auto held_tasks = tasks_rendering_update_holds(docs, style_taken_in, layout_held_for_testing);
-                    m_rendering_update_in_flight = make<RenderingUpdateInFlight>(move(docs), frame_timestamp, m_rendering_update_serial, exchange(m_holds_next_frame_for_testing, false), held_tasks, style_taken_in == StyleTakenIn::Yes);
+                    m_rendering_update_in_flight = make<RenderingUpdateInFlight>(move(docs), frame_timestamp, m_rendering_update_serial, exchange(m_holds_next_frame_for_testing, false), held_tasks, style_taken_in == StyleTakenIn::Yes, held_tasks);
                     // The next rendering opportunity is asked for now, so that the next update can begin as soon as
                     // this one has run, or has ended.
                     finish_rendering_update(update_start_time);
@@ -1003,7 +1039,7 @@ void EventLoop::update_the_rendering()
                 }
             }
         }
-        update_style_and_layout_for_rendering(document);
+        update_style_and_layout_for_rendering(document, m_rendering_update_serial);
     }
 
     update_the_rendering_after_style_and_layout(docs, frame_timestamp, m_rendering_update_serial);
@@ -1027,7 +1063,7 @@ void EventLoop::update_whether_font_face_sets_are_pending_on_the_environment(Vec
 
 // Step 16 of updating the rendering, for one doc of docs: its style and layout, and the resize observations they
 // answer.
-static void update_style_and_layout_for_rendering(DOM::Document& document)
+static void update_style_and_layout_for_rendering(DOM::Document& document, u64 update_serial)
 {
     // 1. Let resizeObserverDepth be 0.
     size_t resize_observer_depth = 0;
@@ -1111,7 +1147,7 @@ static void update_style_and_layout_for_rendering(DOM::Document& document)
             continue;
 
         // 5. Gather active resize observations at depth resizeObserverDepth for doc.
-        document.gather_active_observations_at_depth(resize_observer_depth);
+        document.gather_active_observations_at_depth(resize_observer_depth, update_serial);
 
         // 6. If doc has active resize observations:
         if (document.has_active_resize_observations()) {
@@ -1160,7 +1196,8 @@ static void update_style_and_layout_for_rendering(DOM::Document& document)
     if (animations_changed_timeline)
         requires_style_and_layout_update = true;
 
-    for (auto const& timeline : document.associated_animation_timelines()) {
+    GC::RootVector timelines = { document.associated_animation_timelines().values() };
+    for (auto const& timeline : timelines) {
         auto* scroll_timeline = as_if<Animations::ScrollTimeline>(*timeline);
 
         if (!scroll_timeline)
@@ -1179,7 +1216,7 @@ static void update_style_and_layout_for_rendering(DOM::Document& document)
 }
 
 // Steps 17 to 23 of updating the rendering, once step 16 has laid out every doc of docs.
-void EventLoop::update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM::Document>> const& docs, double frame_timestamp, u64 update_serial, TakenLayout taken_layout)
+void EventLoop::update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM::Document>> const& docs, double frame_timestamp, u64 update_serial, TakenLayout taken_layout, RenderingUpdateInFlight const* update_in_flight)
 {
     auto relative_frame_timestamp_for = [&](DOM::Document const& document) {
         return max(0.0, HighResolutionTime::relative_high_resolution_time(frame_timestamp, relevant_global_object(document)));
@@ -1193,7 +1230,8 @@ void EventLoop::update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM:
     for (auto& document : docs) {
         // NB: A play task resolves the animation's ready promise.
         TemporaryExecutionContext execution_context { document->relevant_settings_object() };
-        for (auto const& timeline : document->associated_animation_timelines()) {
+        GC::RootVector timelines = { document->associated_animation_timelines().values() };
+        for (auto const& timeline : timelines) {
             GC::RootVector<GC::Ref<Animations::Animation>> pending_css_animations;
             for (auto& animation : timeline->associated_animations()) {
                 if (rendering_update_makes_ready(animation))
@@ -1204,7 +1242,20 @@ void EventLoop::update_the_rendering_after_style_and_layout(Vector<GC::Root<DOM:
         }
     }
 
-    // FIXME: 17. For each doc of docs, if the focused area of doc is not a focusable area, then run the focusing steps for doc's viewport, and set doc's relevant global object's navigation API's focus changed during ongoing navigation to false.
+    // 17. For each doc of docs, if the focused area of doc is not a focusable area, then run the focusing steps for doc's viewport, and set doc's relevant global object's navigation API's focus changed during ongoing navigation to false.
+    for (auto& document : docs) {
+        if (!document->is_fully_active())
+            continue;
+        // AD-HOC: Script that ran beside a rendering update in flight comes after the whole of it. The update holds the
+        //         tasks of a doc whose focused area is not its viewport, so that script found the viewport focused, which
+        //         needs no fixup: the next rendering update fixes up what the script focused.
+        if (update_in_flight && update_in_flight->ran_script_of_beside(*document)) {
+            if (focus_fixup_rule_applies(*document))
+                document->page().client().request_frame();
+            continue;
+        }
+        run_focus_fixup_rule(*document);
+    }
 
     // 18. For each doc of docs, perform pending transition operations for doc. [CSSVIEWTRANSITIONS]
     for (auto& document : docs) {
@@ -1354,8 +1405,8 @@ void EventLoop::resume_rendering_update_in_flight()
     {
         TemporaryChange running { m_running_rendering_task, true };
         // The style and layout of the doc whose transaction flew take it in, waiting for it to land.
-        update_style_and_layout_for_rendering(update->document());
-        update_the_rendering_after_style_and_layout(update->docs, update->frame_timestamp, update->serial);
+        update_style_and_layout_for_rendering(update->document(), update->serial);
+        update_the_rendering_after_style_and_layout(update->docs, update->frame_timestamp, update->serial, TakenLayout::UpToDate, update.ptr());
     }
     // What the steps asked for, an animation frame of a promise they resolved for one, asks for the next rendering
     // opportunity now, unless a rendering update runs, whose end asks for it.
@@ -1388,10 +1439,23 @@ bool EventLoop::finish_ended_rendering_update_as_its_layout_flew()
         update = m_rendering_update_in_flight.release_nonnull();
         if (auto navigable = document.navigable())
             navigable->clamp_viewport_scroll_offset();
-        update_the_rendering_after_style_and_layout(update->docs, update->frame_timestamp, update->serial, TakenLayout::AsItFlew);
+        update_the_rendering_after_style_and_layout(update->docs, update->frame_timestamp, update->serial, TakenLayout::AsItFlew, update.ptr());
     }
     update_whether_font_face_sets_are_pending_on_the_environment(update->docs, TakenLayout::AsItFlew);
     return true;
+}
+
+void EventLoop::note_script_ran_beside_rendering_update_in_flight()
+{
+    if (m_rendering_update_in_flight)
+        m_rendering_update_in_flight->script_ran_beside = true;
+}
+
+u64 EventLoop::first_rendering_update_to_gather_resize_observations_of(DOM::Document const& document) const
+{
+    if (m_rendering_update_in_flight && &m_rendering_update_in_flight->document() == &document)
+        return m_rendering_update_in_flight->serial + 1;
+    return 0;
 }
 
 void EventLoop::finish_rendering_update_in_flight()
@@ -1487,6 +1551,7 @@ bool EventLoop::let_layout_of_rendering_update_fly()
         return false;
     update.layout_flew = true;
     update.held_tasks = tasks_rendering_update_holds(update.docs, StyleTakenIn::Yes, exchange(m_holds_next_layout_for_testing, false) ? LayoutHeldForTesting::Yes : LayoutHeldForTesting::No);
+    update.least_held_tasks = min(update.least_held_tasks, update.held_tasks);
     return true;
 }
 
@@ -1786,6 +1851,15 @@ void EventLoop::unregister_environment_settings_object(Badge<EnvironmentSettings
 GC::Ptr<EnvironmentSettingsObject> EventLoop::environment_settings_object_at(EnvironmentSettingsObjectAddress address) const
 {
     return m_related_environment_settings_objects.get(address).value_or(nullptr);
+}
+
+GC::Ptr<EnvironmentSettingsObject> EventLoop::environment_settings_object_with_id(EnvironmentId const& id) const
+{
+    for (auto const& entry : m_related_environment_settings_objects) {
+        if (entry.value->id == id)
+            return entry.value;
+    }
+    return nullptr;
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#same-loop-windows

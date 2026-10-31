@@ -53,16 +53,6 @@ static bool any_have_non_matching_associated_property(Utf16FlyString const& prop
     });
 }
 
-static NonnullRefPtr<StyleValueList> style_value_list_for_property(StyleValueVector&& values, PropertyID property_id)
-{
-    if (first_is_one_of(property_id, PropertyID::BackdropFilter, PropertyID::Filter))
-        return StyleValueList::create(move(values), StyleValueList::Separator::Space, StyleValueList::Collapsible::No);
-
-    // FIXME: Determine which other properties need a space instead of a comma, or to disable collapsibility.
-    //        Move this into Properties.json?
-    return StyleValueList::create(move(values), StyleValueList::Separator::Comma);
-}
-
 // https://drafts.css-houdini.org/css-typed-om-1/#create-an-internal-representation
 static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_representation(JS::VM& vm, PropertyNameAndID const& property, Variant<GC::Ref<CSSStyleValue>, Utf16String> const& value)
 {
@@ -98,6 +88,15 @@ static WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_r
         auto parsed_value = parse_css_value(Parser::ParsingParams {}, internal_representation->to_utf16_string(SerializationMode::Normal), property.id());
         if (!parsed_value)
             return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Numeric value does not match the property's grammar"_utf16 };
+    }
+
+    // NB: Step easing keywords are custom identifiers outside the property parser. Store the parsed iteration so
+    //     multi-value set() and append() use the easing representation expected by style computation.
+    if (internal_representation->is_custom_ident()
+        && first_is_one_of(property.id(), PropertyID::AnimationTimingFunction, PropertyID::TransitionTimingFunction)) {
+        if (auto parsed_value = parse_css_value(Parser::ParsingParams {}, internal_representation->to_utf16_string(SerializationMode::Normal), property.id());
+            parsed_value && parsed_value->is_value_list() && parsed_value->as_value_list().size() == 1)
+            return parsed_value->as_value_list().value_at(0, false);
     }
 
     // AD-HOC: Our parser represents a text-indent that is just a length-percentage as a text-indent value, and style
@@ -273,7 +272,7 @@ WebIDL::ExceptionOr<void> StylePropertyMap::set(Utf16FlyString property_name, Re
     if (values_to_set.size() == 1 && !should_wrap_value_in_list(property.value(), values_to_set.first())) {
         TRY(props.set_property_style_value(property.value(), values_to_set.take_first()));
     } else {
-        TRY(props.set_property_style_value(property.value(), style_value_list_for_property(move(values_to_set), property->id())));
+        TRY(props.set_property_style_value(property.value(), StyleValueList::create(move(values_to_set), StyleValueList::Separator::Comma)));
     }
 
     return {};
@@ -347,7 +346,7 @@ WebIDL::ExceptionOr<void> StylePropertyMap::append(Utf16FlyString property_name,
 
     // 11. Append the entries of temp values to props[property].
     // NB: StyleValues are immutable, so we create a new one instead.
-    return props.set_property_style_value(property.value(), style_value_list_for_property(move(value_list), property->id()));
+    return props.set_property_style_value(property.value(), StyleValueList::create(move(value_list), StyleValueList::Separator::Comma));
 }
 
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymap-delete

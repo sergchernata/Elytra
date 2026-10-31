@@ -45,6 +45,9 @@ public:
     void close();
     virtual bool is_closed() const override;
 
+    // Reads that would wait for missing data fail as permanently unavailable from then on.
+    void make_missing_data_permanently_unavailable();
+
     virtual Availability availability() const override;
 
     virtual void set_available_ranges_change_observer(Function<void()>) override;
@@ -62,6 +65,7 @@ public:
         virtual DecoderErrorOr<void> seek(i64 offset, AK::SeekMode mode) override;
         virtual DecoderErrorOr<size_t> read_into(Bytes bytes) override;
         virtual DecoderErrorOr<FixedArray<u8>> read_bytes(size_t size) override;
+        virtual DecoderErrorOr<void> read_and_discard(size_t size) override;
 
         virtual size_t position() const override { return m_position; }
         virtual Optional<u64> size() const override { return m_stream->expected_size(); }
@@ -122,7 +126,9 @@ private:
 
     using Chunks = AK::RedBlackTree<u64, DataChunk>;
 
+    DecoderErrorOr<void> wait_for_data_while_locked(Cursor&, u64 position, u64 length);
     DecoderErrorOr<size_t> read_at(Cursor&, size_t position, Bytes&);
+    DecoderErrorOr<void> discard_at(Cursor&, size_t position, size_t length);
 
     bool a_cursor_is_blocked_while_locked() const;
     u64 select_request_position_while_locked(u64 position);
@@ -141,6 +147,7 @@ private:
     Chunks m_chunks;
     Optional<u64> m_expected_size;
     bool m_closed { false };
+    bool m_missing_data_is_permanently_unavailable { false };
 
     Function<void()> m_available_ranges_change_observer;
 

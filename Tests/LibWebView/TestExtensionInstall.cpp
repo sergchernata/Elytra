@@ -605,7 +605,7 @@ void installs_are_remembered(ByteString const& directory)
 
     {
         auto outside = new_directory(directory, "outside"sv);
-        MUST(FileSystem::copy_file_or_directory(ByteString::formatted("{}/copy", outside), registry.installed_extension(id)->path));
+        MUST(copy_recursively(ByteString::formatted("{}/copy", outside), registry.installed_extension(id)->path));
         auto json = ByteString::formatted(R"({{ "extensions": [
             {{ "id": "{}", "version": "1.0", "path": "{}/copy", "installType": "normal", "enabled": true, "allowsFileAccess": false, "installTime": 0 }},
             {{ "id": "../../etc", "version": "1.0", "path": "/etc", "installType": "development", "enabled": true }},

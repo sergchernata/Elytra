@@ -1,0 +1,13 @@
+Harness status: OK
+
+Found 8 tests
+
+8 Pass
+Pass	Before: parent to child: setting document.domain must give sync access
+Pass	before parent: originAgentCluster must equal false
+Pass	before child: originAgentCluster must equal false
+Pass	Navigation
+Pass	After: parent to child: messageerror event must occur
+Pass	After: parent to child: setting document.domain must not give sync access
+Pass	after parent: originAgentCluster must equal false
+Pass	after child: originAgentCluster must equal true

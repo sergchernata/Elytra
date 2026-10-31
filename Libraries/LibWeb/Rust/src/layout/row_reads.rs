@@ -248,10 +248,9 @@ impl RowIdentities {
 
 impl LayoutNodeArena {
     /// The rows as they are now, for the host to read, once every row's scrollable overflow is measured where
-    /// `measure_overflow` says so. A host callback a layout pass makes reads the rows as the pass has left them so far,
-    /// and measures nothing: the pass is not done with the geometry overflow is measured from.
+    /// `measure_overflow` says so.
     pub(crate) fn publish_row_snapshot(&mut self, measure_overflow: bool) -> RowSnapshot {
-        if measure_overflow && !self.layout_pass_is_running() {
+        if measure_overflow {
             self.measure_scrollable_overflow();
         }
         let paintable = self.publish_rows();
@@ -260,7 +259,7 @@ impl LayoutNodeArena {
             paintable,
             bound,
             image_maps: self.image_map_areas().snapshot(),
-            visual_context_tree: self.paint_state().borrow().visual_context.tree.clone(),
+            visual_context_tree: self.paint_state().visual_context.tree.clone(),
             version: self.rows_version(),
             overflow_is_measured: self.scrollable_overflow_is_measured(),
             text_awaiting_render: self.text_rows_awaiting_sync(),

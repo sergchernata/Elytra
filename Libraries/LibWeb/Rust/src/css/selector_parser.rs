@@ -472,6 +472,12 @@ impl<'a> SelectorParser<'a> {
             let Some(SimpleSelector::PseudoElement(pseudo_element)) = compound.simple_selectors.first() else {
                 continue;
             };
+            // https://drafts.csswg.org/css-shadow-1/#slotted-pseudo
+            // INTEROP: Selectors 4 permits logical and user action pseudo-classes after pseudo-elements, but
+            //          browsers require these tests inside the ::slotted() argument.
+            if pseudo_element.pseudo_element == PseudoElementType::Slotted && compound.simple_selectors.len() > 1 {
+                return Err(());
+            }
             // https://drafts.csswg.org/css-pseudo-4/#highlight-selectors
             // INTEROP: Selectors 4 allows logical combination and user action pseudo-classes after any
             //          pseudo-element, but browsers reject every simple selector after a highlight pseudo-element.
@@ -1226,7 +1232,10 @@ pub(crate) fn parse_selector_list_from_component_values(
     Ok(RustParsedSelectorList::new(selectors))
 }
 
-fn parse_pseudo_element_selector(input: TokenizerInput<'_>) -> Result<(Arc<CompiledSelector>, PseudoElementType), ()> {
+fn parse_pseudo_element_selector(
+    input: TokenizerInput<'_>,
+    for_computed_style: bool,
+) -> Result<(Arc<CompiledSelector>, PseudoElementType), ()> {
     let tokens = tokenize_for_parser(input);
     let values = consume_a_list_of_component_values(tokens.as_slice())?;
     let mut stream = Stream::new(&values);
@@ -1237,6 +1246,15 @@ fn parse_pseudo_element_selector(input: TokenizerInput<'_>) -> Result<(Arc<Compi
     let SimpleSelector::PseudoElement(pseudo_element) = &simple else {
         unreachable!();
     };
+    // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
+    // Parse pseudoElt as a <pseudo-element-selector>, and let type be the result.
+    // NB: Computed style lookup identifies one pseudo-element, so a view-transition argument must name it exactly.
+    if for_computed_style
+        && let PseudoElementValue::TransitionName(argument) = &pseudo_element.value
+        && (!matches!(argument.name, Some(TransitionNameSelector::Name(_))) || !argument.classes.is_empty())
+    {
+        return Err(());
+    }
     let pseudo_element_type = pseudo_element.pseudo_element;
     Ok((
         CompiledSelector::new(
@@ -1420,14 +1438,17 @@ pub struct FfiParsedPseudoElement {
 
 /// Parses the restricted pseudo-element syntax accepted by `getComputedStyle()` and animation APIs.
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_selector_parse_pseudo_element(input: FfiUtf16View) -> FfiParsedPseudoElement {
+pub extern "C" fn rust_selector_parse_pseudo_element(
+    input: FfiUtf16View,
+    for_computed_style: bool,
+) -> FfiParsedPseudoElement {
     let Some(input) = input.units() else {
         return FfiParsedPseudoElement {
             selector: std::ptr::null_mut(),
             pseudo_element: u8::MAX,
         };
     };
-    let Ok((selector, pseudo_element)) = parse_pseudo_element_selector(input) else {
+    let Ok((selector, pseudo_element)) = parse_pseudo_element_selector(input, for_computed_style) else {
         return FfiParsedPseudoElement {
             selector: std::ptr::null_mut(),
             pseudo_element: u8::MAX,

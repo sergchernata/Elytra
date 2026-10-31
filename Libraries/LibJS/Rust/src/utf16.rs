@@ -350,13 +350,19 @@ pub fn json_special_code_unit_lanes(word: u64, lowest_bits: u64) -> u64 {
     (quotation_marks | reverse_solidi | control_characters) & highest_bits
 }
 
-/// Whether ASCII text has a code unit that a JSON string cannot hold as it is.
-fn ascii_has_json_special_code_unit(bytes: &[u8]) -> bool {
+/// The position of the first code unit of ASCII text that a JSON string cannot hold as it is, if it has one.
+fn ascii_json_special_code_unit_position(bytes: &[u8]) -> Option<usize> {
     let (chunks, remainder) = bytes.as_chunks::<8>();
-    chunks
+    for (index, chunk) in chunks.iter().enumerate() {
+        let lanes = json_special_code_unit_lanes(u64::from_le_bytes(*chunk), 0x0101_0101_0101_0101);
+        if lanes != 0 {
+            return Some(index * 8 + lanes.trailing_zeros() as usize / 8);
+        }
+    }
+    remainder
         .iter()
-        .any(|chunk| json_special_code_unit_lanes(u64::from_le_bytes(*chunk), 0x0101_0101_0101_0101) != 0)
-        || remainder.iter().any(|byte| is_json_special_code_unit(u32::from(*byte)))
+        .position(|byte| is_json_special_code_unit(u32::from(*byte)))
+        .map(|position| chunks.len() * 8 + position)
 }
 
 pub fn is_unicode_surrogate(code_unit: u16) -> bool {
@@ -476,12 +482,26 @@ impl Utf16StringBuilder {
     /// QuoteJSONString specifies.
     pub fn append_quoted_escaped_for_json(&mut self, string: Utf16View<'_>) {
         if let (BuilderStorage::Ascii(bytes), Utf16View::Ascii(units)) = (&mut self.storage, string)
-            && !ascii_has_json_special_code_unit(units)
+            && ascii_json_special_code_unit_position(units).is_none()
         {
             bytes.reserve(units.len() + 2);
             bytes.push(b'"');
             bytes.extend_from_slice(units);
             bytes.push(b'"');
+            return;
+        }
+
+        // OPTIMIZATION: ASCII text has no surrogates, so the runs between the code units that need escaping are
+        //               appended as they are.
+        if let Utf16View::Ascii(mut units) = string {
+            self.append_code_unit(u16::from(b'"'));
+            while let Some(position) = ascii_json_special_code_unit_position(units) {
+                self.append_ascii_bytes(&units[..position]);
+                self.append_json_escape(u16::from(units[position]));
+                units = &units[position + 1..];
+            }
+            self.append_ascii_bytes(units);
+            self.append_code_unit(u16::from(b'"'));
             return;
         }
 
@@ -500,30 +520,39 @@ impl Utf16StringBuilder {
                 index += 2;
                 continue;
             }
-            match code_unit {
-                0x08 => self.append_ascii("\\b"),
-                0x09 => self.append_ascii("\\t"),
-                0x0A => self.append_ascii("\\n"),
-                0x0C => self.append_ascii("\\f"),
-                0x0D => self.append_ascii("\\r"),
-                0x22 => self.append_ascii("\\\""),
-                0x5C => self.append_ascii("\\\\"),
-                _ if code_unit < 0x20 || is_unicode_surrogate(code_unit) => {
-                    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-                    self.append_ascii_bytes(&[
-                        b'\\',
-                        b'u',
-                        HEX_DIGITS[usize::from(code_unit >> 12)],
-                        HEX_DIGITS[usize::from((code_unit >> 8) & 0xf)],
-                        HEX_DIGITS[usize::from((code_unit >> 4) & 0xf)],
-                        HEX_DIGITS[usize::from(code_unit & 0xf)],
-                    ]);
-                }
-                _ => self.append_code_unit(code_unit),
+            if is_json_special_code_unit(u32::from(code_unit)) || is_unicode_surrogate(code_unit) {
+                self.append_json_escape(code_unit);
+            } else {
+                self.append_code_unit(code_unit);
             }
             index += 1;
         }
         self.append_code_unit(u16::from(b'"'));
+    }
+
+    /// Appends the escape sequence of a code unit that a JSON string cannot hold as it is: a JSON special code unit or
+    /// a lone surrogate.
+    fn append_json_escape(&mut self, code_unit: u16) {
+        match code_unit {
+            0x08 => self.append_ascii("\\b"),
+            0x09 => self.append_ascii("\\t"),
+            0x0A => self.append_ascii("\\n"),
+            0x0C => self.append_ascii("\\f"),
+            0x0D => self.append_ascii("\\r"),
+            0x22 => self.append_ascii("\\\""),
+            0x5C => self.append_ascii("\\\\"),
+            _ => {
+                const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+                self.append_ascii_bytes(&[
+                    b'\\',
+                    b'u',
+                    HEX_DIGITS[usize::from(code_unit >> 12)],
+                    HEX_DIGITS[usize::from((code_unit >> 8) & 0xf)],
+                    HEX_DIGITS[usize::from((code_unit >> 4) & 0xf)],
+                    HEX_DIGITS[usize::from(code_unit & 0xf)],
+                ]);
+            }
+        }
     }
 
     pub fn append_utf8(&mut self, utf8: &str) {
@@ -801,18 +830,29 @@ pub fn concatenate(views: &[Utf16View<'_>]) -> Utf16String {
 /// Decodes UTF-8 into UTF-16 code units the way AK's Utf16String::from_utf8() accepts it: a lone surrogate encoded as
 /// a three-byte sequence (WTF-8) becomes that surrogate code unit. Returns None if `bytes` is not valid otherwise.
 pub fn utf16_from_wtf8(bytes: &[u8]) -> Option<Vec<u16>> {
+    // OPTIMIZATION: Source code is mostly ASCII, whose bytes widen to their code units without decoding.
+    fn extend_with_utf16(code_units: &mut Vec<u16>, text: &str) {
+        let ascii_length = if text.is_ascii() {
+            text.len()
+        } else {
+            text.bytes().position(|byte| !byte.is_ascii()).unwrap_or(text.len())
+        };
+        code_units.extend(text.as_bytes()[..ascii_length].iter().map(|&byte| u16::from(byte)));
+        code_units.extend(text[ascii_length..].encode_utf16());
+    }
+
     let mut code_units = Vec::with_capacity(bytes.len());
     let mut remaining = bytes;
     loop {
         match core::str::from_utf8(remaining) {
             Ok(text) => {
-                code_units.extend(text.encode_utf16());
+                extend_with_utf16(&mut code_units, text);
                 return Some(code_units);
             }
             Err(error) => {
                 let (valid, rest) = remaining.split_at(error.valid_up_to());
                 // SAFETY: from_utf8 validated this prefix.
-                code_units.extend(unsafe { core::str::from_utf8_unchecked(valid) }.encode_utf16());
+                extend_with_utf16(&mut code_units, unsafe { core::str::from_utf8_unchecked(valid) });
                 let [0xED, second @ 0xA0..=0xBF, third @ 0x80..=0xBF, ..] = *rest else {
                     return None;
                 };

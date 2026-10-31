@@ -57,6 +57,7 @@ public:
     OwnPtr<FaviconStore> favicon_store;
     OwnPtr<HistoryStore> history_store;
     OwnPtr<SessionStore> session_store;
+    OwnPtr<PermissionManager> permission_manager;
 
     // Fork hook (Arc profiles): where history_store's database is, for the omnibox's own connection to it. None when
     // history isn't on disk (private, disabled, or in memory), so the omnibox suggests none from it.

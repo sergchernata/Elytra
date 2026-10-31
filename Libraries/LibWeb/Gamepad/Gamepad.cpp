@@ -16,19 +16,11 @@
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
+#include <LibWebCommon/Gamepad/GamepadInput.h>
 
 namespace Web::Gamepad {
 
 GC_DEFINE_ALLOCATOR(Gamepad);
-
-// https://w3c.github.io/gamepad/#dfn-button-press-threshold
-// For buttons which do not have a digital switch to indicate a pure pressed or released state, the user
-// agent MUST choose a button press threshold to indicate the button as pressed when its value is above a
-// certain amount. If the platform API gives a recommended value, the user agent SHOULD use that. In other
-// cases, the user agent SHOULD choose some other reasonable value.
-static constexpr double ANALOG_BUTTON_PRESS_THRESHOLD = 0.1;
-
-static constexpr double GAMEPAD_EXPOSURE_AXIS_THRESHOLD = 0.5;
 
 // https://w3c.github.io/gamepad/#dfn-a-new-gamepad
 GC::Ref<Gamepad> Gamepad::create(HTML::Window& window, GamepadDescription const& description)
@@ -306,7 +298,7 @@ void Gamepad::map_and_normalize_axes()
         auto logical_maximum = m_axis_maximums[raw_axis_index];
 
         // 5. Let normalizedValue be 2 (logicalValue − logicalMinimum) / (logicalMaximum − logicalMinimum) − 1.
-        double normalized_value = 2.0 * static_cast<double>(logical_value - logical_minimum) / static_cast<double>(logical_maximum - logical_minimum) - 1.0;
+        double normalized_value = normalize_axis_value(logical_value, logical_minimum, logical_maximum);
 
         // 6. Set gamepad.[[axes]][axisIndex] to be normalizedValue.
         // FIXME: axisIndex should be mappedIndex.
@@ -339,7 +331,7 @@ void Gamepad::map_and_normalize_buttons()
         auto logical_maximum = m_button_maximums[raw_button_index];
 
         // 5. Let normalizedValue be (logicalValue − logicalMinimum) / (logicalMaximum − logicalMinimum).
-        double value = static_cast<double>(logical_value - logical_minimum) / static_cast<double>(logical_maximum - logical_minimum);
+        double value = normalize_button_value(logical_value, logical_minimum, logical_maximum);
 
         // 6. Let button be gamepad.[[buttons]][mappedIndex].
         auto button = m_buttons[mapped_index];
@@ -351,11 +343,7 @@ void Gamepad::map_and_normalize_buttons()
         //    to true if the button is pressed or false if it is not pressed.
         //    Otherwise, set button.[[pressed]] to true if the value is above the button press threshold or false if
         //    it is not above the threshold.
-        if (logical_maximum == 1) {
-            button->set_pressed({}, logical_value == 1);
-        } else {
-            button->set_pressed({}, value > ANALOG_BUTTON_PRESS_THRESHOLD);
-        }
+        button->set_pressed({}, is_button_pressed(logical_value, logical_minimum, logical_maximum));
 
         // 9. If the button is capable of detecting touch, set button.[[touched]] to true if the button is currently being touched.
         //    Otherwise, set button.[[touched]] to button.[[pressed]].
@@ -387,8 +375,18 @@ void Gamepad::update_gamepad_state(Badge<NavigatorGamepadPartial>)
     // 6. Let navigator be gamepad's relevant global object's Navigator object.
     auto navigator = window.navigator();
 
-    // 7. If navigator.[[hasGamepadGesture]] is false and gamepad contains a gamepad user gesture:
-    if (!navigator->has_gamepad_gesture() && contains_gamepad_user_gesture()) {
+    // 7. Let document be gamepad's relevant global object's associated Document; otherwise null.
+    // 8. If document is null, abort these steps.
+    // NB: A Window always has an associated Document.
+    auto& document = window.associated_document();
+
+    // AD-HOC: https://github.com/w3c/gamepad/pull/230 proposes a step here: "If document is a fully active descendant of
+    //         a top-level traversable with user attention and gamepad contains a gamepad user gesture, then run the
+    //         activation notification steps given document." The UI process runs it.
+
+    // 9. If navigator.[[hasGamepadGesture]] is false and document is a fully active descendant of a top-level
+    //    traversable with user attention and gamepad contains a gamepad user gesture:
+    if (!navigator->has_gamepad_gesture() && document.is_fully_active_descendant_of_a_top_level_traversable_with_user_attention() && contains_gamepad_user_gesture()) {
         // 1. Set navigator.[[hasGamepadGesture]] to true.
         navigator->set_has_gamepad_gesture({}, true);
 
@@ -402,10 +400,7 @@ void Gamepad::update_gamepad_state(Badge<NavigatorGamepadPartial>)
                 // 2. Set connectedGamepad.[[timestamp]] to now.
                 connected_gamepad->m_timestamp = now;
 
-                // 3. Let document be gamepad's relevant global object's associated Document; otherwise null.
-                auto& document = window.associated_document();
-
-                // 4. If document is not null and is fully active, then queue a global task on the gamepad task source
+                // 3. If document is not null and is fully active, then queue a global task on the gamepad task source
                 //    to fire an event named gamepadconnected at gamepad's relevant global object using GamepadEvent
                 //    with its gamepad attribute initialized to connectedGamepad.
                 if (document.is_fully_active()) {
@@ -421,33 +416,8 @@ void Gamepad::update_gamepad_state(Badge<NavigatorGamepadPartial>)
 // https://w3c.github.io/gamepad/#dfn-gamepad-user-gesture
 bool Gamepad::contains_gamepad_user_gesture()
 {
-    // A gamepad contains a gamepad user gesture if the current input state indicates that the user is currently
-    // interacting with the gamepad. The user agent MUST provide an algorithm to check if the input state contains a
-    // gamepad user gesture. For buttons that support a neutral default value and have reported a pressed value of
-    // false at least once, a pressed value of true SHOULD be considered interaction. If a button does not support a
-    // neutral default value (for example, a toggle switch), then a pressed value of true SHOULD NOT be considered
-    // interaction. If a button has never reported a pressed value of false then it SHOULD NOT be considered
-    // interaction. Axis movements SHOULD be considered interaction if the axis supports a neutral default value, the
-    // current displacement from neutral is greater than a threshold chosen by the user agent, and the axis has
-    // reported a value below the threshold at least once. If an axis does not support a neutral default value (for
-    // example, an axis for a joystick that does not self-center), or an axis has never reported a value below the axis
-    // gesture threshold, then the axis SHOULD NOT be considered when checking for interaction. The axis gesture
-    // threshold SHOULD be large enough that random jitter is not considered interaction.
-
-    // NOTE: This roughly follows Chrome, where it exposes gamepads if a button is pressed (even if it's held across
-    //       a refresh) or an absolute axis is above 0.5.
-    auto pressed_button = m_buttons.find_if([](GC::Ref<GamepadButton> gamepad_button) {
-        return gamepad_button->pressed();
-    });
-
-    if (!pressed_button.is_end())
-        return true;
-
-    auto axis_above_threshold = m_axes.find_if([](double value) {
-        return abs(value) > GAMEPAD_EXPOSURE_AXIS_THRESHOLD;
-    });
-
-    return !axis_above_threshold.is_end();
+    // NB: The UI process uses the same algorithm to decide when to tell this process about its gamepads.
+    return Web::Gamepad::contains_gamepad_user_gesture(m_description, m_latest_state);
 }
 
 }

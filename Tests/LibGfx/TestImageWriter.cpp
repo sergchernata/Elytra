@@ -6,14 +6,11 @@
 
 #include <AK/MemoryStream.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/ImageFormats/BMPLoader.h>
-#include <LibGfx/ImageFormats/BMPWriter.h>
+#include <LibGfx/CMYKBitmap.h>
 #include <LibGfx/ImageFormats/JPEGLoader.h>
 #include <LibGfx/ImageFormats/JPEGWriter.h>
 #include <LibGfx/ImageFormats/PNGLoader.h>
 #include <LibGfx/ImageFormats/PNGWriter.h>
-#include <LibGfx/ImageFormats/WebPLoader.h>
-#include <LibGfx/ImageFormats/WebPWriter.h>
 #include <LibTest/TestCase.h>
 
 static ErrorOr<NonnullRefPtr<Gfx::Bitmap>> expect_single_frame(Gfx::ImageDecoderPlugin& plugin_decoder)
@@ -96,89 +93,67 @@ static ErrorOr<AK::NonnullRefPtr<Gfx::Bitmap>> create_test_rgba_bitmap()
     return bitmap;
 }
 
-TEST_CASE(test_bmp)
-{
-    TRY_OR_FAIL((test_roundtrip<Gfx::BMPWriter, Gfx::BMPImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgb_bitmap()))));
-    TRY_OR_FAIL((test_roundtrip<Gfx::BMPWriter, Gfx::BMPImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgba_bitmap()))));
-}
-
 TEST_CASE(test_jpeg)
 {
     // JPEG is lossy, so the roundtripped bitmap won't match the original bitmap. But it should still have the same size.
     (void)TRY_OR_FAIL((get_roundtrip_bitmap<Gfx::JPEGWriter, Gfx::JPEGImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgb_bitmap()))));
 }
 
+TEST_CASE(test_jpeg_cmyk)
+{
+    auto bitmap = TRY_OR_FAIL(Gfx::CMYKBitmap::create_with_size({ 47, 33 }));
+    for (int y = 0; y < bitmap->size().height(); ++y)
+        for (int x = 0; x < bitmap->size().width(); ++x)
+            bitmap->scanline(y)[x] = { static_cast<u8>(x * 5), static_cast<u8>(y * 7), static_cast<u8>(x + y), 30 };
+
+    AllocatingMemoryStream stream;
+    TRY_OR_FAIL(Gfx::JPEGWriter::encode(stream, *bitmap));
+    auto encoded_data = TRY_OR_FAIL(stream.read_until_eof());
+
+    auto decoder = TRY_OR_FAIL(Gfx::JPEGImageDecoderPlugin::create(encoded_data));
+    EXPECT_EQ(decoder->natural_frame_format(), Gfx::NaturalFrameFormat::CMYK);
+    auto decoded = TRY_OR_FAIL(decoder->cmyk_frame());
+    EXPECT_EQ(decoded->size(), bitmap->size());
+
+    // Lossy compression and chroma subsampling allow some error, but every channel must keep its meaning.
+    for (int y = 0; y < bitmap->size().height(); ++y) {
+        for (int x = 0; x < bitmap->size().width(); ++x) {
+            auto expected = bitmap->scanline(y)[x];
+            auto actual = decoded->scanline(y)[x];
+            EXPECT(abs(expected.c - actual.c) <= 16);
+            EXPECT(abs(expected.m - actual.m) <= 16);
+            EXPECT(abs(expected.y - actual.y) <= 16);
+            EXPECT(abs(expected.k - actual.k) <= 16);
+        }
+    }
+}
+
+TEST_CASE(test_jpeg_icc_profile)
+{
+    // The profile is larger than one APP2 marker can hold, so libjpeg has to split it.
+    auto icc_data = TRY_OR_FAIL(ByteBuffer::create_uninitialized(70000));
+    for (size_t i = 0; i < icc_data.size(); ++i)
+        icc_data[i] = static_cast<u8>(i * 7);
+
+    auto bitmap = TRY_OR_FAIL(create_test_rgb_bitmap());
+    auto encoded_data = TRY_OR_FAIL(encode_bitmap<Gfx::JPEGWriter>(*bitmap, Gfx::JPEGWriter::Options { .icc_data = icc_data.bytes() }));
+
+    auto decoder = TRY_OR_FAIL(Gfx::JPEGImageDecoderPlugin::create(encoded_data));
+    (void)TRY_OR_FAIL(expect_single_frame_of_size(*decoder, bitmap->size()));
+    auto decoded_icc_data = TRY_OR_FAIL(decoder->icc_data());
+    EXPECT(decoded_icc_data.has_value());
+    EXPECT_EQ(*decoded_icc_data, icc_data.bytes());
+}
+
+TEST_CASE(test_jpeg_too_wide)
+{
+    // libjpeg cannot encode an image with a side above 65500 pixels. This must fail without terminating the process.
+    auto bitmap = TRY_OR_FAIL(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 65501, 1 }));
+    EXPECT(encode_bitmap<Gfx::JPEGWriter>(*bitmap).is_error());
+}
+
 TEST_CASE(test_png)
 {
     TRY_OR_FAIL((test_roundtrip<Gfx::PNGWriter, Gfx::PNGImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgb_bitmap()))));
     TRY_OR_FAIL((test_roundtrip<Gfx::PNGWriter, Gfx::PNGImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgba_bitmap()))));
-}
-
-TEST_CASE(test_webp)
-{
-    TRY_OR_FAIL((test_roundtrip<Gfx::WebPWriter, Gfx::WebPImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgb_bitmap()))));
-    TRY_OR_FAIL((test_roundtrip<Gfx::WebPWriter, Gfx::WebPImageDecoderPlugin>(TRY_OR_FAIL(create_test_rgba_bitmap()))));
-}
-
-TEST_CASE(test_webp_color_indexing_transform)
-{
-    Array<Color, 256> colors;
-    for (size_t i = 0; i < colors.size(); ++i) {
-        colors[i].set_red(i);
-        colors[i].set_green(255 - i);
-        colors[i].set_blue(128);
-        colors[i].set_alpha(255 - i / 16);
-    }
-    for (int bits_per_pixel : { 1, 2, 4, 8 }) {
-        int number_of_colors = 1 << bits_per_pixel;
-
-        auto bitmap = TRY_OR_FAIL(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 47, 33 }));
-        for (int y = 0; y < bitmap->height(); ++y)
-            for (int x = 0; x < bitmap->width(); ++x)
-                bitmap->set_pixel(x, y, colors[(x * bitmap->width() + y) % number_of_colors]);
-
-        auto encoded_data = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap));
-        auto decoded_bitmap = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
-        expect_bitmaps_equal(*decoded_bitmap, *bitmap);
-
-        Gfx::WebPEncoderOptions options;
-        options.vp8l_options.allowed_transforms = 0;
-        auto encoded_data_without_color_indexing = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap, options));
-        EXPECT(encoded_data.size() < encoded_data_without_color_indexing.size());
-        auto decoded_bitmap_without_color_indexing = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
-        expect_bitmaps_equal(*decoded_bitmap_without_color_indexing, *decoded_bitmap);
-    }
-}
-
-TEST_CASE(test_webp_color_indexing_transform_single_channel)
-{
-    Array<Color, 256> colors;
-    for (size_t i = 0; i < colors.size(); ++i) {
-        colors[i].set_red(0);
-        colors[i].set_green(255 - i);
-        colors[i].set_blue(128);
-        colors[i].set_alpha(255);
-    }
-    for (int bits_per_pixel : { 1, 2, 4, 8 }) {
-        int number_of_colors = 1 << bits_per_pixel;
-
-        auto bitmap = TRY_OR_FAIL(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { 47, 33 }));
-        for (int y = 0; y < bitmap->height(); ++y)
-            for (int x = 0; x < bitmap->width(); ++x)
-                bitmap->set_pixel(x, y, colors[(x * bitmap->width() + y) % number_of_colors]);
-
-        auto encoded_data = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap));
-        auto decoded_bitmap = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
-        expect_bitmaps_equal(*decoded_bitmap, *bitmap);
-
-        Gfx::WebPEncoderOptions options;
-        options.vp8l_options.allowed_transforms = 0;
-        auto encoded_data_without_color_indexing = TRY_OR_FAIL(encode_bitmap<Gfx::WebPWriter>(bitmap, options));
-        if (bits_per_pixel == 8)
-            EXPECT(encoded_data.size() <= encoded_data_without_color_indexing.size());
-        else
-            EXPECT(encoded_data.size() < encoded_data_without_color_indexing.size());
-        auto decoded_bitmap_without_color_indexing = TRY_OR_FAIL(expect_single_frame_of_size(*TRY_OR_FAIL(Gfx::WebPImageDecoderPlugin::create(encoded_data)), bitmap->size()));
-        expect_bitmaps_equal(*decoded_bitmap_without_color_indexing, *decoded_bitmap);
-    }
 }

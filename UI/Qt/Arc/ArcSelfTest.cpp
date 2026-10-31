@@ -1086,7 +1086,7 @@ void SelfTest::leaving_a_playing_video_shows_it_in_picture_in_picture()
         QApplication::sendEvent(&view, &press);
         QApplication::sendEvent(&view, &release);
     }
-    if (!wait_until([&] { return video && video->title() == "Playing" && video->view().audio_play_state() == Web::HTML::AudioPlayState::Playing; }, 5000)) {
+    if (!wait_until([&] { return video && video->title() == "Playing" && video->view().audibility() == Audio::Audibility::Audible; }, 5000)) {
         check(false, "the video plays", video ? video->title() : QString());
         return;
     }
@@ -1223,6 +1223,8 @@ void SelfTest::minimizing_picture_in_picture_moves_the_video_to_the_sidebar_play
     check(player.height() == MiniPlayer::CONTROLS_HEIGHT && !player.close_button()->isVisible(), "and back down");
 
     player.play_button()->click();
+    settle(1200);
+    check(!player.is_playing(), "its pause button shows the video paused at once, while its sound fades");
     check(wait_until([&] { return video && video->title() == "Video" && !player.is_playing(); }, 5000), "its pause button pauses the video",
         video ? video->title() : QString());
     player.play_button()->click();

@@ -38,18 +38,15 @@ pub(super) fn verification_is_enabled() -> bool {
 /// progress around it already. Nothing it does is traced.
 pub(super) fn lay_out_discarded_run(
     callbacks: &LayoutPass<'_>,
-    run: impl FnOnce() -> formatting_context::RunOutputs,
+    run: impl for<'discarded> FnOnce(LayoutPass<'discarded>) -> formatting_context::RunOutputs,
 ) -> Option<formatting_context::RunOutputs> {
-    if run_repeatability_verification() == RunRepeatabilityVerification::Off
-        || callbacks.scratch().reads_no_memoized_layout()
-    {
+    if run_repeatability_verification() == RunRepeatabilityVerification::Off || callbacks.reads_no_memoized_layout() {
         return None;
     }
     Some(
         callbacks
-            .arena()
-            .layout_trace
-            .without_events(|| callbacks.scratch().lay_out_discarded_run(run)),
+            .layout_trace()
+            .without_events(|| callbacks.lay_out_discarded_run(run)),
     )
 }
 
@@ -131,9 +128,13 @@ pub(super) fn verify_run_ignores_its_unobserved_own_block_size_and_block_margins
     root_cells: used_values::RootInputCells,
     input: LayoutInput,
     outputs: &formatting_context::RunOutputs,
-    lay_out: impl Fn(used_values::RootInputCells, LayoutInput) -> formatting_context::RunOutputs,
+    lay_out: impl for<'discarded> Fn(
+        LayoutPass<'discarded>,
+        used_values::RootInputCells,
+        LayoutInput,
+    ) -> formatting_context::RunOutputs,
 ) {
-    if !unobserved_own_block_size_verification_is_enabled() || callbacks.scratch().reads_no_memoized_layout() {
+    if !unobserved_own_block_size_verification_is_enabled() || callbacks.reads_no_memoized_layout() {
         return;
     }
     let checked = format!("the run of {box_:?}, which never observed its own block size or block margins,");
@@ -162,10 +163,8 @@ pub(super) fn verify_run_ignores_its_unobserved_own_block_size_and_block_margins
         reference_inputs.push((cells, input, reference));
     }
     for (reference_cells, reference_input, reference) in reference_inputs {
-        let reference_outputs = callbacks.arena().layout_trace.without_events(|| {
-            callbacks
-                .scratch()
-                .lay_out_discarded_run(|| lay_out(reference_cells, reference_input))
+        let reference_outputs = callbacks.layout_trace().without_events(|| {
+            callbacks.lay_out_discarded_run(|callbacks| lay_out(callbacks, reference_cells, reference_input))
         });
         ComparedLayouts {
             checked: &checked,
@@ -196,7 +195,7 @@ impl ComparedLayouts<'_> {
         assert_eq!(
             checked_outputs.root_outcome.input_cells_left_by_run,
             reference_outputs.root_outcome.input_cells_left_by_run,
-            "{checked} left a root record {reference} does not"
+            "{checked} left root cells {reference} does not"
         );
         assert!(
             checked_outputs.root_outcome.line_data.as_deref() == reference_outputs.root_outcome.line_data.as_deref(),
@@ -274,14 +273,11 @@ fn same_elements_in_any_order<T: PartialEq>(left: &[T], right: &[T]) -> bool {
     })
 }
 
-fn host_findings_match(left: Option<&run_records::HostFindings>, right: Option<&run_records::HostFindings>) -> bool {
-    let none = run_records::HostFindings::default();
+fn host_findings_match(left: Option<&run_state::HostFindings>, right: Option<&run_state::HostFindings>) -> bool {
+    let none = run_state::HostFindings::default();
     let left = left.unwrap_or(&none);
     let right = right.unwrap_or(&none);
-    same_elements_in_any_order(
-        &left.nodes_with_unresolved_container_lengths,
-        &right.nodes_with_unresolved_container_lengths,
-    ) && same_elements_in_any_order(&left.messages, &right.messages)
+    same_elements_in_any_order(&left.messages, &right.messages)
         && left.document_svg_root_natural_size == right.document_svg_root_natural_size
 }
 
@@ -486,9 +482,11 @@ mod tests {
         content_block_size: i64,
         has_definite_block_size: bool,
     ) -> (used_values::RootInputCells, LayoutInput) {
-        let record = UsedValues::default();
-        record.content_block_size.set(px(content_block_size));
-        record.has_definite_block_size.set(has_definite_block_size);
+        let root_cells = used_values::RootInputCells {
+            content_block_size: px(content_block_size),
+            has_definite_block_size,
+            ..used_values::RootInputCells::default()
+        };
         let input = LayoutInput::new(
             AvailableSpace {
                 inline_size: AvailableSize::definite(px(300)),
@@ -501,7 +499,7 @@ mod tests {
             ContainingBlockConstraints::default(),
             ParticipationInParentFormattingContext::Item,
         );
-        (used_values::RootInputCells::capture(&record), input)
+        (root_cells, input)
     }
 
     fn own_block_sizes_verified_from(

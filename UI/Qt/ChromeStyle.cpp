@@ -26,6 +26,10 @@
 #include <QStyleOption>
 #include <QWidget>
 
+#if defined(AK_OS_LINUX)
+#    include <UI/Qt/X11Window.h>
+#endif
+
 namespace Ladybird::ChromeStyle {
 
 bool is_dark(QPalette const& palette)
@@ -50,6 +54,22 @@ QColor mix(QColor const& from, QColor const& to, double amount)
 static QColor over(QColor const& color, QColor const& background)
 {
     return mix(background, color, static_cast<double>(color.alphaF()));
+}
+
+QColor opaque_panel_edge()
+{
+    auto const& panel = Theme::panel();
+    return over(panel.edge, panel.surface);
+}
+
+bool shows_opaque_pixels_only(QWidget const& widget)
+{
+#if defined(AK_OS_LINUX)
+    return is_clipped_to_its_opaque_pixels(*widget.window());
+#else
+    (void)widget;
+    return false;
+#endif
 }
 
 WindowActivity window_activity(QWidget const& widget)
@@ -208,6 +228,7 @@ QString style_sheet_color(QColor const& color)
 QString application_style_sheet(QPalette const&)
 {
     auto const& panel = Theme::panel();
+    auto button_background = over(panel.control, panel.surface);
 
     // NB: Menus drawn by Qt are drawn by the application style, so that their rows line up on one right edge, which the
     //     style sheet cannot do. Only the widgets put into menus are styled here.
@@ -242,8 +263,8 @@ QWidget#LadybirdMenuZoomRow QPushButton:pressed {{
     background: {3};
 }}
 )",
-        style_sheet_color(panel.text), style_sheet_color(panel.control), style_sheet_color(over(panel.control, panel.control)),
-        style_sheet_color(panel.pressed));
+        style_sheet_color(panel.text), style_sheet_color(button_background), style_sheet_color(over(panel.pressed, panel.surface)),
+        style_sheet_color(over(panel.pressed, button_background)));
 }
 
 QString toolbar_container_style_sheet(QPalette const& palette)
@@ -269,7 +290,8 @@ QWidget#LadybirdToolbarContainer {{
     border-bottom: 1px solid {3};
 }}
 
-QWidget#LadybirdToolbarContainer[bookmarksBarBelow="true"] {{
+QWidget#LadybirdToolbarContainer[bookmarksBarBelow="true"],
+QWidget#LadybirdToolbarContainer[verticalTabs="true"] {{
     border-bottom-color: transparent;
 }}
 
@@ -549,6 +571,23 @@ QToolButton#LadybirdLocationZoomIndicator:hover {{
 }}
 
 QToolButton#LadybirdLocationZoomIndicator:pressed {{
+    background: {16};
+}}
+
+QToolButton#LadybirdLocationInUse {{
+    color: {13};
+    background: {14};
+    border: 0;
+    border-radius: 5px;
+    padding: 0 8px;
+    font-size: 12px;
+}}
+
+QToolButton#LadybirdLocationInUse:hover {{
+    background: {15};
+}}
+
+QToolButton#LadybirdLocationInUse:pressed {{
     background: {16};
 }}
 
@@ -1141,9 +1180,6 @@ QWidget#LadybirdVerticalTabBar[verticalTabsPosition="right"] {{
     border-left-color: transparent;
 }}
 
-QWidget#LadybirdVerticalTabsContentSeparator {{
-    background: transparent;
-}}
 )"
 #endif
         ,
@@ -1431,6 +1467,66 @@ QPushButton#LadybirdBookmarkPopoverDone:pressed {{
         style_sheet_color(panel.text), style_sheet_color(panel.surface), style_sheet_color(over(panel.edge, panel.surface)), style_sheet_color(panel.muted),
         style_sheet_color(panel.page), style_sheet_color(panel.control), style_sheet_color(primary), style_sheet_color(primary.darker(122)),
         style_sheet_color(Theme::selection()), style_sheet_color(Theme::focus_edge()), style_sheet_color(panel.pressed));
+}
+
+// A permission prompt looks like a message popover, its three answers stacked as equal secondary buttons, since the
+// browser recommends none of them.
+QString permission_prompt_style_sheet(QPalette const&)
+{
+    auto const& panel = Theme::panel();
+    return qformatted(R"(
+QFrame#LadybirdPermissionPrompt {{
+    color: {0};
+    background: {1};
+    border: 1px solid {2};
+    border-radius: 12px;
+}}
+
+QLabel#LadybirdPermissionPromptTitle {{
+    color: {0};
+    font-weight: 600;
+}}
+
+QLabel#LadybirdPermissionPromptIcon {{
+    background: {3};
+    border-radius: 8px;
+}}
+
+QLabel#LadybirdPermissionPromptHint {{
+    color: {4};
+    font-size: 12px;
+}}
+
+QPushButton#LadybirdPermissionPromptAllowAlways,
+QPushButton#LadybirdPermissionPromptAllowOnce,
+QPushButton#LadybirdPermissionPromptBlock {{
+    color: {0};
+    background: {5};
+    border: 0;
+    border-radius: 7px;
+    min-height: 28px;
+    padding: 0 14px;
+    font-size: 13px;
+}}
+
+QPushButton#LadybirdPermissionPromptAllowAlways:hover,
+QPushButton#LadybirdPermissionPromptAllowOnce:hover,
+QPushButton#LadybirdPermissionPromptBlock:hover,
+QPushButton#LadybirdPermissionPromptAllowAlways:pressed,
+QPushButton#LadybirdPermissionPromptAllowOnce:pressed,
+QPushButton#LadybirdPermissionPromptBlock:pressed {{
+    background: {6};
+}}
+
+QPushButton#LadybirdPermissionPromptAllowAlways:focus,
+QPushButton#LadybirdPermissionPromptAllowOnce:focus,
+QPushButton#LadybirdPermissionPromptBlock:focus {{
+    border: 2px solid {7};
+    padding: 0 12px;
+}}
+)",
+        style_sheet_color(panel.text), style_sheet_color(panel.surface), style_sheet_color(over(panel.edge, panel.surface)), style_sheet_color(panel.information),
+        style_sheet_color(panel.muted), style_sheet_color(panel.control), style_sheet_color(panel.pressed), style_sheet_color(Theme::focus_ring()));
 }
 
 // The instructions over a screenshot selection look like a message popover, with every action a secondary one.
@@ -1826,7 +1922,7 @@ public:
         if (element == PE_PanelMenu) {
             auto const& panel = Theme::panel();
             painter->save();
-            painter->setRenderHint(QPainter::Antialiasing, true);
+            painter->setRenderHint(QPainter::Antialiasing, !widget || !shows_opaque_pixels_only(*widget));
             painter->setPen(QPen(over(panel.edge, panel.surface), 1));
             painter->setBrush(panel.surface);
             painter->drawRoundedRect(QRectF(option->rect).adjusted(0.5, 0.5, -0.5, -0.5), MENU_RADIUS - 0.5, MENU_RADIUS - 0.5);
@@ -2090,24 +2186,33 @@ void paint_control_frame(QPainter& painter, QAbstractButton const& button, Contr
 
 // A ring around a favicon, with an arc in the accent color going around it, to show that the page is loading. Every
 // ring follows the same clock, so the rings on screen turn in step.
-static constexpr qreal LOADING_RING_RADIUS = 10.75;
+// NB: The radii are to the middle of the 1.5 px line, so the ring's outer edge is 0.75 px further out.
+static constexpr qreal LOADING_RING_LINE_WIDTH = 1.5;
+static constexpr qreal FAVICON_LOADING_RING_RADIUS = 9.25;
+static constexpr qreal TOOLBAR_BUTTON_LOADING_RING_RADIUS = 10.75;
+
+static QRectF loading_ring_rect(QPointF center, LoadingRingSize size)
+{
+    auto radius = size == LoadingRingSize::Favicon ? FAVICON_LOADING_RING_RADIUS : TOOLBAR_BUTTON_LOADING_RING_RADIUS;
+    return { center.x() - radius, center.y() - radius, 2 * radius, 2 * radius };
+}
 
 void paint_progress_ring(QPainter& painter, QPalette const& palette, QPointF center, double progress)
 {
-    QRectF ring_rect { center.x() - LOADING_RING_RADIUS, center.y() - LOADING_RING_RADIUS, 2 * LOADING_RING_RADIUS, 2 * LOADING_RING_RADIUS };
+    auto ring_rect = loading_ring_rect(center, LoadingRingSize::ToolbarButton);
 
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(Theme::chrome(palette).separator, 1.5));
+    painter.setPen(QPen(Theme::chrome(palette).separator, LOADING_RING_LINE_WIDTH));
     painter.drawEllipse(ring_rect);
     // NB: Qt's angles are in sixteenths of a degree, counterclockwise from three o'clock.
-    painter.setPen(QPen(Theme::accent(), 1.5, Qt::SolidLine, Qt::RoundCap));
+    painter.setPen(QPen(Theme::accent(), LOADING_RING_LINE_WIDTH, Qt::SolidLine, Qt::RoundCap));
     painter.drawArc(ring_rect, 90 * 16, -qRound(clamp(progress, 0.0, 1.0) * 360 * 16));
     painter.restore();
 }
 
-void paint_loading_ring(QPainter& painter, QPalette const& palette, QPointF center, LoadingPhase loading_phase)
+void paint_loading_ring(QPainter& painter, QPalette const& palette, QPointF center, LoadingRingSize size, LoadingPhase loading_phase)
 {
     static QElapsedTimer clock;
     if (!clock.isValid())
@@ -2115,7 +2220,7 @@ void paint_loading_ring(QPainter& painter, QPalette const& palette, QPointF cent
     auto period = loading_phase == LoadingPhase::WaitingForResponse ? LOADING_RING_WAITING_PERIOD_MS : LOADING_RING_PERIOD_MS;
     auto phase = static_cast<qreal>(clock.elapsed() % period) / period;
 
-    QRectF ring_rect { center.x() - LOADING_RING_RADIUS, center.y() - LOADING_RING_RADIUS, 2 * LOADING_RING_RADIUS, 2 * LOADING_RING_RADIUS };
+    auto ring_rect = loading_ring_rect(center, size);
 
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -2123,7 +2228,7 @@ void paint_loading_ring(QPainter& painter, QPalette const& palette, QPointF cent
     if (loading_phase == LoadingPhase::WaitingForResponse && !SystemAppearance::prefers_reduced_motion())
         painter.setOpacity(painter.opacity() * 0.5);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(Theme::chrome(palette).separator, 1.5));
+    painter.setPen(QPen(Theme::chrome(palette).separator, LOADING_RING_LINE_WIDTH));
     painter.drawEllipse(ring_rect);
 
     // NB: Qt's angles are in sixteenths of a degree, counterclockwise from three o'clock. The arc is a quarter of the ring
@@ -2132,7 +2237,7 @@ void paint_loading_ring(QPainter& painter, QPalette const& palette, QPointF cent
     auto start_angle = reduce_motion ? 90 * 16 : qRound((90.0 - (phase * 360.0)) * 16);
     if (reduce_motion)
         painter.setOpacity(painter.opacity() * (0.35 + (0.65 * (0.5 + (0.5 * qCos(phase * 2 * M_PI))))));
-    painter.setPen(QPen(Theme::accent(), 1.5, Qt::SolidLine, Qt::RoundCap));
+    painter.setPen(QPen(Theme::accent(), LOADING_RING_LINE_WIDTH, Qt::SolidLine, Qt::RoundCap));
     painter.drawArc(ring_rect, start_angle, -90 * 16);
     painter.restore();
 }

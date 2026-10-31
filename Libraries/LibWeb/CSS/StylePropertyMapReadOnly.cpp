@@ -16,6 +16,9 @@
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/StyleSheetState.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/CSS/Zoom.h>
 #include <LibWeb/DOM/Document.h>
@@ -68,6 +71,15 @@ static StyleValueVector subdivide_property_value(StyleValue const& value, Proper
     return value.subdivide_into_iterations(property);
 }
 
+static GC::Ref<CSSStyleValue> reify_property_value(StyleValue const& value, PropertyNameAndID const& property, bool is_computed)
+{
+    // INTEROP: Computed border-image values represent all four sides or both axes, even when their serialization
+    //          collapses to a single numeric value or keyword.
+    if (is_computed && first_is_one_of(property.id(), PropertyID::BorderImageWidth, PropertyID::BorderImageOutset, PropertyID::BorderImageSlice, PropertyID::BorderImageRepeat))
+        return value.default_reify(property.name());
+    return value.reify(property.name());
+}
+
 // https://drafts.css-houdini.org/css-typed-om-1/#dom-stylepropertymapreadonly-get
 WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapReadOnly::get(Utf16String property_name)
 {
@@ -85,8 +97,10 @@ WebIDL::ExceptionOr<Variant<GC::Ref<CSSStyleValue>, Empty>> StylePropertyMapRead
 
     // 4. If props[property] exists, subdivide into iterations props[property], then reify the first item of the result and return it.
     if (auto property_value = get_style_value(props, property.value())) {
+        if (props.has<DOM::AbstractElement>() && property_is_shorthand(property->id()))
+            return CSSStyleValue::create(property->name(), *property_value, SerializationMode::ResolvedValue);
         auto iterations = subdivide_property_value(*property_value, property.value(), props.get_pointer<DOM::AbstractElement>());
-        return iterations.first()->reify(property->name());
+        return reify_property_value(*iterations.first(), property.value(), props.has<DOM::AbstractElement>());
     }
 
     // 5. Otherwise, return undefined.
@@ -112,9 +126,13 @@ WebIDL::ExceptionOr<GC::RootVector<GC::Ref<CSSStyleValue>>> StylePropertyMapRead
 
     // 4. If props[property] exists, subdivide into iterations props[property], then reify each item of the result, and return the list.
     if (auto property_value = get_style_value(props, property.value())) {
+        if (props.has<DOM::AbstractElement>() && property_is_shorthand(property->id())) {
+            results.append(CSSStyleValue::create(property->name(), *property_value, SerializationMode::ResolvedValue));
+            return results;
+        }
         auto iterations = subdivide_property_value(*property_value, property.value(), props.get_pointer<DOM::AbstractElement>());
         for (auto const& style_value : iterations)
-            results.append(style_value->reify(property->name()));
+            results.append(reify_property_value(*style_value, property.value(), props.has<DOM::AbstractElement>()));
         return results;
     }
 
@@ -304,10 +322,31 @@ RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& sourc
                 return nullptr;
             }
 
-            if (property.id() >= first_longhand_property_id && property.id() <= last_longhand_property_id) {
-                // FIXME: This will only ever be null for pseudo-elements. What should we do in that case?
-                if (auto computed_values = element.computed_style()) {
-                    auto property_id = property.id();
+            if (auto computed_values = element.computed_style()) {
+                auto value_for_property = [&](auto& self, PropertyID property_id) -> RefPtr<StyleValue const> {
+                    // NB: The computed longhands of all cannot be expressed as a value of all.
+                    if (property_id == PropertyID::All)
+                        return nullptr;
+                    // FIXME: Expose overflow-clip-margin shorthands once their four-sided grammar is interoperable.
+                    if (first_is_one_of(property_id, PropertyID::OverflowClipMargin, PropertyID::OverflowClipMarginBlock, PropertyID::OverflowClipMarginInline))
+                        return nullptr;
+                    if (property_is_shorthand(property_id)) {
+                        Vector<PropertyID> longhands = longhands_for_shorthand(property_id);
+                        StyleValueVector values;
+                        values.ensure_capacity(longhands.size());
+                        for (auto longhand : longhands) {
+                            auto value = self(self, longhand);
+                            if (!value)
+                                return nullptr;
+                            values.unchecked_append(value.release_nonnull());
+                        }
+                        auto shorthand = ShorthandStyleValue::create(property_id, move(longhands), move(values));
+                        if (shorthand->to_utf16_string(SerializationMode::ResolvedValue).is_empty())
+                            return nullptr;
+                        return shorthand;
+                    }
+                    if (property_id < first_longhand_property_id || property_id > last_longhand_property_id)
+                        return nullptr;
                     if (property_is_logical_alias(property_id))
                         property_id = map_logical_alias_to_physical_property(property_id, LogicalAliasMappingContext { computed_values->writing_mode(), computed_values->direction() });
                     if (property_id == PropertyID::BackgroundColor && computed_values->background_color_style_value())
@@ -315,8 +354,13 @@ RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& sourc
                     auto value = computed_values->computed_style_value(property_id);
                     if (!value)
                         return nullptr;
+                    // INTEROP: Computed style maps expose zero letter-spacing as normal, matching the legacy CSSOM
+                    //          resolved value.
+                    if (property_id == PropertyID::LetterSpacing && value->is_length() && value->as_length().raw_value() == 0)
+                        return KeywordStyleValue::create(Keyword::Normal);
                     return unscaled_by_zoom(property_id, value.release_nonnull(), computed_values->effective_zoom());
-                }
+                };
+                return value_for_property(value_for_property, property.id());
             }
 
             return nullptr;
